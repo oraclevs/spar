@@ -198,14 +198,58 @@ fn splice_selective(
 
 fn splice_as_part_of(
     decl: &crate::ast::ImportDecl,
-    _loader: &mut ImportLoader,
-    _visiting: &mut Vec<PathBuf>,
+    loader: &mut ImportLoader,
+    visiting: &mut Vec<PathBuf>,
 ) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
-    Err(vec![SparError::ResolveError {
-        message: format!("`import asPartOf \"{}\";` is not yet implemented", decl.path),
+    let full_path = loader.base_dir.join(&decl.path);
+    let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+
+    if let Some(cycle) = crate::depgraph::find_cycle_in_stack(visiting, &canonical) {
+        let chain: Vec<String> = cycle.iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        return Err(vec![SparError::ResolveError {
+            message: format!("import cycle detected via `asPartOf`: {}", chain.join(" -> ")),
+            hint: None,
+            span: decl.span.clone(),
+        }]);
+    }
+
+    if !full_path.exists() {
+        return Err(vec![SparError::ResolveError {
+            message: format!("cannot find import file '{}' — file does not exist", decl.path),
+            hint: Some("check the file path and ensure it is relative to the current file".into()),
+            span: decl.span.clone(),
+        }]);
+    }
+
+    let src = std::fs::read_to_string(&full_path).map_err(|e| vec![SparError::ResolveError {
+        message: format!("cannot read import file '{}': {}", decl.path, e),
         hint: None,
         span: decl.span.clone(),
-    }])
+    }])?;
+
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| vec![SparError::ResolveError {
+        message: format!("import file '{}' has a lex error: {}", decl.path, e),
+        hint: None,
+        span: decl.span.clone(),
+    }])?;
+
+    let mut sub_program = crate::parser::Parser::new(tokens).parse().map_err(|e| vec![SparError::ResolveError {
+        message: format!("import file '{}' has a parse error: {}", decl.path, e),
+        hint: None,
+        span: decl.span.clone(),
+    }])?;
+
+    let sub_base = full_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut sub_loader = ImportLoader::new(&sub_base);
+
+    visiting.push(canonical);
+    let result = expand_imports_inner(&mut sub_program, &mut sub_loader, visiting);
+    visiting.pop();
+    result?;
+
+    Ok(sub_program.items)
 }
 
 pub fn collect_imports(
@@ -745,6 +789,62 @@ mod tests {
         let mut loader = ImportLoader::new(dir.path());
         let err = expand_imports(&mut program, &mut loader).unwrap_err();
         assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("already"))),
+            "got: {:?}", err);
+    }
+
+    // ── Phase 3: expand_imports (asPartOf) ───────────────────────────────
+
+    #[test]
+    fn expand_imports_as_part_of_inlines_target_file() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("common.spar"),
+            concat!(
+                "export var host: str = \"localhost\";\n",
+                "private [Defaults]{ timeout: int = 30; };\n",
+            ),
+        ).unwrap();
+        let src = r#"import asPartOf "common.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "host")));
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Section(s) if s.private)),
+            "private sections must be pulled in too — true textual inclusion, not a namespaced import");
+    }
+
+    #[test]
+    fn expand_imports_as_part_of_is_transitive() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("base.spar"), "export var version: str = \"1.0\";\n").unwrap();
+        fs::write(
+            dir.path().join("middle.spar"),
+            "import asPartOf \"base.spar\";\nexport var name: str = \"mid\";\n",
+        ).unwrap();
+        let src = r#"import asPartOf "middle.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")),
+            "transitively-included file's declarations must flatten in too");
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "name")));
+    }
+
+    #[test]
+    fn expand_imports_as_part_of_detects_direct_cycle() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.spar"), "import asPartOf \"b.spar\";\n").unwrap();
+        fs::write(dir.path().join("b.spar"), "import asPartOf \"a.spar\";\n").unwrap();
+        let src = r#"import asPartOf "a.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let err = expand_imports(&mut program, &mut loader).unwrap_err();
+        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("cycle"))),
             "got: {:?}", err);
     }
 }

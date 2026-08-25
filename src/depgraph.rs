@@ -62,3 +62,37 @@ pub fn topological_sort(graph: &DepGraph) -> Result<Vec<DeclId>, Vec<DeclId>> {
         Err(cycle_nodes)
     }
 }
+
+/// Cross-file cycle detection for `import asPartOf`. `stack` is the chain of
+/// files currently being expanded (outermost first); returns the cycle
+/// (stack-suffix + the repeated candidate) if `candidate` is already on it.
+pub fn find_cycle_in_stack(
+    stack: &[std::path::PathBuf],
+    candidate: &std::path::Path,
+) -> Option<Vec<std::path::PathBuf>> {
+    let pos = stack.iter().position(|p| p.as_path() == candidate)?;
+    let mut cycle: Vec<std::path::PathBuf> = stack[pos..].to_vec();
+    cycle.push(candidate.to_path_buf());
+    Some(cycle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn find_cycle_in_stack_detects_reentry() {
+        let stack = vec![PathBuf::from("/a.spar"), PathBuf::from("/b.spar")];
+        let cycle = find_cycle_in_stack(&stack, std::path::Path::new("/a.spar"));
+        assert!(cycle.is_some());
+        let cycle = cycle.unwrap();
+        assert_eq!(cycle, vec![PathBuf::from("/a.spar"), PathBuf::from("/b.spar"), PathBuf::from("/a.spar")]);
+    }
+
+    #[test]
+    fn find_cycle_in_stack_none_for_new_path() {
+        let stack = vec![PathBuf::from("/a.spar")];
+        assert!(find_cycle_in_stack(&stack, std::path::Path::new("/b.spar")).is_none());
+    }
+}

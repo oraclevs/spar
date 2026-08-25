@@ -102,6 +102,51 @@ fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
     }
 }
 
+/// Reset a selectively-imported item's visibility so it behaves as an
+/// internal local declaration in the importing file — not schema-validated,
+/// not emitted, not part of the importing file's own export surface.
+/// Root-cause fix for: splicing preserved `exported`/`private` verbatim
+/// from the source file, so an `export [Colors]{...}` pulled in via
+/// `import { Colors } from "...";` was indistinguishable from a section the
+/// importing file declared and exported itself, and got flagged by schema
+/// Rule 2 as "not declared in any imported schema." Must NOT be applied to
+/// asPartOf's splice path — that mechanism intentionally preserves
+/// visibility flags verbatim ("as if pasted in directly").
+fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelItem {
+    use crate::ast::TopLevelItem;
+    match item {
+        TopLevelItem::Var(mut v) => { v.exported = false; TopLevelItem::Var(v) }
+        TopLevelItem::Section(mut s) => { s.exported = false; s.private = true; TopLevelItem::Section(s) }
+        TopLevelItem::Function(mut f) => { f.is_private = true; TopLevelItem::Function(f) }
+        TopLevelItem::Type(mut t) => { t.exported = false; TopLevelItem::Type(t) }
+        other => other,
+    }
+}
+
+/// Point a selectively-imported item's own top-level span at the `import`
+/// statement that brought it in, instead of leaving it pointing into the
+/// source file's text. `Span` carries no file identity — it's just byte
+/// offsets + line/col relative to whichever single source string the CLI
+/// or LSP is currently rendering against — so a foreign span (e.g. from
+/// `lib.spar`) rendered against the importing file's text lands on an
+/// unrelated, misleading line. Retagging the top-level span to the `import`
+/// line at least keeps every error inside the importing file's own text.
+/// This is a partial mitigation, not a full fix: it does not touch spans
+/// nested inside the item (individual fields, expressions) — an error
+/// anchored on one of those will still carry a foreign span. A complete
+/// fix needs file-provenance on `Span`/`SparError` plus a multi-file-aware
+/// renderer; tracked as follow-up work, not attempted here.
+fn retag_top_level_span(item: crate::ast::TopLevelItem, span: &crate::error::Span) -> crate::ast::TopLevelItem {
+    use crate::ast::TopLevelItem;
+    match item {
+        TopLevelItem::Var(mut v) => { v.span = span.clone(); TopLevelItem::Var(v) }
+        TopLevelItem::Section(mut s) => { s.span = span.clone(); TopLevelItem::Section(s) }
+        TopLevelItem::Function(mut f) => { f.span = span.clone(); TopLevelItem::Function(f) }
+        TopLevelItem::Type(mut t) => { t.span = span.clone(); TopLevelItem::Type(t) }
+        other => other,
+    }
+}
+
 fn rename_top_level_item(item: crate::ast::TopLevelItem, new_name: &str) -> crate::ast::TopLevelItem {
     use crate::ast::TopLevelItem;
     match item {
@@ -188,7 +233,9 @@ fn splice_selective(
                     continue;
                 }
                 let final_name = req.alias.clone().unwrap_or_else(|| req.name.clone());
-                spliced.push(rename_top_level_item((*item).clone(), &final_name));
+                let renamed = rename_top_level_item((*item).clone(), &final_name);
+                let localized = localize_visibility(renamed);
+                spliced.push(retag_top_level_span(localized, &decl.span));
             }
         }
     }
@@ -848,6 +895,69 @@ mod tests {
     }
 
     #[test]
+    fn expand_imports_selective_items_lose_exported_flag() {
+        // Regression: a section/var/function/type pulled in via selective
+        // import must NOT keep the `exported`/`is_private` flags it had in
+        // its own source file — otherwise it's indistinguishable from a
+        // declaration the importing file made and exported itself, and
+        // silently becomes part of the importing file's own emit output.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            concat!(
+                "export var version: str = \"1.0\";\n",
+                "export [Server]{ port: int = 8080; };\n",
+                "function greet() -> str { return \"hi\"; }\n",
+                "export type [PostgresType]{ image: str; }\n",
+            ),
+        ).unwrap();
+        let src = r#"import { version, Server, greet, PostgresType } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        for item in &program.items {
+            match item {
+                TopLevelItem::Var(v) => assert!(!v.exported, "spliced var must not stay exported"),
+                TopLevelItem::Section(s) => {
+                    assert!(!s.exported, "spliced section must not stay exported");
+                    assert!(s.private, "spliced section must become private (exempt from schema/emit)");
+                }
+                TopLevelItem::Function(f) => assert!(f.is_private, "spliced function must become private"),
+                TopLevelItem::Type(t) => assert!(!t.exported, "spliced type must not stay exported"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn expand_imports_selective_item_span_points_at_import_statement() {
+        // Regression: Span has no file identity, so a spliced item's
+        // ORIGINAL span (from the source file) renders against the
+        // importing file's text and lands on an unrelated, misleading
+        // line. The spliced item's top-level span must be retagged to the
+        // `import` statement that brought it in.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("shared.spar"), "export var greeting: str = \"hi\";\n").unwrap();
+        let src = r#"import { greeting } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let import_span = match &program.items[0] {
+            TopLevelItem::Import(d) => d.span.clone(),
+            other => panic!("expected Import, got {:?}", other),
+        };
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        let spliced_span = program.items.iter().find_map(|it| {
+            if let TopLevelItem::Var(v) = it { Some(v.span.clone()) } else { None }
+        }).expect("expected a spliced var");
+        assert_eq!(spliced_span, import_span,
+            "spliced item's span must point at the import statement, not the source file's coordinates");
+    }
+
+    #[test]
     fn expand_imports_applies_as_rename() {
         use std::fs;
         let dir = tempdir().unwrap();
@@ -987,6 +1097,38 @@ mod tests {
             "[Postgres]{ image: str = \"postgres:16\"; };\n",
         );
         let program = parse_src(src);
+        let result = validate_schema_imports(&program, dir.path());
+        assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    #[test]
+    fn selectively_imported_section_is_not_checked_against_schema() {
+        // Direct regression for the reported bug: `import { Colors } from
+        // "lib.spar";` (a section exported by lib.spar for cross-file
+        // reuse, e.g. `Colors::red`) must NOT be treated as one of the
+        // importing file's own top-level config sections — it should be
+        // exempt from schema Rule 2 ("every section must be declared in
+        // the schema"), the same way a `private [Section]` already is.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("lib.spar"),
+            "export [Colors]{ red: str = \"#ff0000\"; };\n",
+        ).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            "@SchemaFile\nSchema [Container]{ x?: str; }\n",
+        ).unwrap();
+        let src = concat!(
+            "import schema \"schema.spar\";\n",
+            "import { Colors } from \"lib.spar\";\n",
+            "[Container]{\n",
+            "    x: str = Colors::red;\n",
+            "};\n",
+        );
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
         let result = validate_schema_imports(&program, dir.path());
         assert!(result.is_ok(), "got: {:?}", result.err());
     }

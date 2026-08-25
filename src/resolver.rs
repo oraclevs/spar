@@ -98,11 +98,19 @@ pub struct FunctionEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct TypeEntry {
+    pub fields:   Vec<TypeField>,
+    pub exported: bool,
+    pub span:     Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     pub globals:   HashMap<String, GlobalEntry>,
     pub sections:  HashMap<Vec<String>, SectionEntry>,
     pub imports:   HashMap<String, ImportEntry>,
     pub functions: HashMap<String, FunctionEntry>,
+    pub types:     HashMap<String, TypeEntry>,
 }
 
 impl SymbolTable {
@@ -120,6 +128,10 @@ impl SymbolTable {
 
     pub fn lookup_function(&self, name: &str) -> Option<&FunctionEntry> {
         self.functions.get(name)
+    }
+
+    pub fn lookup_type(&self, name: &str) -> Option<&TypeEntry> {
+        self.types.get(name)
     }
 }
 
@@ -164,6 +176,7 @@ pub struct Resolver {
     sections:        HashMap<Vec<String>, SectionEntry>,
     imports:         HashMap<String, ImportEntry>,
     functions:       HashMap<String, FunctionEntry>,
+    types:           HashMap<String, TypeEntry>,
     loaded_exports:  HashMap<String, HashSet<String>>,  // alias → exported names
     errors:          Vec<SparError>,
     current_section: Option<Vec<String>>,
@@ -176,6 +189,7 @@ impl Resolver {
             sections:        HashMap::new(),
             imports:         HashMap::new(),
             functions:       HashMap::new(),
+            types:           HashMap::new(),
             loaded_exports:  HashMap::new(),
             errors:          Vec::new(),
             current_section: None,
@@ -188,6 +202,7 @@ impl Resolver {
             sections:        HashMap::new(),
             imports:         HashMap::new(),
             functions:       HashMap::new(),
+            types:           HashMap::new(),
             loaded_exports:  exports,
             errors:          Vec::new(),
             current_section: None,
@@ -216,6 +231,7 @@ impl Resolver {
                 sections:  self.sections,
                 imports:   self.imports,
                 functions: self.functions,
+                types:     self.types,
             })
         } else {
             Err(self.errors)
@@ -242,6 +258,7 @@ impl Resolver {
                 sections:  r.sections,
                 imports:   r.imports,
                 functions: r.functions,
+                types:     r.types,
             })
         } else {
             Err(r.errors)
@@ -277,9 +294,46 @@ impl Resolver {
                 TopLevelItem::Section(decl)   => self.register_section(decl),
                 TopLevelItem::Function(decl)  => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
-                TopLevelItem::Type(_) => {} // Task 2 replaces this with real registration
+                TopLevelItem::Type(decl) => self.register_type(decl),
             }
         }
+    }
+
+    fn register_type(&mut self, decl: &TypeDecl) {
+        if decl.name == "Schema" {
+            self.push_error(
+                "'Schema' is reserved and cannot be used as a type name — \
+                 it already means a `Schema [Name]{...}` file-level contract",
+                decl.name_span.clone(),
+            );
+            return;
+        }
+
+        if !naming::is_pascal_case(&decl.name) {
+            self.push_error_hint(
+                format!(
+                    "type name '{}' must be PascalCase (start with an uppercase letter, no underscores)",
+                    decl.name
+                ),
+                Some(naming::pascal_case_hint(&decl.name)),
+                decl.name_span.clone(),
+            );
+            // Do NOT return — continue registering so other errors can be found
+        }
+
+        if self.types.contains_key(&decl.name) {
+            self.push_error(
+                format!("type '{}' is already defined", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+
+        self.types.insert(decl.name.clone(), TypeEntry {
+            fields:   decl.fields.clone(),
+            exported: decl.exported,
+            span:     decl.span.clone(),
+        });
     }
 
     fn register_function(&mut self, decl: &FunctionDecl) {
@@ -596,7 +650,7 @@ impl Resolver {
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
                 TopLevelItem::Function(_)   => {} // function bodies handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
-                TopLevelItem::Type(_) => {} // Task 2 replaces this with real validation
+                TopLevelItem::Type(decl) => self.resolve_type(decl),
             }
         }
     }
@@ -696,6 +750,30 @@ impl Resolver {
                 Some(FieldValue::Expr(val)) => self.resolve_expr(val),
                 Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
                 None => {}
+            }
+        }
+    }
+
+    fn resolve_type(&mut self, decl: &TypeDecl) {
+        self.resolve_type_fields(&decl.fields);
+    }
+
+    fn resolve_type_fields(&mut self, fields: &[TypeField]) {
+        for field in fields {
+            match &field.shape {
+                TypeFieldShape::Primitive(_) => {}
+                TypeFieldShape::Named(name) => {
+                    if !self.types.contains_key(name) {
+                        let candidates: Vec<String> = self.types.keys().cloned().collect();
+                        let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
+                        self.push_error_hint(
+                            format!("undefined type: `{name}` is not declared"),
+                            hint,
+                            field.span.clone(),
+                        );
+                    }
+                }
+                TypeFieldShape::Section(nested) => self.resolve_type_fields(nested),
             }
         }
     }

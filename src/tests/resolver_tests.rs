@@ -381,3 +381,53 @@ fn resolver_rejects_self_reference_outside_section() {
         "expected an error mentioning `self`, got: {err}"
     );
 }
+
+#[test]
+fn resolver_registers_type_with_named_field_reference() {
+    let src = r#"
+        type [Border]{
+            width?: int;
+        }
+        type [Decoration]{
+            border?: Border;
+        }
+    "#;
+    let sym = resolve_ok(src);
+    assert!(sym.types.contains_key("Border"));
+    assert!(sym.types.contains_key("Decoration"));
+}
+
+#[test]
+fn resolver_rejects_duplicate_type() {
+    let src = r#"
+        type [Border]{ width?: int; }
+        type [Border]{ width?: int; }
+    "#;
+    let err = resolve_err(src);
+    assert!(err.contains("already defined"), "got: {err}");
+}
+
+#[test]
+fn resolver_rejects_type_named_schema() {
+    let src = r#"type [Schema]{ a: int; }"#;
+    let err = resolve_err(src);
+    assert!(err.contains("reserved") || err.contains("Schema"), "got: {err}");
+}
+
+#[test]
+fn resolver_rejects_non_pascal_case_type_name() {
+    let src = r#"type [border]{ width?: int; }"#;
+    let err = resolve_err(src);
+    assert!(err.contains("PascalCase"), "got: {err}");
+}
+
+#[test]
+fn resolver_rejects_undefined_named_type_reference() {
+    let src = r#"
+        type [Decoration]{
+            border?: NoSuchType;
+        }
+    "#;
+    let err = resolve_err(src);
+    assert!(err.contains("undefined type") || err.contains("NoSuchType"), "got: {err}");
+}

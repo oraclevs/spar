@@ -1163,6 +1163,7 @@ mod tests {
                         sections: Default::default(),
                         imports: Default::default(),
                         functions: Default::default(),
+                        types: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -1185,6 +1186,7 @@ mod tests {
                         sections: Default::default(),
                         imports: Default::default(),
                         functions: Default::default(),
+                        types: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "section field with expr value must be rejected");

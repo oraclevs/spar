@@ -761,7 +761,23 @@ impl Evaluator {
         }
     }
 
+    fn eval_self_ref(&mut self, nr: &NamespaceRef) -> EvalResult_ {
+        let frame = self.self_stack.last().ok_or_else(|| EvalErr::PathNotFound {
+            path: "self".to_string(),
+            span: nr.span.clone(),
+        })?;
+        let mut key = vec![frame.top_name.clone()];
+        key.extend(nr.segments[1..].iter().cloned());
+        frame.fields.get(&key).cloned().ok_or_else(|| EvalErr::PathNotFound {
+            path: format!("self::{}", nr.segments[1..].join("::")),
+            span: nr.span.clone(),
+        })
+    }
+
     fn eval_namespace_ref(&mut self, nr: &NamespaceRef, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+        if nr.segments.first().map(String::as_str) == Some("self") {
+            return self.eval_self_ref(nr);
+        }
         match nr.segments.as_slice() {
             [name] => {
                 // Check local scope first

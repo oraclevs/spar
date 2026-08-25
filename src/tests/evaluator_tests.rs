@@ -339,3 +339,37 @@ fn eval_genuine_nested_cycle_reports_cyclic_error_not_overflow() {
     let result = crate::evaluator::Evaluator::new(symbols, prog).run();
     assert!(result.is_err(), "a genuine circular nested reference must error, not hang or panic");
 }
+
+#[test]
+fn eval_self_reference_multi_level_nesting() {
+    let src = r#"
+        [Postgres]{
+            environment: section = {
+                postgresDb: str = "my_app";
+                postgresUser: str = self::environment::postgresDb;
+            };
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["Postgres".to_string(), "environment".to_string()];
+    assert_eq!(
+        r.sections[&path]["postgresUser"],
+        crate::evaluator::ConfigValue::Str("my_app".into())
+    );
+}
+
+#[test]
+fn eval_self_reference_direct_child_field() {
+    let src = r#"
+        [A]{
+            a1: str = "hi";
+            a2: str = self::a1;
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["A".to_string()];
+    assert_eq!(
+        r.sections[&path]["a2"],
+        crate::evaluator::ConfigValue::Str("hi".into())
+    );
+}

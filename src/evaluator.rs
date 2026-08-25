@@ -61,6 +61,7 @@ enum EvalErr {
     NotScalar { name: String, span: Span },
     TypeMismatch { expected: &'static str, got: &'static str },
     MaxCallDepth { name: String },
+    PathNotFound { path: String, span: Span },
 }
 
 impl EvalErr {
@@ -96,6 +97,12 @@ impl EvalErr {
                 ),
                 span,
             },
+            EvalErr::PathNotFound { path, span } => SparError::EvalError {
+                message: format!(
+                    "undefined path: `{path}` does not refer to any known field"
+                ),
+                span,
+            },
             EvalErr::TypeMismatch { expected, got } => SparError::EvalError {
                 message: format!("type mismatch: expected {expected}, got {got}"),
                 span: Span::dummy(),
@@ -114,6 +121,16 @@ type EvalResult_ = Result<ConfigValue, EvalErr>;
 
 // ── Evaluator ─────────────────────────────────────────────────────────────────
 
+/// Tracks the fields of the top-level section currently being built, keyed
+/// by full absolute path, as they're computed — so a reference to an
+/// already-computed sibling (via its own name, or via `self::`) can be
+/// resolved without re-entering `eval_section_by_path` for a section that's
+/// already mid-evaluation (which would trip its cyclic-reference guard).
+struct SelfFrame {
+    top_name: String,
+    fields:   HashMap<Vec<String>, ConfigValue>,
+}
+
 pub struct Evaluator {
     program:           Program,
     symbols:           SymbolTable,
@@ -122,6 +139,7 @@ pub struct Evaluator {
     section_cache:     HashMap<Vec<String>, HashMap<String, ConfigValue>>,
     evaluating:        HashSet<String>,
     evaluating_sects:  HashSet<Vec<String>>,
+    self_stack:        Vec<SelfFrame>,
     errors:            Vec<SparError>,
     warnings:          Vec<String>,
     imported_programs: HashMap<String, Program>,
@@ -137,6 +155,7 @@ impl Evaluator {
             section_cache:     HashMap::new(),
             evaluating:        HashSet::new(),
             evaluating_sects:  HashSet::new(),
+            self_stack:        Vec::new(),
             errors:            Vec::new(),
             warnings:          Vec::new(),
             imported_programs: HashMap::new(),
@@ -428,7 +447,12 @@ impl Evaluator {
         let decl = decl?;
 
         self.evaluating_sects.insert(path_vec.clone());
+        self.self_stack.push(SelfFrame {
+            top_name: path_vec[0].clone(),
+            fields:   HashMap::new(),
+        });
         let fields = self.eval_section_decl(&decl);
+        self.self_stack.pop();
         self.evaluating_sects.remove(&path_vec);
 
         self.section_cache.insert(path_vec, fields.clone());
@@ -467,9 +491,18 @@ impl Evaluator {
                                 Ok(ConfigValue::Section(map)) => {
                                     // Section-returning function call — register at nested path
                                     let nested_path = [parent_path, &[field.name.clone()]].concat();
+                                    if let Some(frame) = self.self_stack.last_mut() {
+                                        frame.fields.insert(nested_path.clone(), ConfigValue::Section(map.clone()));
+                                    }
                                     self.section_cache.insert(nested_path, map);
                                 }
-                                Ok(val) => { result.insert(field.name.clone(), val); }
+                                Ok(val) => {
+                                    let field_path = [parent_path, &[field.name.clone()]].concat();
+                                    if let Some(frame) = self.self_stack.last_mut() {
+                                        frame.fields.insert(field_path, val.clone());
+                                    }
+                                    result.insert(field.name.clone(), val);
+                                }
                                 Err(e)  => { self.push_eval_error(e); }
                             }
                         }
@@ -479,6 +512,9 @@ impl Evaluator {
                                 .map(|f| SectionItem::Field(f.clone()))
                                 .collect();
                             let nested_map = self.eval_section_fields(&nested_items, &nested_path, &HashMap::new());
+                            if let Some(frame) = self.self_stack.last_mut() {
+                                frame.fields.insert(nested_path.clone(), ConfigValue::Section(nested_map.clone()));
+                            }
                             self.section_cache.insert(nested_path, nested_map);
                             // Do NOT insert into result — nested sections aren't scalar values
                         }
@@ -672,39 +708,56 @@ impl Evaluator {
             }
         }
 
-        let field_value = self.program.items.iter().find_map(|item| {
-            if let TopLevelItem::Section(d) = item {
-                if d.path == section_path {
-                    return d.items.iter().find_map(|si| {
-                        if let SectionItem::Field(f) = si {
-                            if f.name == field_name { return f.value.clone(); }
-                        }
-                        None
+        // If the owning top-level section is the one currently being
+        // built, section_cache won't have it yet by definition — check
+        // the in-progress accumulator instead of recursing into
+        // eval_section_by_path, which would trip its own reentrancy guard
+        // and report a false cycle for what is really just a reference to
+        // an already-computed sibling.
+        if let Some(top) = section_path.first() {
+            if let Some(frame) = self.self_stack.last() {
+                if &frame.top_name == top {
+                    let mut key = section_path.to_vec();
+                    key.push(field_name.to_string());
+                    return frame.fields.get(&key).cloned().ok_or_else(|| EvalErr::PathNotFound {
+                        path: format!("{}::{field_name}", section_path.join("::")),
+                        span: span.clone(),
                     });
                 }
             }
-            None
-        });
+        }
 
-        match field_value {
-            None => Err(EvalErr::CyclicRef {
+        // Not cached yet — fully evaluate the owning top-level section.
+        // eval_section_by_path recursively walks every FieldValue::Nested
+        // under it and populates section_cache at every resulting path
+        // (see eval_section_fields), so this works for any depth, not
+        // just a direct top-level field. Its own `evaluating_sects` guard
+        // reports a clear cyclic-section error and returns None if we're
+        // already in the middle of evaluating this same top-level path.
+        if let Some(top) = section_path.first() {
+            self.eval_section_by_path(std::slice::from_ref(top));
+        }
+
+        if let Some(cached) = self.section_cache.get(section_path) {
+            if let Some(val) = cached.get(field_name) {
+                return Ok(val.clone());
+            }
+        }
+
+        // Still missing: either the path names a nested section (not a
+        // scalar) at `field_name`, or the path is simply wrong.
+        let mut deeper = section_path.to_vec();
+        deeper.push(field_name.to_string());
+        if self.section_cache.contains_key(&deeper) {
+            Err(EvalErr::NotScalar {
                 name: format!("{}::{field_name}", section_path.join(".")),
                 span: span.clone(),
-            }),
-            Some(FieldValue::Nested(_)) => {
-                Err(EvalErr::NotScalar {
-                    name: format!("{}::{field_name}", section_path.join(".")),
-                    span: span.clone(),
-                })
-            }
-            Some(FieldValue::Expr(e)) => {
-                let val = self.eval_expr(&e, &HashMap::new())?;
-                self.section_cache
-                    .entry(section_path.to_vec())
-                    .or_default()
-                    .insert(field_name.to_string(), val.clone());
-                Ok(val)
-            }
+            })
+        } else {
+            Err(EvalErr::PathNotFound {
+                path: format!("{}::{field_name}", section_path.join("::")),
+                span: span.clone(),
+            })
         }
     }
 

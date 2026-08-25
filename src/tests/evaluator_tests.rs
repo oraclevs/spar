@@ -291,3 +291,51 @@ fn eval_same_section_qualified_self_reference() {
         crate::evaluator::ConfigValue::Str("hi".into())
     );
 }
+
+#[test]
+fn eval_cross_section_nested_to_nested_reference() {
+    let src = r#"
+        [X]{
+            nested: section = {
+                v: str = Y::inner::val;
+            };
+        };
+        [Y]{
+            inner: section = {
+                val: str = "target";
+            };
+        };
+    "#;
+    // Run several times: before the fix this flakes because evaluation
+    // order between X and Y is decided by HashMap iteration order.
+    for _ in 0..20 {
+        let r = eval_src(src);
+        let path = vec!["X".to_string(), "nested".to_string()];
+        assert_eq!(
+            r.sections[&path]["v"],
+            crate::evaluator::ConfigValue::Str("target".into())
+        );
+    }
+}
+
+#[test]
+fn eval_genuine_nested_cycle_reports_cyclic_error_not_overflow() {
+    let src = r#"
+        [X]{
+            nested: section = {
+                v: str = Y::inner::val;
+            };
+        };
+        [Y]{
+            inner: section = {
+                val: str = X::nested::v;
+            };
+        };
+    "#;
+    let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog    = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap();
+    let result = crate::evaluator::Evaluator::new(symbols, prog).run();
+    assert!(result.is_err(), "a genuine circular nested reference must error, not hang or panic");
+}

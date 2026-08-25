@@ -69,13 +69,14 @@ fn expand_imports_inner(
                 for it in items {
                     if let Some(name) = top_level_name(&it) {
                         if !declared.insert(name.to_string()) {
+                            let span = top_level_span(&it).unwrap_or_else(|| decl.span.clone());
                             errors.push(SparError::ResolveError {
                                 message: format!(
                                     "'{}' brought in from '{}' collides with a declaration already in scope",
                                     name, decl.path
                                 ),
                                 hint: None,
-                                span: decl.span.clone(),
+                                span,
                             });
                             continue;
                         }
@@ -98,6 +99,17 @@ fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
         TopLevelItem::Section(s) => s.path.first().map(|s| s.as_str()),
         TopLevelItem::Function(f) => Some(&f.name),
         TopLevelItem::Type(t) => Some(&t.name),
+        _ => None,
+    }
+}
+
+fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span> {
+    use crate::ast::TopLevelItem;
+    match item {
+        TopLevelItem::Var(v) => Some(v.span.clone()),
+        TopLevelItem::Section(s) => Some(s.span.clone()),
+        TopLevelItem::Function(f) => Some(f.span.clone()),
+        TopLevelItem::Type(t) => Some(t.span.clone()),
         _ => None,
     }
 }
@@ -141,8 +153,8 @@ fn retag_top_level_span(item: crate::ast::TopLevelItem, span: &crate::error::Spa
     match item {
         TopLevelItem::Var(mut v) => { v.span = span.clone(); TopLevelItem::Var(v) }
         TopLevelItem::Section(mut s) => { s.span = span.clone(); TopLevelItem::Section(s) }
-        TopLevelItem::Function(mut f) => { f.span = span.clone(); TopLevelItem::Function(f) }
-        TopLevelItem::Type(mut t) => { t.span = span.clone(); TopLevelItem::Type(t) }
+        TopLevelItem::Function(mut f) => { f.span = span.clone(); f.name_span = span.clone(); TopLevelItem::Function(f) }
+        TopLevelItem::Type(mut t) => { t.span = span.clone(); t.name_span = span.clone(); TopLevelItem::Type(t) }
         other => other,
     }
 }
@@ -235,7 +247,10 @@ fn splice_selective(
                 let final_name = req.alias.clone().unwrap_or_else(|| req.name.clone());
                 let renamed = rename_top_level_item((*item).clone(), &final_name);
                 let localized = localize_visibility(renamed);
-                spliced.push(retag_top_level_span(localized, &decl.span));
+                // Each item gets its OWN span (not the whole import line) —
+                // so `import { A, B }` positions A's and B's tokens/errors
+                // at their own names in the brace list, not both at one spot.
+                spliced.push(retag_top_level_span(localized, &req.span));
             }
         }
     }
@@ -946,15 +961,19 @@ mod tests {
         // Regression: Span has no file identity, so a spliced item's
         // ORIGINAL span (from the source file) renders against the
         // importing file's text and lands on an unrelated, misleading
-        // line. The spliced item's top-level span must be retagged to the
-        // `import` statement that brought it in.
+        // line. The spliced item's top-level span must be retagged to its
+        // OWN name in the `import { ... }` brace list — not the whole
+        // import line — so multiple names each get their own position.
         use std::fs;
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("shared.spar"), "export var greeting: str = \"hi\";\n").unwrap();
         let src = r#"import { greeting } from "shared.spar";"#;
         let mut program = parse_src(src);
-        let import_span = match &program.items[0] {
-            TopLevelItem::Import(d) => d.span.clone(),
+        let item_span = match &program.items[0] {
+            TopLevelItem::Import(d) => match &d.kind {
+                crate::ast::ImportKind::Selective(items) => items[0].span.clone(),
+                other => panic!("expected Selective, got {:?}", other),
+            },
             other => panic!("expected Import, got {:?}", other),
         };
         let mut loader = ImportLoader::new(dir.path());
@@ -963,8 +982,34 @@ mod tests {
         let spliced_span = program.items.iter().find_map(|it| {
             if let TopLevelItem::Var(v) = it { Some(v.span.clone()) } else { None }
         }).expect("expected a spliced var");
-        assert_eq!(spliced_span, import_span,
-            "spliced item's span must point at the import statement, not the source file's coordinates");
+        assert_eq!(spliced_span, item_span,
+            "spliced item's span must point at its own name in the import braces, not the source file's coordinates");
+    }
+
+    #[test]
+    fn expand_imports_multiple_selective_items_get_distinct_spans() {
+        // Two names in one `import { A, B }` must not collapse to the
+        // same position — each gets its own item's span.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export var a: str = \"a\";\nexport var b: str = \"b\";\n",
+        ).unwrap();
+        let src = r#"import { a, b } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        let a_span = program.items.iter().find_map(|it| {
+            if let TopLevelItem::Var(v) = it { if v.name == "a" { return Some(v.span.clone()); } }
+            None
+        }).expect("expected spliced var a");
+        let b_span = program.items.iter().find_map(|it| {
+            if let TopLevelItem::Var(v) = it { if v.name == "b" { return Some(v.span.clone()); } }
+            None
+        }).expect("expected spliced var b");
+        assert_ne!(a_span, b_span, "each spliced item must get its own distinct span");
     }
 
     #[test]

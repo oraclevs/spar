@@ -351,6 +351,90 @@ pub fn collect_imports(
     if errors.is_empty() { Ok(result) } else { Err(errors) }
 }
 
+fn type_fields_to_schema_fields(
+    type_fields: &[crate::ast::TypeField],
+    schema_prog: &Program,
+) -> Vec<crate::ast::SchemaField> {
+    use crate::ast::{TypeFieldShape, SchemaFieldShape, SchemaField, TopLevelItem};
+
+    type_fields.iter().map(|tf| {
+        let shape = match &tf.shape {
+            TypeFieldShape::Primitive(ty) => SchemaFieldShape::Primitive(ty.clone()),
+            TypeFieldShape::Section(nested) => {
+                SchemaFieldShape::Section(type_fields_to_schema_fields(nested, schema_prog))
+            }
+            TypeFieldShape::Named(other_name) => {
+                let other_fields = schema_prog.items.iter().find_map(|it| {
+                    if let TopLevelItem::Type(t) = it {
+                        if &t.name == other_name { return Some(&t.fields); }
+                    }
+                    None
+                });
+                let expanded = other_fields
+                    .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
+                    .unwrap_or_default();
+                SchemaFieldShape::Section(expanded)
+            }
+        };
+        SchemaField {
+            name: tf.name.clone(),
+            optional: tf.optional,
+            shape,
+            span: tf.span.clone(),
+        }
+    }).collect()
+}
+
+/// Convert every `SchemaFrom`/`SchemaFrom?` in `schema_prog` into an
+/// equivalent generated `TopLevelItem::SchemaSection`, removing the
+/// `SchemaFrom` items. Must run after `expand_imports` has spliced in any
+/// `import type {...}` targets, so `source_type` lookups see real
+/// `TypeDecl`s.
+fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
+    use crate::ast::{TopLevelItem, SchemaSectionDecl};
+
+    let mut errors: Vec<SparError> = Vec::new();
+    let mut generated: Vec<TopLevelItem> = Vec::new();
+
+    for item in &schema_prog.items {
+        let TopLevelItem::SchemaFrom(sf) = item else { continue };
+
+        let source = schema_prog.items.iter().find_map(|it| {
+            if let TopLevelItem::Type(t) = it {
+                if t.name == sf.source_type { return Some(t); }
+            }
+            None
+        });
+
+        match source {
+            None => {
+                errors.push(SparError::SchemaError {
+                    message: format!(
+                        "SchemaFrom references undeclared type `{}` — bring it in with \
+                         `import type {{ {} }} from \"...\";`",
+                        sf.source_type, sf.source_type
+                    ),
+                    span: sf.source_type_span.clone(),
+                });
+            }
+            Some(t) => {
+                let fields = type_fields_to_schema_fields(&t.fields, schema_prog);
+                generated.push(TopLevelItem::SchemaSection(SchemaSectionDecl {
+                    name: sf.name.clone(),
+                    marker: sf.marker.clone(),
+                    fields,
+                    span: sf.span.clone(),
+                }));
+            }
+        }
+    }
+
+    schema_prog.items.retain(|it| !matches!(it, TopLevelItem::SchemaFrom(_)));
+    schema_prog.items.extend(generated);
+
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
 /// Validate config `program` against any `import schema "..."` declarations it contains.
 /// Loads each schema file, verifies it has @SchemaFile, then checks all sections.
 pub fn validate_schema_imports(
@@ -441,6 +525,11 @@ pub fn validate_schema_imports(
                 SparError::ResolveError { message, span, .. } => SparError::SchemaError { message, span },
                 other => other,
             }));
+            continue;
+        }
+
+        if let Err(es) = expand_schema_from(&mut schema_prog) {
+            errors.extend(es);
             continue;
         }
 
@@ -900,5 +989,180 @@ mod tests {
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
         assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    // ── Phase 3: SchemaFrom (Task 6) ──────────────────────────────────────
+
+    #[test]
+    fn expand_schema_from_generates_equivalent_schema_section() {
+        // Schema files can't declare `type` per the parser's own rule —
+        // this test exercises `expand_schema_from` directly against a
+        // hand-built Program rather than going through the parser, since
+        // the type here stands in for one that arrived via `import type`.
+        let mut program = Program {
+            is_schema_file: true,
+            items: vec![
+                TopLevelItem::Type(crate::ast::TypeDecl {
+                    name: "PostgresType".into(),
+                    name_span: crate::error::Span::dummy(),
+                    exported: true,
+                    fields: vec![
+                        crate::ast::TypeField {
+                            name: "image".into(),
+                            optional: false,
+                            shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Str),
+                            span: crate::error::Span::dummy(),
+                        },
+                        crate::ast::TypeField {
+                            name: "port".into(),
+                            optional: true,
+                            shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Int),
+                            span: crate::error::Span::dummy(),
+                        },
+                    ],
+                    span: crate::error::Span::dummy(),
+                }),
+                TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
+                    name: "Postgres".into(),
+                    source_type: "PostgresType".into(),
+                    source_type_span: crate::error::Span::dummy(),
+                    marker: crate::ast::SchemaMarker { optional: false },
+                    span: crate::error::Span::dummy(),
+                }),
+            ],
+        };
+        expand_schema_from(&mut program).expect("expand must succeed");
+
+        assert!(!program.items.iter().any(|it| matches!(it, TopLevelItem::SchemaFrom(_))));
+        let generated = program.items.iter().find_map(|it| {
+            if let TopLevelItem::SchemaSection(s) = it { Some(s) } else { None }
+        }).expect("SchemaFrom must generate a SchemaSection");
+        assert_eq!(generated.name, "Postgres");
+        assert!(!generated.marker.optional);
+        assert_eq!(generated.fields.len(), 2);
+        assert!(generated.fields.iter().any(|f| f.name == "image" && !f.optional));
+        assert!(generated.fields.iter().any(|f| f.name == "port" && f.optional));
+    }
+
+    #[test]
+    fn expand_schema_from_expands_named_type_reference_recursively() {
+        let mut program = Program {
+            is_schema_file: true,
+            items: vec![
+                TopLevelItem::Type(crate::ast::TypeDecl {
+                    name: "Border".into(),
+                    name_span: crate::error::Span::dummy(),
+                    exported: true,
+                    fields: vec![crate::ast::TypeField {
+                        name: "width".into(),
+                        optional: false,
+                        shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Int),
+                        span: crate::error::Span::dummy(),
+                    }],
+                    span: crate::error::Span::dummy(),
+                }),
+                TopLevelItem::Type(crate::ast::TypeDecl {
+                    name: "Decoration".into(),
+                    name_span: crate::error::Span::dummy(),
+                    exported: true,
+                    fields: vec![crate::ast::TypeField {
+                        name: "border".into(),
+                        optional: false,
+                        shape: crate::ast::TypeFieldShape::Named("Border".into()),
+                        span: crate::error::Span::dummy(),
+                    }],
+                    span: crate::error::Span::dummy(),
+                }),
+                TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
+                    name: "Deco".into(),
+                    source_type: "Decoration".into(),
+                    source_type_span: crate::error::Span::dummy(),
+                    marker: crate::ast::SchemaMarker { optional: true },
+                    span: crate::error::Span::dummy(),
+                }),
+            ],
+        };
+        expand_schema_from(&mut program).expect("expand must succeed");
+
+        let generated = program.items.iter().find_map(|it| {
+            if let TopLevelItem::SchemaSection(s) = it { Some(s) } else { None }
+        }).expect("SchemaFrom must generate a SchemaSection");
+        assert!(generated.marker.optional);
+        let border_field = generated.fields.iter().find(|f| f.name == "border").expect("border field");
+        match &border_field.shape {
+            crate::ast::SchemaFieldShape::Section(nested) => {
+                assert!(nested.iter().any(|f| f.name == "width"));
+            }
+            other => panic!("expected nested Section shape, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_schema_from_errors_on_undeclared_type() {
+        let mut program = Program {
+            is_schema_file: true,
+            items: vec![
+                TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
+                    name: "Postgres".into(),
+                    source_type: "NoSuchType".into(),
+                    source_type_span: crate::error::Span::dummy(),
+                    marker: crate::ast::SchemaMarker { optional: false },
+                    span: crate::error::Span::dummy(),
+                }),
+            ],
+        };
+        let err = expand_schema_from(&mut program).unwrap_err();
+        assert!(err.iter().any(|e| matches!(e, SparError::SchemaError { message, .. } if message.contains("NoSuchType"))),
+            "got: {:?}", err);
+    }
+
+    #[test]
+    fn validate_schema_imports_accepts_config_matching_schema_from() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            "export type [PostgresType]{ image: str; }\n",
+        ).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            concat!(
+                "@SchemaFile\n",
+                "import type { PostgresType } from \"types.spar\";\n",
+                "SchemaFrom [Postgres, PostgresType];\n",
+            ),
+        ).unwrap();
+        let src = concat!(
+            "import schema \"schema.spar\";\n",
+            "[Postgres]{ image: str = \"postgres:16\"; };\n",
+        );
+        let program = parse_src(src);
+        let result = validate_schema_imports(&program, dir.path());
+        assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    #[test]
+    fn validate_schema_imports_rejects_config_missing_schema_from_field() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            "export type [PostgresType]{ image: str; port: int; }\n",
+        ).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            concat!(
+                "@SchemaFile\n",
+                "import type { PostgresType } from \"types.spar\";\n",
+                "SchemaFrom [Postgres, PostgresType];\n",
+            ),
+        ).unwrap();
+        let src = concat!(
+            "import schema \"schema.spar\";\n",
+            "[Postgres]{ image: str = \"postgres:16\"; };\n", // missing required `port`
+        );
+        let program = parse_src(src);
+        let result = validate_schema_imports(&program, dir.path());
+        assert!(result.is_err());
     }
 }

@@ -449,12 +449,10 @@ fn spread_only_top_level_bound_section_wrong_shape_errors() {
 }
 
 #[test]
-fn spread_mixed_with_explicit_fields_is_not_checked() {
-    // Regression-safety: mixing a spread with other explicit fields keeps
-    // the existing "can't statically verify" skip precedent — not the new
-    // spread-only smart check. This deliberately has a WRONG shape
-    // (missing `port`) and must still pass, exactly as it did before this
-    // feature (has_spreads skip).
+fn spread_mixed_with_explicit_fields_full_coverage_passes() {
+    // A resolvable spread's contribution is now merged with the explicit
+    // fields for coverage purposes: Partial covers nodeEnv, the explicit
+    // field covers port — together they satisfy EnvironmentType.
     let src = r#"
         type [EnvironmentType]{ nodeEnv: str; port: str; }
         type [ServiceType]{ image: str; environment: EnvironmentType; }
@@ -465,6 +463,73 @@ fn spread_mixed_with_explicit_fields_is_not_checked() {
         [Api] -> ServiceType {
             image: "my-api";
             environment: { ...Partial; port: "3000"; };
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn spread_mixed_with_explicit_fields_still_missing_required_errors() {
+    // Neither the spread nor the explicit fields cover `port` — must
+    // still be a missing-required-field error, not silently accepted.
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [PartialEnvType]{ nodeEnv: str; }
+        [Partial] -> PartialEnvType {
+            nodeEnv: "production";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...Partial; };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+}
+
+#[test]
+fn spread_mixed_with_explicit_fields_contributes_undeclared_field_errors() {
+    // Direct regression for the reported bug: a spread mixed with an
+    // explicit field, where the spread's source has fields the target
+    // type doesn't declare at all, must be a type error — not silently
+    // accepted just because it's "mixed" with another field.
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; databaseUrl: str; redisUrl: str; }
+        type [VolumeType]{ postgresData: [str]; }
+        type [PostgresType]{ volumes: VolumeType; }
+        [ProductionEnvironment] -> EnvironmentType {
+            nodeEnv: "production";
+            port: "3000";
+            databaseUrl: "None";
+            redisUrl: "None";
+        };
+        [Postgres] -> PostgresType {
+            volumes: {
+                postgresData: ["postgres_data:/var/lib/postgresql/data"];
+                ...ProductionEnvironment;
+            };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("nodeEnv") && err.contains("not declared"), "got: {err}");
+}
+
+#[test]
+fn spread_mixed_with_unresolvable_source_still_skipped() {
+    // A spread whose source can't be statically resolved (a function
+    // call) keeps the conservative "can't verify, skip" fallback, even
+    // when mixed with other fields — this deliberately has a WRONG shape
+    // (missing `port`) and must still pass.
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        function makeEnv() -> section {
+            return { nodeEnv: str = "production"; };
+        }
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...makeEnv(); };
         };
     "#;
     check_ok(src);

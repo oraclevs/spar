@@ -254,13 +254,13 @@ impl<'a> TypeChecker<'a> {
             return;
         }
 
-        // A spread MIXED with other explicit fields can supply required
-        // fields at runtime in a way that's hard to attribute correctly to
-        // "which of the type's fields does the spread vs. the explicit
-        // fields cover" — can't statically verify that combination, so
-        // skip (same precedent as Schema validation in loader.rs).
+        // A spread MIXED with other explicit fields — each resolvable
+        // spread's contribution is merged with the explicit fields for
+        // coverage/type checking; an unresolvable spread falls back to
+        // skipping entirely (see check_mixed_spread_and_fields).
         let has_spreads = decl.items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
         if has_spreads {
+            self.check_mixed_spread_and_fields(&decl.items, &entry.fields, &binding.name, path_str);
             return;
         }
 
@@ -278,9 +278,27 @@ impl<'a> TypeChecker<'a> {
         type_name: &str,
         path_str: &str,
     ) {
+        self.validate_type_fields_with_coverage(type_fields, config_fields, type_name, path_str, None);
+    }
+
+    /// `covered_by_spread`, when given, names fields a resolvable spread
+    /// mixed in alongside `config_fields` already supplies — those don't
+    /// need to appear in `config_fields` itself to satisfy a required
+    /// field. `None` (the common case, no spread involved) behaves exactly
+    /// as before.
+    fn validate_type_fields_with_coverage(
+        &mut self,
+        type_fields: &[TypeField],
+        config_fields: &[&FieldDecl],
+        type_name: &str,
+        path_str: &str,
+        covered_by_spread: Option<&std::collections::HashSet<String>>,
+    ) {
         for tf in type_fields {
             let cf = config_fields.iter().find(|f| f.name == tf.name);
+            let spread_covers = covered_by_spread.is_some_and(|names| names.contains(&tf.name));
             match cf {
+                None if spread_covers => {} // a mixed-in spread supplies this field
                 None if !tf.optional => {
                     self.push_type_error(
                         format!(
@@ -408,6 +426,7 @@ impl<'a> TypeChecker<'a> {
         // attribute coverage" precedent as the top-level case.
         let has_spreads = nested_items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
         if has_spreads {
+            self.check_mixed_spread_and_fields(nested_items, nested_type_fields, type_name, &nested_path);
             return;
         }
 
@@ -415,6 +434,118 @@ impl<'a> TypeChecker<'a> {
             .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
             .collect();
         self.validate_type_fields(nested_type_fields, &nested_config, type_name, &nested_path);
+    }
+
+    /// A spread MIXED with explicit fields (not spread-only, which gets
+    /// `check_spread_against_shape` above) — each *resolvable* spread's
+    /// contributed field names count toward satisfying required fields,
+    /// and are checked against `expected` for type-correctness and
+    /// undeclared/extra fields, same as an explicit field would be. If
+    /// ANY spread present can't be resolved (a function call, a
+    /// multi-segment/cross-file reference), its contribution is
+    /// genuinely unknowable — falls back to skipping the whole check,
+    /// same conservative precedent used everywhere else a spread's
+    /// contents can't be statically determined.
+    fn check_mixed_spread_and_fields(
+        &mut self,
+        items: &[SectionItem],
+        expected: &[TypeField],
+        expected_label: &str,
+        path_str: &str,
+    ) {
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut resolved_spreads: Vec<(&str, Vec<TypeField>, &Span)> = Vec::new();
+
+        for item in items {
+            match item {
+                SectionItem::Field(f) => { covered.insert(f.name.clone()); }
+                SectionItem::Spread(sp) => {
+                    let Some(name) = spread_source_name(sp) else { return }; // unresolvable — skip the whole check
+                    let Some(shape) = self.derive_section_shape(name) else { return };
+                    for tf in &shape { covered.insert(tf.name.clone()); }
+                    resolved_spreads.push((name, shape, &sp.span));
+                }
+            }
+        }
+
+        for (source_label, shape, span) in resolved_spreads {
+            self.check_spread_contribution(&shape, expected, source_label, expected_label, span);
+        }
+
+        let config_fields: Vec<&FieldDecl> = items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        self.validate_type_fields_with_coverage(expected, &config_fields, expected_label, path_str, Some(&covered));
+    }
+
+    /// Check one resolvable spread's OWN contributed fields against
+    /// `expected` — type-correctness and "not declared" only, no
+    /// missing-required check (a mixed spread only needs to supply PART
+    /// of `expected`; `check_mixed_spread_and_fields` checks the union
+    /// for required-field coverage separately).
+    fn check_spread_contribution(
+        &mut self,
+        source: &[TypeField],
+        expected: &[TypeField],
+        source_label: &str,
+        expected_label: &str,
+        span: &Span,
+    ) {
+        for sf in source {
+            match expected.iter().find(|ef| ef.name == sf.name) {
+                None => {
+                    self.push_type_error(
+                        format!(
+                            "spread `...{}` field `{}` is not declared in `{}`",
+                            source_label, sf.name, expected_label
+                        ),
+                        None,
+                        span.clone(),
+                    );
+                }
+                Some(ef) => {
+                    let source_kind = self.expand_type_field_shape(&sf.shape);
+                    let expected_kind = self.expand_type_field_shape(&ef.shape);
+                    match (source_kind, expected_kind) {
+                        (ShapeKind::Primitive(actual), ShapeKind::Primitive(want)) => {
+                            if actual != want {
+                                self.push_type_error(
+                                    format!(
+                                        "spread `...{}` field `{}` is `{}` but `{}` expects `{}`",
+                                        source_label, sf.name, display_type(&actual), expected_label, display_type(&want)
+                                    ),
+                                    None,
+                                    span.clone(),
+                                );
+                            }
+                        }
+                        (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
+                            self.check_spread_contribution(&actual_nested, &want_nested, source_label, expected_label, span);
+                        }
+                        (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
+                            self.push_type_error(
+                                format!(
+                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested section",
+                                    source_label, sf.name, expected_label
+                                ),
+                                None,
+                                span.clone(),
+                            );
+                        }
+                        (ShapeKind::Section(_), ShapeKind::Primitive(want)) => {
+                            self.push_type_error(
+                                format!(
+                                    "spread `...{}` field `{}` is a nested section but `{}` expects `{}`",
+                                    source_label, sf.name, expected_label, display_type(&want)
+                                ),
+                                None,
+                                span.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Resolve `spread`'s source section (same-file, single-segment

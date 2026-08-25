@@ -347,9 +347,8 @@ fn parses_import_schema() {
     assert_eq!(prog.items.len(), 1);
     match &prog.items[0] {
         crate::ast::TopLevelItem::Import(d) => {
-            assert!(d.is_schema);
+            assert!(matches!(d.kind, crate::ast::ImportKind::Schema));
             assert_eq!(d.path, "s.spar");
-            assert!(d.alias.is_none());
         }
         _ => panic!("expected Import"),
     }
@@ -362,11 +361,11 @@ fn import_schema_and_aliased_import_coexist() {
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 2);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Import(d) => assert!(d.is_schema),
+        crate::ast::TopLevelItem::Import(d) => assert!(matches!(d.kind, crate::ast::ImportKind::Schema)),
         _ => panic!(),
     }
     match &prog.items[1] {
-        crate::ast::TopLevelItem::Import(d) => assert!(!d.is_schema),
+        crate::ast::TopLevelItem::Import(d) => assert!(!matches!(d.kind, crate::ast::ImportKind::Schema)),
         _ => panic!(),
     }
 }
@@ -467,5 +466,145 @@ fn parse_angle_bracket_schema_no_longer_parses() {
     // Angle brackets are fully deprecated — the old <Schema> suffix form
     // must no longer parse, even inside a @SchemaFile.
     let src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let _ = parse_err(src);
+}
+
+// ── Phase 3: imports ────────────────────────────────────────────────────
+
+#[test]
+fn parse_selective_import() {
+    let src = r#"import { A, B as C } from "shared.spar";"#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Import(d) => match &d.kind {
+            crate::ast::ImportKind::Selective(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].name, "A");
+                assert_eq!(items[0].alias, None);
+                assert_eq!(items[1].name, "B");
+                assert_eq!(items[1].alias.as_deref(), Some("C"));
+            }
+            other => panic!("expected Selective, got {:?}", other),
+        },
+        other => panic!("expected TopLevelItem::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_import_type_selective() {
+    let src = r#"import type { PostgresType, Border as B } from "shared.spar";"#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Import(d) => match &d.kind {
+            crate::ast::ImportKind::TypeSelective(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].name, "PostgresType");
+            }
+            other => panic!("expected TypeSelective, got {:?}", other),
+        },
+        other => panic!("expected TopLevelItem::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_import_as_part_of() {
+    let src = r#"import asPartOf "common.spar";"#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(matches!(d.kind, crate::ast::ImportKind::AsPartOf));
+            assert_eq!(d.path, "common.spar");
+        }
+        other => panic!("expected TopLevelItem::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_aliased_and_schema_imports_unchanged() {
+    let src = r#"
+        import "db.spar" as db;
+        import "nodb.spar";
+        import schema "s.spar";
+    "#;
+    let prog = parse_ok(src);
+    assert_eq!(prog.items.len(), 3);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(matches!(&d.kind, crate::ast::ImportKind::Aliased(Some(a)) if a == "db"));
+        }
+        other => panic!("expected Import, got {:?}", other),
+    }
+    match &prog.items[1] {
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(matches!(&d.kind, crate::ast::ImportKind::Aliased(None)));
+        }
+        other => panic!("expected Import, got {:?}", other),
+    }
+    match &prog.items[2] {
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(matches!(d.kind, crate::ast::ImportKind::Schema));
+        }
+        other => panic!("expected Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_selective_import_rejects_empty_braces() {
+    let src = r#"import { } from "shared.spar";"#;
+    let err = parse_err(src);
+    assert!(err.contains("at least one"), "got: {err}");
+}
+
+#[test]
+fn parse_selective_import_requires_from() {
+    let src = r#"import { A } "shared.spar";"#;
+    let _ = parse_err(src);
+}
+
+#[test]
+fn parse_schema_from_decl() {
+    // Task 1 covers grammar only — a schema file containing `import
+    // type {...}` isn't legal until Task 5, so this test sticks to plain
+    // `SchemaFrom` declarations (parsing them doesn't require the
+    // referenced type to actually exist; that's a Task 6 semantic check).
+    let src = concat!(
+        "@SchemaFile\n",
+        "SchemaFrom [Postgres, PostgresType];\n",
+        "SchemaFrom? [Cache, CacheType];\n",
+    );
+    let prog = parse_ok(src);
+    assert_eq!(prog.items.len(), 2);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::SchemaFrom(sf) => {
+            assert_eq!(sf.name, "Postgres");
+            assert_eq!(sf.source_type, "PostgresType");
+            assert!(!sf.marker.optional);
+        }
+        other => panic!("expected SchemaFrom, got {:?}", other),
+    }
+    match &prog.items[1] {
+        crate::ast::TopLevelItem::SchemaFrom(sf) => {
+            assert!(sf.marker.optional);
+        }
+        other => panic!("expected SchemaFrom, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_schema_from_rejected_outside_schema_file() {
+    let src = r#"SchemaFrom [Postgres, PostgresType];"#;
+    let err = parse_err(src);
+    assert!(err.contains("schema file"), "got: {err}");
+}
+
+#[test]
+fn parse_schema_file_still_rejects_non_type_imports() {
+    // Task 5 flips `import type` to legal inside @SchemaFile; every OTHER
+    // import form must stay rejected there — asserted now so a regression
+    // in Task 5 is caught by an already-passing Task 1 test.
+    let src = concat!(
+        "@SchemaFile\n",
+        "import \"x.spar\" as x;\n",
+    );
     let _ = parse_err(src);
 }

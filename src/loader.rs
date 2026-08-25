@@ -30,9 +30,9 @@ pub fn collect_imports(
 
     for item in &program.items {
         let TopLevelItem::Import(decl) = item else { continue };
-        if decl.is_schema { continue; }
+        let crate::ast::ImportKind::Aliased(decl_alias) = &decl.kind else { continue };
 
-        let alias = decl.alias.clone().unwrap_or_else(|| {
+        let alias = decl_alias.clone().unwrap_or_else(|| {
             decl.path
                 .rsplit('/')
                 .next()
@@ -150,7 +150,7 @@ pub fn validate_schema_imports(
 
     for item in &program.items {
         let TopLevelItem::Import(decl) = item else { continue };
-        if !decl.is_schema { continue; }
+        if !matches!(decl.kind, crate::ast::ImportKind::Schema) { continue; }
         has_schema_imports = true;
 
         // Resolve and load the schema file

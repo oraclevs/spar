@@ -15,6 +15,7 @@ pub enum TopLevelItem {
     Function(FunctionDecl),
     SchemaSection(SchemaSectionDecl),
     Type(TypeDecl),
+    SchemaFrom(SchemaFromDecl),
 }
 
 #[derive(Debug, Clone)]
@@ -48,10 +49,32 @@ pub struct TypeBinding {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImportItem {
+    pub name: String,
+    pub name_span: Span,
+    pub alias: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportKind {
+    /// `import "path" as alias;` — `None` means derive the alias from the
+    /// path's file stem, exactly as today.
+    Aliased(Option<String>),
+    /// `import schema "path";`
+    Schema,
+    /// `import { A, B as C } from "path";`
+    Selective(Vec<ImportItem>),
+    /// `import type { A, B } from "path";`
+    TypeSelective(Vec<ImportItem>),
+    /// `import asPartOf "path";`
+    AsPartOf,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImportDecl {
     pub path: String,
-    pub alias: Option<String>,
-    pub is_schema: bool,
+    pub kind: ImportKind,
     pub span: Span,
 }
 
@@ -79,6 +102,15 @@ pub struct SchemaSectionDecl {
     pub name: String,
     pub marker: SchemaMarker,
     pub fields: Vec<SchemaField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct SchemaFromDecl {
+    pub name: String,
+    pub source_type: String,
+    pub source_type_span: Span,
+    pub marker: SchemaMarker,
     pub span: Span,
 }
 

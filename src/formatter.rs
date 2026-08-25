@@ -96,25 +96,48 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Function(d)     => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
         TopLevelItem::Type(d)         => d.span.line,
+        TopLevelItem::SchemaFrom(d)   => d.span.line,
     }
 }
 
 fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut String) {
     match item {
         TopLevelItem::Import(imp) => {
-            if imp.is_schema {
-                out.push_str("import schema \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push_str("\";\n");
-            } else {
-                out.push_str("import \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push('"');
-                if let Some(alias) = &imp.alias {
-                    out.push_str(" as ");
-                    out.push_str(alias);
+            match &imp.kind {
+                ImportKind::Schema => {
+                    out.push_str("import schema \"");
+                    out.push_str(&escape_string_content(&imp.path));
+                    out.push_str("\";\n");
                 }
-                out.push_str(";\n");
+                ImportKind::AsPartOf => {
+                    out.push_str("import asPartOf \"");
+                    out.push_str(&escape_string_content(&imp.path));
+                    out.push_str("\";\n");
+                }
+                ImportKind::Aliased(alias) => {
+                    out.push_str("import \"");
+                    out.push_str(&escape_string_content(&imp.path));
+                    out.push('"');
+                    if let Some(alias) = alias {
+                        out.push_str(" as ");
+                        out.push_str(alias);
+                    }
+                    out.push_str(";\n");
+                }
+                ImportKind::Selective(items) => {
+                    out.push_str("import ");
+                    format_import_items(items, out);
+                    out.push_str(" from \"");
+                    out.push_str(&escape_string_content(&imp.path));
+                    out.push_str("\";\n");
+                }
+                ImportKind::TypeSelective(items) => {
+                    out.push_str("import type ");
+                    format_import_items(items, out);
+                    out.push_str(" from \"");
+                    out.push_str(&escape_string_content(&imp.path));
+                    out.push_str("\";\n");
+                }
             }
         }
 
@@ -200,7 +223,30 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             }
             out.push_str("}\n");
         }
+
+        TopLevelItem::SchemaFrom(sf) => {
+            out.push_str("SchemaFrom");
+            if sf.marker.optional { out.push('?'); }
+            out.push_str(" [");
+            out.push_str(&sf.name);
+            out.push_str(", ");
+            out.push_str(&sf.source_type);
+            out.push_str("];\n");
+        }
     }
+}
+
+fn format_import_items(items: &[ImportItem], out: &mut String) {
+    out.push_str("{ ");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 { out.push_str(", "); }
+        out.push_str(&item.name);
+        if let Some(alias) = &item.alias {
+            out.push_str(" as ");
+            out.push_str(alias);
+        }
+    }
+    out.push_str(" }");
 }
 
 fn format_top_level_item_cx(item: &TopLevelItem, config: &FormatConfig, cx: &mut CommentCursor, out: &mut String) {
@@ -922,8 +968,7 @@ function pick(flag: bool) -> int {
             is_schema_file: false,
             items: vec![TopLevelItem::Import(ImportDecl {
                 path: "dir\\file.spar".to_string(), // stored with literal backslash
-                alias: Some("x".to_string()),
-                is_schema: false,
+                kind: ImportKind::Aliased(Some("x".to_string())),
                 span: crate::error::Span::dummy(),
             })],
         };
@@ -957,6 +1002,21 @@ function pick(flag: bool) -> int {
         let formatted = format_source(src).unwrap();
         assert!(formatted.starts_with("@SchemaFile\n"), "must start with @SchemaFile pragma: {}", formatted);
         assert!(formatted.contains("Schema [X]{"), "must contain schema section header: {}", formatted);
+    }
+
+    #[test]
+    fn formats_selective_and_as_part_of_imports() {
+        let src = concat!(
+            "import { A, B as C } from \"shared.spar\";\n",
+            "import type { PostgresType } from \"types.spar\";\n",
+            "import asPartOf \"common.spar\";\n",
+        );
+        let once = format_source(src).expect("format");
+        assert!(once.contains("import { A, B as C } from \"shared.spar\";"), "got: {once}");
+        assert!(once.contains("import type { PostgresType } from \"types.spar\";"), "got: {once}");
+        assert!(once.contains("import asPartOf \"common.spar\";"), "got: {once}");
+        let twice = format_source(&once).expect("format again");
+        assert_eq!(once, twice, "formatting must be idempotent");
     }
 
     #[test]

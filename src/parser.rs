@@ -99,6 +99,9 @@ impl Parser {
             for item in &items {
                 match item {
                     TopLevelItem::SchemaSection(_) => {}
+                    // `SchemaFrom` needs no `import type` machinery to parse —
+                    // it's just grammar here; Task 6 gives it real semantics.
+                    TopLevelItem::SchemaFrom(_) => {}
                     _ => {
                         let item_span = match item {
                             TopLevelItem::Import(d) => d.span.clone(),
@@ -107,17 +110,19 @@ impl Parser {
                             TopLevelItem::Section(d) => d.span.clone(),
                             TopLevelItem::Function(d) => d.span.clone(),
                             TopLevelItem::Type(d) => d.span.clone(),
+                            TopLevelItem::SchemaFrom(_) => unreachable!(),
                             TopLevelItem::SchemaSection(_) => unreachable!(),
                         };
                         return Err(SparError::ParseError {
-                            message: "schema files may only contain `Schema [Name]{...}` declarations".to_string(),
+                            message: "schema files may only contain `Schema [Name]{...}` declarations, \
+                                       and `SchemaFrom [Name, Type];`".to_string(),
                             span: item_span,
                         });
                     }
                 }
             }
         } else {
-            // Non-schema files must not have schema sections
+            // Non-schema files must not have schema sections or SchemaFrom
             for item in &items {
                 if let TopLevelItem::SchemaSection(s) = item {
                     return Err(SparError::ParseError {
@@ -127,6 +132,13 @@ impl Parser {
                             s.name
                         ),
                         span: s.span.clone(),
+                    });
+                }
+                if let TopLevelItem::SchemaFrom(sf) = item {
+                    return Err(SparError::ParseError {
+                        message: "`SchemaFrom [...]` is only legal inside a schema file — \
+                                   add `@SchemaFile` at the top of this file".to_string(),
+                        span: sf.span.clone(),
                     });
                 }
             }
@@ -144,6 +156,7 @@ impl Parser {
             Token::KwFunction => Ok(TopLevelItem::Function(self.parse_function_decl(false)?)),
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
+            Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
             Token::Export => {
                 self.advance();
                 match self.peek() {
@@ -195,15 +208,42 @@ impl Parser {
         let span = self.peek_span();
         self.expect(&Token::Import)?;
 
-        // Detect contextual `schema` keyword: `import schema "path";`
-        let is_schema = matches!(self.peek(), Token::Ident(s) if s == "schema");
-        if is_schema {
-            self.advance(); // consume 'schema' ident
+        // `import schema "path";`
+        if matches!(self.peek(), Token::Ident(s) if s == "schema") {
+            self.advance();
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl { path, alias: None, is_schema: true, span });
+            return Ok(ImportDecl { path, kind: ImportKind::Schema, span });
         }
 
+        // `import asPartOf "path";`
+        if matches!(self.peek(), Token::Ident(s) if s == "asPartOf") {
+            self.advance();
+            let path = self.parse_import_path()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(ImportDecl { path, kind: ImportKind::AsPartOf, span });
+        }
+
+        // `import type { A, B } from "path";`
+        if matches!(self.peek(), Token::Ident(s) if s == "type") {
+            self.advance();
+            let items = self.parse_import_items()?;
+            self.expect_from_keyword()?;
+            let path = self.parse_import_path()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(ImportDecl { path, kind: ImportKind::TypeSelective(items), span });
+        }
+
+        // `import { A, B as C } from "path";`
+        if self.at(&Token::LBrace) {
+            let items = self.parse_import_items()?;
+            self.expect_from_keyword()?;
+            let path = self.parse_import_path()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(ImportDecl { path, kind: ImportKind::Selective(items), span });
+        }
+
+        // `import "path" [as alias];`
         let path = self.parse_import_path()?;
         let alias = if self.at(&Token::As) {
             self.advance();
@@ -213,7 +253,48 @@ impl Parser {
             None
         };
         self.expect(&Token::Semicolon)?;
-        Ok(ImportDecl { path, alias, is_schema: false, span })
+        Ok(ImportDecl { path, kind: ImportKind::Aliased(alias), span })
+    }
+
+    fn parse_import_items(&mut self) -> Result<Vec<ImportItem>, SparError> {
+        self.expect(&Token::LBrace)?;
+        let mut items = Vec::new();
+        loop {
+            if self.at(&Token::RBrace) { break; }
+            let item_span = self.peek_span();
+            let (name, name_span) = self.expect_ident()?;
+            let alias = if self.at(&Token::As) {
+                self.advance();
+                let (a, _) = self.expect_ident()?;
+                Some(a)
+            } else {
+                None
+            };
+            items.push(ImportItem { name, name_span, alias, span: item_span });
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        if items.is_empty() {
+            return Err(self.error(
+                "selective import must name at least one item — \
+                 use `import \"path\" as alias;` to import a whole file"
+            ));
+        }
+        Ok(items)
+    }
+
+    fn expect_from_keyword(&mut self) -> Result<(), SparError> {
+        match self.peek() {
+            Token::Ident(s) if s == "from" => { self.advance(); Ok(()) }
+            _ => Err(self.error(format!(
+                "expected 'from' after import list, found {}",
+                self.peek().human_name()
+            ))),
+        }
     }
 
     fn parse_import_path(&mut self) -> Result<String, SparError> {
@@ -407,6 +488,33 @@ impl Parser {
         self.expect(&Token::RBrace)?;
         // Schema sections do NOT have a trailing semicolon
         Ok(SchemaSectionDecl { name, marker: SchemaMarker { optional }, fields, span })
+    }
+
+    fn parse_schema_from_decl(&mut self) -> Result<SchemaFromDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume 'SchemaFrom' ident
+
+        let optional = if self.at(&Token::Question) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.expect(&Token::LBracket)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::Comma)?;
+        let (source_type, source_type_span) = self.expect_ident()?;
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::Semicolon)?;
+
+        Ok(SchemaFromDecl {
+            name,
+            source_type,
+            source_type_span,
+            marker: SchemaMarker { optional },
+            span,
+        })
     }
 
     /// Parse a single schema field: `name: Type;` or `name?: Type;`
@@ -1103,7 +1211,7 @@ mod tests {
         let item = first_item(r#"import "base.spar";"#);
         let TopLevelItem::Import(decl) = item else { panic!("not import") };
         assert_eq!(decl.path, "base.spar");
-        assert_eq!(decl.alias, None);
+        assert!(matches!(decl.kind, ImportKind::Aliased(None)));
     }
 
     #[test]
@@ -1111,7 +1219,7 @@ mod tests {
         let item = first_item(r#"import "config/base.spar" as config;"#);
         let TopLevelItem::Import(decl) = item else { panic!("not import") };
         assert_eq!(decl.path, "config/base.spar");
-        assert_eq!(decl.alias, Some("config".into()));
+        assert!(matches!(decl.kind, ImportKind::Aliased(Some(ref a)) if a == "config"));
     }
 
     #[test]

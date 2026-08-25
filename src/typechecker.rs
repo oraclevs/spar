@@ -53,6 +53,7 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Function(f)   => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(_) => {} // Task 4 replaces this with real validation
+                TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
             }
         }
     }

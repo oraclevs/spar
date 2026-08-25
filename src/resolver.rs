@@ -297,6 +297,7 @@ impl Resolver {
                 TopLevelItem::Function(decl)  => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.register_type(decl),
+                TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }
     }
@@ -397,10 +398,13 @@ impl Resolver {
     }
 
     fn register_import(&mut self, decl: &ImportDecl) {
-        // Schema imports are consumed by the validation pass; skip them here
-        if decl.is_schema { return; }
+        // Schema imports are consumed by the validation pass; Selective /
+        // TypeSelective / AsPartOf imports are already spliced away by
+        // loader::expand_imports before resolve ever runs — only a plain
+        // aliased import reaches this function.
+        let ImportKind::Aliased(alias) = &decl.kind else { return };
 
-        let namespace = decl.alias.clone().unwrap_or_else(|| {
+        let namespace = alias.clone().unwrap_or_else(|| {
             decl.path
                 .rsplit('/')
                 .next()
@@ -654,6 +658,7 @@ impl Resolver {
                 TopLevelItem::Function(_)   => {} // function bodies handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.resolve_type(decl),
+                TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }
     }

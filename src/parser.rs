@@ -106,10 +106,11 @@ impl Parser {
                             TopLevelItem::Dynamic(d) => d.span.clone(),
                             TopLevelItem::Section(d) => d.span.clone(),
                             TopLevelItem::Function(d) => d.span.clone(),
+                            TopLevelItem::Type(d) => d.span.clone(),
                             TopLevelItem::SchemaSection(_) => unreachable!(),
                         };
                         return Err(SparError::ParseError {
-                            message: "schema files may only contain `<Schema>` section declarations".to_string(),
+                            message: "schema files may only contain `Schema [Name]{...}` declarations".to_string(),
                             span: item_span,
                         });
                     }
@@ -121,7 +122,7 @@ impl Parser {
                 if let TopLevelItem::SchemaSection(s) = item {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "section `{}` has a `<Schema>` marker but this file is not a schema file — \
+                            "`Schema [{}]{{...}}` declares a schema, but this file is not a schema file — \
                              add `@SchemaFile` at the top of this file if it is intended to declare schema shapes",
                             s.name
                         ),
@@ -139,14 +140,17 @@ impl Parser {
             Token::Import     => Ok(TopLevelItem::Import(self.parse_import()?)),
             Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
-            Token::LBracket   => self.parse_section_or_schema(false, false),
+            Token::LBracket   => self.parse_section(false, false),
             Token::KwFunction => Ok(TopLevelItem::Function(self.parse_function_decl(false)?)),
+            Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
+            Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Export => {
                 self.advance();
                 match self.peek() {
                     Token::Var      => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
-                    Token::LBracket => self.parse_section_or_schema(true, false),
-                    _ => Err(self.error(format!("expected 'var' or '[' after 'export', found {}", self.peek().human_name()))),
+                    Token::LBracket => self.parse_section(true, false),
+                    Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(true)?)),
+                    _ => Err(self.error(format!("expected 'var', 'type', or '[' after 'export', found {}", self.peek().human_name()))),
                 }
             }
             Token::Private => {
@@ -162,7 +166,7 @@ impl Parser {
                         ));
                     }
                     Token::LBracket => {
-                        let item = self.parse_section_or_schema(false, true)?;
+                        let item = self.parse_section(false, true)?;
                         Ok(item)
                     }
                     Token::KwFunction => {
@@ -181,7 +185,7 @@ impl Parser {
                  it cannot appear mid-file"
             )),
             _ => Err(self.error(format!(
-                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', or '[' to start a declaration",
+                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'type', 'Schema', or '[' to start a declaration",
                 self.peek().human_name()
             ))),
         }
@@ -342,28 +346,29 @@ impl Parser {
         Ok(SpreadStmt { expr, span })
     }
 
-    /// Try to consume `<Schema>` or `<Schema?>`. Returns `Some(SchemaMarker)` if
-    /// a schema marker is present, `None` otherwise (leaves the token stream unchanged).
-    fn try_parse_schema_marker(&mut self) -> Result<Option<SchemaMarker>, SparError> {
-        if !self.at(&Token::Lt) {
-            return Ok(None);
-        }
-        self.advance(); // consume '<'
-        let (name, name_span) = self.expect_ident()?;
-        if name != "Schema" {
-            return Err(SparError::ParseError {
-                message: format!("expected `Schema` after `<`, found `{}`", name),
-                span: name_span,
-            });
-        }
+    /// Parse `Schema [Name]{ ... }` or `Schema? [Name]{ ... }`. The `Schema`
+    /// ident itself is only `peek()`ed by the caller's dispatch — consume it
+    /// here.
+    fn parse_schema_decl(&mut self) -> Result<SchemaSectionDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume the 'Schema' ident
         let optional = if self.at(&Token::Question) {
             self.advance();
             true
         } else {
             false
         };
-        self.expect(&Token::Gt)?;
-        Ok(Some(SchemaMarker { optional }))
+        self.expect(&Token::LBracket)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            fields.push(self.parse_schema_field()?);
+        }
+        self.expect(&Token::RBrace)?;
+        // Schema sections do NOT have a trailing semicolon
+        Ok(SchemaSectionDecl { name, marker: SchemaMarker { optional }, fields, span })
     }
 
     /// Parse a single schema field: `name: Type;` or `name?: Type;`
@@ -400,7 +405,70 @@ impl Parser {
         Ok(SchemaField { name, optional, shape, span })
     }
 
-    fn parse_section_or_schema(&mut self, exported: bool, private: bool) -> Result<TopLevelItem, SparError> {
+    /// Parse `type [Name]{ ... }`. The caller only `peek()`ed the `type`
+    /// ident to dispatch here — it hasn't been consumed yet, so this
+    /// function consumes it first.
+    fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume the 'type' ident
+        self.expect(&Token::LBracket)?;
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            fields.push(self.parse_type_field()?);
+        }
+        self.expect(&Token::RBrace)?;
+        // Type declarations do NOT have a trailing semicolon (same as
+        // function and schema-section declarations).
+        Ok(TypeDecl { name, name_span, exported, fields, span })
+    }
+
+    /// Parse a single type field: `name: Type;`, `name?: Type;`,
+    /// `name: OtherDeclaredType;`, or `name: section = { ... };`.
+    fn parse_type_field(&mut self) -> Result<TypeField, SparError> {
+        let span = self.peek_span();
+        let (name, _) = self.expect_ident()?;
+
+        let optional = if self.at(&Token::Question) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.expect(&Token::Colon)?;
+        let shape = self.parse_type_field_shape()?;
+        self.expect(&Token::Semicolon)?;
+        Ok(TypeField { name, optional, shape, span })
+    }
+
+    fn parse_type_field_shape(&mut self) -> Result<TypeFieldShape, SparError> {
+        if self.at(&Token::TypeSection) {
+            self.advance(); // consume 'section'
+            self.expect(&Token::Eq)?;
+            self.expect(&Token::LBrace)?;
+            let mut nested = Vec::new();
+            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                nested.push(self.parse_type_field()?);
+            }
+            self.expect(&Token::RBrace)?;
+            Ok(TypeFieldShape::Section(nested))
+        } else if let Token::Ident(name) = self.peek() {
+            // 'str'/'int'/'float'/'bool'/'section' are their own dedicated
+            // tokens (see parse_scalar_type) — any Ident here is
+            // unambiguously a reference to another declared type.
+            let name = name.clone();
+            self.advance();
+            Ok(TypeFieldShape::Named(name))
+        } else {
+            let ty = self.parse_type()?;
+            Ok(TypeFieldShape::Primitive(ty))
+        }
+    }
+
+    fn parse_section(&mut self, exported: bool, private: bool) -> Result<TopLevelItem, SparError> {
         let span = self.peek_span();
         self.expect(&Token::LBracket)?;
 
@@ -420,44 +488,47 @@ impl Parser {
 
         self.expect(&Token::RBracket)?;
 
-        // Check for schema marker BEFORE the `{`
-        let schema_marker = self.try_parse_schema_marker()?;
+        // Check for a `-> TypeName` binding BEFORE the `{`
+        let type_binding = self.try_parse_type_binding()?;
 
-        if let Some(marker) = schema_marker {
-            self.expect(&Token::LBrace)?;
-            let mut fields = Vec::new();
-            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                fields.push(self.parse_schema_field()?);
-            }
-            self.expect(&Token::RBrace)?;
-            // Schema sections do NOT have a trailing semicolon
-            Ok(TopLevelItem::SchemaSection(SchemaSectionDecl {
-                name,
-                marker,
-                fields,
-                span,
-            }))
-        } else {
-            // Regular config section
-            self.expect(&Token::LBrace)?;
-            let mut items = Vec::new();
-            loop {
-                match self.peek() {
-                    Token::RBrace => break,
-                    Token::Eof => return Err(self.error("unclosed section body — expected '}'")),
-                    _ => items.push(self.parse_section_item()?),
-                }
-            }
-            self.expect(&Token::RBrace)?;
-            self.expect(&Token::Semicolon)?;
-            Ok(TopLevelItem::Section(SectionDecl {
-                exported,
-                private,
-                path: vec![name],
-                items,
-                span,
-            }))
+        let items = self.parse_regular_section_items()?;
+        Ok(TopLevelItem::Section(SectionDecl {
+            exported,
+            private,
+            path: vec![name],
+            items,
+            type_binding,
+            span,
+        }))
+    }
+
+    /// Try to consume `-> TypeName` after a section name. Returns `None` if
+    /// there's no `->` at all (leaves the token stream unchanged) — matches
+    /// the arrow already used for function return types.
+    fn try_parse_type_binding(&mut self) -> Result<Option<TypeBinding>, SparError> {
+        if !self.at(&Token::Arrow) {
+            return Ok(None);
         }
+        self.advance(); // consume '->'
+        let (name, name_span) = self.expect_ident()?;
+        Ok(Some(TypeBinding { name, span: name_span }))
+    }
+
+    /// Parse a regular section body: `{ ...fields/spreads... };`, including
+    /// the trailing `;`.
+    fn parse_regular_section_items(&mut self) -> Result<Vec<SectionItem>, SparError> {
+        self.expect(&Token::LBrace)?;
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                Token::RBrace => break,
+                Token::Eof => return Err(self.error("unclosed section body — expected '}'")),
+                _ => items.push(self.parse_section_item()?),
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
+        Ok(items)
     }
 
     fn parse_type(&mut self) -> Result<SparType, SparError> {

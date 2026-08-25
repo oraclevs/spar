@@ -3,6 +3,14 @@ fn parse_ok(src: &str) -> crate::ast::Program {
     crate::parser::Parser::new(tokens).parse().unwrap()
 }
 
+fn parse_err(src: &str) -> String {
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    match crate::parser::Parser::new(tokens).parse() {
+        Ok(_) => panic!("expected a parse error"),
+        Err(e) => format!("{:?}", e),
+    }
+}
+
 #[test]
 fn parse_function_decl_str_return() {
     let src = r#"
@@ -255,7 +263,7 @@ fn comprehension_expression_still_parses() {
 
 #[test]
 fn parses_schema_file_pragma() {
-    let src = "@SchemaFile\n[X]<Schema>{ a: int; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert!(prog.is_schema_file, "is_schema_file must be true");
@@ -263,7 +271,7 @@ fn parses_schema_file_pragma() {
 
 #[test]
 fn parses_required_schema_section() {
-    let src = "@SchemaFile\n[X]<Schema>{ a: int; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 1);
@@ -280,7 +288,7 @@ fn parses_required_schema_section() {
 
 #[test]
 fn parses_optional_schema_section() {
-    let src = "@SchemaFile\n[Y]<Schema?>{ b: str; }";
+    let src = "@SchemaFile\nSchema? [Y]{ b: str; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -293,7 +301,7 @@ fn parses_optional_schema_section() {
 
 #[test]
 fn parses_optional_schema_field() {
-    let src = "@SchemaFile\n[X]<Schema>{ a: int; b?: str; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; b?: str; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -308,7 +316,7 @@ fn parses_optional_schema_field() {
 #[test]
 fn parses_nested_section_schema_field() {
     let src = r#"@SchemaFile
-[X]<Schema>{
+Schema [X]{
     x: section = { host: str; port?: int; };
 }"#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -365,8 +373,10 @@ fn import_schema_and_aliased_import_coexist() {
 
 #[test]
 fn non_schema_file_with_lt_gt_comparison_still_parses() {
-    // Regression guard: `<` and `>` are now also schema markers.
-    // Confirm they still work as comparison operators in expressions.
+    // Regression guard: confirm `<`/`>` still work as comparison
+    // operators in expressions (no grammar in this language uses them
+    // for anything else — Schema/Type conformance markers are keyword-
+    // prefix and arrow-based instead).
     let src = r#"
         function f(a: int, b: int) -> bool {
             return a < b;
@@ -378,9 +388,84 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
 
 #[test]
 fn schema_section_without_pragma_is_parse_error() {
-    // A `<Schema>` section marker outside a @SchemaFile is an error.
-    let src = "[X]<Schema>{ a: int; }";
+    // A Schema declaration outside a @SchemaFile is an error.
+    let src = "Schema [X]{ a: int; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let result = crate::parser::Parser::new(tokens).parse();
     assert!(result.is_err(), "schema section in non-schema file must be a parse error");
+}
+
+#[test]
+fn parse_type_decl_with_named_and_nested_fields() {
+    let src = r#"
+        type [Border]{
+            width?: int;
+        }
+        export type [Decoration]{
+            color?: str;
+            border?: Border;
+            boxShadow: section = {
+                blurRadius: int;
+            };
+        }
+    "#;
+    let prog = parse_ok(src);
+    assert_eq!(prog.items.len(), 2);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Type(t) => {
+            assert_eq!(t.name, "Border");
+            assert!(!t.exported);
+            assert_eq!(t.fields.len(), 1);
+        }
+        other => panic!("expected TopLevelItem::Type, got {:?}", other),
+    }
+    match &prog.items[1] {
+        crate::ast::TopLevelItem::Type(t) => {
+            assert_eq!(t.name, "Decoration");
+            assert!(t.exported);
+            assert_eq!(t.fields.len(), 3);
+            assert!(matches!(t.fields[1].shape, crate::ast::TypeFieldShape::Named(ref n) if n == "Border"));
+            assert!(matches!(t.fields[2].shape, crate::ast::TypeFieldShape::Section(_)));
+        }
+        other => panic!("expected TopLevelItem::Type, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_section_with_type_binding() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: str = "postgres:16";
+        };
+    "#;
+    let prog = parse_ok(src);
+    match &prog.items[1] {
+        crate::ast::TopLevelItem::Section(s) => {
+            let binding = s.type_binding.as_ref().expect("expected a type_binding");
+            assert_eq!(binding.name, "PostgresType");
+        }
+        other => panic!("expected TopLevelItem::Section, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_schema_decl_still_requires_schema_file() {
+    // Unchanged behavior: a Schema declaration outside @SchemaFile is
+    // still rejected, by the SAME check that already exists — this just
+    // confirms the keyword-prefix migration didn't disturb it.
+    let src = r#"Schema [X]{ a: int; }"#;
+    let err = parse_err(src);
+    assert!(err.contains("not a schema file") || err.contains("@SchemaFile"),
+        "expected the existing schema-file-required error, got: {err}");
+}
+
+#[test]
+fn parse_angle_bracket_schema_no_longer_parses() {
+    // Angle brackets are fully deprecated — the old <Schema> suffix form
+    // must no longer parse, even inside a @SchemaFile.
+    let src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let _ = parse_err(src);
 }

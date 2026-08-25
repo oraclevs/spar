@@ -277,6 +277,7 @@ impl Resolver {
                 TopLevelItem::Section(decl)   => self.register_section(decl),
                 TopLevelItem::Function(decl)  => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
+                TopLevelItem::Type(_) => {} // Task 2 replaces this with real registration
             }
         }
     }
@@ -595,6 +596,7 @@ impl Resolver {
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
                 TopLevelItem::Function(_)   => {} // function bodies handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
+                TopLevelItem::Type(_) => {} // Task 2 replaces this with real validation
             }
         }
     }

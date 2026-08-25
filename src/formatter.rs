@@ -95,6 +95,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Section(d)      => d.span.line,
         TopLevelItem::Function(d)     => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
+        TopLevelItem::Type(d)         => d.span.line,
     }
 }
 
@@ -147,7 +148,14 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if sd.private  { out.push_str("private "); }
             out.push('[');
             out.push_str(&sd.path.join("."));
-            out.push_str("]{\n");
+            out.push(']');
+            if let Some(binding) = &sd.type_binding {
+                out.push_str(" -> ");
+                out.push_str(&binding.name);
+                out.push_str(" {\n");
+            } else {
+                out.push_str("{\n");
+            }
             format_section_items(&sd.items, 1, config, out);
             out.push_str("};\n");
         }
@@ -171,13 +179,24 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         }
 
         TopLevelItem::SchemaSection(sd) => {
-            out.push('[');
-            out.push_str(&sd.name);
-            out.push_str("]<Schema");
+            out.push_str("Schema");
             if sd.marker.optional { out.push('?'); }
-            out.push_str(">{\n");
+            out.push_str(" [");
+            out.push_str(&sd.name);
+            out.push_str("]{\n");
             for field in &sd.fields {
                 format_schema_field(field, 1, config, out);
+            }
+            out.push_str("}\n");
+        }
+
+        TopLevelItem::Type(td) => {
+            if td.exported { out.push_str("export "); }
+            out.push_str("type [");
+            out.push_str(&td.name);
+            out.push_str("]{\n");
+            for field in &td.fields {
+                format_type_field(field, 1, config, out);
             }
             out.push_str("}\n");
         }
@@ -191,7 +210,14 @@ fn format_top_level_item_cx(item: &TopLevelItem, config: &FormatConfig, cx: &mut
             if sd.private  { out.push_str("private "); }
             out.push('[');
             out.push_str(&sd.path.join("."));
-            out.push_str("]{\n");
+            out.push(']');
+            if let Some(binding) = &sd.type_binding {
+                out.push_str(" -> ");
+                out.push_str(&binding.name);
+                out.push_str(" {\n");
+            } else {
+                out.push_str("{\n");
+            }
             format_section_items_cx(&sd.items, 1, config, cx, out);
             out.push_str("};\n");
         }
@@ -496,6 +522,32 @@ fn format_schema_field(field: &SchemaField, depth: usize, config: &FormatConfig,
             out.push_str("section = {\n");
             for nf in nested {
                 format_schema_field(nf, depth + 1, config, out);
+            }
+            out.push_str(&indent);
+            out.push_str("};\n");
+        }
+    }
+}
+
+fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out: &mut String) {
+    let indent = " ".repeat(depth * config.indent_width);
+    out.push_str(&indent);
+    out.push_str(&field.name);
+    if field.optional { out.push('?'); }
+    out.push_str(": ");
+    match &field.shape {
+        TypeFieldShape::Primitive(ty) => {
+            out.push_str(&format_type(ty));
+            out.push_str(";\n");
+        }
+        TypeFieldShape::Named(name) => {
+            out.push_str(name);
+            out.push_str(";\n");
+        }
+        TypeFieldShape::Section(nested) => {
+            out.push_str("section = {\n");
+            for nf in nested {
+                format_type_field(nf, depth + 1, config, out);
             }
             out.push_str(&indent);
             out.push_str("};\n");
@@ -870,6 +922,7 @@ function pick(flag: bool) -> int {
                 private: false,
                 path: vec!["A".to_string(), "B".to_string()],
                 items: vec![],
+                type_binding: None,
                 span: crate::error::Span::dummy(),
             })],
         };
@@ -879,22 +932,22 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_schema_file_with_pragma() {
-        let src = "@SchemaFile\n[X]<Schema>{\n    a: int;\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n}\n";
         let formatted = format_source(src).unwrap();
         assert!(formatted.starts_with("@SchemaFile\n"), "must start with @SchemaFile pragma: {}", formatted);
-        assert!(formatted.contains("[X]<Schema>{"), "must contain schema section header: {}", formatted);
+        assert!(formatted.contains("Schema [X]{"), "must contain schema section header: {}", formatted);
     }
 
     #[test]
     fn formats_schema_file_optional_section() {
-        let src = "@SchemaFile\n[Y]<Schema?>{\n    b: str;\n}\n";
+        let src = "@SchemaFile\nSchema? [Y]{\n    b: str;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("[Y]<Schema?>{"), "optional schema marker: {}", formatted);
+        assert!(formatted.contains("Schema? [Y]{"), "optional schema marker: {}", formatted);
     }
 
     #[test]
     fn formats_schema_field_required_and_optional() {
-        let src = "@SchemaFile\n[X]<Schema>{\n    a: int;\n    b?: str;\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n    b?: str;\n}\n";
         let formatted = format_source(src).unwrap();
         assert!(formatted.contains("    a: int;"), "required field: {}", formatted);
         assert!(formatted.contains("    b?: str;"), "optional field: {}", formatted);
@@ -909,10 +962,33 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_nested_section_schema_field() {
-        let src = "@SchemaFile\n[X]<Schema>{\n    x: section = { host: str; };\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    x: section = { host: str; };\n}\n";
         let formatted = format_source(src).unwrap();
         assert!(formatted.contains("x: section = {"), "nested section field: {}", formatted);
         assert!(formatted.contains("host: str;"), "nested field: {}", formatted);
+    }
+
+    #[test]
+    fn formats_type_decl_round_trip() {
+        let src = "type [Border]{\n    width?: int;\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.contains("type [Border]{"), "must contain type header: {}", formatted);
+        assert!(formatted.contains("width?: int;"), "must contain the optional field: {}", formatted);
+    }
+
+    #[test]
+    fn formats_export_type_and_named_field_round_trip() {
+        let src = "type [Border]{\n    width?: int;\n}\nexport type [Decoration]{\n    border?: Border;\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.contains("export type [Decoration]{"), "must contain export type header: {}", formatted);
+        assert!(formatted.contains("border?: Border;"), "must contain the named-type field: {}", formatted);
+    }
+
+    #[test]
+    fn formats_type_binding_on_section_round_trip() {
+        let src = "type [PostgresType]{\n    image: str;\n}\n[Postgres] -> PostgresType {\n    image: str = \"postgres:16\";\n};\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.contains("[Postgres] -> PostgresType {"), "must round-trip the type binding: {}", formatted);
     }
 
     #[test]

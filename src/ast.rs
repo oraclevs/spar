@@ -14,6 +14,37 @@ pub enum TopLevelItem {
     Section(SectionDecl),
     Function(FunctionDecl),
     SchemaSection(SchemaSectionDecl),
+    Type(TypeDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub exported: bool,
+    pub fields: Vec<TypeField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeField {
+    pub name: String,
+    pub optional: bool,
+    pub shape: TypeFieldShape,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeFieldShape {
+    Primitive(SparType),
+    Named(String),
+    Section(Vec<TypeField>),
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeBinding {
+    pub name: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +106,7 @@ pub struct SectionDecl {
     pub private: bool,
     pub path: Vec<String>,
     pub items: Vec<SectionItem>,
+    pub type_binding: Option<TypeBinding>,
     pub span: Span,
 }
 

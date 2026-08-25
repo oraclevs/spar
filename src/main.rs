@@ -447,7 +447,7 @@ private [Defaults]{ timeout: int = 30; };
     #[test]
     fn schema_file_is_rejected_by_parser_not_emit() {
         // The parser already sets is_schema_file=true; the emit path checks this.
-        let src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+        let src = "@SchemaFile\nSchema [X]{ a: int; }\n";
         let tokens = spar::Lexer::new(src).tokenize().unwrap();
         let prog = spar::Parser::new(tokens).parse().unwrap();
         assert!(prog.is_schema_file, "schema file flag must be set");

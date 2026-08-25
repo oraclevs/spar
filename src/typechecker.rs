@@ -52,6 +52,7 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Section(decl) => self.check_section(decl),
                 TopLevelItem::Function(f)   => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
+                TopLevelItem::Type(_) => {} // Task 4 replaces this with real validation
             }
         }
     }

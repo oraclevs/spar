@@ -176,7 +176,7 @@ fn schema_validate(schema_src: &str, config_src: &str) -> Result<(), Vec<crate::
 #[test]
 fn valid_config_against_occ_example_passes() {
     let schema_src = r#"@SchemaFile
-[MainRoute]<Schema>{
+Schema [MainRoute]{
     routeOne: str;
     redirect: bool;
     main: [str];
@@ -204,7 +204,7 @@ fn valid_config_against_occ_example_passes() {
 
 #[test]
 fn missing_required_field_is_schema_error() {
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; b: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -213,7 +213,7 @@ fn missing_required_field_is_schema_error() {
 
 #[test]
 fn missing_optional_field_is_fine() {
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; b?: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b?: str; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
     assert!(result.is_ok(), "omitting optional field must be fine: {:?}", result.err());
@@ -221,7 +221,7 @@ fn missing_optional_field_is_fine() {
 
 #[test]
 fn extra_field_not_in_schema_is_error() {
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; extra: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -230,7 +230,7 @@ fn extra_field_not_in_schema_is_error() {
 
 #[test]
 fn wrong_type_on_present_field_is_schema_error() {
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: bool; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: bool; }\n";
     // config declares `a` as `int` instead of `bool`
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
@@ -240,7 +240,7 @@ fn wrong_type_on_present_field_is_schema_error() {
 
 #[test]
 fn missing_required_section_is_schema_error() {
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n"; // [Y] not [X]
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -249,12 +249,12 @@ fn missing_required_section_is_schema_error() {
 
 #[test]
 fn missing_optional_section_is_fine() {
-    let schema_src = "@SchemaFile\n[X]<Schema?>{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema? [X]{ a: int; }\n";
     // config has no [X] section at all
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n";
     // [inference] This will also fail on extra-section check since [Y] isn't in schema.
     // To isolate this test, schema must declare [Y] too.
-    let schema_src2 = "@SchemaFile\n[X]<Schema?>{ a: int; }\n[Y]<Schema>{ z: int; }\n";
+    let schema_src2 = "@SchemaFile\nSchema? [X]{ a: int; }\nSchema [Y]{ z: int; }\n";
     let result = schema_validate(schema_src2, config_src);
     assert!(result.is_ok(), "omitting optional section must be fine: {:?}", result.err());
 }
@@ -262,7 +262,7 @@ fn missing_optional_section_is_fine() {
 #[test]
 fn config_section_with_no_schema_entry_is_error() {
     // symmetric strictness: config declares a section the schema never mentions
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -272,7 +272,7 @@ fn config_section_with_no_schema_entry_is_error() {
 #[test]
 fn nested_section_field_validated_recursively() {
     let schema_src = r#"@SchemaFile
-[X]<Schema>{
+Schema [X]{
     x: section = {
         host: str;
         port?: int;
@@ -314,11 +314,11 @@ fn two_schema_imports_each_owning_one_section_passes() {
 
     // Schema A declares [A]
     let mut schema_a = NamedTempFile::new().unwrap();
-    write!(schema_a, "@SchemaFile\n[A]<Schema>{{ x: int; }}\n").unwrap();
+    write!(schema_a, "@SchemaFile\nSchema [A]{{ x: int; }}\n").unwrap();
 
     // Schema B declares [B]
     let mut schema_b = NamedTempFile::new().unwrap();
-    write!(schema_b, "@SchemaFile\n[B]<Schema>{{ y: str; }}\n").unwrap();
+    write!(schema_b, "@SchemaFile\nSchema [B]{{ y: str; }}\n").unwrap();
 
     let path_a = schema_a.path().to_str().unwrap().to_string();
     let path_b = schema_b.path().to_str().unwrap().to_string();
@@ -348,7 +348,7 @@ fn two_schema_imports_each_owning_one_section_passes() {
 #[test]
 fn section_with_spread_skips_field_validation() {
     // Schema requires both `a` and `b`
-    let schema_src = "@SchemaFile\n[X]<Schema>{ a: int; b: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; }\n";
     // Config only has `a` explicitly; `b` is expected to come from the spread
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ ...Defaults; a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);

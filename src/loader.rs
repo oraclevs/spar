@@ -437,7 +437,7 @@ mod tests {
         // Schema declares only [Server]
         fs::write(dir.path().join("schema.spar"), concat!(
             "@SchemaFile\n",
-            "[Server]<Schema>{ port: int; }\n",
+            "Schema [Server]{ port: int; }\n",
         )).unwrap();
 
         // Config has [Server] (public) and private [Defaults]

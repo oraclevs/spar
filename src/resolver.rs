@@ -160,34 +160,37 @@ fn suggest(name: &str, candidates: impl Iterator<Item = impl AsRef<str>>) -> Opt
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub struct Resolver {
-    globals:        HashMap<String, GlobalEntry>,
-    sections:       HashMap<Vec<String>, SectionEntry>,
-    imports:        HashMap<String, ImportEntry>,
-    functions:      HashMap<String, FunctionEntry>,
-    loaded_exports: HashMap<String, HashSet<String>>,  // alias → exported names
-    errors:         Vec<SparError>,
+    globals:         HashMap<String, GlobalEntry>,
+    sections:        HashMap<Vec<String>, SectionEntry>,
+    imports:         HashMap<String, ImportEntry>,
+    functions:       HashMap<String, FunctionEntry>,
+    loaded_exports:  HashMap<String, HashSet<String>>,  // alias → exported names
+    errors:          Vec<SparError>,
+    current_section: Option<Vec<String>>,
 }
 
 impl Resolver {
     pub fn new() -> Self {
         Self {
-            globals:        HashMap::new(),
-            sections:       HashMap::new(),
-            imports:        HashMap::new(),
-            functions:      HashMap::new(),
-            loaded_exports: HashMap::new(),
-            errors:         Vec::new(),
+            globals:         HashMap::new(),
+            sections:        HashMap::new(),
+            imports:         HashMap::new(),
+            functions:       HashMap::new(),
+            loaded_exports:  HashMap::new(),
+            errors:          Vec::new(),
+            current_section: None,
         }
     }
 
     fn with_loaded(exports: HashMap<String, HashSet<String>>) -> Self {
         Self {
-            globals:        HashMap::new(),
-            sections:       HashMap::new(),
-            imports:        HashMap::new(),
-            functions:      HashMap::new(),
-            loaded_exports: exports,
-            errors:         Vec::new(),
+            globals:         HashMap::new(),
+            sections:        HashMap::new(),
+            imports:         HashMap::new(),
+            functions:       HashMap::new(),
+            loaded_exports:  exports,
+            errors:          Vec::new(),
+            current_section: None,
         }
     }
 
@@ -667,6 +670,7 @@ impl Resolver {
     }
 
     fn resolve_section(&mut self, decl: &SectionDecl) {
+        let prev_section = self.current_section.replace(decl.path.clone());
         for item in &decl.items {
             match item {
                 SectionItem::Field(f) => {
@@ -681,6 +685,7 @@ impl Resolver {
                 SectionItem::Spread(s) => self.resolve_spread(s),
             }
         }
+        self.current_section = prev_section;
     }
 
     fn resolve_nested_fields(&mut self, fields: &[FieldDecl]) {
@@ -792,6 +797,26 @@ impl Resolver {
     }
 
     fn resolve_namespace_ref(&mut self, nr: &NamespaceRef) {
+        if nr.segments.first().map(String::as_str) == Some("self") {
+            let Some(section_path) = self.current_section.clone() else {
+                self.push_error(
+                    "`self::` can only be used inside a section's own field values".to_string(),
+                    nr.span.clone(),
+                );
+                return;
+            };
+            if nr.segments.len() < 2 {
+                self.push_error(
+                    "`self` must be followed by `::field` — bare `self` is not a value".to_string(),
+                    nr.span.clone(),
+                );
+                return;
+            }
+            let mut substituted = section_path;
+            substituted.extend(nr.segments[1..].iter().cloned());
+            let substituted_ref = NamespaceRef { segments: substituted, span: nr.span.clone() };
+            return self.resolve_namespace_ref(&substituted_ref);
+        }
         match nr.segments.as_slice() {
 
             // ── 1 segment ────────────────────────────────────────────────────

@@ -358,3 +358,26 @@ fn section_with_spread_skips_field_validation() {
         result.err()
     );
 }
+
+#[test]
+fn resolver_accepts_self_reference_inside_section() {
+    let src = r#"
+        [Postgres]{
+            environment: section = {
+                postgresDb: str = "my_app";
+                postgresUser: str = self::environment::postgresDb;
+            };
+        };
+    "#;
+    let _ = resolve_ok(src); // must not error
+}
+
+#[test]
+fn resolver_rejects_self_reference_outside_section() {
+    let src = r#"var x: str = self::y;"#;
+    let err = resolve_err(src);
+    assert!(
+        err.contains("self"),
+        "expected an error mentioning `self`, got: {err}"
+    );
+}

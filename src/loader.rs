@@ -104,6 +104,7 @@ pub fn collect_imports(
                     }
                 }
                 TopLevelItem::Function(f) if !f.is_private => { exports.insert(f.name.clone()); }
+                TopLevelItem::Type(t) if t.exported => { exports.insert(t.name.clone()); }
                 _ => {}
             }
         }
@@ -445,6 +446,23 @@ mod tests {
         let imp = &loaded["shared"];
         assert!(imp.exports.contains("version"), "exported var must appear in exports");
         assert!(!imp.exports.contains("internal"), "non-exported var must not appear");
+    }
+
+    #[test]
+    fn import_existing_file_exposes_exported_type() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export type [PostgresType]{ image: str; }\ntype [Internal]{ a: int; }\n",
+        ).unwrap();
+        let src = r#"import "shared.spar" as shared;"#;
+        let program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let loaded = collect_imports(&program, &mut loader).unwrap();
+        let imp = &loaded["shared"];
+        assert!(imp.exports.contains("PostgresType"), "exported type must appear in exports");
+        assert!(!imp.exports.contains("Internal"), "non-exported type must not appear");
     }
 
     #[test]

@@ -727,6 +727,17 @@ impl Resolver {
 
     fn resolve_section(&mut self, decl: &SectionDecl) {
         let prev_section = self.current_section.replace(decl.path.clone());
+        if let Some(binding) = &decl.type_binding {
+            if !self.types.contains_key(&binding.name) {
+                let candidates: Vec<String> = self.types.keys().cloned().collect();
+                let hint = suggest(&binding.name, candidates.iter().map(|s| s.as_str()));
+                self.push_error_hint(
+                    format!("undefined type: `{}` is not declared", binding.name),
+                    hint,
+                    binding.span.clone(),
+                );
+            }
+        }
         for item in &decl.items {
             match item {
                 SectionItem::Field(f) => {

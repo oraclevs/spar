@@ -431,3 +431,27 @@ fn resolver_rejects_undefined_named_type_reference() {
     let err = resolve_err(src);
     assert!(err.contains("undefined type") || err.contains("NoSuchType"), "got: {err}");
 }
+
+#[test]
+fn resolver_rejects_unknown_type_binding() {
+    let src = r#"
+        [Postgres] -> NoSuchType {
+            image: str = "postgres:16";
+        };
+    "#;
+    let err = resolve_err(src);
+    assert!(err.contains("undefined type") || err.contains("NoSuchType"), "got: {err}");
+}
+
+#[test]
+fn resolver_accepts_known_type_binding() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: str = "postgres:16";
+        };
+    "#;
+    let _ = resolve_ok(src);
+}

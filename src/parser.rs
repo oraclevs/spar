@@ -97,28 +97,25 @@ impl Parser {
         // Validate schema-file exclusivity rules
         if is_schema_file {
             for item in &items {
-                match item {
-                    TopLevelItem::SchemaSection(_) => {}
-                    // `SchemaFrom` needs no `import type` machinery to parse —
-                    // it's just grammar here; Task 6 gives it real semantics.
-                    TopLevelItem::SchemaFrom(_) => {}
-                    _ => {
-                        let item_span = match item {
-                            TopLevelItem::Import(d) => d.span.clone(),
-                            TopLevelItem::Var(d) => d.span.clone(),
-                            TopLevelItem::Dynamic(d) => d.span.clone(),
-                            TopLevelItem::Section(d) => d.span.clone(),
-                            TopLevelItem::Function(d) => d.span.clone(),
-                            TopLevelItem::Type(d) => d.span.clone(),
-                            TopLevelItem::SchemaFrom(_) => unreachable!(),
-                            TopLevelItem::SchemaSection(_) => unreachable!(),
-                        };
-                        return Err(SparError::ParseError {
-                            message: "schema files may only contain `Schema [Name]{...}` declarations, \
-                                       and `SchemaFrom [Name, Type];`".to_string(),
-                            span: item_span,
-                        });
-                    }
+                let allowed = matches!(item, TopLevelItem::SchemaSection(_))
+                    || matches!(item, TopLevelItem::SchemaFrom(_))
+                    || matches!(item, TopLevelItem::Import(d) if matches!(d.kind, ImportKind::TypeSelective(_)));
+                if !allowed {
+                    let item_span = match item {
+                        TopLevelItem::Import(d) => d.span.clone(),
+                        TopLevelItem::Var(d) => d.span.clone(),
+                        TopLevelItem::Dynamic(d) => d.span.clone(),
+                        TopLevelItem::Section(d) => d.span.clone(),
+                        TopLevelItem::Function(d) => d.span.clone(),
+                        TopLevelItem::Type(d) => d.span.clone(),
+                        TopLevelItem::SchemaFrom(d) => d.span.clone(),
+                        TopLevelItem::SchemaSection(_) => unreachable!(),
+                    };
+                    return Err(SparError::ParseError {
+                        message: "schema files may only contain `Schema [Name]{...}` declarations, \
+                                   `import type {...} from \"...\";`, and `SchemaFrom [Name, Type];`".to_string(),
+                        span: item_span,
+                    });
                 }
             }
         } else {

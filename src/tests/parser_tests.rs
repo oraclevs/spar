@@ -608,3 +608,32 @@ fn parse_schema_file_still_rejects_non_type_imports() {
     );
     let _ = parse_err(src);
 }
+
+#[test]
+fn parse_schema_file_allows_import_type() {
+    let src = concat!(
+        "@SchemaFile\n",
+        "import type { PostgresType } from \"types.spar\";\n",
+        "Schema [Postgres]{ image: str; }\n",
+    );
+    let prog = parse_ok(src);
+    assert_eq!(prog.items.len(), 2);
+}
+
+#[test]
+fn parse_schema_file_still_rejects_selective_import() {
+    let src = concat!(
+        "@SchemaFile\n",
+        "import { PostgresType } from \"types.spar\";\n",
+    );
+    let _ = parse_err(src);
+}
+
+#[test]
+fn parse_schema_file_still_rejects_as_part_of() {
+    let src = concat!(
+        "@SchemaFile\n",
+        "import asPartOf \"types.spar\";\n",
+    );
+    let _ = parse_err(src);
+}

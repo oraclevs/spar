@@ -410,7 +410,7 @@ pub fn validate_schema_imports(
             }
         };
 
-        let schema_prog = match crate::parser::Parser::new(schema_tokens).parse() {
+        let mut schema_prog = match crate::parser::Parser::new(schema_tokens).parse() {
             Ok(p) => p,
             Err(e) => {
                 errors.push(SparError::SchemaError {
@@ -429,6 +429,18 @@ pub fn validate_schema_imports(
                 ),
                 span: decl.span.clone(),
             });
+            continue;
+        }
+
+        // Resolve `import type {...}` inside the schema file so any
+        // `SchemaFrom` below has real `TypeDecl`s to convert.
+        let schema_file_base = full_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let mut schema_expand_loader = ImportLoader::new(&schema_file_base);
+        if let Err(es) = expand_imports(&mut schema_prog, &mut schema_expand_loader) {
+            errors.extend(es.into_iter().map(|e| match e {
+                SparError::ResolveError { message, span, .. } => SparError::SchemaError { message, span },
+                other => other,
+            }));
             continue;
         }
 
@@ -861,5 +873,32 @@ mod tests {
         let err = expand_imports(&mut program, &mut loader).unwrap_err();
         assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("is not a type"))),
             "got: {:?}", err);
+    }
+
+    // ── Phase 3: import type inside @SchemaFile (Task 5) ─────────────────
+
+    #[test]
+    fn validate_schema_imports_resolves_import_type_inside_schema_file() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            "export type [PostgresType]{ image: str; }\n",
+        ).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            concat!(
+                "@SchemaFile\n",
+                "import type { PostgresType } from \"types.spar\";\n",
+                "Schema [Postgres]{ image: str; }\n",
+            ),
+        ).unwrap();
+        let src = concat!(
+            "import schema \"schema.spar\";\n",
+            "[Postgres]{ image: str = \"postgres:16\"; };\n",
+        );
+        let program = parse_src(src);
+        let result = validate_schema_imports(&program, dir.path());
+        assert!(result.is_ok(), "got: {:?}", result.err());
     }
 }

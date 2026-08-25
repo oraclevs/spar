@@ -847,4 +847,19 @@ mod tests {
         assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("cycle"))),
             "got: {:?}", err);
     }
+
+    // ── Phase 3: import type (Task 4) ────────────────────────────────────
+
+    #[test]
+    fn expand_imports_type_selective_rejects_non_type_name() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("shared.spar"), "export var host: str = \"x\";\n").unwrap();
+        let src = r#"import type { host } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let err = expand_imports(&mut program, &mut loader).unwrap_err();
+        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("is not a type"))),
+            "got: {:?}", err);
+    }
 }

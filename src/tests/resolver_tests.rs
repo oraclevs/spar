@@ -455,3 +455,25 @@ fn resolver_accepts_known_type_binding() {
     "#;
     let _ = resolve_ok(src);
 }
+
+#[test]
+fn imported_type_selectively_can_bind_a_section() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("types.spar"),
+        "export type [PostgresType]{ image: str; }\n",
+    ).unwrap();
+    let src = concat!(
+        "import type { PostgresType } from \"types.spar\";\n",
+        "[Postgres] -> PostgresType {\n",
+        "    image: \"postgres:16\";\n",
+        "};\n",
+    );
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let mut program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let mut loader = crate::loader::ImportLoader::new(dir.path());
+    crate::loader::expand_imports(&mut program, &mut loader).expect("expand must succeed");
+    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &std::collections::HashMap::new());
+    assert!(symbols.is_ok(), "got: {:?}", symbols.err());
+}

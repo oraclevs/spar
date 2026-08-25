@@ -257,7 +257,7 @@ impl Evaluator {
                 }
                 TopLevelItem::Section(s) => {
                     let top_name = s.path[0].clone();
-                    let node = DeclId::Section(top_name);
+                    let node = DeclId::Section(top_name.clone());
                     let mut deps = HashSet::new();
                     for item in &s.items {
                         match item {
@@ -271,6 +271,12 @@ impl Evaluator {
                             }
                         }
                     }
+                    // A section referencing its own name is not a real
+                    // cross-decl dependency — intra-section ordering is
+                    // handled during evaluation itself (see Task 2/4),
+                    // and topological_sort treats any self-loop as an
+                    // unresolvable cycle.
+                    deps.remove(&DeclId::Section(top_name));
                     graph.entry(node).or_default().extend(deps);
                 }
                 TopLevelItem::Dynamic(d) => {

@@ -275,3 +275,19 @@ fn private_function_callable_within_same_file() {
     let r = eval_src(src);
     assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(10));
 }
+
+#[test]
+fn eval_same_section_qualified_self_reference() {
+    let src = r#"
+        [A]{
+            a1: str = "hi";
+            a2: str = A::a1;
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["A".to_string()];
+    assert_eq!(
+        r.sections[&path]["a2"],
+        crate::evaluator::ConfigValue::Str("hi".into())
+    );
+}

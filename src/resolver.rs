@@ -159,7 +159,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
     dp[m][n]
 }
 
-fn suggest(name: &str, candidates: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
+pub(crate) fn suggest(name: &str, candidates: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
     candidates
         .map(|c| {
             let s = c.as_ref().to_string();

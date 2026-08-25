@@ -19,6 +19,195 @@ impl ImportLoader {
     }
 }
 
+/// Splice selective/asPartOf import targets into `program`'s own top-level
+/// items, in place, before resolve/typecheck ever run. `import "path" as
+/// alias;` and `import schema "path";` pass through untouched — they're
+/// still handled by `collect_imports` / `validate_schema_imports`.
+pub fn expand_imports(
+    program: &mut Program,
+    loader: &mut ImportLoader,
+) -> Result<(), Vec<SparError>> {
+    let mut visiting: Vec<PathBuf> = Vec::new();
+    expand_imports_inner(program, loader, &mut visiting)
+}
+
+fn expand_imports_inner(
+    program: &mut Program,
+    loader: &mut ImportLoader,
+    visiting: &mut Vec<PathBuf>,
+) -> Result<(), Vec<SparError>> {
+    use crate::ast::{ImportKind, TopLevelItem};
+
+    let mut errors: Vec<SparError> = Vec::new();
+    let mut declared: HashSet<String> = program.items.iter()
+        .filter_map(top_level_name)
+        .map(|s| s.to_string())
+        .collect();
+
+    let old_items = std::mem::take(&mut program.items);
+    let mut new_items: Vec<TopLevelItem> = Vec::with_capacity(old_items.len());
+
+    for item in old_items {
+        let TopLevelItem::Import(decl) = &item else {
+            new_items.push(item);
+            continue;
+        };
+        let decl = decl.clone();
+
+        let spliced = match &decl.kind {
+            ImportKind::Aliased(_) | ImportKind::Schema => {
+                new_items.push(item);
+                continue;
+            }
+            ImportKind::Selective(requested) => splice_selective(&decl, requested, false, loader),
+            ImportKind::TypeSelective(requested) => splice_selective(&decl, requested, true, loader),
+            ImportKind::AsPartOf => splice_as_part_of(&decl, loader, visiting),
+        };
+
+        match spliced {
+            Ok(items) => {
+                for it in items {
+                    if let Some(name) = top_level_name(&it) {
+                        if !declared.insert(name.to_string()) {
+                            errors.push(SparError::ResolveError {
+                                message: format!(
+                                    "'{}' brought in from '{}' collides with a declaration already in scope",
+                                    name, decl.path
+                                ),
+                                hint: None,
+                                span: decl.span.clone(),
+                            });
+                            continue;
+                        }
+                    }
+                    new_items.push(it);
+                }
+            }
+            Err(es) => errors.extend(es),
+        }
+    }
+
+    program.items = new_items;
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
+    use crate::ast::TopLevelItem;
+    match item {
+        TopLevelItem::Var(v) => Some(&v.name),
+        TopLevelItem::Section(s) => s.path.first().map(|s| s.as_str()),
+        TopLevelItem::Function(f) => Some(&f.name),
+        TopLevelItem::Type(t) => Some(&t.name),
+        _ => None,
+    }
+}
+
+fn rename_top_level_item(item: crate::ast::TopLevelItem, new_name: &str) -> crate::ast::TopLevelItem {
+    use crate::ast::TopLevelItem;
+    match item {
+        TopLevelItem::Var(mut v) => { v.name = new_name.to_string(); TopLevelItem::Var(v) }
+        TopLevelItem::Section(mut s) => {
+            if let Some(first) = s.path.first_mut() { *first = new_name.to_string(); }
+            TopLevelItem::Section(s)
+        }
+        TopLevelItem::Function(mut f) => { f.name = new_name.to_string(); TopLevelItem::Function(f) }
+        TopLevelItem::Type(mut t) => { t.name = new_name.to_string(); TopLevelItem::Type(t) }
+        other => other,
+    }
+}
+
+fn splice_selective(
+    decl: &crate::ast::ImportDecl,
+    requested: &[crate::ast::ImportItem],
+    types_only: bool,
+    loader: &ImportLoader,
+) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
+    use crate::ast::TopLevelItem;
+
+    let full_path = loader.base_dir.join(&decl.path);
+    if !full_path.exists() {
+        return Err(vec![SparError::ResolveError {
+            message: format!("cannot find import file '{}' — file does not exist", decl.path),
+            hint: Some("check the file path and ensure it is relative to the current file".into()),
+            span: decl.span.clone(),
+        }]);
+    }
+
+    let src = std::fs::read_to_string(&full_path).map_err(|e| vec![SparError::ResolveError {
+        message: format!("cannot read import file '{}': {}", decl.path, e),
+        hint: None,
+        span: decl.span.clone(),
+    }])?;
+
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| vec![SparError::ResolveError {
+        message: format!("import file '{}' has a lex error: {}", decl.path, e),
+        hint: None,
+        span: decl.span.clone(),
+    }])?;
+
+    let imported_program = crate::parser::Parser::new(tokens).parse().map_err(|e| vec![SparError::ResolveError {
+        message: format!("import file '{}' has a parse error: {}", decl.path, e),
+        hint: None,
+        span: decl.span.clone(),
+    }])?;
+
+    let available: Vec<(&str, &TopLevelItem)> = imported_program.items.iter().filter_map(|it| {
+        match it {
+            TopLevelItem::Var(v) if v.exported => Some((v.name.as_str(), it)),
+            TopLevelItem::Section(s) if s.exported => s.path.first().map(|n| (n.as_str(), it)),
+            TopLevelItem::Function(f) if !f.is_private => Some((f.name.as_str(), it)),
+            TopLevelItem::Type(t) if t.exported => Some((t.name.as_str(), it)),
+            _ => None,
+        }
+    }).collect();
+
+    let mut errors = Vec::new();
+    let mut spliced = Vec::new();
+
+    for req in requested {
+        match available.iter().find(|(n, _)| *n == req.name) {
+            None => {
+                let candidates = available.iter().map(|(n, _)| *n);
+                let hint = crate::resolver::suggest(&req.name, candidates);
+                errors.push(SparError::ResolveError {
+                    message: format!("'{}' is not exported by '{}'", req.name, decl.path),
+                    hint,
+                    span: req.name_span.clone(),
+                });
+            }
+            Some((_, item)) => {
+                if types_only && !matches!(item, TopLevelItem::Type(_)) {
+                    errors.push(SparError::ResolveError {
+                        message: format!(
+                            "'{}' is not a type — `import type {{...}}` can only bring in `type` declarations",
+                            req.name
+                        ),
+                        hint: None,
+                        span: req.name_span.clone(),
+                    });
+                    continue;
+                }
+                let final_name = req.alias.clone().unwrap_or_else(|| req.name.clone());
+                spliced.push(rename_top_level_item((*item).clone(), &final_name));
+            }
+        }
+    }
+
+    if errors.is_empty() { Ok(spliced) } else { Err(errors) }
+}
+
+fn splice_as_part_of(
+    decl: &crate::ast::ImportDecl,
+    _loader: &mut ImportLoader,
+    _visiting: &mut Vec<PathBuf>,
+) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
+    Err(vec![SparError::ResolveError {
+        message: format!("`import asPartOf \"{}\";` is not yet implemented", decl.path),
+        hint: None,
+        span: decl.span.clone(),
+    }])
+}
+
 pub fn collect_imports(
     program: &Program,
     loader: &mut ImportLoader,
@@ -393,6 +582,7 @@ fn kl_type_name(ty: &crate::ast::SparType) -> &'static str {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use crate::ast::TopLevelItem;
 
     fn parse_src(src: &str) -> Program {
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -485,5 +675,76 @@ mod tests {
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
         assert!(result.is_ok(), "private section must not be validated against schema, got: {:?}", result.err());
+    }
+
+    // ── Phase 3: expand_imports (selective import) ──────────────────────
+
+    #[test]
+    fn expand_imports_splices_selective_section_and_var() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            concat!(
+                "export var version: str = \"1.0\";\n",
+                "export [Server]{ port: int = 8080; };\n",
+                "var internal: int = 42;\n",
+            ),
+        ).unwrap();
+        let src = r#"import { version, Server } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        assert!(program.items.iter().all(|it| !matches!(it, TopLevelItem::Import(_))),
+            "the consumed import decl must be removed");
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")));
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Section(s) if s.path == vec!["Server".to_string()])));
+    }
+
+    #[test]
+    fn expand_imports_applies_as_rename() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export type [PostgresType]{ image: str; }\n",
+        ).unwrap();
+        let src = r#"import { PostgresType as PgType } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+
+        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PgType")));
+        assert!(!program.items.iter().any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")));
+    }
+
+    #[test]
+    fn expand_imports_rejects_non_exported_name() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("shared.spar"), "var internal: int = 42;\n").unwrap();
+        let src = r#"import { internal } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let err = expand_imports(&mut program, &mut loader).unwrap_err();
+        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("not exported"))),
+            "got: {:?}", err);
+    }
+
+    #[test]
+    fn expand_imports_rejects_collision_with_existing_declaration() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("shared.spar"), "export var host: str = \"remote\";\n").unwrap();
+        let src = concat!(
+            "var host: str = \"local\";\n",
+            "import { host } from \"shared.spar\";\n",
+        );
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let err = expand_imports(&mut program, &mut loader).unwrap_err();
+        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("already"))),
+            "got: {:?}", err);
     }
 }

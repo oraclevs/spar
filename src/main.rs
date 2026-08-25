@@ -112,7 +112,7 @@ fn cmd_check(path: &str) {
     };
 
     // Stage 2: Parse — single error
-    let program = match Parser::new(tokens).parse() {
+    let mut program = match Parser::new(tokens).parse() {
         Ok(p)  => p,
         Err(e) => {
             all_errors.push(e);
@@ -121,8 +121,16 @@ fn cmd_check(path: &str) {
         }
     };
 
-    // Stage 2.5: Import loader — Vec<SparError>; exit before resolve if any file is missing
+    // Stage 2.4: Expand selective / import type / asPartOf imports into local scope
     let base = Path::new(path).parent().unwrap_or(Path::new("."));
+    let mut expand_loader = spar::loader::ImportLoader::new(base);
+    if let Err(es) = spar::loader::expand_imports(&mut program, &mut expand_loader) {
+        all_errors.extend(es);
+        eprintln!("{}", renderer.render_all(&all_errors));
+        std::process::exit(1);
+    }
+
+    // Stage 2.5: Import loader — Vec<SparError>; exit before resolve if any file is missing
     let mut loader = spar::loader::ImportLoader::new(base);
     let imports: std::collections::HashMap<String, LoadedImport> =
         match spar::loader::collect_imports(&program, &mut loader) {
@@ -179,7 +187,7 @@ fn cmd_emit(path: &str) {
     };
 
     // Stage 2: Parse — single error
-    let program = match Parser::new(tokens).parse() {
+    let mut program = match Parser::new(tokens).parse() {
         Ok(p)  => p,
         Err(e) => { all_errors.push(e); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
     };
@@ -199,8 +207,16 @@ fn cmd_emit(path: &str) {
         std::process::exit(1);
     }
 
-    // Stage 2.5: Import loader — exit before resolve if any file is missing
+    // Stage 2.4: Expand selective / import type / asPartOf imports into local scope
     let base = Path::new(path).parent().unwrap_or(Path::new("."));
+    let mut expand_loader = spar::loader::ImportLoader::new(base);
+    if let Err(es) = spar::loader::expand_imports(&mut program, &mut expand_loader) {
+        all_errors.extend(es);
+        eprintln!("{}", renderer.render_all(&all_errors));
+        std::process::exit(1);
+    }
+
+    // Stage 2.5: Import loader — exit before resolve if any file is missing
     let mut loader = spar::loader::ImportLoader::new(base);
     let imports: std::collections::HashMap<String, LoadedImport> =
         match spar::loader::collect_imports(&program, &mut loader) {

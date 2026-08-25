@@ -120,7 +120,11 @@ pub enum SectionItem {
 pub struct FieldDecl {
     pub name: String,
     pub optional: bool,
-    pub ty: SparType,
+    /// `None` when the type is inferred from the enclosing section's
+    /// `-> TypeName` binding (`name: value;`, no explicit type). Always
+    /// `Some` in a section with no binding — the typechecker enforces
+    /// that, not the parser.
+    pub ty: Option<SparType>,
     pub value: Option<FieldValue>,
     pub span: Span,
 }

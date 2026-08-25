@@ -102,16 +102,39 @@ impl<'a> TypeChecker<'a> {
 
     fn check_section(&mut self, decl: &SectionDecl) {
         let path_str = decl.path.join(".");
-        for item in &decl.items {
-            if let SectionItem::Field(field) = item {
-                self.check_field(field, &path_str);
+        match &decl.type_binding {
+            Some(binding) => self.check_type_binding(decl, binding, &path_str),
+            None => {
+                let fields: Vec<&FieldDecl> = decl.items.iter()
+                    .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                    .collect();
+                self.check_untyped_section_fields(&fields, &path_str);
             }
         }
     }
 
-    fn check_field(&mut self, field: &FieldDecl, path_str: &str) {
+    /// Every field in a section with no `-> TypeName` binding must have an
+    /// explicit type — there is nothing to infer it from.
+    fn check_untyped_section_fields(&mut self, fields: &[&FieldDecl], path_str: &str) {
+        for field in fields {
+            match &field.ty {
+                Some(ty) => self.check_field(field, ty, path_str),
+                None => self.push_type_error(
+                    format!(
+                        "field `{}` in section `[{path_str}]` has no type — sections without \
+                         a `-> Type` binding must declare each field's type explicitly",
+                        field.name
+                    ),
+                    None,
+                    field.span.clone(),
+                ),
+            }
+        }
+    }
+
+    fn check_field(&mut self, field: &FieldDecl, ty: &SparType, path_str: &str) {
         // Rule B: validate body vs type compatibility
-        match (&field.ty, &field.value) {
+        match (ty, &field.value) {
             (SparType::Section, Some(FieldValue::Expr(e))) => {
                 let actual = self.infer_type(e);
                 if actual != Some(SparType::Section) {
@@ -129,12 +152,12 @@ impl<'a> TypeChecker<'a> {
                 self.check_expr_internal(e);
                 return;
             }
-            (ty, Some(FieldValue::Nested(_))) if *ty != SparType::Section => {
+            (other_ty, Some(FieldValue::Nested(_))) if *other_ty != SparType::Section => {
                 self.push_type_error(
                     format!(
                         "field '{}' in '[{path_str}]' has type '{}' but uses a section \
                          body '{{ ... }}' — only 'section'-typed fields can have a nested body",
-                        field.name, display_type(ty)
+                        field.name, display_type(other_ty)
                     ),
                     Some("change the field type to 'section' or use an expression value".into()),
                     field.span.clone(),
@@ -144,9 +167,8 @@ impl<'a> TypeChecker<'a> {
             (SparType::Section, Some(FieldValue::Nested(sub_fields))) => {
                 // Recursively type-check the nested section
                 let nested_path = format!("{path_str}.{}", field.name);
-                for sub in sub_fields {
-                    self.check_field(sub, &nested_path);
-                }
+                let subs: Vec<&FieldDecl> = sub_fields.iter().collect();
+                self.check_untyped_section_fields(&subs, &nested_path);
                 return;
             }
             (SparType::Section, None) => {
@@ -178,8 +200,156 @@ impl<'a> TypeChecker<'a> {
             return;
         }
         if let Some(FieldValue::Expr(val)) = &field.value {
-            self.check_expr_type(val, &field.ty, &field.name, &field.span);
+            self.check_expr_type(val, ty, &field.name, &field.span);
         }
+    }
+
+    fn check_type_binding(&mut self, decl: &SectionDecl, binding: &TypeBinding, path_str: &str) {
+        // If the type name itself doesn't exist, the resolver already
+        // reported that — avoid a duplicate error here.
+        let Some(entry) = self.symbols.types.get(&binding.name).cloned() else {
+            return;
+        };
+
+        // Spreads may supply required fields at runtime — can't
+        // statically verify them, so skip (same precedent as Schema
+        // validation in loader.rs).
+        let has_spreads = decl.items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
+        if has_spreads {
+            return;
+        }
+
+        let config_fields: Vec<&FieldDecl> = decl.items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+
+        self.validate_type_fields(&entry.fields, &config_fields, &binding.name, path_str);
+    }
+
+    fn validate_type_fields(
+        &mut self,
+        type_fields: &[TypeField],
+        config_fields: &[&FieldDecl],
+        type_name: &str,
+        path_str: &str,
+    ) {
+        for tf in type_fields {
+            let cf = config_fields.iter().find(|f| f.name == tf.name);
+            match cf {
+                None if !tf.optional => {
+                    self.push_type_error(
+                        format!(
+                            "section `[{}]` is missing required field `{}` (required by type `{}`)",
+                            path_str, tf.name, type_name
+                        ),
+                        None,
+                        tf.span.clone(),
+                    );
+                }
+                None => {} // optional, fine to omit
+                Some(cf) => match &tf.shape {
+                    TypeFieldShape::Primitive(expected_ty) => {
+                        // The field's type is either explicit (Some) or
+                        // inferred from its value (None, under this
+                        // binding) — either way, compare the effective
+                        // type against what the bound type declares.
+                        let actual_ty = match &cf.ty {
+                            Some(t) => Some(t.clone()),
+                            None => match &cf.value {
+                                Some(FieldValue::Expr(e)) => self.infer_type(e),
+                                _ => None,
+                            },
+                        };
+                        match actual_ty {
+                            Some(actual) if &actual != expected_ty => {
+                                self.push_type_error(
+                                    format!(
+                                        "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
+                                        path_str, tf.name, display_type(&actual), type_name, display_type(expected_ty),
+                                    ),
+                                    None,
+                                    cf.span.clone(),
+                                );
+                            }
+                            Some(_) => {} // matches
+                            None => {
+                                self.push_type_error(
+                                    format!(
+                                        "field `{}::{}`'s value type could not be determined; type `{}` expects `{}`",
+                                        path_str, tf.name, type_name, display_type(expected_ty),
+                                    ),
+                                    None,
+                                    cf.span.clone(),
+                                );
+                            }
+                        }
+                    }
+                    TypeFieldShape::Section(nested_type_fields) => {
+                        self.validate_nested_type_field(cf, nested_type_fields, type_name, path_str, &tf.name);
+                    }
+                    TypeFieldShape::Named(other_type_name) => {
+                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned() else {
+                            continue; // resolver already reported the undefined type
+                        };
+                        self.validate_nested_type_field(cf, &other_entry.fields, other_type_name, path_str, &tf.name);
+                    }
+                },
+            }
+        }
+
+        for cf in config_fields {
+            if !type_fields.iter().any(|tf| tf.name == cf.name) {
+                self.push_type_error(
+                    format!(
+                        "field `{}::{}` is not declared in type `{}`",
+                        path_str, cf.name, type_name
+                    ),
+                    None,
+                    cf.span.clone(),
+                );
+            }
+        }
+    }
+
+    fn validate_nested_type_field(
+        &mut self,
+        cf: &FieldDecl,
+        nested_type_fields: &[TypeField],
+        type_name: &str,
+        path_str: &str,
+        field_name: &str,
+    ) {
+        // A field is a nested section if its value is FieldValue::Nested,
+        // regardless of whether its type is explicit (Some(Section)) or
+        // inferred (None, under this binding).
+        let explicit_non_section = matches!(&cf.ty, Some(ty) if *ty != SparType::Section);
+        if explicit_non_section {
+            self.push_type_error(
+                format!(
+                    "field `{}::{}` must be type `section` (type `{}` requires a nested section)",
+                    path_str, field_name, type_name
+                ),
+                None,
+                cf.span.clone(),
+            );
+            return;
+        }
+        let nested_config: Vec<&FieldDecl> = match &cf.value {
+            Some(FieldValue::Nested(fields)) => fields.iter().collect(),
+            _ => {
+                self.push_type_error(
+                    format!(
+                        "field `{}::{}` must have an inline section value (`{{ ... }}`)",
+                        path_str, field_name
+                    ),
+                    None,
+                    cf.span.clone(),
+                );
+                return;
+            }
+        };
+        let nested_path = format!("{}::{}", path_str, field_name);
+        self.validate_type_fields(nested_type_fields, &nested_config, type_name, &nested_path);
     }
 
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {
@@ -245,13 +415,13 @@ impl<'a> TypeChecker<'a> {
                 let key = vec![ns.clone()];
                 self.symbols.lookup_section(&key)
                     .and_then(|s| s.fields.get(name.as_str()))
-                    .map(|f| f.ty.clone())
+                    .and_then(|f| f.ty.clone())
             }
             [_, section, field] => {
                 let key = vec![section.clone()];
                 self.symbols.lookup_section(&key)
                     .and_then(|s| s.fields.get(field.as_str()))
-                    .map(|f| f.ty.clone())
+                    .and_then(|f| f.ty.clone())
             }
             _ => None,
         }

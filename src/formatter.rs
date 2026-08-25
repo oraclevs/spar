@@ -561,22 +561,43 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
     out.push_str(&fd.name);
     if fd.optional { out.push('?'); }
     out.push_str(": ");
-    out.push_str(&format_type(&fd.ty));
-    match &fd.value {
-        None => { out.push_str(";\n"); }
-        Some(FieldValue::Expr(e)) => {
-            out.push_str(" = ");
-            format_expr(e, 0, out);
-            out.push_str(";\n");
-        }
-        Some(FieldValue::Nested(nested_fields)) => {
-            out.push_str(" = {\n");
-            for nf in nested_fields {
-                format_field_decl(nf, depth + 1, config, out);
+    match &fd.ty {
+        Some(ty) => {
+            out.push_str(&format_type(ty));
+            match &fd.value {
+                None => { out.push_str(";\n"); }
+                Some(FieldValue::Expr(e)) => {
+                    out.push_str(" = ");
+                    format_expr(e, 0, out);
+                    out.push_str(";\n");
+                }
+                Some(FieldValue::Nested(nested_fields)) => {
+                    out.push_str(" = {\n");
+                    for nf in nested_fields {
+                        format_field_decl(nf, depth + 1, config, out);
+                    }
+                    out.push_str(&ind);
+                    out.push_str("};\n");
+                }
             }
-            out.push_str(&ind);
-            out.push_str("};\n");
         }
+        // Type omitted — inferred from the enclosing section's binding.
+        // No `=`: the value follows the colon directly.
+        None => match &fd.value {
+            None => { out.push_str(";\n"); } // shouldn't occur (parser requires a value here), but format gracefully
+            Some(FieldValue::Expr(e)) => {
+                format_expr(e, 0, out);
+                out.push_str(";\n");
+            }
+            Some(FieldValue::Nested(nested_fields)) => {
+                out.push_str("{\n");
+                for nf in nested_fields {
+                    format_field_decl(nf, depth + 1, config, out);
+                }
+                out.push_str(&ind);
+                out.push_str("};\n");
+            }
+        },
     }
 }
 

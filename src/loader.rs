@@ -300,21 +300,39 @@ fn validate_fields(
             Some(cf) => {
                 match &sf.shape {
                     SchemaFieldShape::Primitive(expected_ty) => {
-                        if &cf.ty != expected_ty {
-                            errors.push(SparError::SchemaError {
-                                message: format!(
-                                    "field `{}::{}` declared as `{}` but schema expects `{}`",
-                                    section_path,
-                                    sf.name,
-                                    kl_type_name(&cf.ty),
-                                    kl_type_name(expected_ty),
-                                ),
-                                span: cf.span.clone(),
-                            });
+                        match &cf.ty {
+                            // Type omitted (inferred from a `-> TypeName`
+                            // binding) — can't statically verify it here
+                            // without re-deriving inference; the
+                            // type-binding's own typechecker pass already
+                            // covers this field. Same "can't statically
+                            // know" precedent as the has_spreads skip
+                            // below.
+                            None => {}
+                            Some(actual_ty) => {
+                                if actual_ty != expected_ty {
+                                    errors.push(SparError::SchemaError {
+                                        message: format!(
+                                            "field `{}::{}` declared as `{}` but schema expects `{}`",
+                                            section_path,
+                                            sf.name,
+                                            kl_type_name(actual_ty),
+                                            kl_type_name(expected_ty),
+                                        ),
+                                        span: cf.span.clone(),
+                                    });
+                                }
+                            }
                         }
                     }
                     SchemaFieldShape::Section(nested_schema) => {
-                        if cf.ty != SparType::Section {
+                        // A field is a nested section if its value is
+                        // FieldValue::Nested, regardless of whether its
+                        // type is explicit (Some(Section)) or inferred
+                        // (None, from a `-> TypeName` binding).
+                        let explicit_non_section =
+                            matches!(&cf.ty, Some(ty) if *ty != SparType::Section);
+                        if explicit_non_section {
                             errors.push(SparError::SchemaError {
                                 message: format!(
                                     "field `{}::{}` must be type `section` (schema requires a nested section)",

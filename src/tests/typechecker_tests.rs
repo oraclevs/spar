@@ -167,3 +167,140 @@ fn bool_type_in_return_section_typechecks() {
         }
     "#);
 }
+
+#[test]
+fn typecheck_valid_type_binding_with_inferred_field_types_passes() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+            restart?: str;
+        }
+        [Postgres] -> PostgresType {
+            image: "postgres:16";
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn typecheck_valid_type_binding_with_explicit_redundant_type_passes() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: str = "postgres:16";
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn typecheck_type_binding_missing_required_field() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("missing required field"), "got: {err}");
+}
+
+#[test]
+fn typecheck_type_binding_rejects_extra_field() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: "postgres:16";
+            extra: "not allowed";
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("is not declared in type"), "got: {err}");
+}
+
+#[test]
+fn typecheck_type_binding_rejects_wrong_inferred_type() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: 16;
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("expects `str`"), "got: {err}");
+}
+
+#[test]
+fn typecheck_type_binding_rejects_wrong_explicit_type() {
+    let src = r#"
+        type [PostgresType]{
+            image: str;
+        }
+        [Postgres] -> PostgresType {
+            image: int = 16;
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("expects `str`"), "got: {err}");
+}
+
+#[test]
+fn typecheck_type_binding_validates_named_nested_type_with_inferred_fields() {
+    let src = r#"
+        type [Border]{
+            width: int;
+        }
+        type [Decoration]{
+            border: Border;
+        }
+        [Style] -> Decoration {
+            border: {
+                width: 4;
+            };
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn typecheck_type_binding_rejects_bad_named_nested_field() {
+    let src = r#"
+        type [Border]{
+            width: int;
+        }
+        type [Decoration]{
+            border: Border;
+        }
+        [Style] -> Decoration {
+            border: {
+                width: "not an int";
+            };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("expects `int`"), "got: {err}");
+}
+
+#[test]
+fn typecheck_untyped_field_without_binding_is_error() {
+    let src = r#"
+        [Man]{
+            name: "Mike";
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("has no type"), "got: {err}");
+}
+
+#[test]
+fn typecheck_unbound_section_still_requires_explicit_types() {
+    // Regression: sections with no binding are completely unaffected.
+    check_ok(r#"[Man]{ name: str = "Mike"; };"#);
+}

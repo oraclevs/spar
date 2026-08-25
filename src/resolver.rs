@@ -77,7 +77,9 @@ pub struct SectionEntry {
 
 #[derive(Debug, Clone)]
 pub struct FieldEntry {
-    pub ty: SparType,
+    /// `None` when the field's type is inferred from a `-> TypeName`
+    /// binding rather than declared explicitly (see `FieldDecl.ty`).
+    pub ty: Option<SparType>,
     pub optional: bool,
     pub span: Span,
 }
@@ -547,14 +549,15 @@ impl Resolver {
             span: decl.span.clone(),
         });
 
-        // Register nested section-type fields recursively
+        // Register nested section-type fields recursively. A field is a
+        // nested section if its value is FieldValue::Nested, regardless
+        // of whether its type is explicit (Some(Section)) or inferred
+        // (None, from a `-> TypeName` binding).
         for item in &decl.items {
             if let SectionItem::Field(f) = item {
-                if f.ty == SparType::Section {
-                    if let Some(FieldValue::Nested(sub_fields)) = &f.value {
-                        let nested_path = [decl.path.as_slice(), &[f.name.clone()]].concat();
-                        self.register_nested_section(nested_path, sub_fields);
-                    }
+                if let Some(FieldValue::Nested(sub_fields)) = &f.value {
+                    let nested_path = [decl.path.as_slice(), &[f.name.clone()]].concat();
+                    self.register_nested_section(nested_path, sub_fields);
                 }
             }
         }
@@ -566,7 +569,7 @@ impl Resolver {
         }
         let mut field_map = HashMap::new();
         for field in fields {
-            if field.ty == SparType::Section {
+            if matches!(field.value, Some(FieldValue::Nested(_))) {
                 if field_map.contains_key(&field.name) {
                     self.push_error(
                         format!("duplicate field `{}` in section `[{}]`",
@@ -590,7 +593,7 @@ impl Resolver {
                         );
                     }
                     field_map.insert(field.name.clone(), FieldEntry {
-                        ty: SparType::Section,
+                        ty: field.ty.clone(),
                         optional: field.optional,
                         span: field.span.clone(),
                     });

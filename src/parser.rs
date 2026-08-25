@@ -302,6 +302,29 @@ impl Parser {
         }
     }
 
+    /// Does a type follow at the current position? A dedicated type
+    /// keyword (`str`/`int`/`float`/`bool`/`section`), or `[` immediately
+    /// followed by one — used to disambiguate `name: type = value;` from
+    /// the type-omitted `name: value;` form (see `parse_field_decl`).
+    /// Safe because primitives are their own tokens, never `Token::Ident`
+    /// — a value can never start with one of these.
+    fn at_type_start(&self) -> bool {
+        match self.peek() {
+            Token::TypeStr | Token::TypeInt | Token::TypeFloat | Token::TypeBool | Token::TypeSection => true,
+            Token::LBracket => matches!(
+                self.tokens.get(self.pos + 1).map(|st| &st.token),
+                Some(Token::TypeStr) | Some(Token::TypeInt) | Some(Token::TypeFloat) | Some(Token::TypeBool)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Parse a section field. Two forms:
+    /// - `name: type = value;` (or `name: type;` with no value) — type
+    ///   always explicit, legal in any section.
+    /// - `name: value;` — type omitted, inferred from the enclosing
+    ///   section's `-> TypeName` binding (a typechecker concern; the
+    ///   parser accepts this form unconditionally). No `=` in this form.
     fn parse_field_decl(&mut self) -> Result<FieldDecl, SparError> {
         let span = self.peek_span();
         let (name, _) = self.expect_ident()?;
@@ -314,12 +337,30 @@ impl Parser {
         };
 
         self.expect(&Token::Colon)?;
-        let ty = self.parse_type()?;
 
-        let value = if self.at(&Token::Eq) {
-            self.advance();
-            if ty == SparType::Section && self.at(&Token::LBrace) {
-                // Parse inline section body: '{' field_decl* '}'
+        if self.at_type_start() {
+            let ty = self.parse_type()?;
+            let value = if self.at(&Token::Eq) {
+                self.advance();
+                if ty == SparType::Section && self.at(&Token::LBrace) {
+                    // Parse inline section body: '{' field_decl* '}'
+                    self.expect(&Token::LBrace)?;
+                    let mut fields = Vec::new();
+                    while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                        fields.push(self.parse_field_decl()?);
+                    }
+                    self.expect(&Token::RBrace)?;
+                    Some(FieldValue::Nested(fields))
+                } else {
+                    Some(FieldValue::Expr(self.parse_expr()?))
+                }
+            } else {
+                None
+            };
+            self.expect(&Token::Semicolon)?;
+            Ok(FieldDecl { name, optional, ty: Some(ty), value, span })
+        } else {
+            let value = if self.at(&Token::LBrace) {
                 self.expect(&Token::LBrace)?;
                 let mut fields = Vec::new();
                 while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -329,13 +370,10 @@ impl Parser {
                 Some(FieldValue::Nested(fields))
             } else {
                 Some(FieldValue::Expr(self.parse_expr()?))
-            }
-        } else {
-            None
-        };
-
-        self.expect(&Token::Semicolon)?;
-        Ok(FieldDecl { name, optional, ty, value, span })
+            };
+            self.expect(&Token::Semicolon)?;
+            Ok(FieldDecl { name, optional, ty: None, value, span })
+        }
     }
 
     fn parse_spread(&mut self) -> Result<SpreadStmt, SparError> {

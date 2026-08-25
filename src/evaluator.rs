@@ -278,18 +278,7 @@ impl Evaluator {
                     let top_name = s.path[0].clone();
                     let node = DeclId::Section(top_name.clone());
                     let mut deps = HashSet::new();
-                    for item in &s.items {
-                        match item {
-                            SectionItem::Field(f) => {
-                                if let Some(FieldValue::Expr(e)) = &f.value {
-                                    self.collect_expr_deps(e, &mut deps);
-                                }
-                            }
-                            SectionItem::Spread(sp) => {
-                                self.collect_expr_deps(&sp.expr, &mut deps);
-                            }
-                        }
-                    }
+                    self.collect_items_deps(&s.items, &mut deps);
                     // A section referencing its own name is not a real
                     // cross-decl dependency — intra-section ordering is
                     // handled during evaluation itself (see Task 2/4),
@@ -306,6 +295,25 @@ impl Evaluator {
             }
         }
         graph
+    }
+
+    /// Recurses into `FieldValue::Nested` at any depth — a spread or expr
+    /// reference nested inside a field's own `{ ... }` body (not just a
+    /// section's own top-level items) still needs a dependency edge, same
+    /// as a top-level one.
+    fn collect_items_deps(&self, items: &[SectionItem], deps: &mut HashSet<DeclId>) {
+        for item in items {
+            match item {
+                SectionItem::Field(f) => match &f.value {
+                    Some(FieldValue::Expr(e)) => self.collect_expr_deps(e, deps),
+                    Some(FieldValue::Nested(sub)) => self.collect_items_deps(sub, deps),
+                    None => {}
+                },
+                SectionItem::Spread(sp) => {
+                    self.collect_expr_deps(&sp.expr, deps);
+                }
+            }
+        }
     }
 
     fn collect_expr_deps(&self, expr: &Expr, deps: &mut HashSet<DeclId>) {
@@ -506,12 +514,9 @@ impl Evaluator {
                                 Err(e)  => { self.push_eval_error(e); }
                             }
                         }
-                        Some(FieldValue::Nested(sub_fields)) => {
+                        Some(FieldValue::Nested(sub_items)) => {
                             let nested_path = [parent_path, &[field.name.clone()]].concat();
-                            let nested_items: Vec<SectionItem> = sub_fields.iter()
-                                .map(|f| SectionItem::Field(f.clone()))
-                                .collect();
-                            let nested_map = self.eval_section_fields(&nested_items, &nested_path, &HashMap::new());
+                            let nested_map = self.eval_section_fields(sub_items, &nested_path, &HashMap::new());
                             if let Some(frame) = self.self_stack.last_mut() {
                                 frame.fields.insert(nested_path.clone(), ConfigValue::Section(nested_map.clone()));
                             }

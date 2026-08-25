@@ -637,3 +637,61 @@ fn parse_schema_file_still_rejects_as_part_of() {
     );
     let _ = parse_err(src);
 }
+
+#[test]
+fn parse_spread_inside_nested_field_body() {
+    let src = r#"
+        [Postgres] -> PostgresType {
+            image: "postgres:16";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Section(sd) => {
+            let env_field = sd.items.iter().find_map(|it| {
+                if let crate::ast::SectionItem::Field(f) = it {
+                    if f.name == "environment" { return Some(f); }
+                }
+                None
+            }).expect("expected an environment field");
+            match &env_field.value {
+                Some(crate::ast::FieldValue::Nested(items)) => {
+                    assert_eq!(items.len(), 1);
+                    assert!(matches!(items[0], crate::ast::SectionItem::Spread(_)));
+                }
+                other => panic!("expected FieldValue::Nested, got {:?}", other),
+            }
+        }
+        other => panic!("expected TopLevelItem::Section, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_spread_mixed_with_fields_inside_nested_body() {
+    let src = r#"
+        [Postgres] -> PostgresType {
+            image: "postgres:16";
+            environment: {
+                ...ProductionEnvironment;
+                port: "3000";
+            };
+        };
+    "#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::Section(sd) => {
+            let env_field = sd.items.iter().find_map(|it| {
+                if let crate::ast::SectionItem::Field(f) = it {
+                    if f.name == "environment" { return Some(f); }
+                }
+                None
+            }).expect("expected an environment field");
+            match &env_field.value {
+                Some(crate::ast::FieldValue::Nested(items)) => assert_eq!(items.len(), 2),
+                other => panic!("expected FieldValue::Nested, got {:?}", other),
+            }
+        }
+        other => panic!("expected TopLevelItem::Section, got {:?}", other),
+    }
+}

@@ -72,6 +72,12 @@ pub struct SectionEntry {
     pub fields: HashMap<String, FieldEntry>,
     pub exported: bool,
     pub private: bool,
+    /// The section's `-> TypeName` binding, if any. Only ever set for a
+    /// top-level section (nested sections can't declare their own binding —
+    /// their shape comes from the enclosing binding's `TypeFieldShape`).
+    /// Lets the typechecker resolve a spread source's declared shape
+    /// without needing to walk back through the raw `Program` AST.
+    pub type_binding: Option<String>,
     pub span: Span,
 }
 
@@ -548,6 +554,7 @@ impl Resolver {
 
         self.sections.insert(decl.path.clone(), SectionEntry {
             fields,
+            type_binding: decl.type_binding.as_ref().map(|b| b.name.clone()),
             exported: decl.exported,
             private:  decl.private,
             span: decl.span.clone(),
@@ -567,12 +574,16 @@ impl Resolver {
         }
     }
 
-    fn register_nested_section(&mut self, path: Vec<String>, fields: &[FieldDecl]) {
+    fn register_nested_section(&mut self, path: Vec<String>, items: &[SectionItem]) {
         if self.sections.contains_key(&path) {
             return; // already registered (e.g. via a second spread of the same path)
         }
         let mut field_map = HashMap::new();
-        for field in fields {
+        for item in items {
+            // A spread contributes fields only known at eval time — can't
+            // statically know their names, so nothing to register here.
+            let SectionItem::Field(field) = item else { continue };
+
             if matches!(field.value, Some(FieldValue::Nested(_))) {
                 if field_map.contains_key(&field.name) {
                     self.push_error(
@@ -628,11 +639,16 @@ impl Resolver {
                 }
             }
         }
+        let span = items.first().map(|it| match it {
+            SectionItem::Field(f) => f.span.clone(),
+            SectionItem::Spread(s) => s.span.clone(),
+        }).unwrap_or_else(Span::dummy);
         self.sections.insert(path.clone(), SectionEntry {
             fields: field_map,
+            type_binding: None, // a nested section can't declare its own `-> Type` binding
             exported: false,
             private:  false,   // nested sections inherit parent privacy at emit time only
-            span: fields.first().map(|f| f.span.clone()).unwrap_or_else(Span::dummy),
+            span,
         });
     }
 }
@@ -751,8 +767,8 @@ impl Resolver {
                 SectionItem::Field(f) => {
                     match &f.value {
                         Some(FieldValue::Expr(val)) => self.resolve_expr(val),
-                        Some(FieldValue::Nested(sub_fields)) => {
-                            self.resolve_nested_fields(sub_fields);
+                        Some(FieldValue::Nested(sub_items)) => {
+                            self.resolve_nested_fields(sub_items);
                         }
                         None => {}
                     }
@@ -763,12 +779,15 @@ impl Resolver {
         self.current_section = prev_section;
     }
 
-    fn resolve_nested_fields(&mut self, fields: &[FieldDecl]) {
-        for field in fields {
-            match &field.value {
-                Some(FieldValue::Expr(val)) => self.resolve_expr(val),
-                Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
-                None => {}
+    fn resolve_nested_fields(&mut self, items: &[SectionItem]) {
+        for item in items {
+            match item {
+                SectionItem::Field(field) => match &field.value {
+                    Some(FieldValue::Expr(val)) => self.resolve_expr(val),
+                    Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
+                    None => {}
+                },
+                SectionItem::Spread(s) => self.resolve_spread(s),
             }
         }
     }

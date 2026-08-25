@@ -304,3 +304,168 @@ fn typecheck_unbound_section_still_requires_explicit_types() {
     // Regression: sections with no binding are completely unaffected.
     check_ok(r#"[Man]{ name: str = "Mike"; };"#);
 }
+
+// ── Spread in nested field bodies ────────────────────────────────────────
+
+#[test]
+fn spread_in_nested_field_matching_bound_source_passes() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        [ProductionEnvironment] -> EnvironmentType {
+            nodeEnv: "production";
+            port: "3000";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn spread_in_nested_field_missing_required_field_errors() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [PartialEnvType]{ nodeEnv: str; }
+        [Partial] -> PartialEnvType {
+            nodeEnv: "production";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...Partial; };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+}
+
+#[test]
+fn spread_in_nested_field_wrong_primitive_type_errors() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [BadEnvType]{ nodeEnv: str; port: int; }
+        [Bad] -> BadEnvType {
+            nodeEnv: "production";
+            port: 3000;
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...Bad; };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("port") && err.contains("int") && err.contains("str"), "got: {err}");
+}
+
+#[test]
+fn spread_in_nested_field_extra_field_errors() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [ExtraEnvType]{ nodeEnv: str; port: str; extra: str; }
+        [WithExtra] -> ExtraEnvType {
+            nodeEnv: "production";
+            port: "3000";
+            extra: "surprise";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...WithExtra; };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("extra") && err.contains("not declared"), "got: {err}");
+}
+
+#[test]
+fn spread_in_nested_field_unbound_source_with_explicit_types_passes() {
+    // Source has no `-> Type` binding, but every field is explicitly
+    // typed — shape derives straight from those, no Named type needed.
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        [ProductionEnvironment]{
+            nodeEnv: str = "production";
+            port: str = "3000";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn spread_in_nested_field_unbound_source_wrong_shape_errors() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        [ProductionEnvironment]{
+            nodeEnv: str = "production";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+}
+
+#[test]
+fn spread_only_top_level_bound_section_checked_against_whole_type() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        [ProductionEnvironment] -> EnvironmentType {
+            nodeEnv: "production";
+            port: "3000";
+        };
+        [Backup] -> EnvironmentType {
+            ...ProductionEnvironment;
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn spread_only_top_level_bound_section_wrong_shape_errors() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [PartialEnvType]{ nodeEnv: str; }
+        [Partial] -> PartialEnvType {
+            nodeEnv: "production";
+        };
+        [Backup] -> EnvironmentType {
+            ...Partial;
+        };
+    "#;
+    let err = check_err(src);
+    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+}
+
+#[test]
+fn spread_mixed_with_explicit_fields_is_not_checked() {
+    // Regression-safety: mixing a spread with other explicit fields keeps
+    // the existing "can't statically verify" skip precedent — not the new
+    // spread-only smart check. This deliberately has a WRONG shape
+    // (missing `port`) and must still pass, exactly as it did before this
+    // feature (has_spreads skip).
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [PartialEnvType]{ nodeEnv: str; }
+        [Partial] -> PartialEnvType {
+            nodeEnv: "production";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...Partial; port: "3000"; };
+        };
+    "#;
+    check_ok(src);
+}

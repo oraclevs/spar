@@ -15,6 +15,34 @@ pub fn display_type(ty: &SparType) -> String {
     }
 }
 
+/// A `TypeFieldShape` expanded one level — `Named(X)` resolved to `X`'s own
+/// fields, so shape comparison only ever has to handle two cases.
+enum ShapeKind {
+    Primitive(SparType),
+    Section(Vec<TypeField>),
+}
+
+/// `items` is exactly one `...Source;` spread and nothing else — the
+/// spread-only body pattern that gets a structural shape check instead of
+/// the "can't statically verify" skip a mixed spread+fields body gets.
+fn spread_only_source(items: &[SectionItem]) -> Option<&SpreadStmt> {
+    match items {
+        [SectionItem::Spread(s)] => Some(s),
+        _ => None,
+    }
+}
+
+/// The spread's source section name, if it's a same-file, single-segment
+/// reference (`...Name;`) — the only shape a shape can be statically
+/// resolved for. Anything else (a function call, a multi-segment/
+/// cross-file reference) has no statically-known shape to check.
+fn spread_source_name(spread: &SpreadStmt) -> Option<&str> {
+    match &spread.expr {
+        Expr::NamespaceRef(nr) if nr.segments.len() == 1 => Some(nr.segments[0].as_str()),
+        _ => None,
+    }
+}
+
 pub struct TypeChecker<'a> {
     symbols: &'a SymbolTable,
     errors:  Vec<SparError>,
@@ -165,10 +193,15 @@ impl<'a> TypeChecker<'a> {
                 );
                 return;
             }
-            (SparType::Section, Some(FieldValue::Nested(sub_fields))) => {
-                // Recursively type-check the nested section
+            (SparType::Section, Some(FieldValue::Nested(sub_items))) => {
+                // Recursively type-check the nested section. An unbound
+                // section has no `-> Type` to check a spread's contents
+                // against — same "nothing to compare against" precedent
+                // as an unbound top-level section (check_section, above).
                 let nested_path = format!("{path_str}.{}", field.name);
-                let subs: Vec<&FieldDecl> = sub_fields.iter().collect();
+                let subs: Vec<&FieldDecl> = sub_items.iter()
+                    .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                    .collect();
                 self.check_untyped_section_fields(&subs, &nested_path);
                 return;
             }
@@ -212,9 +245,20 @@ impl<'a> TypeChecker<'a> {
             return;
         };
 
-        // Spreads may supply required fields at runtime — can't
-        // statically verify them, so skip (same precedent as Schema
-        // validation in loader.rs).
+        // A section that's ENTIRELY `...Source;` (no other fields) can be
+        // checked structurally against the whole bound type — the spread
+        // must supply exactly what the type requires. Reuses the same
+        // "smart" shape comparison a spread-only nested field gets below.
+        if let Some(spread) = spread_only_source(&decl.items) {
+            self.check_spread_against_shape(spread, &entry.fields, &binding.name, path_str);
+            return;
+        }
+
+        // A spread MIXED with other explicit fields can supply required
+        // fields at runtime in a way that's hard to attribute correctly to
+        // "which of the type's fields does the spread vs. the explicit
+        // fields cover" — can't statically verify that combination, so
+        // skip (same precedent as Schema validation in loader.rs).
         let has_spreads = decl.items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
         if has_spreads {
             return;
@@ -335,8 +379,8 @@ impl<'a> TypeChecker<'a> {
             );
             return;
         }
-        let nested_config: Vec<&FieldDecl> = match &cf.value {
-            Some(FieldValue::Nested(fields)) => fields.iter().collect(),
+        let nested_items: &[SectionItem] = match &cf.value {
+            Some(FieldValue::Nested(items)) => items,
             _ => {
                 self.push_type_error(
                     format!(
@@ -350,7 +394,179 @@ impl<'a> TypeChecker<'a> {
             }
         };
         let nested_path = format!("{}::{}", path_str, field_name);
+
+        // A nested field body that's ENTIRELY `...Source;` gets the same
+        // structural shape check a spread-only bound section gets above —
+        // the spread must supply exactly what this field's expected shape
+        // requires.
+        if let Some(spread) = spread_only_source(nested_items) {
+            self.check_spread_against_shape(spread, nested_type_fields, type_name, &nested_path);
+            return;
+        }
+
+        // A spread mixed with explicit fields — same "can't statically
+        // attribute coverage" precedent as the top-level case.
+        let has_spreads = nested_items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
+        if has_spreads {
+            return;
+        }
+
+        let nested_config: Vec<&FieldDecl> = nested_items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
         self.validate_type_fields(nested_type_fields, &nested_config, type_name, &nested_path);
+    }
+
+    /// Resolve `spread`'s source section (same-file, single-segment
+    /// `...Name;` only — matches the scope `eval_spread`/`resolve_spread`
+    /// already support) and structurally compare its shape against
+    /// `expected` — exact match, recursively, same rule the rest of the
+    /// type system uses everywhere else. A source that can't be resolved
+    /// this way (a function call, a multi-segment/cross-file reference)
+    /// has no statically-known shape — nothing to check, not an error.
+    fn check_spread_against_shape(
+        &mut self,
+        spread: &SpreadStmt,
+        expected: &[TypeField],
+        expected_label: &str,
+        path_str: &str,
+    ) {
+        let Some(source_name) = spread_source_name(spread) else { return };
+        let Some(source_shape) = self.derive_section_shape(source_name) else { return };
+        self.check_shape_matches(&source_shape, expected, source_name, expected_label, path_str, &spread.span);
+    }
+
+    /// The structural shape of a top-level section: if it's type-bound,
+    /// that type's own fields ARE its shape (its instance already has to
+    /// satisfy them exactly, via the normal check_type_binding path); if
+    /// unbound, every field already has an explicit type (Phase 2's rule),
+    /// so derive an equivalent ad-hoc shape straight from those.
+    fn derive_section_shape(&self, name: &str) -> Option<Vec<TypeField>> {
+        let entry = self.symbols.sections.get(std::slice::from_ref(&name.to_string()))?;
+        match &entry.type_binding {
+            Some(type_name) => self.symbols.types.get(type_name).map(|t| t.fields.clone()),
+            None => Some(self.derive_ad_hoc_shape(&[name.to_string()])),
+        }
+    }
+
+    /// Recursively build a `Vec<TypeField>` shape from an UNBOUND section's
+    /// own registered fields — nested sections are registered separately
+    /// under their own path (see resolver.rs's `register_nested_section`),
+    /// so a `section`-typed field recurses into `path + [field_name]`.
+    fn derive_ad_hoc_shape(&self, path: &[String]) -> Vec<TypeField> {
+        let Some(entry) = self.symbols.sections.get(path) else { return Vec::new() };
+        entry.fields.iter().map(|(name, fe)| {
+            let shape = match &fe.ty {
+                Some(SparType::Section) => {
+                    let nested_path: Vec<String> = path.iter().cloned().chain([name.clone()]).collect();
+                    TypeFieldShape::Section(self.derive_ad_hoc_shape(&nested_path))
+                }
+                Some(other) => TypeFieldShape::Primitive(other.clone()),
+                None => TypeFieldShape::Primitive(SparType::Str), // unreachable: unbound fields always have an explicit type
+            };
+            TypeField { name: name.clone(), optional: fe.optional, shape, span: fe.span.clone() }
+        }).collect()
+    }
+
+    /// Structural exact-match comparison between two abstract shapes —
+    /// used when spreading `...Source;` into a position with a known
+    /// expected shape. Every expected field must be present in `source`
+    /// with a matching type (recursively); an expected-optional field may
+    /// be absent; any field `source` has that `expected` doesn't declare
+    /// is an error — the same exact-match rule the type system already
+    /// applies everywhere else (Phase 2's strictness rule).
+    fn check_shape_matches(
+        &mut self,
+        source: &[TypeField],
+        expected: &[TypeField],
+        source_label: &str,
+        expected_label: &str,
+        path_str: &str,
+        span: &Span,
+    ) {
+        for ef in expected {
+            match source.iter().find(|f| f.name == ef.name) {
+                None if !ef.optional => {
+                    self.push_type_error(
+                        format!(
+                            "spread `...{}` in `[{}]` is missing required field `{}` (required by `{}`)",
+                            source_label, path_str, ef.name, expected_label
+                        ),
+                        None,
+                        span.clone(),
+                    );
+                }
+                None => {} // optional, fine to omit
+                Some(sf) => {
+                    let source_kind = self.expand_type_field_shape(&sf.shape);
+                    let expected_kind = self.expand_type_field_shape(&ef.shape);
+                    match (source_kind, expected_kind) {
+                        (ShapeKind::Primitive(actual), ShapeKind::Primitive(want)) => {
+                            if actual != want {
+                                self.push_type_error(
+                                    format!(
+                                        "spread `...{}` field `{}` is `{}` but `{}` expects `{}`",
+                                        source_label, ef.name, display_type(&actual), expected_label, display_type(&want)
+                                    ),
+                                    None,
+                                    span.clone(),
+                                );
+                            }
+                        }
+                        (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
+                            self.check_shape_matches(&actual_nested, &want_nested, source_label, expected_label, path_str, span);
+                        }
+                        (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
+                            self.push_type_error(
+                                format!(
+                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested section",
+                                    source_label, ef.name, expected_label
+                                ),
+                                None,
+                                span.clone(),
+                            );
+                        }
+                        (ShapeKind::Section(_), ShapeKind::Primitive(want)) => {
+                            self.push_type_error(
+                                format!(
+                                    "spread `...{}` field `{}` is a nested section but `{}` expects `{}`",
+                                    source_label, ef.name, expected_label, display_type(&want)
+                                ),
+                                None,
+                                span.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        for sf in source {
+            if !expected.iter().any(|ef| ef.name == sf.name) {
+                self.push_type_error(
+                    format!(
+                        "spread `...{}` field `{}` is not declared in `{}`",
+                        source_label, sf.name, expected_label
+                    ),
+                    None,
+                    span.clone(),
+                );
+            }
+        }
+    }
+
+    /// Expand a `TypeFieldShape` into its comparable kind — `Named(X)`
+    /// expands to `X`'s own registered fields, same "resolve once, expand"
+    /// semantics `SchemaFrom` already uses (loader.rs).
+    fn expand_type_field_shape(&self, shape: &TypeFieldShape) -> ShapeKind {
+        match shape {
+            TypeFieldShape::Primitive(ty) => ShapeKind::Primitive(ty.clone()),
+            TypeFieldShape::Section(fields) => ShapeKind::Section(fields.clone()),
+            TypeFieldShape::Named(name) => match self.symbols.types.get(name) {
+                Some(entry) => ShapeKind::Section(entry.fields.clone()),
+                None => ShapeKind::Section(Vec::new()), // resolver already reported the undefined type
+            },
+        }
     }
 
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {

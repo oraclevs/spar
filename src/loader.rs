@@ -723,8 +723,8 @@ fn validate_fields(
                                 span: cf.span.clone(),
                             });
                         } else {
-                            let nested_config: Vec<&crate::ast::FieldDecl> = match &cf.value {
-                                Some(FieldValue::Nested(fields)) => fields.iter().collect(),
+                            let nested_items: &[crate::ast::SectionItem] = match &cf.value {
+                                Some(FieldValue::Nested(items)) => items,
                                 _ => {
                                     errors.push(SparError::SchemaError {
                                         message: format!(
@@ -736,8 +736,18 @@ fn validate_fields(
                                     continue;
                                 }
                             };
-                            let nested_path = format!("{}::{}", section_path, sf.name);
-                            validate_fields(nested_schema, &nested_config, &nested_path, errors, &cf.span);
+                            // A spread's contributed fields can't be statically
+                            // known here — same "can't verify" precedent as the
+                            // has_spreads skip above, one level deeper.
+                            let has_spreads = nested_items.iter()
+                                .any(|i| matches!(i, crate::ast::SectionItem::Spread(_)));
+                            if !has_spreads {
+                                let nested_config: Vec<&crate::ast::FieldDecl> = nested_items.iter()
+                                    .filter_map(|i| if let crate::ast::SectionItem::Field(f) = i { Some(f) } else { None })
+                                    .collect();
+                                let nested_path = format!("{}::{}", section_path, sf.name);
+                                validate_fields(nested_schema, &nested_config, &nested_path, errors, &cf.span);
+                            }
                         }
                     }
                 }

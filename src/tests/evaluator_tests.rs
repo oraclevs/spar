@@ -373,3 +373,53 @@ fn eval_self_reference_direct_child_field() {
         crate::evaluator::ConfigValue::Str("hi".into())
     );
 }
+
+#[test]
+fn eval_spread_inside_nested_field_body() {
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        [ProductionEnvironment] -> EnvironmentType {
+            nodeEnv: "production";
+            port: "3000";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["Api".to_string(), "environment".to_string()];
+    let nested = r.sections.get(&path).expect("nested environment section must be in sections map");
+    assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
+    assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
+}
+
+#[test]
+fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
+    // Regression guard for the class of bug Phase 1 fixed: build_dep_graph
+    // must recurse into FieldValue::Nested to find this spread's
+    // dependency on [ProductionEnvironment] — otherwise evaluation order
+    // between the two top-level sections is left to HashMap iteration
+    // order and flakes across runs. Run enough iterations that a flake
+    // would show.
+    let src = r#"
+        type [EnvironmentType]{ nodeEnv: str; port: str; }
+        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        [ProductionEnvironment] -> EnvironmentType {
+            nodeEnv: "production";
+            port: "3000";
+        };
+        [Api] -> ServiceType {
+            image: "my-api";
+            environment: { ...ProductionEnvironment; };
+        };
+    "#;
+    for _ in 0..20 {
+        let r = eval_src(src);
+        let path = vec!["Api".to_string(), "environment".to_string()];
+        let nested = r.sections.get(&path).expect("nested environment section must be in sections map");
+        assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
+        assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
+    }
+}

@@ -182,8 +182,11 @@ pub enum SparType {
 pub enum FieldValue {
     /// Normal expression (int, float, str, bool, list fields).
     Expr(Expr),
-    /// Inline nested section body (only for section-type fields).
-    Nested(Vec<FieldDecl>),
+    /// Inline nested section body (only for section-type fields). Reuses
+    /// `SectionItem` (not a bare `Vec<FieldDecl>`) so a nested body can
+    /// also contain `...SourceSection;` spreads, same as a top-level
+    /// section body already can.
+    Nested(Vec<SectionItem>),
 }
 
 #[derive(Debug, Clone)]

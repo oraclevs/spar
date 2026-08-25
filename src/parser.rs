@@ -421,14 +421,14 @@ impl Parser {
             let value = if self.at(&Token::Eq) {
                 self.advance();
                 if ty == SparType::Section && self.at(&Token::LBrace) {
-                    // Parse inline section body: '{' field_decl* '}'
+                    // Parse inline section body: '{' section_item* '}'
                     self.expect(&Token::LBrace)?;
-                    let mut fields = Vec::new();
+                    let mut items = Vec::new();
                     while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                        fields.push(self.parse_field_decl()?);
+                        items.push(self.parse_section_item()?);
                     }
                     self.expect(&Token::RBrace)?;
-                    Some(FieldValue::Nested(fields))
+                    Some(FieldValue::Nested(items))
                 } else {
                     Some(FieldValue::Expr(self.parse_expr()?))
                 }
@@ -440,12 +440,12 @@ impl Parser {
         } else {
             let value = if self.at(&Token::LBrace) {
                 self.expect(&Token::LBrace)?;
-                let mut fields = Vec::new();
+                let mut items = Vec::new();
                 while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                    fields.push(self.parse_field_decl()?);
+                    items.push(self.parse_section_item()?);
                 }
                 self.expect(&Token::RBrace)?;
-                Some(FieldValue::Nested(fields))
+                Some(FieldValue::Nested(items))
             } else {
                 Some(FieldValue::Expr(self.parse_expr()?))
             };

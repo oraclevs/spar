@@ -617,10 +617,10 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
                     format_expr(e, 0, out);
                     out.push_str(";\n");
                 }
-                Some(FieldValue::Nested(nested_fields)) => {
+                Some(FieldValue::Nested(nested_items)) => {
                     out.push_str(" = {\n");
-                    for nf in nested_fields {
-                        format_field_decl(nf, depth + 1, config, out);
+                    for ni in nested_items {
+                        format_nested_section_item(ni, depth + 1, config, out);
                     }
                     out.push_str(&ind);
                     out.push_str("};\n");
@@ -635,15 +635,30 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
                 format_expr(e, 0, out);
                 out.push_str(";\n");
             }
-            Some(FieldValue::Nested(nested_fields)) => {
+            Some(FieldValue::Nested(nested_items)) => {
                 out.push_str("{\n");
-                for nf in nested_fields {
-                    format_field_decl(nf, depth + 1, config, out);
+                for ni in nested_items {
+                    format_nested_section_item(ni, depth + 1, config, out);
                 }
                 out.push_str(&ind);
                 out.push_str("};\n");
             }
         },
+    }
+}
+
+/// A nested field body reuses `SectionItem` (a field or a `...Source;`
+/// spread) — mirrors the top-level section-item printing, one indent
+/// level deeper.
+fn format_nested_section_item(item: &SectionItem, depth: usize, config: &FormatConfig, out: &mut String) {
+    match item {
+        SectionItem::Field(f) => format_field_decl(f, depth, config, out),
+        SectionItem::Spread(ss) => {
+            out.push_str(&indent(depth, config));
+            out.push_str("...");
+            format_expr(&ss.expr, 0, out);
+            out.push_str(";\n");
+        }
     }
 }
 
@@ -1002,6 +1017,20 @@ function pick(flag: bool) -> int {
         let formatted = format_source(src).unwrap();
         assert!(formatted.starts_with("@SchemaFile\n"), "must start with @SchemaFile pragma: {}", formatted);
         assert!(formatted.contains("Schema [X]{"), "must contain schema section header: {}", formatted);
+    }
+
+    #[test]
+    fn formats_spread_inside_nested_field_body() {
+        let src = concat!(
+            "[Postgres] -> PostgresType {\n",
+            "    image: \"postgres:16\";\n",
+            "    environment: { ...ProductionEnvironment; };\n",
+            "};\n",
+        );
+        let once = format_source(src).expect("format");
+        assert!(once.contains("...ProductionEnvironment;"), "got: {once}");
+        let twice = format_source(&once).expect("format again");
+        assert_eq!(once, twice, "formatting must be idempotent");
     }
 
     #[test]

@@ -454,6 +454,7 @@ pub fn collect_imports(
                 }
                 TopLevelItem::Function(f) if !f.is_private => { exports.insert(f.name.clone()); }
                 TopLevelItem::Type(t) if t.exported => { exports.insert(t.name.clone()); }
+                TopLevelItem::FunctionGroup(g) if !g.is_private => { exports.insert(g.name.clone()); }
                 _ => {}
             }
         }
@@ -917,6 +918,26 @@ mod tests {
         let imp = &loaded["shared"];
         assert!(imp.exports.contains("version"), "exported var must appear in exports");
         assert!(!imp.exports.contains("internal"), "non-exported var must not appear");
+    }
+
+    #[test]
+    fn import_existing_file_exposes_function_group_exports() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            r#"
+                functionGroup EdgeInsect { function only() -> int { return 1; } }
+                private functionGroup Hidden { function f() -> int { return 1; } }
+            "#,
+        ).unwrap();
+        let src = r#"import "shared.spar" as shared;"#;
+        let program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        let loaded = collect_imports(&program, &mut loader).unwrap();
+        let imp = &loaded["shared"];
+        assert!(imp.exports.contains("EdgeInsect"), "got: {:?}", imp.exports);
+        assert!(!imp.exports.contains("Hidden"), "got: {:?}", imp.exports);
     }
 
     #[test]

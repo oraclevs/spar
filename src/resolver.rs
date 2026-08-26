@@ -113,6 +113,13 @@ pub struct TypeEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct FunctionGroupEntry {
+    pub is_private: bool,
+    pub functions: HashMap<String, FunctionEntry>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct EnumEntry {
     pub variants: Vec<String>,
     pub exported: bool,
@@ -121,12 +128,13 @@ pub struct EnumEntry {
 
 #[derive(Debug, Clone)]
 pub struct SymbolTable {
-    pub globals:   HashMap<String, GlobalEntry>,
-    pub sections:  HashMap<Vec<String>, SectionEntry>,
-    pub imports:   HashMap<String, ImportEntry>,
-    pub functions: HashMap<String, FunctionEntry>,
-    pub types:     HashMap<String, TypeEntry>,
-    pub enums:     HashMap<String, EnumEntry>,
+    pub globals:         HashMap<String, GlobalEntry>,
+    pub sections:        HashMap<Vec<String>, SectionEntry>,
+    pub imports:         HashMap<String, ImportEntry>,
+    pub functions:       HashMap<String, FunctionEntry>,
+    pub types:           HashMap<String, TypeEntry>,
+    pub enums:           HashMap<String, EnumEntry>,
+    pub function_groups: HashMap<String, FunctionGroupEntry>,
 }
 
 impl SymbolTable {
@@ -144,6 +152,10 @@ impl SymbolTable {
 
     pub fn lookup_function(&self, name: &str) -> Option<&FunctionEntry> {
         self.functions.get(name)
+    }
+
+    pub fn lookup_function_group(&self, name: &str) -> Option<&FunctionGroupEntry> {
+        self.function_groups.get(name)
     }
 
     pub fn lookup_type(&self, name: &str) -> Option<&TypeEntry> {
@@ -194,6 +206,7 @@ pub struct Resolver {
     functions:       HashMap<String, FunctionEntry>,
     types:           HashMap<String, TypeEntry>,
     enums:           HashMap<String, EnumEntry>,
+    function_groups: HashMap<String, FunctionGroupEntry>,
     loaded_exports:  HashMap<String, HashSet<String>>,  // alias → exported names
     errors:          Vec<SparError>,
     current_section: Option<Vec<String>>,
@@ -208,6 +221,7 @@ impl Resolver {
             functions:       HashMap::new(),
             types:           HashMap::new(),
             enums:           HashMap::new(),
+            function_groups: HashMap::new(),
             loaded_exports:  HashMap::new(),
             errors:          Vec::new(),
             current_section: None,
@@ -222,6 +236,7 @@ impl Resolver {
             functions:       HashMap::new(),
             types:           HashMap::new(),
             enums:           HashMap::new(),
+            function_groups: HashMap::new(),
             loaded_exports:  exports,
             errors:          Vec::new(),
             current_section: None,
@@ -242,16 +257,18 @@ impl Resolver {
             self.loaded_exports.insert(alias, li.exports.clone());
         }
         self.register(program);
+        self.check_function_group_import_collisions();
         self.resolve_program(program);
         self.resolve_function_bodies(program);
         if self.errors.is_empty() {
             Ok(SymbolTable {
-                globals:   self.globals,
-                sections:  self.sections,
-                imports:   self.imports,
-                functions: self.functions,
-                types:     self.types,
-                enums:     self.enums,
+                globals:         self.globals,
+                sections:        self.sections,
+                imports:         self.imports,
+                functions:       self.functions,
+                types:           self.types,
+                enums:           self.enums,
+                function_groups: self.function_groups,
             })
         } else {
             Err(self.errors)
@@ -270,16 +287,18 @@ impl Resolver {
 
         let mut r = Resolver::with_loaded(exports);
         r.register(program);
+        r.check_function_group_import_collisions();
         r.resolve_program(program);
         r.resolve_function_bodies(program);
         if r.errors.is_empty() {
             Ok(SymbolTable {
-                globals:   r.globals,
-                sections:  r.sections,
-                imports:   r.imports,
-                functions: r.functions,
-                types:     r.types,
-                enums:     r.enums,
+                globals:         r.globals,
+                sections:        r.sections,
+                imports:         r.imports,
+                functions:       r.functions,
+                types:           r.types,
+                enums:           r.enums,
+                function_groups: r.function_groups,
             })
         } else {
             Err(r.errors)
@@ -301,6 +320,22 @@ impl Resolver {
             span,
         });
     }
+
+    fn check_function_group_import_collisions(&mut self) {
+        let colliding: Vec<(String, Span)> = self.function_groups.iter()
+            .filter(|(name, _)| self.imports.contains_key(name.as_str()))
+            .map(|(name, entry)| (name.clone(), entry.span.clone()))
+            .collect();
+        for (name, span) in colliding {
+            self.push_error(
+                format!(
+                    "functionGroup '{name}' has the same name as an import alias — \
+                     rename one of them to avoid ambiguous '{name}::...' calls"
+                ),
+                span,
+            );
+        }
+    }
 }
 
 // ── Pass 1: Registration ──────────────────────────────────────────────────────
@@ -317,6 +352,7 @@ impl Resolver {
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.register_type(decl),
                 TopLevelItem::Enum(decl) => self.register_enum(decl),
+                TopLevelItem::FunctionGroup(decl) => self.register_function_group(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }
@@ -404,7 +440,6 @@ impl Resolver {
     }
 
     fn register_function(&mut self, decl: &FunctionDecl) {
-        // Duplicate check
         if self.functions.contains_key(&decl.name) {
             self.push_error(
                 format!("function '{}' is already defined", decl.name),
@@ -412,7 +447,16 @@ impl Resolver {
             );
             return;
         }
-        // camelCase validation
+        let entry = self.build_function_entry(decl);
+        self.functions.insert(decl.name.clone(), entry);
+    }
+
+    /// Builds a `FunctionEntry` for a single function declaration — naming
+    /// convention checks, param validation, and signature capture. Does NOT
+    /// check for duplicate names (top-level and functionGroup callers use
+    /// different maps and different duplicate-detection scopes) and does NOT
+    /// insert into any map — callers own that.
+    fn build_function_entry(&mut self, decl: &FunctionDecl) -> FunctionEntry {
         if !naming::is_camel_case(&decl.name) {
             self.push_error_hint(
                 format!(
@@ -424,7 +468,6 @@ impl Resolver {
             );
             // continue — still register so subsequent errors can be found
         }
-        // Validate params
         let mut params: Vec<(String, SparType)> = Vec::new();
         for param in &decl.params {
             if matches!(param.ty, SparType::Section) {
@@ -449,16 +492,52 @@ impl Resolver {
             }
             params.push((param.name.clone(), param.ty.clone()));
         }
-        self.functions.insert(
-            decl.name.clone(),
-            FunctionEntry {
-                params,
-                ret: decl.ret.clone(),
-                span: decl.name_span.clone(),
-                closure_deps: HashSet::new(), // computed in Pass 3
-                is_private: decl.is_private,
-            },
-        );
+        FunctionEntry {
+            params,
+            ret: decl.ret.clone(),
+            span: decl.name_span.clone(),
+            closure_deps: HashSet::new(), // computed in Pass 3
+            is_private: decl.is_private,
+        }
+    }
+
+    fn register_function_group(&mut self, decl: &FunctionGroupDecl) {
+        if self.function_groups.contains_key(&decl.name) {
+            self.push_error(
+                format!("functionGroup '{}' is already defined", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+        if !naming::is_pascal_case(&decl.name) {
+            self.push_error_hint(
+                format!(
+                    "functionGroup name '{}' must be PascalCase (start with an uppercase letter, no underscores)",
+                    decl.name
+                ),
+                Some(naming::pascal_case_hint(&decl.name)),
+                decl.name_span.clone(),
+            );
+        }
+
+        let mut functions: HashMap<String, FunctionEntry> = HashMap::new();
+        for f in &decl.functions {
+            if functions.contains_key(&f.name) {
+                self.push_error(
+                    format!("function '{}' is already defined in functionGroup '{}'", f.name, decl.name),
+                    f.name_span.clone(),
+                );
+                continue;
+            }
+            let entry = self.build_function_entry(f);
+            functions.insert(f.name.clone(), entry);
+        }
+
+        self.function_groups.insert(decl.name.clone(), FunctionGroupEntry {
+            is_private: decl.is_private,
+            functions,
+            span: decl.span.clone(),
+        });
     }
 
     fn register_import(&mut self, decl: &ImportDecl) {
@@ -739,6 +818,14 @@ impl Resolver {
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.resolve_type(decl),
                 TopLevelItem::Enum(_) => {} // nothing to resolve — no field expressions, registration already validated it
+                TopLevelItem::FunctionGroup(g) => {
+                    for f in &g.functions {
+                        for p in &f.params {
+                            self.check_named_type_exists(&p.ty, &p.span);
+                        }
+                        self.check_named_type_exists(&f.ret, &f.ret_span);
+                    }
+                }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }
@@ -747,38 +834,57 @@ impl Resolver {
     /// Pass 3: resolve function bodies and compute closure dependencies.
     fn resolve_function_bodies(&mut self, program: &Program) {
         for item in &program.items {
-            let TopLevelItem::Function(f) = item else { continue };
-            let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-            let mut local_names = param_names.clone();
-
-            // Resolve all statements (Return is now just another statement)
-            self.resolve_func_stmts(&f.body.stmts, &mut local_names);
-
-            // Exhaustiveness: every path must hit a return
-            if !stmts_always_return(&f.body.stmts) {
-                self.errors.push(SparError::ResolveError {
-                    message: format!(
-                        "function '{}' does not guarantee a value is returned on every \
-                         possible path — add a 'return' that covers the remaining case(s)",
-                        f.name
-                    ),
-                    hint: None,
-                    span: f.span.clone(),
-                });
-            }
-
-            // Unreachable code detection
-            let stmts = f.body.stmts.clone();
-            self.check_unreachable(&stmts);
-
-            // Compute closure deps
-            let mut deps: HashSet<DeclId> = HashSet::new();
-            self.collect_closure_deps_stmts(&f.body.stmts, &param_names, &mut deps);
-
-            if let Some(entry) = self.functions.get_mut(&f.name) {
-                entry.closure_deps = deps;
+            match item {
+                TopLevelItem::Function(f) => {
+                    let deps = self.resolve_one_function_body(f);
+                    if let Some(entry) = self.functions.get_mut(&f.name) {
+                        entry.closure_deps = deps;
+                    }
+                }
+                TopLevelItem::FunctionGroup(g) => {
+                    for f in &g.functions {
+                        let deps = self.resolve_one_function_body(f);
+                        if let Some(entry) = self.function_groups.get_mut(&g.name)
+                            .and_then(|ge| ge.functions.get_mut(&f.name))
+                        {
+                            entry.closure_deps = deps;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+    }
+
+    /// Resolves a single function's body (statement resolution, exhaustive-
+    /// return check, unreachable-code check, closure-dependency collection),
+    /// used for both top-level functions and functions nested in a
+    /// functionGroup. Returns the computed closure deps; the caller decides
+    /// which map to store them in.
+    fn resolve_one_function_body(&mut self, f: &FunctionDecl) -> HashSet<DeclId> {
+        let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        let mut local_names = param_names.clone();
+
+        self.resolve_func_stmts(&f.body.stmts, &mut local_names);
+
+        if !stmts_always_return(&f.body.stmts) {
+            self.errors.push(SparError::ResolveError {
+                message: format!(
+                    "function '{}' does not guarantee a value is returned on every \
+                     possible path — add a 'return' that covers the remaining case(s)",
+                    f.name
+                ),
+                hint: None,
+                span: f.span.clone(),
+            });
+        }
+
+        let stmts = f.body.stmts.clone();
+        self.check_unreachable(&stmts);
+
+        let mut deps: HashSet<DeclId> = HashSet::new();
+        self.collect_closure_deps_stmts(&f.body.stmts, &param_names, &mut deps);
+        deps
     }
 
     fn check_unreachable(&mut self, stmts: &[FuncStmt]) {

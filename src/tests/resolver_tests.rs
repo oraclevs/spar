@@ -680,3 +680,61 @@ fn named_field_access_on_loop_var_resolves() {
     "#;
     resolve_ok(src);
 }
+
+// ── functionGroup registration ───────────────────────────────────────────────
+
+#[test]
+fn function_group_registers_its_functions() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+            private function semantic(hor: float, vet: float) -> int { return 2; }
+        }
+    "#;
+    let table = resolve_ok(src);
+    let group = table.function_groups.get("EdgeInsect").expect("group must be registered");
+    assert!(!group.is_private);
+    assert!(group.functions.contains_key("only"));
+    assert!(group.functions.contains_key("semantic"));
+    assert!(group.functions["semantic"].is_private);
+}
+
+#[test]
+fn function_group_duplicate_name_errors() {
+    let src = r#"
+        functionGroup EdgeInsect { function only() -> int { return 1; } }
+        functionGroup EdgeInsect { function other() -> int { return 2; } }
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("already defined") && errs.contains("EdgeInsect"), "got: {errs}");
+}
+
+#[test]
+fn function_group_duplicate_inner_function_errors() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+            function only() -> int { return 2; }
+        }
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("already defined") && errs.contains("only"), "got: {errs}");
+}
+
+#[test]
+fn function_group_name_must_be_pascal_case() {
+    let src = r#"functionGroup edgeInsect { function only() -> int { return 1; } }"#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("PascalCase"), "got: {errs}");
+}
+
+#[test]
+fn function_group_missing_return_on_all_paths_errors() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function bad() -> int { }
+        }
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("does not guarantee a value is returned"), "got: {errs}");
+}

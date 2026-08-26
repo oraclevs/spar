@@ -96,6 +96,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Function(d)     => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
         TopLevelItem::Type(d)         => d.span.line,
+        TopLevelItem::Enum(d)         => d.span.line,
         TopLevelItem::SchemaFrom(d)   => d.span.line,
     }
 }
@@ -222,6 +223,20 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 format_type_field(field, 1, config, out);
             }
             out.push_str("}\n");
+        }
+
+        TopLevelItem::Enum(ed) => {
+            if ed.exported { out.push_str("export "); }
+            out.push_str("enum ");
+            out.push_str(&ed.name);
+            out.push_str(" {\n");
+            for (i, v) in ed.variants.iter().enumerate() {
+                out.push_str("    ");
+                out.push_str(v);
+                if i + 1 < ed.variants.len() { out.push(','); }
+                out.push('\n');
+            }
+            out.push_str("};\n");
         }
 
         TopLevelItem::SchemaFrom(sf) => {
@@ -731,6 +746,15 @@ mod tests {
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
         assert!(formatted.contains("{ name:"), "got: {formatted}");
+    }
+
+    #[test]
+    fn format_enum_decl_round_trips() {
+        let src = "export enum Devices {\n    Ios,\n    Android,\n};\n";
+        let formatted = fmt(src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+        assert!(formatted.contains("enum Devices"), "got: {formatted}");
     }
 
     #[test]

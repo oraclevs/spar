@@ -16,6 +16,16 @@ pub enum TopLevelItem {
     SchemaSection(SchemaSectionDecl),
     Type(TypeDecl),
     SchemaFrom(SchemaFromDecl),
+    Enum(EnumDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub exported: bool,
+    pub variants: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

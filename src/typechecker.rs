@@ -101,6 +101,7 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Function(f)   => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(_) => {} // Task 4 replaces this with real validation
+                TopLevelItem::Enum(_) => {} // nothing to typecheck — resolver already validated the declaration
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
             }
         }
@@ -2249,6 +2250,7 @@ mod tests {
                         imports: Default::default(),
                         functions: Default::default(),
                         types: Default::default(),
+                        enums: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -2272,6 +2274,7 @@ mod tests {
                         imports: Default::default(),
                         functions: Default::default(),
                         types: Default::default(),
+                        enums: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "section field with expr value must be rejected");

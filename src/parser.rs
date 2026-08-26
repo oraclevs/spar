@@ -108,6 +108,7 @@ impl Parser {
                         TopLevelItem::Section(d) => d.span.clone(),
                         TopLevelItem::Function(d) => d.span.clone(),
                         TopLevelItem::Type(d) => d.span.clone(),
+                        TopLevelItem::Enum(d) => d.span.clone(),
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
@@ -152,6 +153,7 @@ impl Parser {
             Token::LBracket   => self.parse_section(false, false),
             Token::KwFunction => Ok(TopLevelItem::Function(self.parse_function_decl(false)?)),
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
+            Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
             Token::Export => {
@@ -160,7 +162,8 @@ impl Parser {
                     Token::Var      => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
                     Token::LBracket => self.parse_section(true, false),
                     Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(true)?)),
-                    _ => Err(self.error(format!("expected 'var', 'type', or '[' after 'export', found {}", self.peek().human_name()))),
+                    Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(true)?)),
+                    _ => Err(self.error(format!("expected 'var', 'type', 'enum', or '[' after 'export', found {}", self.peek().human_name()))),
                 }
             }
             Token::Private => {
@@ -562,6 +565,29 @@ impl Parser {
     /// Parse `type [Name]{ ... }`. The caller only `peek()`ed the `type`
     /// ident to dispatch here — it hasn't been consumed yet, so this
     /// function consumes it first.
+    fn parse_enum_decl(&mut self, exported: bool) -> Result<EnumDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume the 'enum' ident
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut variants = Vec::new();
+        if !self.at(&Token::RBrace) {
+            let (v, _) = self.expect_ident()?;
+            variants.push(v);
+            while self.at(&Token::Comma) {
+                self.advance();
+                if self.at(&Token::RBrace) {
+                    break; // trailing comma
+                }
+                let (v, _) = self.expect_ident()?;
+                variants.push(v);
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
+        Ok(EnumDecl { name, name_span, exported, variants, span })
+    }
+
     fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'type' ident

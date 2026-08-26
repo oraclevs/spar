@@ -781,3 +781,44 @@ fn parse_object_literal_with_spread() {
     assert!(matches!(&items[0], crate::ast::SectionItem::Spread(_)));
     assert!(matches!(&items[1], crate::ast::SectionItem::Field(_)));
 }
+
+// ── enum declarations ─────────────────────────────────────────────────────────
+
+#[test]
+fn parse_enum_decl_basic() {
+    let src = "enum Devices { Ios, Android, Windows, MacOs };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    assert_eq!(e.name, "Devices");
+    assert!(!e.exported);
+    assert_eq!(e.variants, vec!["Ios", "Android", "Windows", "MacOs"]);
+}
+
+#[test]
+fn parse_exported_enum_decl() {
+    let src = "export enum Devices { Ios, Android };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    assert!(e.exported);
+}
+
+#[test]
+fn parse_enum_decl_trailing_comma_allowed() {
+    let src = "enum Devices { Ios, Android, };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    assert_eq!(e.variants, vec!["Ios", "Android"]);
+}
+
+#[test]
+fn parse_enum_variant_ref_is_two_segment_namespace_ref() {
+    let src = "enum Devices { Android };\nvar x: Devices = Devices::Android;";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[1] else { panic!("expected var") };
+    let Some(crate::ast::Expr::NamespaceRef(nr)) = &v.value else { panic!("expected namespace ref") };
+    assert_eq!(nr.segments, vec!["Devices".to_string(), "Android".to_string()]);
+}

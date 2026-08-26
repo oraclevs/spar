@@ -589,3 +589,34 @@ fn object_literal_errors_on_undefined_inner_reference() {
     let errs = resolve_err(src);
     assert!(errs.contains("ghost"), "got: {errs}");
 }
+
+// ── enum declarations ─────────────────────────────────────────────────────────
+
+#[test]
+fn enum_registers_ok() {
+    resolve_ok("enum Devices { Ios, Android };");
+}
+
+#[test]
+fn enum_duplicate_name_errors() {
+    let errs = resolve_err("enum Devices { Ios };\nenum Devices { Android };\n");
+    assert!(errs.contains("already defined"), "got: {errs}");
+}
+
+#[test]
+fn enum_non_pascal_case_name_errors() {
+    let errs = resolve_err("enum devices { Ios };");
+    assert!(errs.contains("PascalCase"), "got: {errs}");
+}
+
+#[test]
+fn enum_and_type_name_collision_errors() {
+    let errs = resolve_err("type [Devices]{ x: str; }\nenum Devices { Ios };\n");
+    assert!(errs.contains("already declared as a type"), "got: {errs}");
+}
+
+#[test]
+fn type_and_enum_name_collision_errors_reverse_order() {
+    let errs = resolve_err("enum Devices { Ios };\ntype [Devices]{ x: str; }\n");
+    assert!(errs.contains("already declared as an enum"), "got: {errs}");
+}

@@ -113,12 +113,20 @@ pub struct TypeEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnumEntry {
+    pub variants: Vec<String>,
+    pub exported: bool,
+    pub span:     Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     pub globals:   HashMap<String, GlobalEntry>,
     pub sections:  HashMap<Vec<String>, SectionEntry>,
     pub imports:   HashMap<String, ImportEntry>,
     pub functions: HashMap<String, FunctionEntry>,
     pub types:     HashMap<String, TypeEntry>,
+    pub enums:     HashMap<String, EnumEntry>,
 }
 
 impl SymbolTable {
@@ -185,6 +193,7 @@ pub struct Resolver {
     imports:         HashMap<String, ImportEntry>,
     functions:       HashMap<String, FunctionEntry>,
     types:           HashMap<String, TypeEntry>,
+    enums:           HashMap<String, EnumEntry>,
     loaded_exports:  HashMap<String, HashSet<String>>,  // alias → exported names
     errors:          Vec<SparError>,
     current_section: Option<Vec<String>>,
@@ -198,6 +207,7 @@ impl Resolver {
             imports:         HashMap::new(),
             functions:       HashMap::new(),
             types:           HashMap::new(),
+            enums:           HashMap::new(),
             loaded_exports:  HashMap::new(),
             errors:          Vec::new(),
             current_section: None,
@@ -211,6 +221,7 @@ impl Resolver {
             imports:         HashMap::new(),
             functions:       HashMap::new(),
             types:           HashMap::new(),
+            enums:           HashMap::new(),
             loaded_exports:  exports,
             errors:          Vec::new(),
             current_section: None,
@@ -240,6 +251,7 @@ impl Resolver {
                 imports:   self.imports,
                 functions: self.functions,
                 types:     self.types,
+                enums:     self.enums,
             })
         } else {
             Err(self.errors)
@@ -267,6 +279,7 @@ impl Resolver {
                 imports:   r.imports,
                 functions: r.functions,
                 types:     r.types,
+                enums:     r.enums,
             })
         } else {
             Err(r.errors)
@@ -303,6 +316,7 @@ impl Resolver {
                 TopLevelItem::Function(decl)  => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.register_type(decl),
+                TopLevelItem::Enum(decl) => self.register_enum(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }
@@ -338,8 +352,52 @@ impl Resolver {
             return;
         }
 
+        if self.enums.contains_key(&decl.name) {
+            self.push_error(
+                format!("'{}' is already declared as an enum — a type can't share a name with an enum", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+
         self.types.insert(decl.name.clone(), TypeEntry {
             fields:   decl.fields.clone(),
+            exported: decl.exported,
+            span:     decl.span.clone(),
+        });
+    }
+
+    fn register_enum(&mut self, decl: &EnumDecl) {
+        if !naming::is_pascal_case(&decl.name) {
+            self.push_error_hint(
+                format!(
+                    "enum name '{}' must be PascalCase (start with an uppercase letter, no underscores)",
+                    decl.name
+                ),
+                Some(naming::pascal_case_hint(&decl.name)),
+                decl.name_span.clone(),
+            );
+            // Do NOT return — continue registering so other errors can be found
+        }
+
+        if self.types.contains_key(&decl.name) {
+            self.push_error(
+                format!("'{}' is already declared as a type — an enum can't share a name with a type", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+
+        if self.enums.contains_key(&decl.name) {
+            self.push_error(
+                format!("enum '{}' is already defined", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+
+        self.enums.insert(decl.name.clone(), EnumEntry {
+            variants: decl.variants.clone(),
             exported: decl.exported,
             span:     decl.span.clone(),
         });
@@ -680,6 +738,7 @@ impl Resolver {
                 } // function BODIES still handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.resolve_type(decl),
+                TopLevelItem::Enum(_) => {} // nothing to resolve — no field expressions, registration already validated it
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
             }
         }

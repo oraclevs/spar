@@ -822,3 +822,55 @@ fn parse_enum_variant_ref_is_two_segment_namespace_ref() {
     let Some(crate::ast::Expr::NamespaceRef(nr)) = &v.value else { panic!("expected namespace ref") };
     assert_eq!(nr.segments, vec!["Devices".to_string(), "Android".to_string()]);
 }
+
+#[test]
+fn parse_function_group_decl() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+    "#;
+    let prog = parse_ok(src);
+    assert_eq!(prog.items.len(), 1);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::FunctionGroup(g) => {
+            assert_eq!(g.name, "EdgeInsect");
+            assert!(!g.is_private);
+            assert_eq!(g.functions.len(), 1);
+            assert_eq!(g.functions[0].name, "only");
+        }
+        other => panic!("expected FunctionGroup, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_private_function_group_with_private_inner_function() {
+    let src = r#"
+        private functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+            private function semantic(hor: float, vet: float) -> int { return 2; }
+        }
+    "#;
+    let prog = parse_ok(src);
+    match &prog.items[0] {
+        crate::ast::TopLevelItem::FunctionGroup(g) => {
+            assert!(g.is_private);
+            assert_eq!(g.functions.len(), 2);
+            assert!(!g.functions[0].is_private);
+            assert!(g.functions[1].is_private);
+        }
+        other => panic!("expected FunctionGroup, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_function_group_rejects_nested_function_group() {
+    let src = r#"
+        functionGroup Outer {
+            functionGroup Inner {
+                function f() -> int { return 1; }
+            }
+        }
+    "#;
+    parse_err(src);
+}

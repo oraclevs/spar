@@ -109,6 +109,7 @@ impl Parser {
                         TopLevelItem::Function(d) => d.span.clone(),
                         TopLevelItem::Type(d) => d.span.clone(),
                         TopLevelItem::Enum(d) => d.span.clone(),
+                        TopLevelItem::FunctionGroup(d) => d.span.clone(),
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
@@ -154,6 +155,7 @@ impl Parser {
             Token::KwFunction => Ok(TopLevelItem::Function(self.parse_function_decl(false)?)),
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
             Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
+            Token::Ident(s) if s == "functionGroup" => Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(false)?)),
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
             Token::Export => {
@@ -185,9 +187,12 @@ impl Parser {
                     Token::KwFunction => {
                         Ok(TopLevelItem::Function(self.parse_function_decl(true)?))
                     }
+                    Token::Ident(s) if s == "functionGroup" => {
+                        Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(true)?))
+                    }
                     _ => {
                         Err(self.error(format!(
-                            "'private' must be followed by 'function' or a section declaration '[SectionName]{{...}}', found {}",
+                            "'private' must be followed by 'function', 'functionGroup', or a section declaration '[SectionName]{{...}}', found {}",
                             self.peek().human_name()
                         )))
                     }
@@ -198,7 +203,7 @@ impl Parser {
                  it cannot appear mid-file"
             )),
             _ => Err(self.error(format!(
-                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'type', 'Schema', or '[' to start a declaration",
+                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'Schema', or '[' to start a declaration",
                 self.peek().human_name()
             ))),
         }
@@ -1152,6 +1157,24 @@ impl Parser {
             is_private,
             span,
         })
+    }
+
+    fn parse_function_group_decl(&mut self, is_private: bool) -> Result<FunctionGroupDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume the 'functionGroup' ident
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut functions = Vec::new();
+        while self.at(&Token::KwFunction) || self.at(&Token::Private) {
+            if self.at(&Token::Private) {
+                self.advance();
+                functions.push(self.parse_function_decl(true)?);
+            } else {
+                functions.push(self.parse_function_decl(false)?);
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(FunctionGroupDecl { is_private, name, name_span, functions, span })
     }
 
     fn parse_func_stmt(&mut self) -> Result<FuncStmt, SparError> {

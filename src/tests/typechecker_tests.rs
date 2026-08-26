@@ -693,3 +693,39 @@ fn plain_string_literal_rejected_for_enum_typed_field() {
     let err = check_err("enum Devices { Ios, Android };\nvar x: Devices = \"Android\";\n");
     assert!(err.contains("Devices") || err.contains("str"), "got: {err}");
 }
+
+#[test]
+fn named_field_access_on_global_var_has_correct_type() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: str = person::name;
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn named_field_access_on_global_var_type_mismatch_errors() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: int = person::name;
+    "#;
+    let errs = check_err(src);
+    assert!(errs.contains("type mismatch"), "got: {errs}");
+}
+
+#[test]
+fn named_field_access_on_loop_var_has_correct_type() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person::name == "jude" { return 6; }
+                return 0;
+            }
+            return 0;
+        }
+    "#;
+    check_ok(src);
+}

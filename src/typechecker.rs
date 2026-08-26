@@ -923,6 +923,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// A `TypeField`'s own declared shape, expressed as the `SparType` it
+    /// evaluates to when read through `Named::field` — not to be confused
+    /// with `expand_type_field_shape` below, which expands `Named` shapes
+    /// into their nested fields for structural comparison instead.
+    fn field_shape_to_type(&self, shape: &TypeFieldShape) -> SparType {
+        match shape {
+            TypeFieldShape::Primitive(ty) => ty.clone(),
+            TypeFieldShape::Named(name) => SparType::Named(name.clone()),
+            TypeFieldShape::Section(_) => SparType::Section,
+        }
+    }
+
     /// Expand a `TypeFieldShape` into its comparable kind — `Named(X)`
     /// expands to `X`'s own registered fields, same "resolve once, expand"
     /// semantics `SchemaFrom` already uses (loader.rs).
@@ -1000,6 +1012,12 @@ impl<'a> TypeChecker<'a> {
             [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
                 Some(SparType::Named(ns.clone()))
             }
+            [ns, name] if self.global_named_type(ns).is_some() => {
+                let type_name = self.global_named_type(ns)?;
+                self.symbols.types.get(&type_name)
+                    .and_then(|te| te.fields.iter().find(|f| &f.name == name))
+                    .map(|f| self.field_shape_to_type(&f.shape))
+            }
             [ns, name] => {
                 let key = vec![ns.clone()];
                 self.symbols.lookup_section(&key)
@@ -1012,6 +1030,15 @@ impl<'a> TypeChecker<'a> {
                     .and_then(|s| s.fields.get(field.as_str()))
                     .and_then(|f| f.ty.clone())
             }
+            _ => None,
+        }
+    }
+
+    /// If `name` is a global var whose declared type is `SparType::Named(X)`,
+    /// returns `X`. `None` for any other global (or a non-Named type).
+    fn global_named_type(&self, name: &str) -> Option<String> {
+        match self.symbols.lookup_global(name)? {
+            GlobalEntry::Var { ty: SparType::Named(n), .. } => Some(n.clone()),
             _ => None,
         }
     }
@@ -1952,6 +1979,22 @@ impl<'a> TypeChecker<'a> {
                 if let Some(ty) = locals.get(name) {
                     return Some(ty.clone());
                 }
+                self.infer_type(expr)
+            }
+            Expr::NamespaceRef(nr) if nr.segments.len() == 2 => {
+                let ns = &nr.segments[0];
+                let field = &nr.segments[1];
+                if let Some(ty) = locals.get(ns) {
+                    return match ty {
+                        SparType::Named(type_name) => self.symbols.types.get(type_name)
+                            .and_then(|te| te.fields.iter().find(|f| &f.name == field))
+                            .map(|f| self.field_shape_to_type(&f.shape)),
+                        _ => None, // local exists but isn't a Named-type value
+                    };
+                }
+                // `ns` isn't a local (e.g. it's a global var, section, or
+                // enum) — defer to the non-locals path, which now also
+                // handles the global-var case (see infer_namespace_type above).
                 self.infer_type(expr)
             }
             Expr::Call { name, .. } => {

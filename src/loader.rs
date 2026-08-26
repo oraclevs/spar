@@ -131,6 +131,7 @@ fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelIt
         TopLevelItem::Section(mut s) => { s.exported = false; s.private = true; TopLevelItem::Section(s) }
         TopLevelItem::Function(mut f) => { f.is_private = true; TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.exported = false; TopLevelItem::Type(t) }
+        TopLevelItem::Enum(mut e) => { e.exported = false; TopLevelItem::Enum(e) }
         other => other,
     }
 }
@@ -155,6 +156,7 @@ fn retag_top_level_span(item: crate::ast::TopLevelItem, span: &crate::error::Spa
         TopLevelItem::Section(mut s) => { s.span = span.clone(); TopLevelItem::Section(s) }
         TopLevelItem::Function(mut f) => { f.span = span.clone(); f.name_span = span.clone(); TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.span = span.clone(); t.name_span = span.clone(); TopLevelItem::Type(t) }
+        TopLevelItem::Enum(mut e) => { e.span = span.clone(); e.name_span = span.clone(); TopLevelItem::Enum(e) }
         other => other,
     }
 }
@@ -169,6 +171,7 @@ fn rename_top_level_item(item: crate::ast::TopLevelItem, new_name: &str) -> crat
         }
         TopLevelItem::Function(mut f) => { f.name = new_name.to_string(); TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.name = new_name.to_string(); TopLevelItem::Type(t) }
+        TopLevelItem::Enum(mut e) => { e.name = new_name.to_string(); TopLevelItem::Enum(e) }
         other => other,
     }
 }
@@ -214,6 +217,7 @@ fn splice_selective(
             TopLevelItem::Section(s) if s.exported => s.path.first().map(|n| (n.as_str(), it)),
             TopLevelItem::Function(f) if !f.is_private => Some((f.name.as_str(), it)),
             TopLevelItem::Type(t) if t.exported => Some((t.name.as_str(), it)),
+            TopLevelItem::Enum(e) if e.exported => Some((e.name.as_str(), it)),
             _ => None,
         }
     }).collect();
@@ -233,10 +237,11 @@ fn splice_selective(
                 });
             }
             Some((_, item)) => {
-                if types_only && !matches!(item, TopLevelItem::Type(_)) {
+                if types_only && !matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)) {
                     errors.push(SparError::ResolveError {
                         message: format!(
-                            "'{}' is not a type — `import type {{...}}` can only bring in `type` declarations",
+                            "'{}' is not a type or enum — `import type {{...}}` can only bring in \
+                             `type` or `enum` declarations",
                             req.name
                         ),
                         hint: None,
@@ -275,7 +280,7 @@ fn splice_selective(
             for name in refs {
                 if pulled.insert(name.clone()) {
                     match available.iter().find(|(n, _)| *n == name) {
-                        Some((_, dep_item @ TopLevelItem::Type(_))) => {
+                        Some((_, dep_item @ (TopLevelItem::Type(_) | TopLevelItem::Enum(_)))) => {
                             let localized = localize_visibility((*dep_item).clone());
                             spliced.push(retag_top_level_span(localized, &decl.span));
                         }
@@ -1236,6 +1241,47 @@ mod tests {
             it, TopLevelItem::Type(t) if t.name == "Libs"
         ));
         assert!(has_libs, "Libs must be transitively spliced in, got items: {:?}", program.items);
+    }
+
+    #[test]
+    fn expand_imports_type_selective_can_import_an_enum_directly() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            "export enum Protocol { Http, Https };\n",
+        ).unwrap();
+        let src = r#"import type { Protocol } from "types.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let has_protocol = program.items.iter().any(|it| matches!(
+            it, TopLevelItem::Enum(e) if e.name == "Protocol"
+        ));
+        assert!(has_protocol, "Protocol enum must be spliced in, got items: {:?}", program.items);
+    }
+
+    #[test]
+    fn expand_imports_type_selective_transitively_pulls_dependent_enum() {
+        // A type's field can reference an enum, not just another type —
+        // the transitive pull must handle both.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            concat!(
+                "export enum RestartPolicy { Always, Never };\n",
+                "export type [Container]{ name: str; restart: RestartPolicy; }\n",
+            ),
+        ).unwrap();
+        let src = r#"import type { Container } from "types.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let has_restart_policy = program.items.iter().any(|it| matches!(
+            it, TopLevelItem::Enum(e) if e.name == "RestartPolicy"
+        ));
+        assert!(has_restart_policy, "RestartPolicy enum must be transitively spliced in, got items: {:?}", program.items);
     }
 
     // ── Phase 3: import type inside @SchemaFile (Task 5) ─────────────────

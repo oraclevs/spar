@@ -1081,19 +1081,25 @@ impl Evaluator {
         }
         self.call_depth += 1;
 
-        // Cross-file call: alias::fn(args)
-        if let Some(sep) = name.find("::") {
-            let alias = &name[..sep];
-            let fn_name = &name[sep + 2..];
+        let segments: Vec<&str> = name.split("::").collect();
+
+        if segments.len() == 3 {
+            // Cross-file functionGroup call: alias::Group::fn(args)
+            let alias = segments[0];
+            let group = segments[1];
+            let fn_name = segments[2];
             if let Some(imp_prog) = self.imported_programs.get(alias).cloned() {
                 let func_decl = imp_prog.items.iter().find_map(|item| {
-                    if let TopLevelItem::Function(f) = item {
-                        if f.name == fn_name && !f.is_private { return Some(f.clone()); }
+                    if let TopLevelItem::FunctionGroup(g) = item {
+                        if g.name == group && !g.is_private {
+                            return g.functions.iter()
+                                .find(|f| f.name == fn_name && !f.is_private)
+                                .cloned();
+                        }
                     }
                     None
                 });
                 if let Some(fd) = func_decl {
-                    // Resolve + build minimal symbols for the imported program
                     let imp_sym = crate::resolver::Resolver::new()
                         .resolve(&imp_prog, &[])
                         .unwrap_or_else(|_| self.symbols.clone());
@@ -1102,7 +1108,6 @@ impl Evaluator {
                         let val = self.eval_expr(&arg.value, caller_scope)?;
                         local_scope.insert(arg.param_name.clone(), val);
                     }
-                    // Create sub-evaluator for imported program
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.call_depth = self.call_depth;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
@@ -1112,9 +1117,64 @@ impl Evaluator {
                 }
             }
             self.call_depth -= 1;
-            return Err(EvalErr::ImportRef { alias: alias.to_string(), symbol: fn_name.to_string() });
+            return Err(EvalErr::ImportRef { alias: alias.to_string(), symbol: format!("{group}::{fn_name}") });
         }
 
+        if segments.len() == 2 {
+            let ns = segments[0];
+            let fn_name = segments[1];
+
+            // Local functionGroup call: Group::fn(args)
+            let group_call = self.program.items.iter().find_map(|item| {
+                if let TopLevelItem::FunctionGroup(g) = item {
+                    if g.name == ns {
+                        return g.functions.iter().find(|f| f.name == fn_name).cloned();
+                    }
+                }
+                None
+            });
+            if let Some(fd) = group_call {
+                let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
+                for arg in args {
+                    let val = self.eval_expr(&arg.value, caller_scope)?;
+                    local_scope.insert(arg.param_name.clone(), val);
+                }
+                let result = self.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                    .unwrap_or(ConfigValue::Int(0));
+                self.call_depth -= 1;
+                return Ok(result);
+            }
+
+            // Cross-file plain function call: alias::fn(args)
+            if let Some(imp_prog) = self.imported_programs.get(ns).cloned() {
+                let func_decl = imp_prog.items.iter().find_map(|item| {
+                    if let TopLevelItem::Function(f) = item {
+                        if f.name == fn_name && !f.is_private { return Some(f.clone()); }
+                    }
+                    None
+                });
+                if let Some(fd) = func_decl {
+                    let imp_sym = crate::resolver::Resolver::new()
+                        .resolve(&imp_prog, &[])
+                        .unwrap_or_else(|_| self.symbols.clone());
+                    let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
+                    for arg in args {
+                        let val = self.eval_expr(&arg.value, caller_scope)?;
+                        local_scope.insert(arg.param_name.clone(), val);
+                    }
+                    let mut sub = Evaluator::new(imp_sym, imp_prog);
+                    sub.call_depth = self.call_depth;
+                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                        .unwrap_or(ConfigValue::Int(0));
+                    self.call_depth -= 1;
+                    return Ok(result);
+                }
+            }
+            self.call_depth -= 1;
+            return Err(EvalErr::ImportRef { alias: ns.to_string(), symbol: fn_name.to_string() });
+        }
+
+        // 1 segment: local plain function call.
         let func_decl = self.program.items.iter().find_map(|item| {
             if let TopLevelItem::Function(f) = item {
                 if f.name == name { return Some(f.clone()); }
@@ -1122,14 +1182,12 @@ impl Evaluator {
             None
         }).unwrap(); // resolver ensures function exists
 
-        // Evaluate args in caller scope
         let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
         for arg in args {
             let val = self.eval_expr(&arg.value, caller_scope)?;
             local_scope.insert(arg.param_name.clone(), val);
         }
 
-        // Execute body statements; a Return statement propagates its value out
         let result = self.eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
             .unwrap(); // resolver ensures every path returns
 

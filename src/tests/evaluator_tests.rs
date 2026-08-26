@@ -507,3 +507,27 @@ fn eval_original_bug_report_repro() {
     let r = eval_src(src);
     assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(6));
 }
+
+#[test]
+fn eval_function_group_call() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 5; }
+        }
+        var result: int = EdgeInsect::only();
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(5));
+}
+
+#[test]
+fn eval_function_group_call_with_args() {
+    let src = r#"
+        functionGroup Math {
+            function double(n: int) -> int { return n + n; }
+        }
+        var result: int = Math::double(n: 21);
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(42));
+}

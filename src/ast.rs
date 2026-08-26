@@ -17,6 +17,7 @@ pub enum TopLevelItem {
     Type(TypeDecl),
     SchemaFrom(SchemaFromDecl),
     Enum(EnumDecl),
+    FunctionGroup(FunctionGroupDecl),
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +323,15 @@ pub struct FunctionDecl {
     pub ret_span: Span,
     pub body: FunctionBody,
     pub is_private: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionGroupDecl {
+    pub is_private: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub functions: Vec<FunctionDecl>,
     pub span: Span,
 }
 

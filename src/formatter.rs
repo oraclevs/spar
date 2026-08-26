@@ -537,8 +537,10 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
                         out.push_str(&indent(depth + 1, config));
                         out.push_str(&rf.name);
                         out.push_str(": ");
-                        out.push_str(&format_type(&rf.ty));
-                        out.push_str(" = ");
+                        if let Some(ty) = &rf.ty {
+                            out.push_str(&format_type(ty));
+                            out.push_str(" = ");
+                        }
                         format_expr(&rf.value, 0, out);
                         out.push_str(";\n");
                     }

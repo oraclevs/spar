@@ -1120,6 +1120,9 @@ impl Resolver {
                         }
                         ReturnValue::SectionBlock(fields) => {
                             for rf in fields {
+                                if let Some(ty) = &rf.ty {
+                                    self.check_named_type_exists(ty, &rf.span);
+                                }
                                 if let Err(err) = self.resolve_expr_with_locals(&rf.value, local_names) {
                                     self.errors.push(err);
                                 }

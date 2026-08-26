@@ -551,6 +551,127 @@ impl<'a> TypeChecker<'a> {
         self.validate_type_fields(nested_type_fields, &nested_config, type_name, &nested_path);
     }
 
+    /// Locals-aware twin of `validate_type_fields_with_coverage`, for an
+    /// object literal inside a function body (a local var's value, a
+    /// return value) whose field expressions may reference params/locals
+    /// — invisible to the global-scope `self.infer_type`. Does not support
+    /// mixed spread+field coverage (out of scope for this pass); a spread
+    /// present among `config_fields`' source items is simply invisible to
+    /// the required/extra-field checks below (same "can't statically know"
+    /// precedent used elsewhere for spreads, just without the coverage
+    /// tracking `validate_type_fields_with_coverage` layers on top).
+    fn validate_type_fields_with_locals(
+        &mut self,
+        type_fields: &[TypeField],
+        config_fields: &[&FieldDecl],
+        type_name: &str,
+        path_str: &str,
+        locals: &HashMap<String, SparType>,
+    ) {
+        for tf in type_fields {
+            let cf = config_fields.iter().find(|f| f.name == tf.name);
+            match cf {
+                None if !tf.optional => {
+                    self.push_type_error(
+                        format!(
+                            "section `[{}]` is missing required field `{}` (required by type `{}`)",
+                            path_str, tf.name, type_name
+                        ),
+                        None,
+                        tf.span.clone(),
+                    );
+                }
+                None => {} // optional, fine to omit
+                Some(cf) => match &tf.shape {
+                    TypeFieldShape::Primitive(expected_ty) => {
+                        let actual_ty = match &cf.ty {
+                            Some(t) => Some(t.clone()),
+                            None => match &cf.value {
+                                Some(FieldValue::Expr(e)) => self.infer_type_with_locals(e, locals),
+                                _ => None,
+                            },
+                        };
+                        match actual_ty {
+                            Some(actual) if &actual != expected_ty => {
+                                self.push_type_error(
+                                    format!(
+                                        "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
+                                        path_str, tf.name, display_type(&actual), type_name, display_type(expected_ty),
+                                    ),
+                                    None,
+                                    cf.span.clone(),
+                                );
+                            }
+                            Some(_) => {} // matches
+                            None => {
+                                self.push_type_error(
+                                    format!(
+                                        "field `{}::{}`'s value type could not be determined; type `{}` expects `{}`",
+                                        path_str, tf.name, type_name, display_type(expected_ty),
+                                    ),
+                                    None,
+                                    cf.span.clone(),
+                                );
+                            }
+                        }
+                    }
+                    TypeFieldShape::Section(nested_type_fields) => {
+                        self.validate_nested_type_field_with_locals(cf, nested_type_fields, type_name, path_str, &tf.name, locals);
+                    }
+                    TypeFieldShape::Named(other_type_name) => {
+                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned() else {
+                            continue; // resolver already reported the undefined type
+                        };
+                        self.validate_nested_type_field_with_locals(cf, &other_entry.fields, other_type_name, path_str, &tf.name, locals);
+                    }
+                },
+            }
+        }
+
+        for cf in config_fields {
+            if !type_fields.iter().any(|tf| tf.name == cf.name) {
+                self.push_type_error(
+                    format!(
+                        "field `{}::{}` is not declared in type `{}`",
+                        path_str, cf.name, type_name
+                    ),
+                    None,
+                    cf.span.clone(),
+                );
+            }
+        }
+    }
+
+    fn validate_nested_type_field_with_locals(
+        &mut self,
+        cf: &FieldDecl,
+        nested_type_fields: &[TypeField],
+        type_name: &str,
+        path_str: &str,
+        field_name: &str,
+        locals: &HashMap<String, SparType>,
+    ) {
+        let nested_items: &[SectionItem] = match &cf.value {
+            Some(FieldValue::Nested(items)) => items,
+            _ => {
+                self.push_type_error(
+                    format!(
+                        "field `{}::{}` must have an inline section value (`{{ ... }}`)",
+                        path_str, field_name
+                    ),
+                    None,
+                    cf.span.clone(),
+                );
+                return;
+            }
+        };
+        let nested_config: Vec<&FieldDecl> = nested_items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        let nested_path = format!("{}::{}", path_str, field_name);
+        self.validate_type_fields_with_locals(nested_type_fields, &nested_config, type_name, &nested_path, locals);
+    }
+
     /// A spread MIXED with explicit fields (not spread-only, which gets
     /// `check_spread_against_shape` above) — each *resolvable* spread's
     /// contributed field names count toward satisfying required fields,
@@ -1374,24 +1495,56 @@ impl<'a> TypeChecker<'a> {
                     if let Err(e) = self.check_expr_with_locals(&lv.value, local_types) {
                         self.errors.push(e);
                     }
-                    let actual = self.infer_type_with_locals(&lv.value, local_types);
-                    match actual {
-                        Some(ref t) if t == &lv.ty => {
-                            local_types.insert(lv.name.clone(), lv.ty.clone());
+
+                    let handled_as_named_object = match (&lv.ty, &lv.value) {
+                        (SparType::Named(name), Expr::Object(items, _)) => {
+                            let config_fields: Vec<&FieldDecl> = items.iter()
+                                .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                                .collect();
+                            if let Some(entry) = self.symbols.types.get(name).cloned() {
+                                self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, &lv.name, local_types);
+                            }
+                            true
                         }
-                        Some(t) => self.errors.push(SparError::TypeError {
-                            message: format!(
-                                "local variable '{}' declared as '{}' but assigned a value of type '{}'",
-                                lv.name, display_type(&lv.ty), display_type(&t)
-                            ),
-                            hint: None,
-                            span: lv.span.clone(),
-                        }),
-                        None => self.errors.push(SparError::TypeError {
-                            message: format!("cannot infer type of var '{}'", lv.name),
-                            hint: None,
-                            span: lv.span.clone(),
-                        }),
+                        (SparType::List(elem_ty), Expr::List(elems, _)) if matches!(elem_ty.as_ref(), SparType::Named(_)) => {
+                            let SparType::Named(name) = elem_ty.as_ref() else { unreachable!() };
+                            for elem in elems {
+                                if let Expr::Object(items, _) = elem {
+                                    let config_fields: Vec<&FieldDecl> = items.iter()
+                                        .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                                        .collect();
+                                    if let Some(entry) = self.symbols.types.get(name).cloned() {
+                                        self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, &lv.name, local_types);
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+
+                    if handled_as_named_object {
+                        local_types.insert(lv.name.clone(), lv.ty.clone());
+                    } else {
+                        let actual = self.infer_type_with_locals(&lv.value, local_types);
+                        match actual {
+                            Some(ref t) if t == &lv.ty => {
+                                local_types.insert(lv.name.clone(), lv.ty.clone());
+                            }
+                            Some(t) => self.errors.push(SparError::TypeError {
+                                message: format!(
+                                    "local variable '{}' declared as '{}' but assigned a value of type '{}'",
+                                    lv.name, display_type(&lv.ty), display_type(&t)
+                                ),
+                                hint: None,
+                                span: lv.span.clone(),
+                            }),
+                            None => self.errors.push(SparError::TypeError {
+                                message: format!("cannot infer type of var '{}'", lv.name),
+                                hint: None,
+                                span: lv.span.clone(),
+                            }),
+                        }
                     }
                 }
                 FuncStmt::Return(ret_value, span) => {
@@ -1442,13 +1595,28 @@ impl<'a> TypeChecker<'a> {
                     if let Err(e) = self.check_expr_with_locals(&field.value, local_types) {
                         self.errors.push(e);
                     }
+                    let Some(field_ty) = &field.ty else {
+                        // A `section` return has no declared type to infer
+                        // this field's type from — same "must be explicit"
+                        // precedent as an untyped top-level section.
+                        self.errors.push(SparError::TypeError {
+                            message: format!(
+                                "return field '{}' has no type — a function returning 'section' \
+                                 has nothing to infer field types from; declare each field's type explicitly",
+                                field.name
+                            ),
+                            hint: None,
+                            span: field.span.clone(),
+                        });
+                        continue;
+                    };
                     let actual = self.infer_type_with_locals(&field.value, local_types);
-                    if actual.as_ref() != Some(&field.ty) {
+                    if actual.as_ref() != Some(field_ty) {
                         if let Some(actual_ty) = actual {
                             self.errors.push(SparError::TypeError {
                                 message: format!(
                                     "return field '{}' declared as '{}' but value has type '{}'",
-                                    field.name, display_type(&field.ty), display_type(&actual_ty)
+                                    field.name, display_type(field_ty), display_type(&actual_ty)
                                 ),
                                 hint: None,
                                 span: field.span.clone(),
@@ -1465,6 +1633,47 @@ impl<'a> TypeChecker<'a> {
                     hint: None,
                     span: span.clone(),
                 });
+            }
+            (SparType::Named(name), ReturnValue::SectionBlock(fields)) => {
+                let Some(entry) = self.symbols.types.get(name).cloned() else { return }; // resolver already reported it
+                for rf in fields {
+                    if let Err(e) = self.check_expr_with_locals(&rf.value, local_types) {
+                        self.errors.push(e);
+                    }
+                }
+                let config_fields: Vec<FieldDecl> = fields.iter().map(|rf| FieldDecl {
+                    name: rf.name.clone(),
+                    optional: false,
+                    ty: rf.ty.clone(),
+                    value: Some(FieldValue::Expr(rf.value.clone())),
+                    span: rf.span.clone(),
+                }).collect();
+                let config_field_refs: Vec<&FieldDecl> = config_fields.iter().collect();
+                self.validate_type_fields_with_locals(&entry.fields, &config_field_refs, name, "return", local_types);
+            }
+            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _))) if matches!(elem_ty.as_ref(), SparType::Named(_)) => {
+                let SparType::Named(name) = elem_ty.as_ref() else { unreachable!() };
+                let Some(entry) = self.symbols.types.get(name).cloned() else { return };
+                for item in items {
+                    if let Expr::Object(obj_items, _) = item {
+                        if let Err(e) = self.check_expr_with_locals(item, local_types) {
+                            self.errors.push(e);
+                        }
+                        let config_fields: Vec<&FieldDecl> = obj_items.iter()
+                            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                            .collect();
+                        self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, "return", local_types);
+                    } else {
+                        self.errors.push(SparError::TypeError {
+                            message: format!(
+                                "function declares return type '[{}]' but this list element is not an object literal",
+                                name
+                            ),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    }
+                }
             }
             (ty, ReturnValue::Expr(e)) => {
                 if let Err(err) = self.check_expr_with_locals(e, local_types) {

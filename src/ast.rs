@@ -366,7 +366,7 @@ pub enum ReturnValue {
 #[derive(Debug, Clone)]
 pub struct ReturnField {
     pub name: String,
-    pub ty: SparType,
+    pub ty: Option<SparType>,
     pub value: Expr,
     pub span: Span,
 }

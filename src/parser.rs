@@ -1145,9 +1145,13 @@ impl Parser {
                     let field_span = self.peek_span();
                     let (field_name, _) = self.expect_ident()?;
                     self.expect(&Token::Colon)?;
-                    let ty = self.parse_type()?;
-                    self.expect(&Token::Eq)?;
-                    let value = self.parse_or()?;
+                    let (ty, value) = if self.at_type_start() {
+                        let ty = self.parse_type()?;
+                        self.expect(&Token::Eq)?;
+                        (Some(ty), self.parse_or()?)
+                    } else {
+                        (None, self.parse_or()?)
+                    };
                     self.expect(&Token::Semicolon)?;
                     fields.push(ReturnField { name: field_name, ty, value, span: field_span });
                 }

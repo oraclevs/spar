@@ -585,3 +585,63 @@ fn nested_object_literal_inside_object_literal_validates_recursively() {
         "var x: Leaf = { name: \"a\"; sub: { label: \"b\"; }; };\n",
     ));
 }
+
+// ── Function-body-local shape validation ──────────────────────────────────────
+
+#[test]
+fn local_var_object_literal_matching_named_type_passes() {
+    // Confirmed via resolver.rs::check_ns_ref_with_locals: this language has
+    // no field-access-on-a-local-variable syntax (`local.field`/`local::field`
+    // only resolves for top-level SECTIONS, not locals) — so this test only
+    // exercises that the local var's own declaration typechecks, not that
+    // its fields are later readable.
+    check_ok(concat!(
+        "type [Leaf]{ name: str; }\n",
+        "function f() -> str {\n",
+        "    var l: Leaf = { name: \"a\"; };\n",
+        "    return \"ok\";\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn function_return_bare_object_literal_matching_named_type_passes() {
+    check_ok(concat!(
+        "type [Leaf]{ name: str; size: int; }\n",
+        "function makeLeaf(n: str) -> Leaf {\n",
+        "    return { name: n; size: 0; };\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn function_return_bare_object_literal_missing_field_errors() {
+    let err = check_err(concat!(
+        "type [Leaf]{ name: str; size: int; }\n",
+        "function makeLeaf(n: str) -> Leaf {\n",
+        "    return { name: n; };\n",
+        "}\n",
+    ));
+    assert!(err.contains("missing required field"), "got: {err}");
+}
+
+#[test]
+fn function_return_list_of_named_type_passes() {
+    check_ok(concat!(
+        "type [Leaf]{ name: str; }\n",
+        "function makeLeaves() -> [Leaf] {\n",
+        "    return [{ name: \"a\"; }, { name: \"b\"; }];\n",
+        "}\n",
+    ));
+}
+
+// Regression guard: the EXISTING `-> section { return { field: type = value; }; }`
+// form must keep working exactly as before.
+#[test]
+fn section_return_block_with_explicit_types_still_works_regression() {
+    check_ok(concat!(
+        "function borderConf() -> section {\n",
+        "    return { sides: [int] = [2, 4]; width: int = 5; };\n",
+        "}\n",
+    ));
+}

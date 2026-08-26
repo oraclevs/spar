@@ -97,6 +97,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::SchemaSection(d) => d.span.line,
         TopLevelItem::Type(d)         => d.span.line,
         TopLevelItem::Enum(d)         => d.span.line,
+        TopLevelItem::FunctionGroup(d) => d.span.line,
         TopLevelItem::SchemaFrom(d)   => d.span.line,
     }
 }
@@ -237,6 +238,32 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push('\n');
             }
             out.push_str("};\n");
+        }
+
+        TopLevelItem::FunctionGroup(gd) => {
+            if gd.is_private { out.push_str("private "); }
+            out.push_str("functionGroup ");
+            out.push_str(&gd.name);
+            out.push_str(" {\n");
+            for f in &gd.functions {
+                out.push_str("    ");
+                if f.is_private { out.push_str("private "); }
+                out.push_str("function ");
+                out.push_str(&f.name);
+                out.push('(');
+                for (i, p) in f.params.iter().enumerate() {
+                    if i > 0 { out.push_str(", "); }
+                    out.push_str(&p.name);
+                    out.push_str(": ");
+                    out.push_str(&format_type(&p.ty));
+                }
+                out.push_str(") -> ");
+                out.push_str(&format_type(&f.ret));
+                out.push_str(" {\n");
+                format_func_stmts(&f.body.stmts, 2, config, out);
+                out.push_str("    }\n");
+            }
+            out.push_str("}\n");
         }
 
         TopLevelItem::SchemaFrom(sf) => {
@@ -755,6 +782,16 @@ mod tests {
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
         assert!(formatted.contains("enum Devices"), "got: {formatted}");
+    }
+
+    #[test]
+    fn format_function_group_decl_round_trips() {
+        let src = "private functionGroup EdgeInsect {\n    function only() -> int {\n        return 1;\n    }\n}\n";
+        let formatted = fmt(src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+        assert!(formatted.contains("functionGroup EdgeInsect"), "got: {formatted}");
+        assert!(formatted.contains("private "), "got: {formatted}");
     }
 
     #[test]

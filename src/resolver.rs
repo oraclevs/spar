@@ -980,8 +980,8 @@ impl Resolver {
             match &field.shape {
                 TypeFieldShape::Primitive(_) => {}
                 TypeFieldShape::Named(name) => {
-                    if !self.types.contains_key(name) {
-                        let candidates: Vec<String> = self.types.keys().cloned().collect();
+                    if !self.types.contains_key(name) && !self.enums.contains_key(name) {
+                        let candidates: Vec<String> = self.types.keys().chain(self.enums.keys()).cloned().collect();
                         let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                         self.push_error_hint(
                             format!("undefined type: `{name}` is not declared"),

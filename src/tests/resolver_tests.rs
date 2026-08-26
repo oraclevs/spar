@@ -788,3 +788,14 @@ fn function_group_name_colliding_with_import_alias_errors() {
     let errs = resolve_err(src);
     assert!(errs.contains("EdgeInsect") && errs.contains("import alias"), "got: {errs}");
 }
+
+// ── enum-typed field inside a `type [X]{...}` declaration ───────────────────
+
+#[test]
+fn type_field_referencing_enum_resolves() {
+    let src = r#"
+        enum Protocol { Http, Https };
+        type [Port]{ protocol?: Protocol; }
+    "#;
+    resolve_ok(src);
+}

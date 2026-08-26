@@ -486,16 +486,28 @@ fn type_fields_to_schema_fields(
                 SchemaFieldShape::Section(type_fields_to_schema_fields(nested, schema_prog))
             }
             TypeFieldShape::Named(other_name) => {
-                let other_fields = schema_prog.items.iter().find_map(|it| {
-                    if let TopLevelItem::Type(t) = it {
-                        if &t.name == other_name { return Some(&t.fields); }
-                    }
-                    None
+                let is_enum = schema_prog.items.iter().any(|it| {
+                    matches!(it, TopLevelItem::Enum(e) if &e.name == other_name)
                 });
-                let expanded = other_fields
-                    .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
-                    .unwrap_or_default();
-                SchemaFieldShape::Section(expanded)
+                if is_enum {
+                    // An enum-typed field has a single named value, not
+                    // nested fields — reuse `Primitive(SparType::Named)`
+                    // rather than expanding into a `Section`, so schema
+                    // value-checking compares it the same way a `var x:
+                    // EnumName = EnumName::Variant;` declaration already does.
+                    SchemaFieldShape::Primitive(crate::ast::SparType::Named(other_name.clone()))
+                } else {
+                    let other_fields = schema_prog.items.iter().find_map(|it| {
+                        if let TopLevelItem::Type(t) = it {
+                            if &t.name == other_name { return Some(&t.fields); }
+                        }
+                        None
+                    });
+                    let expanded = other_fields
+                        .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
+                        .unwrap_or_default();
+                    SchemaFieldShape::Section(expanded)
+                }
             }
         };
         SchemaField {
@@ -1487,6 +1499,35 @@ mod tests {
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "[Postgres]{ image: str = \"postgres:16\"; };\n",
+        );
+        let program = parse_src(src);
+        let result = validate_schema_imports(&program, dir.path());
+        assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    #[test]
+    fn validate_schema_imports_accepts_enum_typed_field_via_schema_from() {
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            concat!(
+                "export enum RestartPolicy { Always, Never };\n",
+                "export type [ServiceType]{ image: str; restart: RestartPolicy; }\n",
+            ),
+        ).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            concat!(
+                "@SchemaFile\n",
+                "import type { ServiceType } from \"types.spar\";\n",
+                "SchemaFrom [Service, ServiceType];\n",
+            ),
+        ).unwrap();
+        let src = concat!(
+            "import schema \"schema.spar\";\n",
+            "import type { RestartPolicy } from \"types.spar\";\n",
+            "[Service]{ image: str = \"nginx\"; restart: RestartPolicy = RestartPolicy::Always; };\n",
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());

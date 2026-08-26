@@ -531,3 +531,94 @@ fn eval_function_group_call_with_args() {
     let r = eval_src(src);
     assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(42));
 }
+
+#[test]
+fn eval_function_group_design_doc_example() {
+    // Verbatim from docs/superpowers/specs/2026-08-26-functiongroup-and-named-field-access-design.md, Part A.
+    let src = r#"
+        private functionGroup EdgeInsect {
+            function only() -> [int] { return [1, 2, 3, 5]; }
+            private function semantic(hor: float, vet: float) -> [int] { return [1, 2, 3, 5]; }
+        }
+
+        [MainCont]{
+            padding: [int] = EdgeInsect::only();
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["MainCont".to_string()];
+    let padding = r.sections[&path]["padding"].clone();
+    match padding {
+        crate::evaluator::ConfigValue::List(items) => {
+            assert_eq!(items.len(), 4);
+        }
+        other => panic!("expected a list, got {:?}", other),
+    }
+}
+
+#[test]
+fn eval_cross_file_function_group_call() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("shared.spar"),
+        r#"
+            functionGroup EdgeInsect {
+                function only() -> int { return 7; }
+            }
+            private functionGroup Hidden {
+                function f() -> int { return 1; }
+            }
+        "#,
+    ).unwrap();
+
+    let src = r#"
+        import "shared.spar" as shared;
+        var result: int = shared::EdgeInsect::only();
+    "#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+
+    let mut loader = crate::loader::ImportLoader::new(dir.path());
+    let loaded = crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
+
+    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &loaded)
+        .expect("resolve failed");
+
+    let result = crate::evaluator::Evaluator::evaluate_with_imports_and_base(
+        &program, &symbols, &loaded, dir.path(),
+    ).expect("eval failed");
+
+    assert_eq!(result.globals["result"], crate::evaluator::ConfigValue::Int(7));
+}
+
+#[test]
+fn eval_cross_file_private_function_group_not_exported() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("shared.spar"),
+        r#"
+            private functionGroup Hidden {
+                function f() -> int { return 1; }
+            }
+        "#,
+    ).unwrap();
+
+    let src = r#"
+        import "shared.spar" as shared;
+        var result: int = shared::Hidden::f();
+    "#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+
+    let mut loader = crate::loader::ImportLoader::new(dir.path());
+    let loaded = crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
+
+    let result = crate::resolver::Resolver::resolve_with_imports(&program, &loaded);
+    assert!(result.is_err(), "private functionGroup must not be reachable via import alias");
+}

@@ -534,3 +534,54 @@ fn spread_mixed_with_unresolvable_source_still_skipped() {
     "#;
     check_ok(src);
 }
+
+// ── Expr::Object shape validation against SparType::Named ────────────────────
+
+#[test]
+fn object_literal_matching_named_type_passes() {
+    check_ok("type [Leaf]{ name: str; size: int; }\nvar x: Leaf = { name: \"a\"; size: 1; };\n");
+}
+
+#[test]
+fn object_literal_missing_required_field_errors() {
+    let err = check_err("type [Leaf]{ name: str; size: int; }\nvar x: Leaf = { name: \"a\"; };\n");
+    assert!(err.contains("missing required field"), "got: {err}");
+}
+
+#[test]
+fn object_literal_extra_field_errors() {
+    let err = check_err("type [Leaf]{ name: str; }\nvar x: Leaf = { name: \"a\"; extra: 1; };\n");
+    assert!(err.contains("not declared in type"), "got: {err}");
+}
+
+#[test]
+fn object_literal_wrong_field_type_errors() {
+    let err = check_err("type [Leaf]{ name: str; }\nvar x: Leaf = { name: 1; };\n");
+    assert!(err.contains("expects"), "got: {err}");
+}
+
+#[test]
+fn object_literal_against_primitive_type_errors() {
+    let err = check_err("var x: int = { a: 1; };");
+    assert!(err.contains("object literal"), "got: {err}");
+}
+
+#[test]
+fn list_of_named_type_object_literals_passes() {
+    check_ok("type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n");
+}
+
+#[test]
+fn list_of_named_type_bad_element_errors() {
+    let err = check_err("type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { wrong: 1; }];\n");
+    assert!(err.contains("not declared in type"), "got: {err}");
+}
+
+#[test]
+fn nested_object_literal_inside_object_literal_validates_recursively() {
+    check_ok(concat!(
+        "type [Branch]{ label: str; }\n",
+        "type [Leaf]{ name: str; sub: Branch; }\n",
+        "var x: Leaf = { name: \"a\"; sub: { label: \"b\"; }; };\n",
+    ));
+}

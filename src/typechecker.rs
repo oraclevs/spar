@@ -929,17 +929,70 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Validates an object literal's items against a declared type's own
+    /// fields — reuses `validate_type_fields`, the exact function `->
+    /// TypeName` section bindings already use for structural validation.
+    fn check_object_against_named(&mut self, items: &[SectionItem], name: &str, label: &str) {
+        let Some(entry) = self.symbols.types.get(name).cloned() else {
+            return; // resolver already reported the undefined type
+        };
+        let config_fields: Vec<&FieldDecl> = items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        self.validate_type_fields(&entry.fields, &config_fields, name, label);
+    }
+
     fn check_expr_type(&mut self, expr: &Expr, declared_ty: &SparType, label: &str, span: &Span) {
         self.check_expr_internal(expr);
 
-        let inferred = match self.infer_type(expr) {
-            Some(t) => t,
-            None    => return,
-        };
+        if let Expr::Object(items, _) = expr {
+            match declared_ty {
+                SparType::Named(name) => {
+                    self.check_object_against_named(items, name, label);
+                }
+                _ => {
+                    self.push_type_error(
+                        format!(
+                            "`{label}` has type `{}` but value is an object literal `{{ ... }}` — \
+                             object literals can only be used for a declared `type [X]{{...}}`",
+                            display_type(declared_ty)
+                        ),
+                        None,
+                        span.clone(),
+                    );
+                }
+            }
+            return;
+        }
 
+        // Checked BEFORE the `infer_type` early-return below: when a list's
+        // first element is an object literal, `infer_type(Expr::List)`
+        // itself returns `None` (it infers from the first element, and
+        // `infer_type(Expr::Object)` is always `None`) — so this block
+        // would never be reached if placed after that early return.
         if let Expr::List(items, _) = expr {
             if let SparType::List(elem_ty) = declared_ty {
                 for item in items {
+                    if let Expr::Object(obj_items, _) = item {
+                        match elem_ty.as_ref() {
+                            SparType::Named(name) => {
+                                self.check_object_against_named(obj_items, name, label);
+                            }
+                            other => {
+                                self.push_type_error(
+                                    format!(
+                                        "list element in `{label}` has type `{}` but value is an \
+                                         object literal `{{ ... }}` — object literals can only be \
+                                         used for a declared `type [X]{{...}}`",
+                                        display_type(other)
+                                    ),
+                                    None,
+                                    span.clone(),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(item_ty) = self.infer_type(item) {
                         if &item_ty != elem_ty.as_ref() {
                             self.push_type_error(
@@ -962,6 +1015,11 @@ impl<'a> TypeChecker<'a> {
                 return;
             }
         }
+
+        let inferred = match self.infer_type(expr) {
+            Some(t) => t,
+            None    => return,
+        };
 
         if &inferred != declared_ty {
             self.push_type_error(

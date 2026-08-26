@@ -175,6 +175,7 @@ pub enum SparType {
     Bool,
     Section,                // inline nested section body
     List(Box<SparType>),
+    Named(String),          // a declared `type [X]{...}`, referenced by name
 }
 
 /// The right-hand side of a field declaration.

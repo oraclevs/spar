@@ -255,7 +255,61 @@ fn splice_selective(
         }
     }
 
+    // Transitively pull in any type referenced by a spliced type's own
+    // fields (e.g. `packages?: Libs;` inside `FlutterType`) that the caller
+    // didn't name explicitly. Without this, splicing only the exactly
+    // requested items leaves `Libs` undeclared in the importing file even
+    // though it was never meant to be a user-facing import target — it's
+    // load-bearing structure of `FlutterType`, not something the caller
+    // should have to know about. Pulled-in types keep their original name
+    // (never aliased) and are localized like any other spliced item; the
+    // loop is index-based over a growing `spliced`, so a dependency that
+    // itself references further types is picked up on a later pass.
+    let mut pulled: HashSet<String> = requested.iter().map(|r| r.name.clone()).collect();
+    let mut i = 0;
+    while i < spliced.len() {
+        if let TopLevelItem::Type(t) = &spliced[i] {
+            let mut refs = Vec::new();
+            collect_named_type_refs(&t.fields, &mut refs);
+            let parent_name = t.name.clone();
+            for name in refs {
+                if pulled.insert(name.clone()) {
+                    match available.iter().find(|(n, _)| *n == name) {
+                        Some((_, dep_item @ TopLevelItem::Type(_))) => {
+                            let localized = localize_visibility((*dep_item).clone());
+                            spliced.push(retag_top_level_span(localized, &decl.span));
+                        }
+                        Some(_) => {} // name resolves to a non-type item; resolver reports the shape mismatch
+                        None => {
+                            errors.push(SparError::ResolveError {
+                                message: format!(
+                                    "type `{}`, used by `{}`'s field, is not exported by '{}' — \
+                                     export it so the transitive import can resolve",
+                                    name, parent_name, decl.path
+                                ),
+                                hint: None,
+                                span: decl.span.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
     if errors.is_empty() { Ok(spliced) } else { Err(errors) }
+}
+
+fn collect_named_type_refs(fields: &[crate::ast::TypeField], out: &mut Vec<String>) {
+    use crate::ast::TypeFieldShape;
+    for f in fields {
+        match &f.shape {
+            TypeFieldShape::Primitive(_) => {}
+            TypeFieldShape::Named(name) => out.push(name.clone()),
+            TypeFieldShape::Section(nested) => collect_named_type_refs(nested, out),
+        }
+    }
 }
 
 fn splice_as_part_of(
@@ -499,14 +553,22 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
 
 /// Validate config `program` against any `import schema "..."` declarations it contains.
 /// Loads each schema file, verifies it has @SchemaFile, then checks all sections.
+///
+/// On success, also returns every config section's schema-derived field
+/// list, keyed by section name. The typechecker uses this to exempt
+/// schema-bound sections from the "every field needs an explicit type"
+/// rule that applies to sections with neither a `-> Type` binding nor a
+/// schema — the schema already tells it each field's expected shape.
 pub fn validate_schema_imports(
     program: &crate::ast::Program,
     base_dir: &std::path::Path,
-) -> Result<(), Vec<crate::error::SparError>> {
+) -> Result<std::collections::HashMap<String, Vec<crate::ast::SchemaField>>, Vec<crate::error::SparError>> {
     use crate::ast::TopLevelItem;
     use crate::error::SparError;
 
     let mut errors: Vec<SparError> = Vec::new();
+    let mut bindings: std::collections::HashMap<String, Vec<crate::ast::SchemaField>> =
+        std::collections::HashMap::new();
 
     // Build config section map once — it is the same for every schema import.
     let mut config_sections: std::collections::HashMap<String, &crate::ast::SectionDecl> =
@@ -626,6 +688,7 @@ pub fn validate_schema_imports(
                 }
                 None => {} // optional section, fine to omit
                 Some(cfg_section) => {
+                    bindings.insert(name.clone(), (*schema_fields).clone());
                     // Fix 2: skip field-level validation for sections that contain spread items.
                     // Spreads are resolved at runtime; we cannot statically know which fields
                     // they contribute, so a "missing required field" error would be a false positive.
@@ -667,7 +730,7 @@ pub fn validate_schema_imports(
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() { Ok(bindings) } else { Err(errors) }
 }
 
 fn validate_fields(
@@ -784,14 +847,15 @@ fn validate_fields(
     }
 }
 
-fn kl_type_name(ty: &crate::ast::SparType) -> &'static str {
+fn kl_type_name(ty: &crate::ast::SparType) -> String {
     match ty {
-        crate::ast::SparType::Str     => "str",
-        crate::ast::SparType::Int     => "int",
-        crate::ast::SparType::Float   => "float",
-        crate::ast::SparType::Bool    => "bool",
-        crate::ast::SparType::Section => "section",
-        crate::ast::SparType::List(_) => "list",
+        crate::ast::SparType::Str     => "str".to_string(),
+        crate::ast::SparType::Int     => "int".to_string(),
+        crate::ast::SparType::Float   => "float".to_string(),
+        crate::ast::SparType::Bool    => "bool".to_string(),
+        crate::ast::SparType::Section => "section".to_string(),
+        crate::ast::SparType::List(_) => "list".to_string(),
+        crate::ast::SparType::Named(name) => name.clone(),
     }
 }
 
@@ -1127,6 +1191,30 @@ mod tests {
         let err = expand_imports(&mut program, &mut loader).unwrap_err();
         assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("is not a type"))),
             "got: {:?}", err);
+    }
+
+    #[test]
+    fn expand_imports_type_selective_transitively_pulls_dependent_type() {
+        // Regression: `import type { FlutterType }` must silently bring in
+        // `Libs` too — FlutterType's own field (`packages?: Libs;`) needs
+        // it, and the caller never asked to import Libs directly.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("types.spar"),
+            concat!(
+                "export type [Libs]{ dependencies?: [str]; }\n",
+                "export type [FlutterType]{ projectName: str; packages?: Libs; }\n",
+            ),
+        ).unwrap();
+        let src = r#"import type { FlutterType } from "types.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let has_libs = program.items.iter().any(|it| matches!(
+            it, TopLevelItem::Type(t) if t.name == "Libs"
+        ));
+        assert!(has_libs, "Libs must be transitively spliced in, got items: {:?}", program.items);
     }
 
     // ── Phase 3: import type inside @SchemaFile (Task 5) ─────────────────

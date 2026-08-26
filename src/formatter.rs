@@ -308,6 +308,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Bool         => "bool".to_string(),
         SparType::Section      => "section".to_string(),
         SparType::List(inner)  => format!("[{}]", format_type(inner)),
+        SparType::Named(name)  => name.clone(),
     }
 }
 

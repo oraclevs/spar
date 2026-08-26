@@ -389,9 +389,20 @@ impl Parser {
     fn at_type_start(&self) -> bool {
         match self.peek() {
             Token::TypeStr | Token::TypeInt | Token::TypeFloat | Token::TypeBool | Token::TypeSection => true,
+            // A bare Ident is only a type-start when immediately followed by
+            // `=` — otherwise it's the type-omitted value form (`name: someVar;`).
+            Token::Ident(_) => matches!(
+                self.tokens.get(self.pos + 1).map(|st| &st.token),
+                Some(Token::Eq)
+            ),
             Token::LBracket => matches!(
                 self.tokens.get(self.pos + 1).map(|st| &st.token),
                 Some(Token::TypeStr) | Some(Token::TypeInt) | Some(Token::TypeFloat) | Some(Token::TypeBool)
+            ) || (
+                // `[Ident] =` — list of a named type, same `=`-disambiguation.
+                matches!(self.tokens.get(self.pos + 1).map(|st| &st.token), Some(Token::Ident(_)))
+                && matches!(self.tokens.get(self.pos + 2).map(|st| &st.token), Some(Token::RBracket))
+                && matches!(self.tokens.get(self.pos + 3).map(|st| &st.token), Some(Token::Eq))
             ),
             _ => false,
         }
@@ -688,13 +699,23 @@ impl Parser {
     }
 
     fn parse_scalar_type(&mut self) -> Result<SparType, SparError> {
+        if let Token::Ident(name) = self.peek() {
+            // 'str'/'int'/'float'/'bool'/'section' are their own dedicated
+            // tokens (see below) — any Ident here is unambiguously a
+            // reference to another declared type. Mirrors
+            // parse_type_field_shape's identical handling one level up
+            // (inside `type [X]{...}` field shapes).
+            let name = name.clone();
+            self.advance();
+            return Ok(SparType::Named(name));
+        }
         let ty = match self.peek() {
             Token::TypeStr     => SparType::Str,
             Token::TypeInt     => SparType::Int,
             Token::TypeFloat   => SparType::Float,
             Token::TypeBool    => SparType::Bool,
             Token::TypeSection => SparType::Section,
-            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', or 'section'), found {}", self.peek().human_name()))),
+            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', 'section', or a declared type name), found {}", self.peek().human_name()))),
         };
         self.advance();
         Ok(ty)

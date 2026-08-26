@@ -12,6 +12,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Bool         => "bool".into(),
         SparType::Section      => "section".into(),
         SparType::List(inner)  => format!("[{}]", display_type(inner)),
+        SparType::Named(name)  => name.clone(),
     }
 }
 
@@ -46,11 +47,15 @@ fn spread_source_name(spread: &SpreadStmt) -> Option<&str> {
 pub struct TypeChecker<'a> {
     symbols: &'a SymbolTable,
     errors:  Vec<SparError>,
+    /// Section name → schema-derived field list, for sections validated
+    /// against an `import schema "...";` but with no `-> Type` binding of
+    /// their own. Empty unless populated via `check_with_schema`.
+    schema_bindings: HashMap<String, Vec<SchemaField>>,
 }
 
 impl<'a> TypeChecker<'a> {
     pub fn check(program: &Program, symbols: &'a SymbolTable) -> Result<(), Vec<SparError>> {
-        let mut tc = TypeChecker { symbols, errors: Vec::new() };
+        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings: HashMap::new() };
         tc.check_program(program);
         if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
     }
@@ -61,6 +66,21 @@ impl<'a> TypeChecker<'a> {
         _loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
     ) -> Result<(), Vec<SparError>> {
         Self::check(program, symbols)
+    }
+
+    /// Like `check`, but also given every section's schema-derived field
+    /// list (from `loader::validate_schema_imports`'s `Ok` value) — a
+    /// section with no `-> Type` binding but a name present in `bindings`
+    /// is checked against its schema shape instead of requiring every
+    /// field to declare its own type explicitly.
+    pub fn check_with_schema(
+        program: &Program,
+        symbols: &'a SymbolTable,
+        schema_bindings: HashMap<String, Vec<SchemaField>>,
+    ) -> Result<(), Vec<SparError>> {
+        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings };
+        tc.check_program(program);
+        if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
     }
 
     fn push_type_error(&mut self, message: impl Into<String>, hint: Option<String>, span: Span) {
@@ -137,8 +157,103 @@ impl<'a> TypeChecker<'a> {
                 let fields: Vec<&FieldDecl> = decl.items.iter()
                     .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
                     .collect();
-                self.check_untyped_section_fields(&fields, &path_str);
+                match self.schema_bindings.get(&path_str).cloned() {
+                    Some(schema_fields) => self.check_schema_bound_fields(&fields, &schema_fields, &path_str),
+                    None => self.check_untyped_section_fields(&fields, &path_str),
+                }
             }
+        }
+    }
+
+    /// A section with no `-> Type` binding but a matching `import schema`
+    /// entry — each field's expected shape comes from the schema instead of
+    /// requiring `field: Type = value;` to spell the type out again. An
+    /// explicit local type, if present, still wins (existing behavior,
+    /// unchanged). A field the schema doesn't declare is left for
+    /// `loader::validate_schema_imports`'s own "not declared in the schema"
+    /// error — this only still walks its expression so calls/refs inside it
+    /// get resolved and checked.
+    fn check_schema_bound_fields(&mut self, fields: &[&FieldDecl], schema_fields: &[SchemaField], path_str: &str) {
+        for field in fields {
+            if let Some(ty) = &field.ty {
+                self.check_field(field, ty, path_str);
+                continue;
+            }
+            match schema_fields.iter().find(|sf| sf.name == field.name) {
+                Some(sf) => self.check_field_against_schema(field, sf, path_str),
+                None => match &field.value {
+                    Some(FieldValue::Expr(e)) => self.check_expr_internal(e),
+                    Some(FieldValue::Nested(items)) => {
+                        let subs: Vec<&FieldDecl> = items.iter()
+                            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                            .collect();
+                        self.check_untyped_section_fields(&subs, &format!("{path_str}.{}", field.name));
+                    }
+                    None => {}
+                },
+            }
+        }
+    }
+
+    fn check_field_against_schema(&mut self, field: &FieldDecl, sf: &SchemaField, path_str: &str) {
+        match &sf.shape {
+            SchemaFieldShape::Primitive(expected_ty) => match &field.value {
+                Some(FieldValue::Expr(val)) => self.check_expr_type(val, expected_ty, &field.name, &field.span),
+                Some(FieldValue::Nested(_)) => {
+                    self.push_type_error(
+                        format!(
+                            "field `{}` in section `[{path_str}]` must be `{}` (required by the bound schema) \
+                             but uses a section body `{{ ... }}`",
+                            field.name, display_type(expected_ty)
+                        ),
+                        None,
+                        field.span.clone(),
+                    );
+                }
+                None => {
+                    if !field.optional {
+                        self.push_type_error(
+                            format!("required field `{}` in section `[{path_str}]` has no value", field.name),
+                            None,
+                            field.span.clone(),
+                        );
+                    }
+                }
+            },
+            SchemaFieldShape::Section(nested_schema_fields) => match &field.value {
+                Some(FieldValue::Nested(items)) => {
+                    let subs: Vec<&FieldDecl> = items.iter()
+                        .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                        .collect();
+                    let nested_path = format!("{path_str}.{}", field.name);
+                    self.check_schema_bound_fields(&subs, nested_schema_fields, &nested_path);
+                }
+                Some(FieldValue::Expr(e)) => {
+                    let actual = self.infer_type(e);
+                    if actual != Some(SparType::Section) {
+                        self.push_type_error(
+                            format!(
+                                "field '{}' in '[{path_str}]' must be a nested section (required by the bound \
+                                 schema) but value is {}",
+                                field.name,
+                                actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                            ),
+                            None,
+                            field.span.clone(),
+                        );
+                    }
+                    self.check_expr_internal(e);
+                }
+                None => {
+                    if !field.optional {
+                        self.push_type_error(
+                            format!("required field `{}` in section `[{path_str}]` has no value", field.name),
+                            None,
+                            field.span.clone(),
+                        );
+                    }
+                }
+            },
         }
     }
 

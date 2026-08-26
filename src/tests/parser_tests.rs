@@ -695,3 +695,54 @@ fn parse_spread_mixed_with_fields_inside_nested_body() {
         other => panic!("expected TopLevelItem::Section, got {:?}", other),
     }
 }
+
+// ── SparType::Named ──────────────────────────────────────────────────────────
+
+#[test]
+fn parse_var_decl_with_named_type() {
+    let src = "var x: Leaf = someExpr;";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    assert_eq!(v.ty, crate::ast::SparType::Named("Leaf".to_string()));
+}
+
+#[test]
+fn parse_var_decl_with_list_of_named_type() {
+    let src = "var xs: [Leaf] = someExpr;";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    assert_eq!(v.ty, crate::ast::SparType::List(Box::new(crate::ast::SparType::Named("Leaf".to_string()))));
+}
+
+#[test]
+fn parse_function_param_and_return_with_named_type() {
+    let src = "function f(l: Leaf) -> Leaf { return l; }";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Function(f) = &program.items[0] else { panic!("expected function") };
+    assert_eq!(f.params[0].ty, crate::ast::SparType::Named("Leaf".to_string()));
+    assert_eq!(f.ret, crate::ast::SparType::Named("Leaf".to_string()));
+}
+
+#[test]
+fn parse_section_field_with_explicit_named_type_and_eq_disambiguates_as_type() {
+    let src = "[Tree]{ root: Leaf = someExpr; };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else { panic!("expected section") };
+    let crate::ast::SectionItem::Field(f) = &s.items[0] else { panic!("expected field") };
+    assert_eq!(f.ty, Some(crate::ast::SparType::Named("Leaf".to_string())));
+}
+
+#[test]
+fn parse_section_field_bare_ident_no_eq_is_still_untyped_value_regression() {
+    let src = "[Man] -> Human { name: someVar; };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else { panic!("expected section") };
+    let crate::ast::SectionItem::Field(f) = &s.items[0] else { panic!("expected field") };
+    assert_eq!(f.ty, None);
+    assert!(matches!(&f.value, Some(crate::ast::FieldValue::Expr(crate::ast::Expr::NamespaceRef(_)))));
+}

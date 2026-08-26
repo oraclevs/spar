@@ -318,6 +318,7 @@ impl Evaluator {
 
     fn collect_expr_deps(&self, expr: &Expr, deps: &mut HashSet<DeclId>) {
         match expr {
+            Expr::Object(items, _) => self.collect_items_deps(items, deps),
             Expr::NamespaceRef(nr) => {
                 if let Some(top) = nr.segments.first() {
                     if self.symbols.globals.contains_key(top.as_str()) {
@@ -627,6 +628,18 @@ impl Evaluator {
             Expr::Literal(Literal::Float(f)) => Ok(ConfigValue::Float(*f)),
             Expr::Literal(Literal::Bool(b))  => Ok(ConfigValue::Bool(*b)),
             Expr::String(s)                  => self.eval_interp_string(s, local_scope),
+            Expr::Object(items, _) => {
+                // parent_path is empty — an anonymous object literal has no
+                // path identity of its own. Nested self-references /
+                // section_cache entries inside an object literal are
+                // therefore not uniquely path-addressed if multiple object
+                // literals exist in the same evaluation scope; deliberate,
+                // documented scope limitation — object literals are
+                // structural data (JSON-object-like), not full
+                // cross-referenceable sections.
+                let map = self.eval_section_fields(items, &[], local_scope);
+                Ok(ConfigValue::Section(map))
+            }
             Expr::List(items, _) => {
                 let mut vals = Vec::with_capacity(items.len());
                 for item in items {

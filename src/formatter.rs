@@ -360,6 +360,32 @@ fn escape_string_content(s: &str) -> String {
 
 fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
     match expr {
+        Expr::Object(items, _) => {
+            out.push_str("{ ");
+            for item in items {
+                match item {
+                    SectionItem::Field(f) => {
+                        out.push_str(&f.name);
+                        if f.optional { out.push('?'); }
+                        out.push_str(": ");
+                        if let Some(ty) = &f.ty {
+                            out.push_str(&format_type(ty));
+                            out.push_str(" = ");
+                        }
+                        if let Some(FieldValue::Expr(e)) = &f.value {
+                            format_expr(e, 0, out);
+                        }
+                        out.push_str("; ");
+                    }
+                    SectionItem::Spread(ss) => {
+                        out.push_str("...");
+                        format_expr(&ss.expr, 0, out);
+                        out.push_str("; ");
+                    }
+                }
+            }
+            out.push('}');
+        }
         Expr::Literal(lit) => match lit {
             Literal::Int(n)   => out.push_str(&n.to_string()),
             Literal::Float(f) => {
@@ -694,6 +720,15 @@ mod tests {
     #[test]
     fn normalizes_extra_spaces_around_colon_and_eq() {
         assert_eq!(fmt("var   x:int=1;").trim(), "var x: int = 1;");
+    }
+
+    #[test]
+    fn format_object_literal_round_trips() {
+        let src = "var x: Leaf = { name: \"a\"; size: 1; };\n";
+        let formatted = fmt(src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+        assert!(formatted.contains("{ name:"), "got: {formatted}");
     }
 
     #[test]

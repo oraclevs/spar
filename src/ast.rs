@@ -222,6 +222,14 @@ pub enum Expr {
         index: Box<Expr>,
         span: Span,
     },
+    /// An anonymous object literal — `{ field: value; ...Spread; }`. Reuses
+    /// `SectionItem` verbatim, the same Field/Spread payload a nested
+    /// section body (`FieldValue::Nested`) already carries. Only reachable
+    /// via general expression parsing (list elements, var values, call
+    /// args, ...) — a `{` appearing as a FIELD's own value is still always
+    /// captured as `FieldValue::Nested` by `parse_field_decl`, never as
+    /// this variant.
+    Object(Vec<SectionItem>, Span),
 }
 
 #[derive(Debug, Clone, PartialEq)]

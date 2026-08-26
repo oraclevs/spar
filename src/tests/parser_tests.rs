@@ -746,3 +746,38 @@ fn parse_section_field_bare_ident_no_eq_is_still_untyped_value_regression() {
     assert_eq!(f.ty, None);
     assert!(matches!(&f.value, Some(crate::ast::FieldValue::Expr(crate::ast::Expr::NamespaceRef(_)))));
 }
+
+// ── Expr::Object ──────────────────────────────────────────────────────────────
+
+#[test]
+fn parse_bare_object_literal_as_var_value() {
+    let src = "var x: Leaf = { name: \"a\"; size: 1; };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::Object(items, _)) = &v.value else { panic!("expected object literal, got {:?}", v.value) };
+    assert_eq!(items.len(), 2);
+}
+
+#[test]
+fn parse_object_literal_inside_list_literal() {
+    let src = "var xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::List(elems, _)) = &v.value else { panic!("expected list") };
+    assert_eq!(elems.len(), 2);
+    assert!(matches!(&elems[0], crate::ast::Expr::Object(_, _)));
+    assert!(matches!(&elems[1], crate::ast::Expr::Object(_, _)));
+}
+
+#[test]
+fn parse_object_literal_with_spread() {
+    let src = "var x: Leaf = { ...Other; size: 1; };";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::Object(items, _)) = &v.value else { panic!("expected object literal") };
+    assert!(matches!(&items[0], crate::ast::SectionItem::Spread(_)));
+    assert!(matches!(&items[1], crate::ast::SectionItem::Field(_)));
+}

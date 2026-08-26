@@ -854,6 +854,7 @@ impl Resolver {
 
     fn resolve_expr(&mut self, expr: &Expr) {
         match expr {
+            Expr::Object(items, _)  => self.resolve_nested_fields(items),
             Expr::Literal(_)        => {}
             Expr::NamespaceRef(nr)  => self.resolve_namespace_ref(nr),
             Expr::FnCall(fc)        => {
@@ -1169,6 +1170,30 @@ impl Resolver {
         }
     }
 
+    /// Locals-aware sibling of `resolve_nested_fields`, for an object
+    /// literal appearing inside a function body (a local var's value, a
+    /// return value, ...) where names may refer to locals/params instead
+    /// of globals. A spread's own expression is resolved the same way any
+    /// other locals-aware expression is — via `resolve_expr_with_locals`
+    /// itself, not the (non-locals-aware, `&mut self`) `resolve_spread`.
+    fn resolve_nested_fields_with_locals(
+        &self,
+        items: &[SectionItem],
+        locals: &HashSet<String>,
+    ) -> Result<(), SparError> {
+        for item in items {
+            match item {
+                SectionItem::Field(f) => match &f.value {
+                    Some(FieldValue::Expr(e)) => self.resolve_expr_with_locals(e, locals)?,
+                    Some(FieldValue::Nested(sub)) => self.resolve_nested_fields_with_locals(sub, locals)?,
+                    None => {}
+                },
+                SectionItem::Spread(sp) => self.resolve_expr_with_locals(&sp.expr, locals)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Validate an expression inside a function body, allowing locals to shadow globals.
     fn resolve_expr_with_locals(
         &self,
@@ -1176,6 +1201,7 @@ impl Resolver {
         locals: &HashSet<String>,
     ) -> Result<(), SparError> {
         match expr {
+            Expr::Object(items, _) => self.resolve_nested_fields_with_locals(items, locals),
             Expr::Literal(_) => Ok(()),
             Expr::String(s) => {
                 for part in &s.parts {
@@ -1478,6 +1504,20 @@ impl Resolver {
             Expr::Index { source, index, .. } => {
                 self.collect_closure_deps_expr(source, local_names, deps);
                 self.collect_closure_deps_expr(index, local_names, deps);
+            }
+            Expr::Object(items, _) => {
+                for item in items {
+                    match item {
+                        SectionItem::Field(f) => {
+                            if let Some(FieldValue::Expr(e)) = &f.value {
+                                self.collect_closure_deps_expr(e, local_names, deps);
+                            }
+                        }
+                        SectionItem::Spread(sp) => {
+                            self.collect_closure_deps_expr(&sp.expr, local_names, deps);
+                        }
+                    }
+                }
             }
             Expr::Literal(_) => {}
         }

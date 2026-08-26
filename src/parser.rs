@@ -895,6 +895,7 @@ impl Parser {
                 Ok(Expr::String(s))
             }
             Token::LBracket => self.parse_list_literal(),
+            Token::LBrace => self.parse_object_literal(),
             Token::LParen => {
                 let span = self.peek_span();
                 self.advance();
@@ -961,6 +962,17 @@ impl Parser {
 
         self.expect(&Token::RBracket)?;
         Ok(Expr::List(items, span))
+    }
+
+    fn parse_object_literal(&mut self) -> Result<Expr, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::LBrace)?;
+        let mut items = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            items.push(self.parse_section_item()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Expr::Object(items, span))
     }
 
     fn parse_interp_string(&mut self) -> Result<InterpolString, SparError> {

@@ -144,11 +144,14 @@ fn cmd_check(path: &str) {
 
     // Stage 2.75: Schema validation — validate config against imported schema files
     let schema_base = Path::new(path).parent().unwrap_or(Path::new("."));
-    if let Err(es) = spar::loader::validate_schema_imports(&program, schema_base) {
-        all_errors.extend(es);
-        eprintln!("{}", renderer.render_all(&all_errors));
-        std::process::exit(1);
-    }
+    let schema_bindings = match spar::loader::validate_schema_imports(&program, schema_base) {
+        Ok(b)   => b,
+        Err(es) => {
+            all_errors.extend(es);
+            eprintln!("{}", renderer.render_all(&all_errors));
+            std::process::exit(1);
+        }
+    };
 
     // Stage 3: Resolve — Vec<SparError>
     let symbols = match Resolver::resolve_with_imports(&program, &imports) {
@@ -161,7 +164,7 @@ fn cmd_check(path: &str) {
     };
 
     // Stage 4: Type check — collect errors, continue to report all
-    if let Err(es) = TypeChecker::check_with_imports(&program, &symbols, &imports) {
+    if let Err(es) = TypeChecker::check_with_schema(&program, &symbols, schema_bindings) {
         all_errors.extend(es);
     }
 
@@ -230,11 +233,10 @@ fn cmd_emit(path: &str) {
 
     // Stage 2.75: Schema validation — validate config against imported schema files
     let schema_base = Path::new(path).parent().unwrap_or(Path::new("."));
-    if let Err(es) = spar::loader::validate_schema_imports(&program, schema_base) {
-        all_errors.extend(es);
-        eprintln!("{}", renderer.render_all(&all_errors));
-        std::process::exit(1);
-    }
+    let schema_bindings = match spar::loader::validate_schema_imports(&program, schema_base) {
+        Ok(b)   => b,
+        Err(es) => { all_errors.extend(es); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
+    };
 
     // Stage 3: Resolve — Vec<SparError>
     let symbols = match Resolver::resolve_with_imports(&program, &imports) {
@@ -243,7 +245,7 @@ fn cmd_emit(path: &str) {
     };
 
     // Stage 4: Type check — collect errors before deciding to proceed
-    if let Err(es) = TypeChecker::check_with_imports(&program, &symbols, &imports) {
+    if let Err(es) = TypeChecker::check_with_schema(&program, &symbols, schema_bindings) {
         all_errors.extend(es);
     }
 

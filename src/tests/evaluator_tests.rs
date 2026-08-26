@@ -423,3 +423,27 @@ fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
         assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
     }
 }
+
+// ── Expr::Object evaluation ───────────────────────────────────────────────────
+
+#[test]
+fn object_literal_evaluates_to_section_config_value() {
+    let src = "type [Leaf]{ name: str; }\nvar x: Leaf = { name: \"a\"; };\n";
+    let r = eval_src(src);
+    let crate::evaluator::ConfigValue::Section(map) = &r.globals["x"] else {
+        panic!("expected ConfigValue::Section, got {:?}", r.globals["x"])
+    };
+    assert_eq!(map["name"], crate::evaluator::ConfigValue::Str("a".into()));
+}
+
+#[test]
+fn list_of_object_literals_evaluates_to_list_of_section_config_values() {
+    let src = "type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n";
+    let r = eval_src(src);
+    let crate::evaluator::ConfigValue::List(items) = &r.globals["xs"] else {
+        panic!("expected ConfigValue::List, got {:?}", r.globals["xs"])
+    };
+    assert_eq!(items.len(), 2);
+    let crate::evaluator::ConfigValue::Section(first) = &items[0] else { panic!("expected Section element") };
+    assert_eq!(first["name"], crate::evaluator::ConfigValue::Str("a".into()));
+}

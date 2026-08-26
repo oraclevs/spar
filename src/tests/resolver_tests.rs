@@ -572,3 +572,20 @@ fn imported_type_selectively_can_bind_a_section() {
     let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &std::collections::HashMap::new());
     assert!(symbols.is_ok(), "got: {:?}", symbols.err());
 }
+
+// ── Expr::Object resolution ───────────────────────────────────────────────────
+
+#[test]
+fn object_literal_resolves_inner_namespace_ref() {
+    // resolve_ok's own `.unwrap()` panics with the error detail if this
+    // fails to resolve — that panic-on-Err IS the test's failure mode.
+    let src = "var host: str = \"h\";\ntype [Leaf]{ name: str; }\nvar x: Leaf = { name: host; };\n";
+    resolve_ok(src);
+}
+
+#[test]
+fn object_literal_errors_on_undefined_inner_reference() {
+    let src = "type [Leaf]{ name: str; }\nvar x: Leaf = { name: ghost; };\n";
+    let errs = resolve_err(src);
+    assert!(errs.contains("ghost"), "got: {errs}");
+}

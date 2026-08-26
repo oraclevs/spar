@@ -817,6 +817,7 @@ impl<'a> TypeChecker<'a> {
 
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {
         match expr {
+            Expr::Object(_, _) => None, // shape only checkable against an expected type — see check_expr_type (Task 4)
             Expr::Literal(Literal::Int(_))   => Some(SparType::Int),
             Expr::Literal(Literal::Float(_)) => Some(SparType::Float),
             Expr::Literal(Literal::Bool(_))  => Some(SparType::Bool),
@@ -981,6 +982,18 @@ impl<'a> TypeChecker<'a> {
 
     fn check_expr_internal(&mut self, expr: &Expr) {
         match expr {
+            Expr::Object(items, _) => {
+                for item in items {
+                    match item {
+                        SectionItem::Field(f) => {
+                            if let Some(FieldValue::Expr(e)) = &f.value {
+                                self.check_expr_internal(e);
+                            }
+                        }
+                        SectionItem::Spread(sp) => self.check_expr_internal(&sp.expr),
+                    }
+                }
+            }
             Expr::BinaryOp(op) => {
                 self.check_expr_internal(&op.lhs);
                 self.check_expr_internal(&op.rhs);
@@ -1208,6 +1221,19 @@ impl<'a> TypeChecker<'a> {
         locals: &HashMap<String, SparType>,
     ) -> Result<(), SparError> {
         match expr {
+            Expr::Object(items, _) => {
+                for item in items {
+                    match item {
+                        SectionItem::Field(f) => {
+                            if let Some(FieldValue::Expr(e)) = &f.value {
+                                self.check_expr_with_locals(e, locals)?;
+                            }
+                        }
+                        SectionItem::Spread(sp) => self.check_expr_with_locals(&sp.expr, locals)?,
+                    }
+                }
+                Ok(())
+            }
             Expr::BinaryOp(op) => {
                 self.check_expr_with_locals(&op.lhs, locals)?;
                 self.check_expr_with_locals(&op.rhs, locals)?;

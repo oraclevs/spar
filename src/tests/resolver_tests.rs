@@ -13,6 +13,42 @@ fn resolve_err(src: &str) -> String {
     }
 }
 
+// ── SparType::Named existence validation ─────────────────────────────────────
+
+#[test]
+fn named_type_on_var_resolves_when_type_exists() {
+    let src = "type [Leaf]{ name: str; }\nvar someExpr: str = \"a\";\nvar x: Leaf = someExpr;\n";
+    resolve_ok(src); // panics (test fails) if the declared type doesn't resolve
+}
+
+#[test]
+fn named_type_on_var_errors_when_type_missing() {
+    let src = "var x: Ghost = 1;\n";
+    let errs = resolve_err(src);
+    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+}
+
+#[test]
+fn named_type_on_list_var_errors_when_type_missing() {
+    let src = "var xs: [Ghost] = [];\n";
+    let errs = resolve_err(src);
+    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+}
+
+#[test]
+fn named_type_on_function_param_and_return_errors_when_type_missing() {
+    let src = "function f(l: Ghost) -> Ghost { return l; }\n";
+    let errs = resolve_err(src);
+    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+}
+
+#[test]
+fn named_type_on_section_field_errors_when_type_missing() {
+    let src = "[Tree]{ root: Ghost = 1; };\n";
+    let errs = resolve_err(src);
+    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+}
+
 #[test]
 fn resolver_registers_function() {
     let src = r#"function greet(name: str) -> str { return name; }"#;
@@ -154,7 +190,9 @@ fn for_loop_var_not_in_scope_after_loop() {
 
 // ── Schema validation helpers ────────────────────────────────────────────────
 
-fn schema_validate(schema_src: &str, config_src: &str) -> Result<(), Vec<crate::error::SparError>> {
+fn schema_validate(schema_src: &str, config_src: &str)
+    -> Result<std::collections::HashMap<String, Vec<crate::ast::SchemaField>>, Vec<crate::error::SparError>>
+{
     use std::io::Write;
     use tempfile::NamedTempFile;
     use std::path::Path;
@@ -236,6 +274,63 @@ fn wrong_type_on_present_field_is_schema_error() {
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(combined.contains("type") || combined.contains("bool") || combined.contains("int"), "must mention type mismatch: {}", combined);
+}
+
+#[test]
+fn schema_bound_section_does_not_require_explicit_field_types() {
+    // Regression: a section with no `-> Type` binding of its own, but
+    // matching a section declared by an `import schema`, must NOT be forced
+    // to write `field: Type = value;` on every field — the schema already
+    // tells the typechecker each field's expected shape.
+    use std::io::Write;
+    use std::path::Path;
+    use tempfile::NamedTempFile;
+
+    let mut schema_file = NamedTempFile::new().unwrap();
+    write!(schema_file, "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }}\n").unwrap();
+    let schema_path = schema_file.path().to_str().unwrap().to_string();
+
+    let config_src = format!(
+        "import schema \"{schema_path}\";\n[Flutter]{{ projectName: \"oracle\"; gitInit: true; }};\n"
+    );
+
+    let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+
+    let schema_bindings = crate::loader::validate_schema_imports(&program, Path::new("."))
+        .expect("schema validation must pass — fields match the schema");
+
+    let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
+    let result = crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings);
+    assert!(result.is_ok(), "schema-bound untyped fields must not error: {:?}", result.err());
+}
+
+#[test]
+fn schema_bound_section_still_checks_value_type_mismatch() {
+    // The exemption above must not turn into "anything goes" — a value that
+    // doesn't match the schema's declared type must still be caught.
+    use std::io::Write;
+    use std::path::Path;
+    use tempfile::NamedTempFile;
+
+    let mut schema_file = NamedTempFile::new().unwrap();
+    write!(schema_file, "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }}\n").unwrap();
+    let schema_path = schema_file.path().to_str().unwrap().to_string();
+
+    let config_src = format!(
+        "import schema \"{schema_path}\";\n[Flutter]{{ gitInit: \"yes\"; }};\n"
+    );
+
+    let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+
+    let schema_bindings = crate::loader::validate_schema_imports(&program, Path::new("."))
+        .expect("schema validation must pass at the loader stage — value-type checking is the typechecker's job here");
+
+    let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
+    let errs = crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings)
+        .unwrap_err();
+    assert!(!errs.is_empty(), "a str value for a schema-declared bool field must still error");
 }
 
 #[test]

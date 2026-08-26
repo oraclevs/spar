@@ -661,6 +661,7 @@ impl Resolver {
             match item {
                 TopLevelItem::Import(_)     => {}
                 TopLevelItem::Var(decl)     => {
+                    self.check_named_type_exists(&decl.ty, &decl.span);
                     if let Some(val) = &decl.value {
                         self.resolve_expr(val);
                     }
@@ -671,7 +672,12 @@ impl Resolver {
                     }
                 }
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
-                TopLevelItem::Function(_)   => {} // function bodies handled in resolve_function_bodies
+                TopLevelItem::Function(f)   => {
+                    for p in &f.params {
+                        self.check_named_type_exists(&p.ty, &p.span);
+                    }
+                    self.check_named_type_exists(&f.ret, &f.ret_span);
+                } // function BODIES still handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.resolve_type(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
@@ -765,6 +771,9 @@ impl Resolver {
         for item in &decl.items {
             match item {
                 SectionItem::Field(f) => {
+                    if let Some(ty) = &f.ty {
+                        self.check_named_type_exists(ty, &f.span);
+                    }
                     match &f.value {
                         Some(FieldValue::Expr(val)) => self.resolve_expr(val),
                         Some(FieldValue::Nested(sub_items)) => {
@@ -782,10 +791,15 @@ impl Resolver {
     fn resolve_nested_fields(&mut self, items: &[SectionItem]) {
         for item in items {
             match item {
-                SectionItem::Field(field) => match &field.value {
+                SectionItem::Field(field) => {
+                    if let Some(ty) = &field.ty {
+                        self.check_named_type_exists(ty, &field.span);
+                    }
+                    match &field.value {
                     Some(FieldValue::Expr(val)) => self.resolve_expr(val),
                     Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
                     None => {}
+                    }
                 },
                 SectionItem::Spread(s) => self.resolve_spread(s),
             }
@@ -813,6 +827,28 @@ impl Resolver {
                 }
                 TypeFieldShape::Section(nested) => self.resolve_type_fields(nested),
             }
+        }
+    }
+
+    /// Checks that a `SparType::Named(name)` — including nested inside
+    /// `List(...)` — refers to a declared type. No-op for every other
+    /// `SparType` variant. Mirrors the "undefined type" error
+    /// `resolve_type_fields` already raises for `TypeFieldShape::Named`.
+    fn check_named_type_exists(&mut self, ty: &SparType, span: &Span) {
+        match ty {
+            SparType::Named(name) => {
+                if !self.types.contains_key(name) {
+                    let candidates: Vec<String> = self.types.keys().cloned().collect();
+                    let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
+                    self.push_error_hint(
+                        format!("undefined type: `{}` is not declared", name),
+                        hint,
+                        span.clone(),
+                    );
+                }
+            }
+            SparType::List(inner) => self.check_named_type_exists(inner, span),
+            _ => {}
         }
     }
 
@@ -1061,6 +1097,7 @@ impl Resolver {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
+                    self.check_named_type_exists(&lv.ty, &lv.span);
                     if let Err(e) = self.resolve_expr_with_locals(&lv.value, local_names) {
                         self.errors.push(e);
                     }

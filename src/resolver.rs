@@ -896,8 +896,8 @@ impl Resolver {
     fn check_named_type_exists(&mut self, ty: &SparType, span: &Span) {
         match ty {
             SparType::Named(name) => {
-                if !self.types.contains_key(name) {
-                    let candidates: Vec<String> = self.types.keys().cloned().collect();
+                if !self.types.contains_key(name) && !self.enums.contains_key(name) {
+                    let candidates: Vec<String> = self.types.keys().chain(self.enums.keys()).cloned().collect();
                     let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                     self.push_error_hint(
                         format!("undefined type: `{}` is not declared", name),
@@ -1086,6 +1086,15 @@ impl Resolver {
                         }
                     }
                     // If loaded_exports is empty (single-file mode), defer silently as before
+                } else if let Some(entry) = self.enums.get(ns.as_str()) {
+                    if !entry.variants.iter().any(|v| v == name) {
+                        let hint = suggest(name, entry.variants.iter().map(|s| s.as_str()));
+                        self.push_error_hint(
+                            format!("`{name}` is not a variant of enum `{ns}`"),
+                            hint,
+                            nr.span.clone(),
+                        );
+                    }
                 } else {
                     let section_names: Vec<String> = self.sections.keys()
                         .filter_map(|p| p.first().cloned())
@@ -1420,6 +1429,17 @@ impl Resolver {
                             "undefined reference: `{name}` is not a field in section `[{ns}]`"
                         ),
                         hint: None,
+                        span: nr.span.clone(),
+                    });
+                }
+                if let Some(entry) = self.enums.get(ns.as_str()) {
+                    if entry.variants.iter().any(|v| v == name) {
+                        return Ok(());
+                    }
+                    let hint = suggest(name, entry.variants.iter().map(|s| s.as_str()));
+                    return Err(SparError::ResolveError {
+                        message: format!("`{name}` is not a variant of enum `{ns}`"),
+                        hint,
                         span: nr.span.clone(),
                     });
                 }

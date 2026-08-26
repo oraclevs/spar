@@ -447,3 +447,10 @@ fn list_of_object_literals_evaluates_to_list_of_section_config_values() {
     let crate::evaluator::ConfigValue::Section(first) = &items[0] else { panic!("expected Section element") };
     assert_eq!(first["name"], crate::evaluator::ConfigValue::Str("a".into()));
 }
+
+#[test]
+fn enum_variant_evaluates_to_bare_string() {
+    let src = "enum Devices { Ios, Android };\nvar x: Devices = Devices::Android;\n";
+    let r = eval_src(src);
+    assert_eq!(r.globals["x"], crate::evaluator::ConfigValue::Str("Android".into()));
+}

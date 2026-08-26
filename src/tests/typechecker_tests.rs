@@ -670,3 +670,26 @@ fn function_call_with_named_type_object_literal_arg_missing_field_errors() {
     ));
     assert!(err.contains("expects"), "got: {err}");
 }
+
+// ── enum variant type-checking ────────────────────────────────────────────────
+
+#[test]
+fn enum_variant_matching_declared_enum_type_passes() {
+    check_ok("enum Devices { Ios, Android };\nvar x: Devices = Devices::Android;\n");
+}
+
+#[test]
+fn enum_variant_from_wrong_enum_errors() {
+    let err = check_err(concat!(
+        "enum Devices { Ios, Android };\n",
+        "enum Os { Linux, Windows };\n",
+        "var x: Devices = Os::Linux;\n",
+    ));
+    assert!(err.contains("Devices") || err.contains("Os"), "got: {err}");
+}
+
+#[test]
+fn plain_string_literal_rejected_for_enum_typed_field() {
+    let err = check_err("enum Devices { Ios, Android };\nvar x: Devices = \"Android\";\n");
+    assert!(err.contains("Devices") || err.contains("str"), "got: {err}");
+}

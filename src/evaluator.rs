@@ -816,7 +816,9 @@ impl Evaluator {
             }
 
             [ns, field] => {
-                if self.symbols.lookup_section(&[ns.to_string()]).is_some() {
+                if self.symbols.enums.contains_key(ns.as_str()) {
+                    Ok(ConfigValue::Str(field.clone()))
+                } else if self.symbols.lookup_section(&[ns.to_string()]).is_some() {
                     self.eval_section_field_direct(&[ns.to_string()], field, &nr.span)
                 } else if let Some(imp_prog) = self.imported_programs.get(ns.as_str()).cloned() {
                     let imp_sym = crate::resolver::Resolver::new()

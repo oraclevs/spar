@@ -620,3 +620,24 @@ fn type_and_enum_name_collision_errors_reverse_order() {
     let errs = resolve_err("enum Devices { Ios };\ntype [Devices]{ x: str; }\n");
     assert!(errs.contains("already declared as an enum"), "got: {errs}");
 }
+
+#[test]
+fn enum_variant_ref_resolves() {
+    resolve_ok("enum Devices { Ios, Android };\nvar x: Devices = Devices::Android;\n");
+}
+
+#[test]
+fn enum_undeclared_variant_errors() {
+    let errs = resolve_err("enum Devices { Ios, Android };\nvar x: Devices = Devices::Ghost;\n");
+    assert!(errs.contains("Ghost") && errs.contains("Devices"), "got: {errs}");
+}
+
+#[test]
+fn enum_variant_ref_resolves_inside_function_body() {
+    resolve_ok(concat!(
+        "enum Devices { Ios, Android };\n",
+        "function f() -> Devices {\n",
+        "    return Devices::Android;\n",
+        "}\n",
+    ));
+}

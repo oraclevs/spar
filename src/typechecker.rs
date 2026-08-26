@@ -997,6 +997,9 @@ impl<'a> TypeChecker<'a> {
         match nr.segments.as_slice() {
             [name] => self.lookup_global_type(name),
             [ns, name] if ns == "global" => self.lookup_global_type(name),
+            [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
+                Some(SparType::Named(ns.clone()))
+            }
             [ns, name] => {
                 let key = vec![ns.clone()];
                 self.symbols.lookup_section(&key)

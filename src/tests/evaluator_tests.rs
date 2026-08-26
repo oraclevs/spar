@@ -482,3 +482,28 @@ fn eval_named_field_access_on_global_var() {
     let r = eval_src(src);
     assert_eq!(r.globals["pname"], crate::evaluator::ConfigValue::Str("Mike".into()));
 }
+
+#[test]
+fn eval_original_bug_report_repro() {
+    // Closest verbatim reconstruction of the original bug report
+    // (docs/superpowers/specs/2026-08-26-functiongroup-and-named-field-access-design.md,
+    // Part B), minus the unrelated `print` builtin finding.
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person::name == "jude" {
+                    return 6;
+                }
+                return 0;
+            }
+            return 0;
+        }
+
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var result: int = looper(people: people);
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(6));
+}

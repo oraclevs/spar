@@ -641,3 +641,42 @@ fn enum_variant_ref_resolves_inside_function_body() {
         "}\n",
     ));
 }
+
+// ── Named::field access on vars/locals (not just sections) ──────────────────
+
+#[test]
+fn named_field_access_on_global_var_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: str = person::name;
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn named_field_access_on_function_local_var_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function greet(h: Human) -> str {
+            var local: Human = h;
+            return local::name;
+        }
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn named_field_access_on_loop_var_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person::name == "jude" { return 6; }
+                return 0;
+            }
+            return 0;
+        }
+    "#;
+    resolve_ok(src);
+}

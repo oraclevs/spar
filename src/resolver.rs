@@ -1095,6 +1095,10 @@ impl Resolver {
                             nr.span.clone(),
                         );
                     }
+                } else if self.globals.contains_key(ns.as_str()) {
+                    // `ns` is a global var — field-existence validation is
+                    // deferred to the typechecker, which has the type info
+                    // (`SparType::Named`) needed to check this properly.
                 } else {
                     let section_names: Vec<String> = self.sections.keys()
                         .filter_map(|p| p.first().cloned())
@@ -1445,6 +1449,13 @@ impl Resolver {
                 }
                 if self.imports.contains_key(ns.as_str()) {
                     return Ok(()); // defer import ref validation
+                }
+                if locals.contains(ns.as_str()) {
+                    // `ns` is a local (param, `var`, or loop var) — field-
+                    // existence validation is deferred to the typechecker,
+                    // which has the typed locals map needed to check this
+                    // properly (this fn only has names, no types).
+                    return Ok(());
                 }
                 Err(SparError::ResolveError {
                     message: format!(

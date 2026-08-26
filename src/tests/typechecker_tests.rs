@@ -645,3 +645,28 @@ fn section_return_block_with_explicit_types_still_works_regression() {
         "}\n",
     ));
 }
+
+// ── Function-call argument checking for Named types ───────────────────────────
+
+#[test]
+fn function_call_with_named_type_object_literal_arg_passes() {
+    // As in the local-var/return tests above: no field-access-on-param
+    // syntax exists in this language, so `useLeaf`'s body doesn't read
+    // `l`'s fields — the point is that the CALL SITE's object-literal
+    // argument typechecks.
+    check_ok(concat!(
+        "type [Leaf]{ name: str; }\n",
+        "function useLeaf(l: Leaf) -> str { return \"ok\"; }\n",
+        "var r: str = useLeaf(l: { name: \"a\"; });\n",
+    ));
+}
+
+#[test]
+fn function_call_with_named_type_object_literal_arg_missing_field_errors() {
+    let err = check_err(concat!(
+        "type [Leaf]{ name: str; size: int; }\n",
+        "function useLeaf(l: Leaf) -> int { return 1; }\n",
+        "var r: int = useLeaf(l: { name: \"a\"; });\n",
+    ));
+    assert!(err.contains("expects"), "got: {err}");
+}

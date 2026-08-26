@@ -1330,6 +1330,129 @@ impl<'a> TypeChecker<'a> {
 
     // ── Call argument type checking ───────────────────────────────────────────
 
+    /// Coarse structural shape check: does this object literal have every
+    /// required field of `name`'s declared type, correctly typed (for
+    /// primitive fields — nested/Named fields recurse), with no extra
+    /// fields? No per-field error detail (unlike `validate_type_fields`) —
+    /// intentionally matches `check_call`'s existing whole-argument error
+    /// granularity, not a shortcut.
+    fn object_matches_named_type(&self, items: &[SectionItem], name: &str) -> bool {
+        let Some(entry) = self.symbols.types.get(name) else { return false };
+        let config_fields: Vec<&FieldDecl> = items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        for tf in &entry.fields {
+            let cf = config_fields.iter().find(|f| f.name == tf.name);
+            match cf {
+                None if !tf.optional => return false,
+                None => continue,
+                Some(cf) => match &tf.shape {
+                    TypeFieldShape::Primitive(expected_ty) => {
+                        let actual = match &cf.ty {
+                            Some(t) => Some(t.clone()),
+                            None => match &cf.value {
+                                Some(FieldValue::Expr(e)) => self.infer_type(e),
+                                _ => None,
+                            },
+                        };
+                        if actual.as_ref() != Some(expected_ty) { return false; }
+                    }
+                    TypeFieldShape::Section(nested) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                    }
+                    TypeFieldShape::Named(other_name) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.object_matches_named_type(nested_items, other_name) { return false; }
+                    }
+                },
+            }
+        }
+        for cf in &config_fields {
+            if !entry.fields.iter().any(|tf| tf.name == cf.name) { return false; }
+        }
+        true
+    }
+
+    /// Locals-aware twin of `object_matches_named_type`, for a call
+    /// argument built inside a function body.
+    fn object_matches_named_type_with_locals(&self, items: &[SectionItem], name: &str, locals: &HashMap<String, SparType>) -> bool {
+        let Some(entry) = self.symbols.types.get(name) else { return false };
+        let config_fields: Vec<&FieldDecl> = items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        for tf in &entry.fields {
+            let cf = config_fields.iter().find(|f| f.name == tf.name);
+            match cf {
+                None if !tf.optional => return false,
+                None => continue,
+                Some(cf) => match &tf.shape {
+                    TypeFieldShape::Primitive(expected_ty) => {
+                        let actual = match &cf.ty {
+                            Some(t) => Some(t.clone()),
+                            None => match &cf.value {
+                                Some(FieldValue::Expr(e)) => self.infer_type_with_locals(e, locals),
+                                _ => None,
+                            },
+                        };
+                        if actual.as_ref() != Some(expected_ty) { return false; }
+                    }
+                    TypeFieldShape::Section(nested) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                    }
+                    TypeFieldShape::Named(other_name) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.object_matches_named_type_with_locals(nested_items, other_name, locals) { return false; }
+                    }
+                },
+            }
+        }
+        for cf in &config_fields {
+            if !entry.fields.iter().any(|tf| tf.name == cf.name) { return false; }
+        }
+        true
+    }
+
+    /// Structural check for a nested `section`-shaped field (not a `Named`
+    /// type — an inline `TypeFieldShape::Section(...)`).
+    fn nested_items_match_type_fields(&self, items: &[SectionItem], type_fields: &[TypeField]) -> bool {
+        let config_fields: Vec<&FieldDecl> = items.iter()
+            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+            .collect();
+        for tf in type_fields {
+            let cf = config_fields.iter().find(|f| f.name == tf.name);
+            match cf {
+                None if !tf.optional => return false,
+                None => continue,
+                Some(cf) => match &tf.shape {
+                    TypeFieldShape::Primitive(expected_ty) => {
+                        let actual = match &cf.ty {
+                            Some(t) => Some(t.clone()),
+                            None => match &cf.value {
+                                Some(FieldValue::Expr(e)) => self.infer_type(e),
+                                _ => None,
+                            },
+                        };
+                        if actual.as_ref() != Some(expected_ty) { return false; }
+                    }
+                    TypeFieldShape::Section(nested) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                    }
+                    TypeFieldShape::Named(other_name) => {
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
+                        if !self.object_matches_named_type(nested_items, other_name) { return false; }
+                    }
+                },
+            }
+        }
+        for cf in &config_fields {
+            if !type_fields.iter().any(|tf| tf.name == cf.name) { return false; }
+        }
+        true
+    }
+
     fn check_call(&self, call: &Expr) -> Result<(), SparError> {
         if let Expr::Call { name, args, .. } = call {
             if let Some(entry) = self.symbols.functions.get(name) {
@@ -1338,6 +1461,24 @@ impl<'a> TypeChecker<'a> {
                         .find(|(n, _)| n == &arg.param_name)
                         .map(|(_, t)| t.clone());
                     if let Some(param_ty) = param_ty {
+                        if let Expr::Object(items, _) = &arg.value {
+                            let ok = match &param_ty {
+                                SparType::Named(name) => self.object_matches_named_type(items, name),
+                                _ => false,
+                            };
+                            if !ok {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "argument '{}' expects {} but this object literal doesn't match its shape",
+                                        arg.param_name,
+                                        display_type(&param_ty),
+                                    ),
+                                    hint: None,
+                                    span: arg.span.clone(),
+                                });
+                            }
+                            continue;
+                        }
                         let actual = self.infer_type(&arg.value);
                         if actual.as_ref() != Some(&param_ty) {
                             return Err(SparError::TypeError {
@@ -1372,6 +1513,24 @@ impl<'a> TypeChecker<'a> {
                         .find(|(n, _)| n == &arg.param_name)
                         .map(|(_, t)| t.clone());
                     if let Some(param_ty) = param_ty {
+                        if let Expr::Object(items, _) = &arg.value {
+                            let ok = match &param_ty {
+                                SparType::Named(name) => self.object_matches_named_type_with_locals(items, name, locals),
+                                _ => false,
+                            };
+                            if !ok {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "argument '{}' expects {} but this object literal doesn't match its shape",
+                                        arg.param_name,
+                                        display_type(&param_ty),
+                                    ),
+                                    hint: None,
+                                    span: arg.span.clone(),
+                                });
+                            }
+                            continue;
+                        }
                         let actual = self.infer_type_with_locals(&arg.value, locals);
                         if actual.as_ref() != Some(&param_ty) {
                             return Err(SparError::TypeError {

@@ -454,3 +454,31 @@ fn enum_variant_evaluates_to_bare_string() {
     let r = eval_src(src);
     assert_eq!(r.globals["x"], crate::evaluator::ConfigValue::Str("Android".into()));
 }
+
+#[test]
+fn eval_named_field_access_on_loop_var() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> str {
+            for person in people {
+                return person::name;
+            }
+            return "none";
+        }
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var result: str = looper(people: people);
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+}
+
+#[test]
+fn eval_named_field_access_on_global_var() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: str = person::name;
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["pname"], crate::evaluator::ConfigValue::Str("Mike".into()));
+}

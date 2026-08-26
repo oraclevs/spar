@@ -816,6 +816,18 @@ impl Evaluator {
             }
 
             [ns, field] => {
+                if let Some(ConfigValue::Section(map)) = local_scope.get(ns.as_str()) {
+                    return map.get(field.as_str()).cloned().ok_or_else(|| EvalErr::CyclicRef {
+                        name: format!("{ns}::{field}"),
+                        span: nr.span.clone(),
+                    });
+                }
+                if let Some(ConfigValue::Section(map)) = self.eval_global(ns.as_str()) {
+                    return map.get(field.as_str()).cloned().ok_or_else(|| EvalErr::CyclicRef {
+                        name: format!("{ns}::{field}"),
+                        span: nr.span.clone(),
+                    });
+                }
                 if self.symbols.enums.contains_key(ns.as_str()) {
                     Ok(ConfigValue::Str(field.clone()))
                 } else if self.symbols.lookup_section(&[ns.to_string()]).is_some() {

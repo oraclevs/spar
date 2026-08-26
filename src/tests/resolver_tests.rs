@@ -738,3 +738,53 @@ fn function_group_missing_return_on_all_paths_errors() {
     let errs = resolve_err(src);
     assert!(errs.contains("does not guarantee a value is returned"), "got: {errs}");
 }
+
+// ── functionGroup call resolution ────────────────────────────────────────────
+
+#[test]
+fn function_group_call_resolves() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+        var x: int = EdgeInsect::only();
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn function_group_call_undefined_function_errors() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+        var x: int = EdgeInsect::missing();
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("missing") && errs.contains("EdgeInsect"), "got: {errs}");
+}
+
+#[test]
+fn function_group_call_from_function_body_resolves() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+        function useIt() -> int {
+            return EdgeInsect::only();
+        }
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn function_group_name_colliding_with_import_alias_errors() {
+    let src = r#"
+        import "does_not_matter.spar" as EdgeInsect;
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("EdgeInsect") && errs.contains("import alias"), "got: {errs}");
+}

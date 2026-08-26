@@ -1041,62 +1041,99 @@ impl Resolver {
             }
             Expr::Grouped(inner, _) => self.resolve_expr(inner),
             Expr::Call { name, name_span, args, .. } => {
-                // Qualified cross-file call: alias::fn_name(...)
-                if let Some((alias, fn_name)) = name.split_once("::") {
-                    if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
-                        if let Some(exports) = self.loaded_exports.get(alias) {
-                            if !exports.contains(fn_name) {
+                let segments: Vec<&str> = name.split("::").collect();
+                match segments.len() {
+                    3 => {
+                        // Cross-file functionGroup call: alias::Group::fn(...)
+                        let alias = segments[0];
+                        let group = segments[1];
+                        if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
+                            if let Some(exports) = self.loaded_exports.get(alias) {
+                                if !exports.contains(group) {
+                                    self.push_error(
+                                        format!("'{group}' is not exported by import '{alias}'"),
+                                        name_span.clone(),
+                                    );
+                                }
+                            }
+                            // `fn_name` existence within the group is deferred:
+                            // `loaded_exports` is a flat name-only set, it
+                            // doesn't carry a group's inner function names.
+                        } else {
+                            self.push_error(format!("undefined function '{name}'"), name_span.clone());
+                        }
+                        for arg in args { self.resolve_expr(&arg.value); }
+                    }
+                    2 => {
+                        let ns = segments[0];
+                        let fn_name = segments[1];
+                        if let Some(group) = self.function_groups.get(ns) {
+                            if !group.functions.contains_key(fn_name) {
                                 self.push_error(
-                                    format!("function '{fn_name}' not exported from '{alias}'"),
+                                    format!("function '{fn_name}' not found in functionGroup '{ns}'"),
                                     name_span.clone(),
                                 );
                             }
+                            for arg in args { self.resolve_expr(&arg.value); }
+                        } else if self.imports.contains_key(ns) || self.loaded_exports.contains_key(ns) {
+                            if let Some(exports) = self.loaded_exports.get(ns) {
+                                if !exports.contains(fn_name) {
+                                    self.push_error(
+                                        format!("function '{fn_name}' not exported from '{ns}'"),
+                                        name_span.clone(),
+                                    );
+                                }
+                            }
+                            for arg in args { self.resolve_expr(&arg.value); }
+                        } else {
+                            self.push_error(format!("undefined function '{name}'"), name_span.clone());
+                            for arg in args { self.resolve_expr(&arg.value); }
                         }
-                        for arg in args { self.resolve_expr(&arg.value); }
-                    } else {
-                        self.push_error(format!("undefined function '{name}'"), name_span.clone());
-                        for arg in args { self.resolve_expr(&arg.value); }
                     }
-                } else if let Some(entry) = self.functions.get(name).cloned() {
-                    let param_names: HashSet<String> =
-                        entry.params.iter().map(|(n, _)| n.clone()).collect();
-                    let mut seen: HashSet<String> = HashSet::new();
-                    for arg in args {
-                        if !param_names.contains(&arg.param_name) {
+                    _ => {
+                        // 1 segment: local plain function call.
+                        if let Some(entry) = self.functions.get(name.as_str()).cloned() {
+                            let param_names: HashSet<String> =
+                                entry.params.iter().map(|(n, _)| n.clone()).collect();
+                            let mut seen: HashSet<String> = HashSet::new();
+                            for arg in args {
+                                if !param_names.contains(&arg.param_name) {
+                                    self.push_error(
+                                        format!(
+                                            "function '{}' has no param '{}'",
+                                            name, arg.param_name
+                                        ),
+                                        arg.param_name_span.clone(),
+                                    );
+                                } else if !seen.insert(arg.param_name.clone()) {
+                                    self.push_error(
+                                        format!("duplicate argument '{}'", arg.param_name),
+                                        arg.param_name_span.clone(),
+                                    );
+                                }
+                                self.resolve_expr(&arg.value);
+                            }
+                            let missing: Vec<_> = param_names
+                                .iter()
+                                .filter(|p| !seen.contains(p.as_str()))
+                                .collect();
+                            if !missing.is_empty() {
+                                self.push_error(
+                                    format!(
+                                        "missing arguments for function '{}': {:?}",
+                                        name, missing
+                                    ),
+                                    name_span.clone(),
+                                );
+                            }
+                        } else {
                             self.push_error(
-                                format!(
-                                    "function '{}' has no param '{}'",
-                                    name, arg.param_name
-                                ),
-                                arg.param_name_span.clone(),
+                                format!("undefined function '{name}'"),
+                                name_span.clone(),
                             );
-                        } else if !seen.insert(arg.param_name.clone()) {
-                            self.push_error(
-                                format!("duplicate argument '{}'", arg.param_name),
-                                arg.param_name_span.clone(),
-                            );
+                            for arg in args { self.resolve_expr(&arg.value); }
                         }
-                        self.resolve_expr(&arg.value);
                     }
-                    let missing: Vec<_> = param_names
-                        .iter()
-                        .filter(|p| !seen.contains(p.as_str()))
-                        .collect();
-                    if !missing.is_empty() {
-                        self.push_error(
-                            format!(
-                                "missing arguments for function '{}': {:?}",
-                                name, missing
-                            ),
-                            name_span.clone(),
-                        );
-                    }
-                } else {
-                    self.push_error(
-                        format!("undefined function '{name}'"),
-                        name_span.clone(),
-                    );
-                    for arg in args { self.resolve_expr(&arg.value); }
                 }
             }
             Expr::Unary { operand, .. } => self.resolve_expr(operand),
@@ -1411,72 +1448,115 @@ impl Resolver {
             }
             Expr::Grouped(inner, _) => self.resolve_expr_with_locals(inner, locals),
             Expr::Call { name, name_span, args, .. } => {
-                // Qualified cross-file call: alias::fn_name(...)
-                if let Some((alias, fn_name)) = name.split_once("::") {
-                    if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
-                        if let Some(exports) = self.loaded_exports.get(alias) {
-                            if !exports.contains(fn_name) {
+                let segments: Vec<&str> = name.split("::").collect();
+                match segments.len() {
+                    3 => {
+                        let alias = segments[0];
+                        let group = segments[1];
+                        if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
+                            if let Some(exports) = self.loaded_exports.get(alias) {
+                                if !exports.contains(group) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!("'{group}' is not exported by import '{alias}'"),
+                                        hint: None,
+                                        span: name_span.clone(),
+                                    });
+                                }
+                            }
+                            for arg in args {
+                                self.resolve_expr_with_locals(&arg.value, locals)?;
+                            }
+                            return Ok(());
+                        }
+                        Err(SparError::ResolveError {
+                            message: format!("undefined function '{name}'"),
+                            hint: None,
+                            span: name_span.clone(),
+                        })
+                    }
+                    2 => {
+                        let ns = segments[0];
+                        let fn_name = segments[1];
+                        if let Some(group) = self.function_groups.get(ns) {
+                            if !group.functions.contains_key(fn_name) {
                                 return Err(SparError::ResolveError {
-                                    message: format!("function '{fn_name}' not exported from '{alias}'"),
+                                    message: format!("function '{fn_name}' not found in functionGroup '{ns}'"),
                                     hint: None,
                                     span: name_span.clone(),
                                 });
                             }
+                            for arg in args {
+                                self.resolve_expr_with_locals(&arg.value, locals)?;
+                            }
+                            return Ok(());
                         }
+                        if self.imports.contains_key(ns) || self.loaded_exports.contains_key(ns) {
+                            if let Some(exports) = self.loaded_exports.get(ns) {
+                                if !exports.contains(fn_name) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!("function '{fn_name}' not exported from '{ns}'"),
+                                        hint: None,
+                                        span: name_span.clone(),
+                                    });
+                                }
+                            }
+                            for arg in args {
+                                self.resolve_expr_with_locals(&arg.value, locals)?;
+                            }
+                            return Ok(());
+                        }
+                        Err(SparError::ResolveError {
+                            message: format!("undefined function '{name}'"),
+                            hint: None,
+                            span: name_span.clone(),
+                        })
+                    }
+                    _ => {
+                        let entry = self.functions.get(name.as_str()).ok_or_else(|| SparError::ResolveError {
+                            message: format!("undefined function '{name}'"),
+                            hint: None,
+                            span: name_span.clone(),
+                        })?;
+                        let param_names: HashSet<String> =
+                            entry.params.iter().map(|(n, _)| n.clone()).collect();
+                        let mut seen: HashSet<String> = HashSet::new();
                         for arg in args {
+                            if !param_names.contains(&arg.param_name) {
+                                return Err(SparError::ResolveError {
+                                    message: format!(
+                                        "function '{name}' has no param '{}'",
+                                        arg.param_name
+                                    ),
+                                    hint: None,
+                                    span: arg.param_name_span.clone(),
+                                });
+                            }
+                            if !seen.insert(arg.param_name.clone()) {
+                                return Err(SparError::ResolveError {
+                                    message: format!("duplicate argument '{}'", arg.param_name),
+                                    hint: None,
+                                    span: arg.param_name_span.clone(),
+                                });
+                            }
                             self.resolve_expr_with_locals(&arg.value, locals)?;
                         }
-                        return Ok(());
+                        let missing: Vec<_> = param_names
+                            .iter()
+                            .filter(|p| !seen.contains(p.as_str()))
+                            .collect();
+                        if !missing.is_empty() {
+                            return Err(SparError::ResolveError {
+                                message: format!(
+                                    "missing arguments for function '{name}': {:?}",
+                                    missing
+                                ),
+                                hint: None,
+                                span: name_span.clone(),
+                            });
+                        }
+                        Ok(())
                     }
-                    return Err(SparError::ResolveError {
-                        message: format!("undefined function '{name}'"),
-                        hint: None,
-                        span: name_span.clone(),
-                    });
                 }
-                let entry = self.functions.get(name).ok_or_else(|| SparError::ResolveError {
-                    message: format!("undefined function '{name}'"),
-                    hint: None,
-                    span: name_span.clone(),
-                })?;
-                let param_names: HashSet<String> =
-                    entry.params.iter().map(|(n, _)| n.clone()).collect();
-                let mut seen: HashSet<String> = HashSet::new();
-                for arg in args {
-                    if !param_names.contains(&arg.param_name) {
-                        return Err(SparError::ResolveError {
-                            message: format!(
-                                "function '{name}' has no param '{}'",
-                                arg.param_name
-                            ),
-                            hint: None,
-                            span: arg.param_name_span.clone(),
-                        });
-                    }
-                    if !seen.insert(arg.param_name.clone()) {
-                        return Err(SparError::ResolveError {
-                            message: format!("duplicate argument '{}'", arg.param_name),
-                            hint: None,
-                            span: arg.param_name_span.clone(),
-                        });
-                    }
-                    self.resolve_expr_with_locals(&arg.value, locals)?;
-                }
-                let missing: Vec<_> = param_names
-                    .iter()
-                    .filter(|p| !seen.contains(p.as_str()))
-                    .collect();
-                if !missing.is_empty() {
-                    return Err(SparError::ResolveError {
-                        message: format!(
-                            "missing arguments for function '{name}': {:?}",
-                            missing
-                        ),
-                        hint: None,
-                        span: name_span.clone(),
-                    });
-                }
-                Ok(())
             }
             Expr::Unary { operand, .. } => self.resolve_expr_with_locals(operand, locals),
             Expr::Index { source, index, .. } => {

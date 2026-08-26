@@ -980,10 +980,7 @@ impl<'a> TypeChecker<'a> {
                 self.infer_binop_type(&op.op, &lhs, &rhs)
             }
             Expr::Grouped(inner, _) => self.infer_type(inner),
-            Expr::Call { name, .. } => {
-                if name.contains("::") { return None; } // cross-file call — type unknown here
-                self.symbols.functions.get(name).map(|fe| fe.ret.clone())
-            }
+            Expr::Call { name, .. } => self.call_return_type(name),
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
                     let t = self.infer_type(operand)?;
@@ -1035,6 +1032,23 @@ impl<'a> TypeChecker<'a> {
                     .and_then(|s| s.fields.get(field.as_str()))
                     .and_then(|f| f.ty.clone())
             }
+            _ => None,
+        }
+    }
+
+    /// Return type of a `Expr::Call.name` string, for calls that are
+    /// statically resolvable here: local plain functions (1 segment) and
+    /// local functionGroup calls (2 segments, `Group::fn`) — both have a
+    /// `FunctionEntry` already in `self.symbols`. Cross-file calls (2
+    /// segments where the first isn't a local functionGroup, or 3 segments)
+    /// stay opaque — this typechecker doesn't load imported files' symbols.
+    fn call_return_type(&self, name: &str) -> Option<SparType> {
+        let segments: Vec<&str> = name.split("::").collect();
+        match segments.len() {
+            2 => self.symbols.function_groups.get(segments[0])
+                .and_then(|g| g.functions.get(segments[1]))
+                .map(|fe| fe.ret.clone()),
+            1 => self.symbols.functions.get(name).map(|fe| fe.ret.clone()),
             _ => None,
         }
     }
@@ -2002,10 +2016,7 @@ impl<'a> TypeChecker<'a> {
                 // handles the global-var case (see infer_namespace_type above).
                 self.infer_type(expr)
             }
-            Expr::Call { name, .. } => {
-                if name.contains("::") { return None; } // cross-file call — type unknown here
-                self.symbols.functions.get(name).map(|fe| fe.ret.clone())
-            }
+            Expr::Call { name, .. } => self.call_return_type(name),
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
                     let t = self.infer_type_with_locals(operand, locals)?;

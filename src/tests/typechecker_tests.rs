@@ -729,3 +729,28 @@ fn named_field_access_on_loop_var_has_correct_type() {
     "#;
     check_ok(src);
 }
+
+#[test]
+fn local_function_group_call_return_type_used_in_another_functions_return() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+            function useOnly() -> int {
+                return EdgeInsect::only();
+            }
+        }
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn local_function_group_call_return_type_mismatch_errors() {
+    let src = r#"
+        functionGroup EdgeInsect {
+            function only() -> int { return 1; }
+        }
+        var x: str = EdgeInsect::only();
+    "#;
+    let errs = check_err(src);
+    assert!(errs.contains("type mismatch"), "got: {errs}");
+}

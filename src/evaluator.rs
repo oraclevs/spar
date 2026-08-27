@@ -877,15 +877,15 @@ impl Evaluator {
                     span: span.clone(),
                 });
             }
-            if nr.segments.len() == 1 {
-                let name = &nr.segments[0];
-                if !local_scope.contains_key(name.as_str())
-                    && !self.symbols.globals.contains_key(name.as_str())
-                    && self.symbols.lookup_section(std::slice::from_ref(name)).is_some()
-                {
-                    return self.eval_section_field_direct(std::slice::from_ref(name), field, span);
-                }
-            }
+        }
+        // A chain of bare identifiers rooted at a known top-level section
+        // (`Section.nested.deeper.field`) is a static path — nested-section
+        // intermediates aren't independently addressable ConfigValues (see
+        // `eval_section_fields`'s "Do NOT insert into result" note), so the
+        // whole path must be resolved in one `eval_section_field_direct`
+        // call rather than hop-by-hop.
+        if let Some(section_path) = self.flatten_static_section_path(base, local_scope) {
+            return self.eval_section_field_direct(&section_path, field, span);
         }
         let base_val = self.eval_expr(base, local_scope)?;
         match base_val {
@@ -894,6 +894,33 @@ impl Evaluator {
                 span: span.clone(),
             }),
             _ => Err(EvalErr::CyclicRef { name: field.to_string(), span: span.clone() }),
+        }
+    }
+
+    /// If `expr` is a chain of bare-identifier `FieldAccess`es rooted at a
+    /// known top-level section name (not shadowed by a local), returns the
+    /// full section path (e.g. `Section.nested.deeper` → `["Section",
+    /// "nested", "deeper"]`). Returns `None` for anything else (a call,
+    /// index, self/global base, or a root that's a local/global var) —
+    /// those fall through to normal per-hop expression evaluation.
+    fn flatten_static_section_path(&self, expr: &Expr, local_scope: &HashMap<String, ConfigValue>) -> Option<Vec<String>> {
+        match expr {
+            Expr::NamespaceRef(nr) if nr.segments.len() == 1 => {
+                let name = &nr.segments[0];
+                if !local_scope.contains_key(name.as_str())
+                    && self.symbols.lookup_section(std::slice::from_ref(name)).is_some()
+                {
+                    Some(vec![name.clone()])
+                } else {
+                    None
+                }
+            }
+            Expr::FieldAccess { base, field, .. } => {
+                let mut path = self.flatten_static_section_path(base, local_scope)?;
+                path.push(field.clone());
+                Some(path)
+            }
+            _ => None,
         }
     }
 

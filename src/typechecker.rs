@@ -1062,13 +1062,6 @@ impl<'a> TypeChecker<'a> {
 
     /// If `name` is a global var whose declared type is `SparType::Named(X)`,
     /// returns `X`. `None` for any other global (or a non-Named type).
-    fn global_named_type(&self, name: &str) -> Option<String> {
-        match self.symbols.lookup_global(name)? {
-            GlobalEntry::Var { ty: SparType::Named(n), .. } => Some(n.clone()),
-            _ => None,
-        }
-    }
-
     fn lookup_global_type(&self, name: &str) -> Option<SparType> {
         match self.symbols.lookup_global(name)? {
             GlobalEntry::Var { ty, .. } => Some(ty.clone()),

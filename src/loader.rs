@@ -132,6 +132,7 @@ fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelIt
         TopLevelItem::Function(mut f) => { f.is_private = true; TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.exported = false; TopLevelItem::Type(t) }
         TopLevelItem::Enum(mut e) => { e.exported = false; TopLevelItem::Enum(e) }
+        TopLevelItem::FunctionGroup(mut g) => { g.is_private = true; TopLevelItem::FunctionGroup(g) }
         other => other,
     }
 }
@@ -157,6 +158,7 @@ fn retag_top_level_span(item: crate::ast::TopLevelItem, span: &crate::error::Spa
         TopLevelItem::Function(mut f) => { f.span = span.clone(); f.name_span = span.clone(); TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.span = span.clone(); t.name_span = span.clone(); TopLevelItem::Type(t) }
         TopLevelItem::Enum(mut e) => { e.span = span.clone(); e.name_span = span.clone(); TopLevelItem::Enum(e) }
+        TopLevelItem::FunctionGroup(mut g) => { g.span = span.clone(); g.name_span = span.clone(); TopLevelItem::FunctionGroup(g) }
         other => other,
     }
 }
@@ -172,6 +174,7 @@ fn rename_top_level_item(item: crate::ast::TopLevelItem, new_name: &str) -> crat
         TopLevelItem::Function(mut f) => { f.name = new_name.to_string(); TopLevelItem::Function(f) }
         TopLevelItem::Type(mut t) => { t.name = new_name.to_string(); TopLevelItem::Type(t) }
         TopLevelItem::Enum(mut e) => { e.name = new_name.to_string(); TopLevelItem::Enum(e) }
+        TopLevelItem::FunctionGroup(mut g) => { g.name = new_name.to_string(); TopLevelItem::FunctionGroup(g) }
         other => other,
     }
 }
@@ -218,6 +221,7 @@ fn splice_selective(
             TopLevelItem::Function(f) if !f.is_private => Some((f.name.as_str(), it)),
             TopLevelItem::Type(t) if t.exported => Some((t.name.as_str(), it)),
             TopLevelItem::Enum(e) if e.exported => Some((e.name.as_str(), it)),
+            TopLevelItem::FunctionGroup(g) if !g.is_private => Some((g.name.as_str(), it)),
             _ => None,
         }
     }).collect();
@@ -1271,6 +1275,27 @@ mod tests {
             it, TopLevelItem::Enum(e) if e.name == "Protocol"
         ));
         assert!(has_protocol, "Protocol enum must be spliced in, got items: {:?}", program.items);
+    }
+
+    #[test]
+    fn expand_imports_named_selective_can_import_a_function_group() {
+        // Regression: `import { X } from "...";` (plain named import, not
+        // `import type`) didn't recognize functionGroup exports at all —
+        // `available`/rename/localize/retag all skipped `FunctionGroup`.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "functionGroup EdgeInsect { function only() -> int { return 1; } }\n",
+        ).unwrap();
+        let src = r#"import { EdgeInsect } from "shared.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let has_group = program.items.iter().any(|it| matches!(
+            it, TopLevelItem::FunctionGroup(g) if g.name == "EdgeInsect"
+        ));
+        assert!(has_group, "EdgeInsect functionGroup must be spliced in, got items: {:?}", program.items);
     }
 
     #[test]

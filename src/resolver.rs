@@ -1277,6 +1277,13 @@ impl Resolver {
                 }
                 return;
             }
+            // A bare name naming a top-level section (e.g. `Database.pool`)
+            // is a section-field access, not a global-var lookup — field-
+            // existence is deferred to the typechecker, same as a var-typed
+            // base; skip resolve_expr's global-only check for this name.
+            if nr.segments.len() == 1 && self.sections.contains_key(&vec![nr.segments[0].clone()]) {
+                return;
+            }
         }
         // General case: resolve `base` like any other expression (var
         // lookup, index, call, nested FieldAccess, ...) and defer field-
@@ -1307,6 +1314,12 @@ impl Resolver {
                     hint,
                     span: span.clone(),
                 });
+            }
+            if nr.segments.len() == 1
+                && !locals.contains(&nr.segments[0])
+                && self.sections.contains_key(&vec![nr.segments[0].clone()])
+            {
+                return Ok(());
             }
         }
         self.resolve_expr_with_locals(base, locals)

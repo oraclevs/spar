@@ -51,11 +51,13 @@ pub struct TypeChecker<'a> {
     /// against an `import schema "...";` but with no `-> Type` binding of
     /// their own. Empty unless populated via `check_with_schema`.
     schema_bindings: HashMap<String, Vec<SchemaField>>,
+    /// The section currently being checked, for `self.field` type lookups.
+    current_section: Option<Vec<String>>,
 }
 
 impl<'a> TypeChecker<'a> {
     pub fn check(program: &Program, symbols: &'a SymbolTable) -> Result<(), Vec<SparError>> {
-        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings: HashMap::new() };
+        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings: HashMap::new(), current_section: None };
         tc.check_program(program);
         if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
     }
@@ -78,7 +80,7 @@ impl<'a> TypeChecker<'a> {
         symbols: &'a SymbolTable,
         schema_bindings: HashMap<String, Vec<SchemaField>>,
     ) -> Result<(), Vec<SparError>> {
-        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings };
+        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings, current_section: None };
         tc.check_program(program);
         if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
     }
@@ -156,6 +158,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_section(&mut self, decl: &SectionDecl) {
+        let prev_section = self.current_section.replace(decl.path.clone());
         let path_str = decl.path.join(".");
         match &decl.type_binding {
             Some(binding) => self.check_type_binding(decl, binding, &path_str),
@@ -169,6 +172,7 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
+        self.current_section = prev_section;
     }
 
     /// A section with no `-> Type` binding but a matching `import schema`
@@ -967,6 +971,7 @@ impl<'a> TypeChecker<'a> {
                     .map(|t| SparType::List(Box::new(t)))
             }
             Expr::NamespaceRef(nr) => self.infer_namespace_type(nr),
+            Expr::FieldAccess { base, field, .. } => self.infer_field_access(base, field),
             Expr::FnCall(fc) => match fc.name.as_str() {
                 "env" | "str" => Some(SparType::Str),
                 "int"         => Some(SparType::Int),
@@ -1010,28 +1015,30 @@ impl<'a> TypeChecker<'a> {
     fn infer_namespace_type(&self, nr: &NamespaceRef) -> Option<SparType> {
         match nr.segments.as_slice() {
             [name] => self.lookup_global_type(name),
-            [ns, name] if ns == "global" => self.lookup_global_type(name),
             [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
                 Some(SparType::Named(ns.clone()))
             }
-            [ns, name] if self.global_named_type(ns).is_some() => {
-                let type_name = self.global_named_type(ns)?;
-                self.symbols.types.get(&type_name)
-                    .and_then(|te| te.fields.iter().find(|f| &f.name == name))
-                    .map(|f| self.field_shape_to_type(&f.shape))
+            _ => None,
+        }
+    }
+
+    fn infer_field_access(&self, base: &Expr, field: &str) -> Option<SparType> {
+        if let Expr::NamespaceRef(nr) = base {
+            if nr.segments == ["self"] {
+                let section_path = self.current_section.as_ref()?;
+                return self.symbols.lookup_section(section_path)
+                    .and_then(|s| s.fields.get(field))
+                    .and_then(|f| f.ty.clone());
             }
-            [ns, name] => {
-                let key = vec![ns.clone()];
-                self.symbols.lookup_section(&key)
-                    .and_then(|s| s.fields.get(name.as_str()))
-                    .and_then(|f| f.ty.clone())
+            if nr.segments == ["global"] {
+                return self.lookup_global_type(field);
             }
-            [_, section, field] => {
-                let key = vec![section.clone()];
-                self.symbols.lookup_section(&key)
-                    .and_then(|s| s.fields.get(field.as_str()))
-                    .and_then(|f| f.ty.clone())
-            }
+        }
+        let base_ty = self.infer_type(base)?;
+        match base_ty {
+            SparType::Named(type_name) => self.symbols.types.get(&type_name)
+                .and_then(|te| te.fields.iter().find(|f| &f.name == field))
+                .map(|f| self.field_shape_to_type(&f.shape)),
             _ => None,
         }
     }
@@ -1375,6 +1382,7 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Literal(_) => {}
             Expr::NamespaceRef(_) => {}
+            Expr::FieldAccess { base, .. } => self.check_expr_internal(base),
         }
     }
 
@@ -1680,6 +1688,7 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Literal(_) => Ok(()),
             Expr::NamespaceRef(_) => Ok(()),
+            Expr::FieldAccess { base, .. } => self.check_expr_with_locals(base, locals),
         }
     }
 
@@ -2000,21 +2009,20 @@ impl<'a> TypeChecker<'a> {
                 }
                 self.infer_type(expr)
             }
-            Expr::NamespaceRef(nr) if nr.segments.len() == 2 => {
-                let ns = &nr.segments[0];
-                let field = &nr.segments[1];
-                if let Some(ty) = locals.get(ns) {
-                    return match ty {
-                        SparType::Named(type_name) => self.symbols.types.get(type_name)
-                            .and_then(|te| te.fields.iter().find(|f| &f.name == field))
-                            .map(|f| self.field_shape_to_type(&f.shape)),
-                        _ => None, // local exists but isn't a Named-type value
-                    };
+            Expr::FieldAccess { base, field, .. } => {
+                if let Expr::NamespaceRef(nr) = base.as_ref() {
+                    if nr.segments.len() == 1 {
+                        if let Some(ty) = locals.get(&nr.segments[0]) {
+                            return match ty {
+                                SparType::Named(type_name) => self.symbols.types.get(type_name)
+                                    .and_then(|te| te.fields.iter().find(|f| &f.name == field))
+                                    .map(|f| self.field_shape_to_type(&f.shape)),
+                                _ => None,
+                            };
+                        }
+                    }
                 }
-                // `ns` isn't a local (e.g. it's a global var, section, or
-                // enum) — defer to the non-locals path, which now also
-                // handles the global-var case (see infer_namespace_type above).
-                self.infer_type(expr)
+                self.infer_field_access(base, field)
             }
             Expr::Call { name, .. } => self.call_return_type(name),
             Expr::Unary { op, operand, .. } => match op {

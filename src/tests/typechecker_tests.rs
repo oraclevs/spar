@@ -754,3 +754,64 @@ fn local_function_group_call_return_type_mismatch_errors() {
     let errs = check_err(src);
     assert!(errs.contains("type mismatch"), "got: {errs}");
 }
+
+#[test]
+fn dot_field_access_on_global_var_has_correct_type() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: str = person.name;
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn dot_field_access_type_mismatch_errors() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: int = person.name;
+    "#;
+    let errs = check_err(src);
+    assert!(errs.contains("type mismatch"), "got: {errs}");
+}
+
+#[test]
+fn dot_field_access_on_loop_var_has_correct_type() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person.name == "jude" { return 6; }
+                return 0;
+            }
+            return 0;
+        }
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn self_dot_field_access_has_correct_type() {
+    // New coverage — self.field was never type-checked at all before
+    // this change (confirmed: no "self" handling existed in typechecker.rs).
+    let src = r#"
+        [Server]{
+            port: int = 8080;
+            doubled: int = self.port + self.port;
+        };
+    "#;
+    check_ok(src);
+}
+
+#[test]
+fn self_dot_field_access_type_mismatch_errors() {
+    let src = r#"
+        [Server]{
+            port: int = 8080;
+            bad: str = self.port;
+        };
+    "#;
+    let errs = check_err(src);
+    assert!(errs.contains("type mismatch"), "got: {errs}");
+}

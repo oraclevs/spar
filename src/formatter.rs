@@ -400,21 +400,35 @@ fn escape_string_content(s: &str) -> String {
     out
 }
 
-/// Total line-width budget for a candidate one-line rendering of a
-/// container expression (`Object`/`List`/`Comprehension`) — measured from
-/// column 0, not from the current cursor column, matching common formatter
-/// convention (rustfmt/prettier) of budgeting the whole line rather than
-/// "remaining space", so the same expression wraps the same way regardless
-/// of how deeply it's nested in the surrounding field/call syntax.
-const MAX_INLINE_WIDTH: usize = 96;
+/// Real line-width budget, measured as "already-written column + candidate
+/// length" — NOT the candidate's own length in isolation. A short object
+/// can still need wrapping once it's sitting after `        ports: [Port]
+/// = ` on its real line; checking the candidate alone misses that
+/// entirely. Set a couple of columns under the nominal 100-col target
+/// (rustfmt's default) rather than exactly at it: whatever follows the
+/// candidate on the same line — a field's `;`, a list item's `,` — isn't
+/// part of the candidate string `fits_inline` measures, so budgeting to
+/// the exact limit lets real lines land one or two columns over it.
+const MAX_LINE_WIDTH: usize = 98;
 
-/// True if a candidate one-line rendering both fits the width budget and
-/// didn't already contain a forced break — a child container that itself
-/// exceeded the budget renders multi-line internally, and that embedded
-/// `\n` must propagate outward: a parent can never stay on one line while
-/// wrapping a child that didn't.
-fn fits_inline(candidate: &str) -> bool {
-    !candidate.contains('\n') && candidate.chars().count() <= MAX_INLINE_WIDTH
+/// How many columns into the current line `out` already is — the length
+/// of everything written since the last `\n` (or all of `out`, if this is
+/// still the first line).
+fn current_column(out: &str) -> usize {
+    match out.rfind('\n') {
+        Some(i) => out[i + 1..].chars().count(),
+        None => out.chars().count(),
+    }
+}
+
+/// True if appending a candidate one-line rendering to `out` right now
+/// both fits the real line-width budget and didn't already contain a
+/// forced break — a child container that itself exceeded the budget
+/// renders multi-line internally, and that embedded `\n` must propagate
+/// outward: a parent can never stay on one line while wrapping a child
+/// that didn't.
+fn fits_inline(out: &str, candidate: &str) -> bool {
+    !candidate.contains('\n') && current_column(out) + candidate.chars().count() <= MAX_LINE_WIDTH
 }
 
 fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig, out: &mut String) {
@@ -426,7 +440,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             }
             flat.push('}');
 
-            if fits_inline(&flat) {
+            if fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("{\n");
@@ -528,7 +542,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             }
             flat.push(']');
 
-            if fits_inline(&flat) {
+            if fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("[\n");
@@ -559,7 +573,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             format_expr(body, 0, depth + 1, config, &mut flat);
             flat.push_str(" }");
 
-            if fits_inline(&flat) {
+            if fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("for ");
@@ -874,7 +888,7 @@ mod tests {
             "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
         assert!(formatted.contains("for i in [0, 1, 2] {\n"), "got: {formatted}");
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
@@ -890,13 +904,43 @@ mod tests {
     }
 
     #[test]
+    fn width_check_accounts_for_real_indentation_and_prefix() {
+        // Regression: a nested object whose OWN flat rendering is short
+        // (well under the width budget in isolation) still needs to wrap
+        // once the real line is accounted for — deep indentation plus a
+        // `field: [Type] = ` prefix, PLUS the trailing `;` the caller
+        // appends right after the candidate (not part of what
+        // `fits_inline` measures) can together push an individually-short
+        // object past the line-width budget even though checking the
+        // object's candidate string alone would say it fits.
+        let src = concat!(
+            "export var apiReplicas: [int] = for i in [0, 1, 2] {\n",
+            "    {\n",
+            "        ports: [Port] = [{ container: 8080; host: Compute::replicaPort(basePort: 8081, index: i); }];\n",
+            "    }\n",
+            "};\n",
+        );
+        let formatted = fmt(src);
+        assert!(
+            formatted.lines().all(|l| l.chars().count() <= 100),
+            "no line should exceed the width budget once real indentation is counted, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("ports: [Port] = [\n"),
+            "the ports list must wrap onto its own lines, got: {formatted}"
+        );
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
     fn long_list_literal_wraps_one_item_per_line() {
         let src = concat!(
             "export var names: [str] = [\"alpha-service\", \"beta-service\", ",
             "\"gamma-service\", \"delta-service\", \"epsilon-service\", \"zeta-service\"];\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
         assert!(formatted.contains("[\n"), "got: {formatted}");
         assert!(formatted.contains("\"alpha-service\",\n"), "got: {formatted}");
         let reformatted = fmt(&formatted);
@@ -917,7 +961,7 @@ mod tests {
             "};\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }

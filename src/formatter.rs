@@ -152,7 +152,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str(&format_type(&vd.ty));
             if let Some(val) = &vd.value {
                 out.push_str(" = ");
-                format_expr(val, 0, out);
+                format_expr(val, 0, 0, config, out);
             }
             out.push_str(";\n");
         }
@@ -163,7 +163,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if dd.optional { out.push('?'); }
             if let Some(val) = &dd.value {
                 out.push_str(" = ");
-                format_expr(val, 0, out);
+                format_expr(val, 0, 0, config, out);
             }
             out.push_str(";\n");
         }
@@ -335,7 +335,7 @@ fn format_section_items_cx(items: &[SectionItem], depth: usize, config: &FormatC
                 let ind = indent(depth, config);
                 out.push_str(&ind);
                 out.push_str("...");
-                format_expr(&ss.expr, 0, out);
+                format_expr(&ss.expr, 0, depth, config, out);
                 out.push_str(";\n");
             }
         }
@@ -400,33 +400,46 @@ fn escape_string_content(s: &str) -> String {
     out
 }
 
-fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
+/// Total line-width budget for a candidate one-line rendering of a
+/// container expression (`Object`/`List`/`Comprehension`) — measured from
+/// column 0, not from the current cursor column, matching common formatter
+/// convention (rustfmt/prettier) of budgeting the whole line rather than
+/// "remaining space", so the same expression wraps the same way regardless
+/// of how deeply it's nested in the surrounding field/call syntax.
+const MAX_INLINE_WIDTH: usize = 96;
+
+/// True if a candidate one-line rendering both fits the width budget and
+/// didn't already contain a forced break — a child container that itself
+/// exceeded the budget renders multi-line internally, and that embedded
+/// `\n` must propagate outward: a parent can never stay on one line while
+/// wrapping a child that didn't.
+fn fits_inline(candidate: &str) -> bool {
+    !candidate.contains('\n') && candidate.chars().count() <= MAX_INLINE_WIDTH
+}
+
+fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig, out: &mut String) {
     match expr {
         Expr::Object(items, _) => {
-            out.push_str("{ ");
+            let mut flat = String::from("{ ");
             for item in items {
-                match item {
-                    SectionItem::Field(f) => {
-                        out.push_str(&f.name);
-                        if f.optional { out.push('?'); }
-                        out.push_str(": ");
-                        if let Some(ty) = &f.ty {
-                            out.push_str(&format_type(ty));
-                            out.push_str(" = ");
-                        }
-                        if let Some(FieldValue::Expr(e)) = &f.value {
-                            format_expr(e, 0, out);
-                        }
-                        out.push_str("; ");
-                    }
-                    SectionItem::Spread(ss) => {
-                        out.push_str("...");
-                        format_expr(&ss.expr, 0, out);
-                        out.push_str("; ");
-                    }
-                }
+                format_object_item_flat(item, depth + 1, config, &mut flat);
             }
-            out.push('}');
+            flat.push('}');
+
+            if fits_inline(&flat) {
+                out.push_str(&flat);
+            } else {
+                out.push_str("{\n");
+                let field_indent = indent(depth + 1, config);
+                for item in items {
+                    out.push_str(&field_indent);
+                    format_object_item_flat(item, depth + 1, config, out);
+                    out.pop(); // drop the flat variant's trailing space after ';'
+                    out.push('\n');
+                }
+                out.push_str(&indent(depth, config));
+                out.push('}');
+            }
         }
         Expr::Literal(lit) => match lit {
             Literal::Int(n)   => out.push_str(&n.to_string()),
@@ -450,7 +463,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
                     StringPart::Literal(s) => out.push_str(&escape_string_content(s)),
                     StringPart::Expr(e)    => {
                         out.push_str("${");
-                        format_expr(e, 0, out);
+                        format_expr(e, 0, depth, config, out);
                         out.push('}');
                     }
                 }
@@ -467,7 +480,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
             out.push('(');
             for (i, arg) in fc.args.iter().enumerate() {
                 if i > 0 { out.push_str(", "); }
-                format_expr(arg, 0, out);
+                format_expr(arg, 0, depth, config, out);
             }
             out.push(')');
         }
@@ -479,7 +492,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
                 if i > 0 { out.push_str(", "); }
                 out.push_str(&arg.param_name);
                 out.push_str(": ");
-                format_expr(&arg.value, 0, out);
+                format_expr(&arg.value, 0, depth, config, out);
             }
             out.push(')');
         }
@@ -488,13 +501,13 @@ fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
             let prec = binop_prec(&b.op);
             let needs_parens = prec < parent_prec;
             if needs_parens { out.push('('); }
-            format_expr(&b.lhs, prec, out);
+            format_expr(&b.lhs, prec, depth, config, out);
             out.push(' ');
             out.push_str(binop_symbol(&b.op));
             out.push(' ');
             // Right side: use prec+1 so same-precedence right operand gets parens
             // (avoids ambiguity for non-associative ops like comparisons)
-            format_expr(&b.rhs, prec + 1, out);
+            format_expr(&b.rhs, prec + 1, depth, config, out);
             if needs_parens { out.push(')'); }
         }
 
@@ -504,39 +517,95 @@ fn format_expr(expr: &Expr, parent_prec: u8, out: &mut String) {
                 UnOp::Neg => out.push('-'),
             }
             // Unary binds tighter than all binary ops (prec 7)
-            format_expr(operand, 7, out);
+            format_expr(operand, 7, depth, config, out);
         }
 
         Expr::List(items, _) => {
-            out.push('[');
+            let mut flat = String::from("[");
             for (i, item) in items.iter().enumerate() {
-                if i > 0 { out.push_str(", "); }
-                format_expr(item, 0, out);
+                if i > 0 { flat.push_str(", "); }
+                format_expr(item, 0, depth + 1, config, &mut flat);
             }
-            out.push(']');
+            flat.push(']');
+
+            if fits_inline(&flat) {
+                out.push_str(&flat);
+            } else {
+                out.push_str("[\n");
+                let item_indent = indent(depth + 1, config);
+                for (i, item) in items.iter().enumerate() {
+                    out.push_str(&item_indent);
+                    format_expr(item, 0, depth + 1, config, out);
+                    if i + 1 < items.len() { out.push(','); }
+                    out.push('\n');
+                }
+                out.push_str(&indent(depth, config));
+                out.push(']');
+            }
         }
 
         Expr::Grouped(inner, _) => {
             out.push('(');
-            format_expr(inner, 0, out);
+            format_expr(inner, 0, depth, config, out);
             out.push(')');
         }
 
         Expr::Comprehension { var_name, source, body, .. } => {
-            out.push_str("for ");
-            out.push_str(var_name);
-            out.push_str(" in ");
-            format_expr(source, 0, out);
-            out.push_str(" { ");
-            format_expr(body, 0, out);
-            out.push_str(" }");
+            let mut flat = String::from("for ");
+            flat.push_str(var_name);
+            flat.push_str(" in ");
+            format_expr(source, 0, depth, config, &mut flat);
+            flat.push_str(" { ");
+            format_expr(body, 0, depth + 1, config, &mut flat);
+            flat.push_str(" }");
+
+            if fits_inline(&flat) {
+                out.push_str(&flat);
+            } else {
+                out.push_str("for ");
+                out.push_str(var_name);
+                out.push_str(" in ");
+                format_expr(source, 0, depth, config, out);
+                out.push_str(" {\n");
+                out.push_str(&indent(depth + 1, config));
+                format_expr(body, 0, depth + 1, config, out);
+                out.push('\n');
+                out.push_str(&indent(depth, config));
+                out.push('}');
+            }
         }
 
         Expr::Index { source, index, .. } => {
-            format_expr(source, 8, out); // 8 = tightest: index always binds to immediate source
+            format_expr(source, 8, depth, config, out); // 8 = tightest: index always binds to immediate source
             out.push('[');
-            format_expr(index, 0, out);
+            format_expr(index, 0, depth, config, out);
             out.push(']');
+        }
+    }
+}
+
+/// Renders one `{ ... }` object-literal field or spread, `"; "`-terminated,
+/// shared verbatim by the inline and multi-line `Expr::Object` branches —
+/// the multi-line branch strips the trailing space and adds its own `\n`.
+fn format_object_item_flat(item: &SectionItem, depth: usize, config: &FormatConfig, out: &mut String) {
+    match item {
+        SectionItem::Field(f) => {
+            out.push_str(&f.name);
+            if f.optional { out.push('?'); }
+            out.push_str(": ");
+            if let Some(ty) = &f.ty {
+                out.push_str(&format_type(ty));
+                out.push_str(" = ");
+            }
+            if let Some(FieldValue::Expr(e)) = &f.value {
+                format_expr(e, 0, depth, config, out);
+            }
+            out.push_str("; ");
+        }
+        SectionItem::Spread(ss) => {
+            out.push_str("...");
+            format_expr(&ss.expr, 0, depth, config, out);
+            out.push_str("; ");
         }
     }
 }
@@ -561,7 +630,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str(": ");
             out.push_str(&format_type(&lv.ty));
             out.push_str(" = ");
-            format_expr(&lv.value, 0, out);
+            format_expr(&lv.value, 0, depth, config, out);
             out.push_str(";\n");
         }
 
@@ -570,7 +639,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str("return ");
             match rv {
                 ReturnValue::Expr(e) => {
-                    format_expr(e, 0, out);
+                    format_expr(e, 0, depth, config, out);
                     out.push_str(";\n");
                 }
                 ReturnValue::SectionBlock(fields) => {
@@ -583,7 +652,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
                             out.push_str(&format_type(ty));
                             out.push_str(" = ");
                         }
-                        format_expr(&rf.value, 0, out);
+                        format_expr(&rf.value, 0, depth + 1, config, out);
                         out.push_str(";\n");
                     }
                     out.push_str(&ind);
@@ -595,7 +664,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
         FuncStmt::If(if_stmt) => {
             out.push_str(&ind);
             out.push_str("if ");
-            format_expr(&if_stmt.condition, 0, out);
+            format_expr(&if_stmt.condition, 0, depth, config, out);
             out.push_str(" {\n");
             format_func_stmts(&if_stmt.then_stmts, depth + 1, config, out);
             if if_stmt.else_stmts.is_empty() {
@@ -615,7 +684,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str("for ");
             out.push_str(var_name);
             out.push_str(" in ");
-            format_expr(iterable, 0, out);
+            format_expr(iterable, 0, depth, config, out);
             out.push_str(" {\n");
             format_func_stmts(body, depth + 1, config, out);
             out.push_str(&ind);
@@ -685,7 +754,7 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
                 None => { out.push_str(";\n"); }
                 Some(FieldValue::Expr(e)) => {
                     out.push_str(" = ");
-                    format_expr(e, 0, out);
+                    format_expr(e, 0, depth, config, out);
                     out.push_str(";\n");
                 }
                 Some(FieldValue::Nested(nested_items)) => {
@@ -703,7 +772,7 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
         None => match &fd.value {
             None => { out.push_str(";\n"); } // shouldn't occur (parser requires a value here), but format gracefully
             Some(FieldValue::Expr(e)) => {
-                format_expr(e, 0, out);
+                format_expr(e, 0, depth, config, out);
                 out.push_str(";\n");
             }
             Some(FieldValue::Nested(nested_items)) => {
@@ -727,7 +796,7 @@ fn format_nested_section_item(item: &SectionItem, depth: usize, config: &FormatC
         SectionItem::Spread(ss) => {
             out.push_str(&indent(depth, config));
             out.push_str("...");
-            format_expr(&ss.expr, 0, out);
+            format_expr(&ss.expr, 0, depth, config, out);
             out.push_str(";\n");
         }
     }
@@ -741,7 +810,7 @@ fn format_section_items(items: &[SectionItem], depth: usize, config: &FormatConf
                 let ind = indent(depth, config);
                 out.push_str(&ind);
                 out.push_str("...");
-                format_expr(&ss.expr, 0, out);
+                format_expr(&ss.expr, 0, depth, config, out);
                 out.push_str(";\n");
             }
         }
@@ -792,6 +861,65 @@ mod tests {
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
         assert!(formatted.contains("functionGroup EdgeInsect"), "got: {formatted}");
         assert!(formatted.contains("private "), "got: {formatted}");
+    }
+
+    #[test]
+    fn long_comprehension_wraps_to_multiple_lines() {
+        // Regression: a comprehension whose body is a many-field object
+        // literal used to render as one unreadable ~350-char line.
+        let src = concat!(
+            "export var apiReplicas: [int] = for i in [0, 1, 2] { ",
+            "{ name: str = replicaName(base: \"api\", index: i); ",
+            "image: str = \"acme/api\"; tag: str = \"1.4.2\"; ",
+            "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
+        );
+        let formatted = fmt(src);
+        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        assert!(formatted.contains("for i in [0, 1, 2] {\n"), "got: {formatted}");
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn short_object_literal_stays_inline() {
+        // A short object must NOT be forced onto multiple lines just
+        // because SOME container expressions need wrapping elsewhere.
+        let src = "var p: Port = { container: 8080; host: 8081; };\n";
+        let formatted = fmt(src);
+        assert_eq!(formatted, "var p: Port = { container: 8080; host: 8081; };\n");
+    }
+
+    #[test]
+    fn long_list_literal_wraps_one_item_per_line() {
+        let src = concat!(
+            "export var names: [str] = [\"alpha-service\", \"beta-service\", ",
+            "\"gamma-service\", \"delta-service\", \"epsilon-service\", \"zeta-service\"];\n",
+        );
+        let formatted = fmt(src);
+        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        assert!(formatted.contains("[\n"), "got: {formatted}");
+        assert!(formatted.contains("\"alpha-service\",\n"), "got: {formatted}");
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn nested_wrapped_object_forces_parent_list_to_wrap_too() {
+        // A break inside a child (the comprehension's object body) must
+        // propagate outward — the containing list/field can't stay
+        // single-line while its own content spans multiple lines.
+        let src = concat!(
+            "[Services]{\n",
+            "    replicas: [int] = for i in [0, 1, 2] { ",
+            "{ name: str = replicaName(base: \"api\", index: i); ",
+            "image: str = \"acme/api\"; tag: str = \"1.4.2\"; ",
+            "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
+            "};\n",
+        );
+        let formatted = fmt(src);
+        assert!(formatted.lines().all(|l| l.chars().count() <= 96), "got: {formatted}");
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }
 
     #[test]

@@ -233,6 +233,12 @@ pub enum Expr {
         index: Box<Expr>,
         span: Span,
     },
+    FieldAccess {
+        base: Box<Expr>,
+        field: String,
+        field_span: Span,
+        span: Span,
+    },
     /// An anonymous object literal — `{ field: value; ...Spread; }`. Reuses
     /// `SectionItem` verbatim, the same Field/Spread payload a nested
     /// section body (`FieldValue::Nested`) already carries. Only reachable

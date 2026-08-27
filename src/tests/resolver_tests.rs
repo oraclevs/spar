@@ -799,3 +799,105 @@ fn type_field_referencing_enum_resolves() {
     "#;
     resolve_ok(src);
 }
+
+// ── Dot field access ──────────────────────────────────────────────────────
+
+#[test]
+fn dot_field_access_on_section_resolves() {
+    let src = r#"
+        [Database]{ pool: int = 5; };
+        var p: int = Database.pool;
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn dot_field_access_on_global_var_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var person: Human = { name: "Mike"; age: 5; };
+        var pname: str = person.name;
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn dot_field_access_on_loop_var_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person.name == "jude" { return 6; }
+                return 0;
+            }
+            return 0;
+        }
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn dot_field_access_after_index_resolves() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var pname: str = people[0].name;
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn self_dot_field_access_resolves() {
+    let src = r#"
+        [Server]{
+            port: int = 8080;
+            display: str = "port-${self.port}";
+        };
+    "#;
+    resolve_ok(src);
+}
+
+#[test]
+fn bare_self_without_field_errors() {
+    let src = r#"[Server]{ x: int = self; };"#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("self"), "got: {errs}");
+}
+
+#[test]
+fn global_dot_field_access_resolves() {
+    let src = r#"
+        var port: int = 3000;
+        function f() -> int {
+            var port: int = 1;
+            return global.port;
+        }
+    "#;
+    resolve_ok(src);
+}
+
+// ── Old '::' field-access syntax — must fail with a migration hint ────────
+
+#[test]
+fn old_style_section_double_colon_field_access_errors_with_migration_hint() {
+    let src = r#"
+        [Database]{ pool: int = 5; };
+        var p: int = Database::pool;
+    "#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("'.'") || errs.to_lowercase().contains("no longer supported"), "got: {errs}");
+}
+
+#[test]
+fn old_style_self_double_colon_errors_with_migration_hint() {
+    let src = r#"[Server]{ port: int = 8080; display: str = self::port; };"#;
+    let errs = resolve_err(src);
+    assert!(errs.to_lowercase().contains("no longer supported") || errs.contains("'.'"), "got: {errs}");
+}
+
+#[test]
+fn unknown_double_colon_namespace_still_gets_generic_error() {
+    let src = r#"var x: str = totallyUnknownThing::field;"#;
+    let errs = resolve_err(src);
+    assert!(errs.contains("undefined namespace") || errs.contains("undefined function"), "got: {errs}");
+}

@@ -1022,6 +1022,7 @@ impl Resolver {
             Expr::Object(items, _)  => self.resolve_nested_fields(items),
             Expr::Literal(_)        => {}
             Expr::NamespaceRef(nr)  => self.resolve_namespace_ref(nr),
+            Expr::FieldAccess { base, field, span, .. } => self.resolve_field_access(base, field, span),
             Expr::FnCall(fc)        => {
                 for arg in &fc.args { self.resolve_expr(arg); }
             }
@@ -1154,30 +1155,21 @@ impl Resolver {
     }
 
     fn resolve_namespace_ref(&mut self, nr: &NamespaceRef) {
-        if nr.segments.first().map(String::as_str) == Some("self") {
-            let Some(section_path) = self.current_section.clone() else {
-                self.push_error(
-                    "`self::` can only be used inside a section's own field values".to_string(),
-                    nr.span.clone(),
-                );
-                return;
-            };
-            if nr.segments.len() < 2 {
-                self.push_error(
-                    "`self` must be followed by `::field` — bare `self` is not a value".to_string(),
-                    nr.span.clone(),
-                );
-                return;
-            }
-            let mut substituted = section_path;
-            substituted.extend(nr.segments[1..].iter().cloned());
-            let substituted_ref = NamespaceRef { segments: substituted, span: nr.span.clone() };
-            return self.resolve_namespace_ref(&substituted_ref);
-        }
         match nr.segments.as_slice() {
 
             // ── 1 segment ────────────────────────────────────────────────────
             [name] => {
+                if name == "self" || name == "global" {
+                    // Bare self/global (not followed by `.field`) is never
+                    // a value on its own — FieldAccess resolution handles
+                    // the `self.x`/`global.x` case before ever calling
+                    // this function on a bare self/global NamespaceRef.
+                    self.push_error(
+                        format!("`{name}` must be followed by `.field` — bare `{name}` is not a value"),
+                        nr.span.clone(),
+                    );
+                    return;
+                }
                 if !self.globals.contains_key(name.as_str()) {
                     let candidates: Vec<String> = self.globals.keys().cloned().collect();
                     let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
@@ -1189,47 +1181,9 @@ impl Resolver {
                 }
             }
 
-            // ── 2 segments ────────────────────────────────────────────────────
+            // ── 2+ segments — enum variant or import-alias item ONLY ────────
             [ns, name] => {
-                if ns == "global" {
-                    if !self.globals.contains_key(name.as_str()) {
-                        let candidates: Vec<String> = self.globals.keys().cloned().collect();
-                        let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
-                        self.push_error_hint(
-                            format!("undefined reference: `{name}` is not declared in the global scope"),
-                            hint,
-                            nr.span.clone(),
-                        );
-                    }
-                } else if self.sections.contains_key(&vec![ns.clone()]) {
-                    let key = vec![ns.clone()];
-                    let field_exists = self.sections[&key].fields.contains_key(name.as_str());
-                    let hint = if !field_exists {
-                        let field_keys: Vec<String> =
-                            self.sections[&key].fields.keys().cloned().collect();
-                        suggest(name, field_keys.iter().map(|s| s.as_str()))
-                    } else {
-                        None
-                    };
-                    if !field_exists {
-                        self.push_error_hint(
-                            format!("undefined reference: `{name}` is not a field in section `[{ns}]`"),
-                            hint,
-                            nr.span.clone(),
-                        );
-                    }
-                } else if self.imports.contains_key(ns.as_str()) {
-                    // Validate against loaded export set if available
-                    if let Some(exports) = self.loaded_exports.get(ns.as_str()) {
-                        if !exports.contains(name.as_str()) {
-                            self.push_error(
-                                format!("'{}' is not exported by import '{ns}'", name),
-                                nr.span.clone(),
-                            );
-                        }
-                    }
-                    // If loaded_exports is empty (single-file mode), defer silently as before
-                } else if let Some(entry) = self.enums.get(ns.as_str()) {
+                if let Some(entry) = self.enums.get(ns.as_str()) {
                     if !entry.variants.iter().any(|v| v == name) {
                         let hint = suggest(name, entry.variants.iter().map(|s| s.as_str()));
                         self.push_error_hint(
@@ -1238,69 +1192,124 @@ impl Resolver {
                             nr.span.clone(),
                         );
                     }
-                } else if self.globals.contains_key(ns.as_str()) {
-                    // `ns` is a global var — field-existence validation is
-                    // deferred to the typechecker, which has the type info
-                    // (`SparType::Named`) needed to check this properly.
+                } else if self.imports.contains_key(ns.as_str()) {
+                    if let Some(exports) = self.loaded_exports.get(ns.as_str()) {
+                        if !exports.contains(name.as_str()) {
+                            self.push_error(
+                                format!("'{}' is not exported by import '{ns}'", name),
+                                nr.span.clone(),
+                            );
+                        }
+                    }
+                } else if self.migration_hint_target(ns) {
+                    self.push_error(
+                        format!("field access via '::' is no longer supported — use '.' instead (e.g. '{ns}.{name}')"),
+                        nr.span.clone(),
+                    );
                 } else {
-                    let section_names: Vec<String> = self.sections.keys()
-                        .filter_map(|p| p.first().cloned())
-                        .collect();
-                    let import_names: Vec<String> = self.imports.keys().cloned().collect();
-                    let all_ns: Vec<String> =
-                        section_names.into_iter().chain(import_names).collect();
-                    let hint = suggest(ns, all_ns.iter().map(|s| s.as_str()));
+                    let hint = suggest(ns, self.imports.keys().chain(self.enums.keys()).map(|s| s.as_str()));
                     self.push_error_hint(
-                        format!("undefined namespace: `{ns}` is not a section, import alias, or `global`"),
+                        format!("undefined namespace: `{ns}` is not an import alias or enum"),
                         hint,
                         nr.span.clone(),
                     );
                 }
             }
 
-            // ── 3 segments ────────────────────────────────────────────────────
-            [ns, section_name, field_name] => {
-                if ns == "global" {
-                    let key = vec![section_name.clone()];
-                    if let Some(entry) = self.sections.get(&key) {
-                        if !entry.fields.contains_key(field_name.as_str()) {
-                            self.push_error(
-                                format!("undefined reference: `{field_name}` is not a field in section `[{section_name}]`"),
-                                nr.span.clone(),
-                            );
-                        }
+            [] => {}
+            // 3+ segments: alias::EnumName::Variant or similarly nested
+            // static lookups — deferred, same "no error unless the alias
+            // itself is unknown" policy as the 2-segment import-alias case.
+            [first, ..] => {
+                if !self.imports.contains_key(first.as_str()) && !self.enums.contains_key(first.as_str()) {
+                    if self.migration_hint_target(first) {
+                        self.push_error(
+                            format!("field access via '::' is no longer supported — use '.' instead"),
+                            nr.span.clone(),
+                        );
                     } else {
                         self.push_error(
-                            format!("undefined reference: section `[{section_name}]` is not declared"),
+                            format!("undefined namespace: `{first}` is not an import alias or enum"),
                             nr.span.clone(),
                         );
                     }
-                } else if self.imports.contains_key(ns.as_str()) {
-                    // deferred — no error
-                } else if self.sections.keys().any(|k| k.first().map(|s| s.as_str()) == Some(ns.as_str())) {
-                    // `Section::nestedSection::field` — defer deep validation to evaluator.
-                } else {
-                    self.push_error(
-                        format!("undefined namespace: `{ns}` is not a section, import alias, or `global`"),
-                        nr.span.clone(),
-                    );
-                }
-            }
-
-            [] => {}
-            // ── 4+ segments ───────────────────────────────────────────────────
-            // Unbounded nesting depth; defer deep-path validation to the evaluator.
-            [first, ..] => {
-                if !self.sections.keys().any(|k| k.first().map(|s| s.as_str()) == Some(first.as_str()))
-                    && !self.imports.contains_key(first.as_str())
-                {
-                    self.push_error(
-                        format!("undefined namespace: `{first}` is not a section or import alias"),
-                        nr.span.clone(),
-                    );
                 }
             }
         }
+    }
+
+    /// True if `name` is something that used to be a valid `::` field-
+    /// access prefix before this session's dot-notation change — a
+    /// section, `self`, `global`, or a known var — used only to decide
+    /// whether an unresolvable `::` reference gets the specific migration
+    /// hint or the generic "undefined namespace" message.
+    fn migration_hint_target(&self, name: &str) -> bool {
+        name == "self" || name == "global"
+            || self.sections.contains_key(&vec![name.to_string()])
+            || self.globals.contains_key(name)
+    }
+
+    fn resolve_field_access(&mut self, base: &Expr, field: &str, span: &Span) {
+        // self.field — defer field-existence to the typechecker (which
+        // knows the current section's field types); only check that
+        // `self` is even valid here.
+        if let Expr::NamespaceRef(nr) = base {
+            if nr.segments == ["self"] {
+                if self.current_section.is_none() {
+                    self.push_error(
+                        "`self` can only be used inside a section's own field values".to_string(),
+                        span.clone(),
+                    );
+                }
+                return;
+            }
+            if nr.segments == ["global"] {
+                // global.x IS a direct name lookup (not a value's field) —
+                // same check today's `ns == "global"` branches already did.
+                if !self.globals.contains_key(field) {
+                    let candidates: Vec<String> = self.globals.keys().cloned().collect();
+                    let hint = suggest(field, candidates.iter().map(|s| s.as_str()));
+                    self.push_error_hint(
+                        format!("undefined reference: `{field}` is not declared in the global scope"),
+                        hint,
+                        span.clone(),
+                    );
+                }
+                return;
+            }
+        }
+        // General case: resolve `base` like any other expression (var
+        // lookup, index, call, nested FieldAccess, ...) and defer field-
+        // existence entirely to the typechecker.
+        self.resolve_expr(base);
+    }
+
+    fn check_field_access_with_locals(&self, base: &Expr, field: &str, span: &Span, locals: &HashSet<String>) -> Result<(), SparError> {
+        if let Expr::NamespaceRef(nr) = base {
+            if nr.segments == ["self"] {
+                if self.current_section.is_none() {
+                    return Err(SparError::ResolveError {
+                        message: "`self` can only be used inside a section's own field values".to_string(),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                return Ok(());
+            }
+            if nr.segments == ["global"] {
+                if self.globals.contains_key(field) {
+                    return Ok(());
+                }
+                let candidates: Vec<String> = self.globals.keys().cloned().collect();
+                let hint = suggest(field, candidates.iter().map(|s| s.as_str()));
+                return Err(SparError::ResolveError {
+                    message: format!("undefined reference: `{field}` is not declared in the global scope"),
+                    hint,
+                    span: span.clone(),
+                });
+            }
+        }
+        self.resolve_expr_with_locals(base, locals)
     }
 
     // ── Function body helpers ─────────────────────────────────────────────────
@@ -1430,6 +1439,7 @@ impl Resolver {
                 Ok(())
             }
             Expr::NamespaceRef(nr) => self.check_ns_ref_with_locals(nr, locals),
+            Expr::FieldAccess { base, field, span, .. } => self.check_field_access_with_locals(base, field, span, locals),
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.resolve_expr_with_locals(arg, locals)?;
@@ -1583,6 +1593,13 @@ impl Resolver {
                 if locals.contains(name) {
                     return Ok(());
                 }
+                if name == "self" || name == "global" {
+                    return Err(SparError::ResolveError {
+                        message: format!("`{name}` must be followed by `.field` — bare `{name}` is not a value"),
+                        hint: None,
+                        span: nr.span.clone(),
+                    });
+                }
                 if self.globals.contains_key(name.as_str()) {
                     return Ok(());
                 }
@@ -1597,31 +1614,6 @@ impl Resolver {
                 })
             }
             [ns, name] => {
-                if ns == "global" {
-                    if self.globals.contains_key(name.as_str()) {
-                        return Ok(());
-                    }
-                    return Err(SparError::ResolveError {
-                        message: format!(
-                            "undefined reference: `{name}` is not declared in the global scope"
-                        ),
-                        hint: None,
-                        span: nr.span.clone(),
-                    });
-                }
-                if self.sections.contains_key(&vec![ns.clone()]) {
-                    let key = vec![ns.clone()];
-                    if self.sections[&key].fields.contains_key(name.as_str()) {
-                        return Ok(());
-                    }
-                    return Err(SparError::ResolveError {
-                        message: format!(
-                            "undefined reference: `{name}` is not a field in section `[{ns}]`"
-                        ),
-                        hint: None,
-                        span: nr.span.clone(),
-                    });
-                }
                 if let Some(entry) = self.enums.get(ns.as_str()) {
                     if entry.variants.iter().any(|v| v == name) {
                         return Ok(());
@@ -1636,66 +1628,38 @@ impl Resolver {
                 if self.imports.contains_key(ns.as_str()) {
                     return Ok(()); // defer import ref validation
                 }
-                if locals.contains(ns.as_str()) {
-                    // `ns` is a local (param, `var`, or loop var) — field-
-                    // existence validation is deferred to the typechecker,
-                    // which has the typed locals map needed to check this
-                    // properly (this fn only has names, no types).
-                    return Ok(());
-                }
-                Err(SparError::ResolveError {
-                    message: format!(
-                        "undefined namespace: `{ns}` is not a section, import alias, or `global`"
-                    ),
-                    hint: None,
-                    span: nr.span.clone(),
-                })
-            }
-            [ns, section_name, field_name] => {
-                if ns == "global" {
-                    let key = vec![section_name.clone()];
-                    if let Some(entry) = self.sections.get(&key) {
-                        if entry.fields.contains_key(field_name.as_str()) {
-                            return Ok(());
-                        }
-                        return Err(SparError::ResolveError {
-                            message: format!(
-                                "undefined reference: `{field_name}` is not a field in section `[{section_name}]`"
-                            ),
-                            hint: None,
-                            span: nr.span.clone(),
-                        });
-                    }
+                if self.migration_hint_target(ns) {
                     return Err(SparError::ResolveError {
-                        message: format!(
-                            "undefined reference: section `[{section_name}]` is not declared"
-                        ),
+                        message: format!("field access via '::' is no longer supported — use '.' instead (e.g. '{ns}.{name}')"),
                         hint: None,
                         span: nr.span.clone(),
                     });
                 }
-                if self.imports.contains_key(ns.as_str()) {
-                    return Ok(());
-                }
                 Err(SparError::ResolveError {
                     message: format!(
-                        "undefined namespace: `{ns}` is not a section, import alias, or `global`"
+                        "undefined namespace: `{ns}` is not an import alias or enum"
                     ),
                     hint: None,
                     span: nr.span.clone(),
                 })
             }
             [] => Ok(()),
-            // 4+ segments: defer to evaluator
+            // 3+ segments: alias::EnumName::Variant or similarly nested
+            // static lookups — deferred, same policy as the 2-segment
+            // import-alias case.
             [first, ..] => {
-                if self.sections.keys().any(|k| k.first().map(|s| s.as_str()) == Some(first.as_str()))
-                    || self.imports.contains_key(first.as_str())
-                {
+                if self.imports.contains_key(first.as_str()) || self.enums.contains_key(first.as_str()) {
                     Ok(())
+                } else if self.migration_hint_target(first) {
+                    Err(SparError::ResolveError {
+                        message: "field access via '::' is no longer supported — use '.' instead".to_string(),
+                        hint: None,
+                        span: nr.span.clone(),
+                    })
                 } else {
                     Err(SparError::ResolveError {
                         message: format!(
-                            "undefined namespace: `{first}` is not a section or import alias"
+                            "undefined namespace: `{first}` is not an import alias or enum"
                         ),
                         hint: None,
                         span: nr.span.clone(),
@@ -1735,6 +1699,9 @@ impl Resolver {
                     }
                     [] => {}
                 }
+            }
+            Expr::FieldAccess { base, .. } => {
+                self.collect_closure_deps_expr(base, local_names, deps);
             }
             Expr::Call { name, args, .. } => {
                 for arg in args {
@@ -1851,14 +1818,6 @@ impl Resolver {
                         );
                     }
                 }
-                [ns, name] if ns == "global" => {
-                    if !self.sections.contains_key(&vec![name.clone()]) {
-                        self.push_error(
-                            format!("undefined spread target: `{name}` is not a declared section"),
-                            spread.span.clone(),
-                        );
-                    }
-                }
                 [alias, _] => {
                     if !self.imports.contains_key(alias.as_str()) {
                         self.push_error(
@@ -1869,6 +1828,14 @@ impl Resolver {
                 }
                 _ => {}
             },
+            Expr::FieldAccess { base, field, .. } if matches!(base.as_ref(), Expr::NamespaceRef(nr) if nr.segments == ["global"]) => {
+                if !self.sections.contains_key(&vec![field.clone()]) {
+                    self.push_error(
+                        format!("undefined spread target: `{field}` is not a declared section"),
+                        spread.span.clone(),
+                    );
+                }
+            }
             Expr::Call { name, name_span, .. } => {
                 if !self.functions.contains_key(name.as_str()) {
                     self.push_error(

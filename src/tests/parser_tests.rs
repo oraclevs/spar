@@ -874,3 +874,52 @@ fn parse_function_group_rejects_nested_function_group() {
     "#;
     parse_err(src);
 }
+
+#[test]
+fn parse_dot_field_access() {
+    let src = "var x: str = person.name;";
+    let prog = parse_ok(src);
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::FieldAccess { field, .. }) = &v.value else {
+        panic!("expected FieldAccess, got {:?}", v.value)
+    };
+    assert_eq!(field, "name");
+}
+
+#[test]
+fn parse_dot_after_index() {
+    // The bug this redesign fixes as a side effect: chaining a field
+    // access after an index used to be a parse error.
+    let src = "var x: str = people[0].name;";
+    let prog = parse_ok(src);
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::FieldAccess { base, field, .. }) = &v.value else {
+        panic!("expected FieldAccess, got {:?}", v.value)
+    };
+    assert_eq!(field, "name");
+    assert!(matches!(base.as_ref(), crate::ast::Expr::Index { .. }), "base should be an Index expr, got {:?}", base);
+}
+
+#[test]
+fn parse_dot_chain_multi_hop() {
+    let src = "var x: str = a.b.c;";
+    let prog = parse_ok(src);
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    // a.b.c => FieldAccess{ base: FieldAccess{ base: a, field: "b" }, field: "c" }
+    let Some(crate::ast::Expr::FieldAccess { base, field, .. }) = &v.value else {
+        panic!("expected outer FieldAccess, got {:?}", v.value)
+    };
+    assert_eq!(field, "c");
+    assert!(matches!(base.as_ref(), crate::ast::Expr::FieldAccess { field, .. } if field == "b"));
+}
+
+#[test]
+fn parse_dot_after_index_and_index_after_dot() {
+    let src = "var x: int = a.b[0];";
+    let prog = parse_ok(src);
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::Index { source, .. }) = &v.value else {
+        panic!("expected outer Index, got {:?}", v.value)
+    };
+    assert!(matches!(source.as_ref(), crate::ast::Expr::FieldAccess { field, .. } if field == "b"));
+}

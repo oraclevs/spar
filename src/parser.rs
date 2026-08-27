@@ -959,17 +959,30 @@ impl Parser {
             _ => Err(self.error(format!("expected an expression, found {}", self.peek().human_name()))),
         }?;
 
-        // Postfix indexing: expr[index]
-        while self.at(&Token::LBracket) {
-            let span = self.peek_span();
-            self.advance();
-            let index = self.parse_expr()?;
-            self.expect(&Token::RBracket)?;
-            expr = Expr::Index {
-                source: Box::new(expr),
-                index: Box::new(index),
-                span,
-            };
+        // Postfix indexing/field-access: expr[index], expr.field — one
+        // loop so both compose freely in any order (a.b[0], a[0].b, a.b.c).
+        while self.at(&Token::LBracket) || self.at(&Token::Dot) {
+            if self.at(&Token::LBracket) {
+                let span = self.peek_span();
+                self.advance();
+                let index = self.parse_expr()?;
+                self.expect(&Token::RBracket)?;
+                expr = Expr::Index {
+                    source: Box::new(expr),
+                    index: Box::new(index),
+                    span,
+                };
+            } else {
+                let span = self.peek_span();
+                self.advance(); // consume '.'
+                let (field, field_span) = self.expect_ident()?;
+                expr = Expr::FieldAccess {
+                    base: Box::new(expr),
+                    field,
+                    field_span,
+                    span,
+                };
+            }
         }
 
         Ok(expr)

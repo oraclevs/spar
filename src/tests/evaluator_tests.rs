@@ -622,3 +622,67 @@ fn eval_cross_file_private_function_group_not_exported() {
     let result = crate::resolver::Resolver::resolve_with_imports(&program, &loaded);
     assert!(result.is_err(), "private functionGroup must not be reachable via import alias");
 }
+
+#[test]
+fn eval_dot_field_access_on_loop_var() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> str {
+            for person in people {
+                return person.name;
+            }
+            return "none";
+        }
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var result: str = looper(people: people);
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+}
+
+#[test]
+fn eval_dot_field_access_after_index() {
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var result: str = people[0].name;
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+}
+
+#[test]
+fn eval_self_dot_field_access() {
+    let src = r#"
+        [Server]{
+            port: int = 8080;
+            display: str = "port-${self.port}";
+        };
+    "#;
+    let r = eval_src(src);
+    let path = vec!["Server".to_string()];
+    assert_eq!(r.sections[&path]["display"], crate::evaluator::ConfigValue::Str("port-8080".into()));
+}
+
+#[test]
+fn eval_original_bug_report_repro_with_dot_syntax() {
+    // Same repro as the prior session's regression test, updated to the
+    // new dot syntax — confirms the whole pipeline still produces the
+    // same result under the new grammar.
+    let src = r#"
+        type [Human]{ name: str; age: int; }
+        function looper(people: [Human]) -> int {
+            for person in people {
+                if person.name == "jude" {
+                    return 6;
+                }
+                return 0;
+            }
+            return 0;
+        }
+        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var result: int = looper(people: people);
+    "#;
+    let r = eval_src(src);
+    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(6));
+}

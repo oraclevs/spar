@@ -359,6 +359,7 @@ impl Evaluator {
                 self.collect_expr_deps(source, deps);
                 self.collect_expr_deps(index, deps);
             }
+            Expr::FieldAccess { base, .. } => self.collect_expr_deps(base, deps),
             Expr::Literal(_) => {}
         }
     }
@@ -541,9 +542,6 @@ impl Evaluator {
         match expr {
             Expr::NamespaceRef(nr) => match nr.segments.as_slice() {
                 [name] => self.eval_section_by_path(std::slice::from_ref(name)),
-                [ns, name] if ns == "global" => {
-                    self.eval_section_by_path(std::slice::from_ref(name))
-                }
                 [alias, name] => {
                     self.warnings.push(format!(
                         "spread `...{alias}::{name}` skipped — \
@@ -559,6 +557,9 @@ impl Evaluator {
                     None
                 }
             },
+            Expr::FieldAccess { base, field, .. } if matches!(base.as_ref(), Expr::NamespaceRef(nr) if nr.segments == ["global"]) => {
+                self.eval_section_by_path(std::slice::from_ref(field))
+            }
             other => {
                 let span = match other {
                     Expr::Call { span, .. } => span.clone(),
@@ -649,6 +650,7 @@ impl Evaluator {
             }
             Expr::Grouped(inner, _) => self.eval_expr(inner, local_scope),
             Expr::NamespaceRef(nr) => self.eval_namespace_ref(nr, local_scope),
+            Expr::FieldAccess { base, field, span, .. } => self.eval_field_access(base, field, span, local_scope),
             Expr::FnCall(fc)       => {
                 let fc = fc.clone();
                 self.eval_fn_call(&fc, local_scope)
@@ -793,9 +795,6 @@ impl Evaluator {
     }
 
     fn eval_namespace_ref(&mut self, nr: &NamespaceRef, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
-        if nr.segments.first().map(String::as_str) == Some("self") {
-            return self.eval_self_ref(nr);
-        }
         match nr.segments.as_slice() {
             [name] => {
                 // Check local scope first
@@ -808,84 +807,93 @@ impl Evaluator {
                 })
             }
 
-            [ns, name] if ns == "global" => {
-                self.eval_global(name).ok_or_else(|| EvalErr::CyclicRef {
-                    name: name.clone(),
+            // ── 2 segments — enum variant or import-alias item ONLY ────────
+            [ns, name] => {
+                if self.symbols.enums.contains_key(ns.as_str()) {
+                    return Ok(ConfigValue::Str(name.clone()));
+                }
+                if let Some(imp_prog) = self.imported_programs.get(ns.as_str()).cloned() {
+                    let imp_sym = crate::resolver::Resolver::new()
+                        .resolve(&imp_prog, &[])
+                        .unwrap_or_else(|_| self.symbols.clone());
+                    let mut sub = Evaluator::new(imp_sym.clone(), imp_prog);
+                    sub.imported_programs = self.imported_programs.clone();
+                    if imp_sym.lookup_section(&[name.to_string()]).is_some() {
+                        return sub.eval_section_by_path(&[name.to_string()])
+                            .map(ConfigValue::Section)
+                            .ok_or_else(|| EvalErr::ImportRef {
+                                alias: ns.to_string(),
+                                symbol: name.to_string(),
+                            });
+                    }
+                    return sub.eval_global(name).ok_or_else(|| EvalErr::ImportRef {
+                        alias: ns.to_string(),
+                        symbol: name.to_string(),
+                    });
+                }
+                Err(EvalErr::CyclicRef {
+                    name: format!("{ns}::{name}"),
                     span: nr.span.clone(),
                 })
             }
 
-            [ns, field] => {
-                if let Some(ConfigValue::Section(map)) = local_scope.get(ns.as_str()) {
-                    return map.get(field.as_str()).cloned().ok_or_else(|| EvalErr::CyclicRef {
-                        name: format!("{ns}::{field}"),
-                        span: nr.span.clone(),
-                    });
-                }
-                if let Some(ConfigValue::Section(map)) = self.eval_global(ns.as_str()) {
-                    return map.get(field.as_str()).cloned().ok_or_else(|| EvalErr::CyclicRef {
-                        name: format!("{ns}::{field}"),
-                        span: nr.span.clone(),
-                    });
-                }
-                if self.symbols.enums.contains_key(ns.as_str()) {
-                    Ok(ConfigValue::Str(field.clone()))
-                } else if self.symbols.lookup_section(&[ns.to_string()]).is_some() {
-                    self.eval_section_field_direct(&[ns.to_string()], field, &nr.span)
-                } else if let Some(imp_prog) = self.imported_programs.get(ns.as_str()).cloned() {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
-                    let mut sub = Evaluator::new(imp_sym, imp_prog);
-                    sub.imported_programs = self.imported_programs.clone();
-                    sub.eval_global(field).ok_or_else(|| EvalErr::ImportRef {
-                        alias: ns.to_string(),
-                        symbol: field.to_string(),
-                    })
-                } else {
-                    Err(EvalErr::CyclicRef {
-                        name: format!("{ns}::{field}"),
-                        span: nr.span.clone(),
-                    })
-                }
-            }
-
-            [ns, section, field] if ns == "global" => {
-                self.eval_section_field_direct(&[section.to_string()], field, &nr.span)
-            }
-
-            [ns, section, field] => {
-                let path = vec![ns.to_string(), section.to_string()];
-                if self.symbols.lookup_section(&path).is_some() {
-                    self.eval_section_field_direct(&path, field, &nr.span)
-                } else if let Some(imp_prog) = self.imported_programs.get(ns.as_str()).cloned() {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
-                    let mut sub = Evaluator::new(imp_sym, imp_prog);
-                    sub.imported_programs = self.imported_programs.clone();
-                    sub.eval_section_field_direct(&[section.to_string()], field, &nr.span)
-                        .map_err(|_| EvalErr::ImportRef {
-                            alias: ns.to_string(),
-                            symbol: format!("{section}::{field}"),
-                        })
-                } else {
-                    Err(EvalErr::ImportRef {
-                        alias: ns.to_string(),
-                        symbol: format!("{section}::{field}"),
-                    })
-                }
-            }
-
-            segments if segments.len() >= 2 => {
-                // 4+ segments: section_path = segments[..n-1], field = segments[n-1]
-                let (field, section_path) = segments.split_last().unwrap();
-                self.eval_section_field_direct(section_path, field.as_str(), &nr.span)
-            }
-            _ => Err(EvalErr::CyclicRef {
-                name: nr.segments.join("::"),
+            [] => Err(EvalErr::CyclicRef {
+                name: String::new(),
                 span: nr.span.clone(),
             }),
+            // 3+ segments: alias::EnumName::Variant or similarly nested
+            // static lookups — recurse into the import, same deferred
+            // policy as the resolver/typechecker.
+            [first, rest @ ..] => {
+                if self.symbols.enums.contains_key(first.as_str()) {
+                    return Ok(ConfigValue::Str(rest.last().cloned().unwrap_or_default()));
+                }
+                if let Some(imp_prog) = self.imported_programs.get(first.as_str()).cloned() {
+                    let imp_sym = crate::resolver::Resolver::new()
+                        .resolve(&imp_prog, &[])
+                        .unwrap_or_else(|_| self.symbols.clone());
+                    let mut sub = Evaluator::new(imp_sym, imp_prog);
+                    sub.imported_programs = self.imported_programs.clone();
+                    let inner_nr = NamespaceRef { segments: rest.to_vec(), span: nr.span.clone() };
+                    return sub.eval_namespace_ref(&inner_nr, &HashMap::new());
+                }
+                Err(EvalErr::CyclicRef {
+                    name: nr.segments.join("::"),
+                    span: nr.span.clone(),
+                })
+            }
+        }
+    }
+
+    fn eval_field_access(&mut self, base: &Expr, field: &str, span: &Span, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+        if let Expr::NamespaceRef(nr) = base {
+            if nr.segments == ["self"] {
+                let self_ref = NamespaceRef { segments: vec!["self".to_string(), field.to_string()], span: span.clone() };
+                return self.eval_self_ref(&self_ref);
+            }
+            if nr.segments == ["global"] {
+                return self.eval_global(field).ok_or_else(|| EvalErr::CyclicRef {
+                    name: field.to_string(),
+                    span: span.clone(),
+                });
+            }
+            if nr.segments.len() == 1 {
+                let name = &nr.segments[0];
+                if !local_scope.contains_key(name.as_str())
+                    && !self.symbols.globals.contains_key(name.as_str())
+                    && self.symbols.lookup_section(std::slice::from_ref(name)).is_some()
+                {
+                    return self.eval_section_field_direct(std::slice::from_ref(name), field, span);
+                }
+            }
+        }
+        let base_val = self.eval_expr(base, local_scope)?;
+        match base_val {
+            ConfigValue::Section(map) => map.get(field).cloned().ok_or_else(|| EvalErr::CyclicRef {
+                name: field.to_string(),
+                span: span.clone(),
+            }),
+            _ => Err(EvalErr::CyclicRef { name: field.to_string(), span: span.clone() }),
         }
     }
 

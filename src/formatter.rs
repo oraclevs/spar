@@ -595,6 +595,12 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             format_expr(index, 0, depth, config, out);
             out.push(']');
         }
+
+        Expr::FieldAccess { base, field, .. } => {
+            format_expr(base, 8, depth, config, out); // 8 = tightest, same as Index's source
+            out.push('.');
+            out.push_str(field);
+        }
     }
 }
 
@@ -1393,5 +1399,17 @@ function pick(flag: bool) -> int {
         let c_pos = out.find("// commented").unwrap();
         let b_pos = out.find("b: int").unwrap();
         assert!(a_pos < c_pos && c_pos < b_pos, "comment between a and b: {out}");
+    }
+
+    #[test]
+    fn format_dot_field_access() {
+        let src = "var x: str = person.name;\n";
+        assert_eq!(fmt(src).trim(), "var x: str = person.name;");
+    }
+
+    #[test]
+    fn format_dot_chain_after_index() {
+        let src = "var x: str = people[0].name;\n";
+        assert_eq!(fmt(src).trim(), "var x: str = people[0].name;");
     }
 }

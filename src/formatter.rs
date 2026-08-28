@@ -1,7 +1,7 @@
 use crate::ast::*;
+use crate::error::SparError;
 use crate::lexer::{CommentTrivia, Lexer};
 use crate::parser::Parser;
-use crate::error::SparError;
 
 pub struct FormatConfig {
     pub indent_width: usize,
@@ -16,14 +16,22 @@ impl Default for FormatConfig {
 pub fn format_source(src: &str) -> Result<String, SparError> {
     let (tokens, comments) = Lexer::new(src).tokenize_with_comments()?;
     let program = Parser::new(tokens).parse()?;
-    Ok(format_program_with_comments(&program, &FormatConfig::default(), &comments))
+    Ok(format_program_with_comments(
+        &program,
+        &FormatConfig::default(),
+        &comments,
+    ))
 }
 
 pub fn format_program(program: &Program, config: &FormatConfig) -> String {
     format_program_with_comments(program, config, &[])
 }
 
-pub fn format_program_with_comments(program: &Program, config: &FormatConfig, comments: &[CommentTrivia]) -> String {
+pub fn format_program_with_comments(
+    program: &Program,
+    config: &FormatConfig,
+    comments: &[CommentTrivia],
+) -> String {
     let mut out = String::new();
     let mut cx = CommentCursor::new(comments);
 
@@ -59,10 +67,18 @@ impl<'a> CommentCursor<'a> {
     }
 
     /// Emit all pending standalone comments whose source line < `before_line`.
-    fn emit_before_line(&mut self, before_line: u32, depth: usize, config: &FormatConfig, out: &mut String) {
+    fn emit_before_line(
+        &mut self,
+        before_line: u32,
+        depth: usize,
+        config: &FormatConfig,
+        out: &mut String,
+    ) {
         while self.next < self.comments.len() {
             let c = &self.comments[self.next];
-            if c.line >= before_line { break; }
+            if c.line >= before_line {
+                break;
+            }
             if !c.is_trailing {
                 let ind = indent(depth, config);
                 out.push_str(&ind);
@@ -89,65 +105,67 @@ impl<'a> CommentCursor<'a> {
 
 fn item_span_line(item: &TopLevelItem) -> u32 {
     match item {
-        TopLevelItem::Import(d)       => d.span.line,
-        TopLevelItem::Var(d)          => d.span.line,
-        TopLevelItem::Dynamic(d)      => d.span.line,
-        TopLevelItem::Section(d)      => d.span.line,
-        TopLevelItem::Function(d)     => d.span.line,
+        TopLevelItem::Import(d) => d.span.line,
+        TopLevelItem::Var(d) => d.span.line,
+        TopLevelItem::Dynamic(d) => d.span.line,
+        TopLevelItem::Section(d) => d.span.line,
+        TopLevelItem::Function(d) => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
-        TopLevelItem::Type(d)         => d.span.line,
-        TopLevelItem::Enum(d)         => d.span.line,
+        TopLevelItem::Type(d) => d.span.line,
+        TopLevelItem::Enum(d) => d.span.line,
         TopLevelItem::FunctionGroup(d) => d.span.line,
-        TopLevelItem::SchemaFrom(d)   => d.span.line,
+        TopLevelItem::SchemaFrom(d) => d.span.line,
     }
 }
 
 fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut String) {
     match item {
-        TopLevelItem::Import(imp) => {
-            match &imp.kind {
-                ImportKind::Schema => {
-                    out.push_str("import schema \"");
-                    out.push_str(&escape_string_content(&imp.path));
-                    out.push_str("\";\n");
-                }
-                ImportKind::AsPartOf => {
-                    out.push_str("import asPartOf \"");
-                    out.push_str(&escape_string_content(&imp.path));
-                    out.push_str("\";\n");
-                }
-                ImportKind::Aliased(alias) => {
-                    out.push_str("import \"");
-                    out.push_str(&escape_string_content(&imp.path));
-                    out.push('"');
-                    if let Some(alias) = alias {
-                        out.push_str(" as ");
-                        out.push_str(alias);
-                    }
-                    out.push_str(";\n");
-                }
-                ImportKind::Selective(items) => {
-                    out.push_str("import ");
-                    format_import_items(items, out);
-                    out.push_str(" from \"");
-                    out.push_str(&escape_string_content(&imp.path));
-                    out.push_str("\";\n");
-                }
-                ImportKind::TypeSelective(items) => {
-                    out.push_str("import type ");
-                    format_import_items(items, out);
-                    out.push_str(" from \"");
-                    out.push_str(&escape_string_content(&imp.path));
-                    out.push_str("\";\n");
-                }
+        TopLevelItem::Import(imp) => match &imp.kind {
+            ImportKind::Schema => {
+                out.push_str("import schema \"");
+                out.push_str(&escape_string_content(&imp.path));
+                out.push_str("\";\n");
             }
-        }
+            ImportKind::AsPartOf => {
+                out.push_str("import asPartOf \"");
+                out.push_str(&escape_string_content(&imp.path));
+                out.push_str("\";\n");
+            }
+            ImportKind::Aliased(alias) => {
+                out.push_str("import \"");
+                out.push_str(&escape_string_content(&imp.path));
+                out.push('"');
+                if let Some(alias) = alias {
+                    out.push_str(" as ");
+                    out.push_str(alias);
+                }
+                out.push_str(";\n");
+            }
+            ImportKind::Selective(items) => {
+                out.push_str("import ");
+                format_import_items(items, out);
+                out.push_str(" from \"");
+                out.push_str(&escape_string_content(&imp.path));
+                out.push_str("\";\n");
+            }
+            ImportKind::TypeSelective(items) => {
+                out.push_str("import type ");
+                format_import_items(items, out);
+                out.push_str(" from \"");
+                out.push_str(&escape_string_content(&imp.path));
+                out.push_str("\";\n");
+            }
+        },
 
         TopLevelItem::Var(vd) => {
-            if vd.exported { out.push_str("export "); }
+            if vd.exported {
+                out.push_str("export ");
+            }
             out.push_str("var ");
             out.push_str(&vd.name);
-            if vd.optional { out.push('?'); }
+            if vd.optional {
+                out.push('?');
+            }
             out.push_str(": ");
             out.push_str(&format_type(&vd.ty));
             if let Some(val) = &vd.value {
@@ -160,7 +178,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         TopLevelItem::Dynamic(dd) => {
             out.push_str("dynamic var ");
             out.push_str(&dd.name);
-            if dd.optional { out.push('?'); }
+            if dd.optional {
+                out.push('?');
+            }
             if let Some(val) = &dd.value {
                 out.push_str(" = ");
                 format_expr(val, 0, 0, config, out);
@@ -169,8 +189,12 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         }
 
         TopLevelItem::Section(sd) => {
-            if sd.exported { out.push_str("export "); }
-            if sd.private  { out.push_str("private "); }
+            if sd.exported {
+                out.push_str("export ");
+            }
+            if sd.private {
+                out.push_str("private ");
+            }
             out.push('[');
             out.push_str(&sd.path.join("."));
             out.push(']');
@@ -186,12 +210,16 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         }
 
         TopLevelItem::Function(fd) => {
-            if fd.is_private { out.push_str("private "); }
+            if fd.is_private {
+                out.push_str("private ");
+            }
             out.push_str("function ");
             out.push_str(&fd.name);
             out.push('(');
             for (i, p) in fd.params.iter().enumerate() {
-                if i > 0 { out.push_str(", "); }
+                if i > 0 {
+                    out.push_str(", ");
+                }
                 out.push_str(&p.name);
                 out.push_str(": ");
                 out.push_str(&format_type(&p.ty));
@@ -205,7 +233,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
 
         TopLevelItem::SchemaSection(sd) => {
             out.push_str("Schema");
-            if sd.marker.optional { out.push('?'); }
+            if sd.marker.optional {
+                out.push('?');
+            }
             out.push_str(" [");
             out.push_str(&sd.name);
             out.push_str("]{\n");
@@ -216,7 +246,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         }
 
         TopLevelItem::Type(td) => {
-            if td.exported { out.push_str("export "); }
+            if td.exported {
+                out.push_str("export ");
+            }
             out.push_str("type [");
             out.push_str(&td.name);
             out.push_str("]{\n");
@@ -227,32 +259,42 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
         }
 
         TopLevelItem::Enum(ed) => {
-            if ed.exported { out.push_str("export "); }
+            if ed.exported {
+                out.push_str("export ");
+            }
             out.push_str("enum ");
             out.push_str(&ed.name);
             out.push_str(" {\n");
             for (i, v) in ed.variants.iter().enumerate() {
                 out.push_str("    ");
                 out.push_str(v);
-                if i + 1 < ed.variants.len() { out.push(','); }
+                if i + 1 < ed.variants.len() {
+                    out.push(',');
+                }
                 out.push('\n');
             }
             out.push_str("};\n");
         }
 
         TopLevelItem::FunctionGroup(gd) => {
-            if gd.is_private { out.push_str("private "); }
+            if gd.is_private {
+                out.push_str("private ");
+            }
             out.push_str("functionGroup ");
             out.push_str(&gd.name);
             out.push_str(" {\n");
             for f in &gd.functions {
                 out.push_str("    ");
-                if f.is_private { out.push_str("private "); }
+                if f.is_private {
+                    out.push_str("private ");
+                }
                 out.push_str("function ");
                 out.push_str(&f.name);
                 out.push('(');
                 for (i, p) in f.params.iter().enumerate() {
-                    if i > 0 { out.push_str(", "); }
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
                     out.push_str(&p.name);
                     out.push_str(": ");
                     out.push_str(&format_type(&p.ty));
@@ -268,7 +310,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
 
         TopLevelItem::SchemaFrom(sf) => {
             out.push_str("SchemaFrom");
-            if sf.marker.optional { out.push('?'); }
+            if sf.marker.optional {
+                out.push('?');
+            }
             out.push_str(" [");
             out.push_str(&sf.name);
             out.push_str(", ");
@@ -281,7 +325,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
 fn format_import_items(items: &[ImportItem], out: &mut String) {
     out.push_str("{ ");
     for (i, item) in items.iter().enumerate() {
-        if i > 0 { out.push_str(", "); }
+        if i > 0 {
+            out.push_str(", ");
+        }
         out.push_str(&item.name);
         if let Some(alias) = &item.alias {
             out.push_str(" as ");
@@ -291,11 +337,20 @@ fn format_import_items(items: &[ImportItem], out: &mut String) {
     out.push_str(" }");
 }
 
-fn format_top_level_item_cx(item: &TopLevelItem, config: &FormatConfig, cx: &mut CommentCursor, out: &mut String) {
+fn format_top_level_item_cx(
+    item: &TopLevelItem,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+) {
     match item {
         TopLevelItem::Section(sd) => {
-            if sd.exported { out.push_str("export "); }
-            if sd.private  { out.push_str("private "); }
+            if sd.exported {
+                out.push_str("export ");
+            }
+            if sd.private {
+                out.push_str("private ");
+            }
             out.push('[');
             out.push_str(&sd.path.join("."));
             out.push(']');
@@ -313,7 +368,13 @@ fn format_top_level_item_cx(item: &TopLevelItem, config: &FormatConfig, cx: &mut
     }
 }
 
-fn format_section_items_cx(items: &[SectionItem], depth: usize, config: &FormatConfig, cx: &mut CommentCursor, out: &mut String) {
+fn format_section_items_cx(
+    items: &[SectionItem],
+    depth: usize,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+) {
     for item in items {
         match item {
             SectionItem::Field(fd) => {
@@ -344,31 +405,31 @@ fn format_section_items_cx(items: &[SectionItem], depth: usize, config: &FormatC
 
 fn format_type(ty: &SparType) -> String {
     match ty {
-        SparType::Str          => "str".to_string(),
-        SparType::Int          => "int".to_string(),
-        SparType::Float        => "float".to_string(),
-        SparType::Bool         => "bool".to_string(),
-        SparType::Section      => "section".to_string(),
-        SparType::List(inner)  => format!("[{}]", format_type(inner)),
-        SparType::Named(name)  => name.clone(),
+        SparType::Str => "str".to_string(),
+        SparType::Int => "int".to_string(),
+        SparType::Float => "float".to_string(),
+        SparType::Bool => "bool".to_string(),
+        SparType::Section => "section".to_string(),
+        SparType::List(inner) => format!("[{}]", format_type(inner)),
+        SparType::Named(name) => name.clone(),
     }
 }
 
 fn binop_symbol(op: &BinOp) -> &'static str {
     match op {
-        BinOp::Add      => "+",
-        BinOp::Sub      => "-",
-        BinOp::Mul      => "*",
-        BinOp::Div      => "/",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
         BinOp::Fallback => "??",
-        BinOp::Eq       => "==",
-        BinOp::NotEq    => "!=",
-        BinOp::Lt       => "<",
-        BinOp::Gt       => ">",
-        BinOp::LtEq     => "<=",
-        BinOp::GtEq     => ">=",
-        BinOp::And      => "&&",
-        BinOp::Or       => "||",
+        BinOp::Eq => "==",
+        BinOp::NotEq => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::LtEq => "<=",
+        BinOp::GtEq => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
     }
 }
 
@@ -376,13 +437,11 @@ fn binop_symbol(op: &BinOp) -> &'static str {
 fn binop_prec(op: &BinOp) -> u8 {
     match op {
         BinOp::Fallback => 1,
-        BinOp::Or       => 2,
-        BinOp::And      => 3,
-        BinOp::Eq | BinOp::NotEq
-        | BinOp::Lt | BinOp::Gt
-        | BinOp::LtEq | BinOp::GtEq => 4,
-        BinOp::Add | BinOp::Sub      => 5,
-        BinOp::Mul | BinOp::Div      => 6,
+        BinOp::Or => 2,
+        BinOp::And => 3,
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 4,
+        BinOp::Add | BinOp::Sub => 5,
+        BinOp::Mul | BinOp::Div => 6,
     }
 }
 
@@ -390,11 +449,23 @@ fn escape_string_content(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            '"'  => { out.push('\\'); out.push('"'); }
-            '\\' => { out.push('\\'); out.push('\\'); }
-            '\n' => { out.push('\\'); out.push('n'); }
-            '\t' => { out.push('\\'); out.push('t'); }
-            _    => out.push(c),
+            '"' => {
+                out.push('\\');
+                out.push('"');
+            }
+            '\\' => {
+                out.push('\\');
+                out.push('\\');
+            }
+            '\n' => {
+                out.push('\\');
+                out.push('n');
+            }
+            '\t' => {
+                out.push('\\');
+                out.push('t');
+            }
+            _ => out.push(c),
         }
     }
     out
@@ -431,7 +502,13 @@ fn fits_inline(out: &str, candidate: &str) -> bool {
     !candidate.contains('\n') && current_column(out) + candidate.chars().count() <= MAX_LINE_WIDTH
 }
 
-fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_expr(
+    expr: &Expr,
+    parent_prec: u8,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     match expr {
         Expr::Object(items, _) => {
             let mut flat = String::from("{ ");
@@ -456,7 +533,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             }
         }
         Expr::Literal(lit) => match lit {
-            Literal::Int(n)   => out.push_str(&n.to_string()),
+            Literal::Int(n) => out.push_str(&n.to_string()),
             Literal::Float(f) => {
                 let s = format!("{}", f);
                 // ensure at least one decimal point for round floats
@@ -467,7 +544,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
                     out.push_str(".0");
                 }
             }
-            Literal::Bool(b)  => out.push_str(if *b { "true" } else { "false" }),
+            Literal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         },
 
         Expr::String(is) => {
@@ -475,7 +552,7 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             for part in &is.parts {
                 match part {
                     StringPart::Literal(s) => out.push_str(&escape_string_content(s)),
-                    StringPart::Expr(e)    => {
+                    StringPart::Expr(e) => {
                         out.push_str("${");
                         format_expr(e, 0, depth, config, out);
                         out.push('}');
@@ -493,7 +570,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             out.push_str(&fc.name);
             out.push('(');
             for (i, arg) in fc.args.iter().enumerate() {
-                if i > 0 { out.push_str(", "); }
+                if i > 0 {
+                    out.push_str(", ");
+                }
                 format_expr(arg, 0, depth, config, out);
             }
             out.push(')');
@@ -503,7 +582,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             out.push_str(name);
             out.push('(');
             for (i, arg) in args.iter().enumerate() {
-                if i > 0 { out.push_str(", "); }
+                if i > 0 {
+                    out.push_str(", ");
+                }
                 out.push_str(&arg.param_name);
                 out.push_str(": ");
                 format_expr(&arg.value, 0, depth, config, out);
@@ -514,7 +595,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
         Expr::BinaryOp(b) => {
             let prec = binop_prec(&b.op);
             let needs_parens = prec < parent_prec;
-            if needs_parens { out.push('('); }
+            if needs_parens {
+                out.push('(');
+            }
             format_expr(&b.lhs, prec, depth, config, out);
             out.push(' ');
             out.push_str(binop_symbol(&b.op));
@@ -522,7 +605,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             // Right side: use prec+1 so same-precedence right operand gets parens
             // (avoids ambiguity for non-associative ops like comparisons)
             format_expr(&b.rhs, prec + 1, depth, config, out);
-            if needs_parens { out.push(')'); }
+            if needs_parens {
+                out.push(')');
+            }
         }
 
         Expr::Unary { op, operand, .. } => {
@@ -537,7 +622,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
         Expr::List(items, _) => {
             let mut flat = String::from("[");
             for (i, item) in items.iter().enumerate() {
-                if i > 0 { flat.push_str(", "); }
+                if i > 0 {
+                    flat.push_str(", ");
+                }
                 format_expr(item, 0, depth + 1, config, &mut flat);
             }
             flat.push(']');
@@ -550,7 +637,9 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
                 for (i, item) in items.iter().enumerate() {
                     out.push_str(&item_indent);
                     format_expr(item, 0, depth + 1, config, out);
-                    if i + 1 < items.len() { out.push(','); }
+                    if i + 1 < items.len() {
+                        out.push(',');
+                    }
                     out.push('\n');
                 }
                 out.push_str(&indent(depth, config));
@@ -564,7 +653,12 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
             out.push(')');
         }
 
-        Expr::Comprehension { var_name, source, body, .. } => {
+        Expr::Comprehension {
+            var_name,
+            source,
+            body,
+            ..
+        } => {
             let mut flat = String::from("for ");
             flat.push_str(var_name);
             flat.push_str(" in ");
@@ -607,11 +701,18 @@ fn format_expr(expr: &Expr, parent_prec: u8, depth: usize, config: &FormatConfig
 /// Renders one `{ ... }` object-literal field or spread, `"; "`-terminated,
 /// shared verbatim by the inline and multi-line `Expr::Object` branches —
 /// the multi-line branch strips the trailing space and adds its own `\n`.
-fn format_object_item_flat(item: &SectionItem, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_object_item_flat(
+    item: &SectionItem,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     match item {
         SectionItem::Field(f) => {
             out.push_str(&f.name);
-            if f.optional { out.push('?'); }
+            if f.optional {
+                out.push('?');
+            }
             out.push_str(": ");
             if let Some(ty) = &f.ty {
                 out.push_str(&format_type(ty));
@@ -699,7 +800,12 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             }
         }
 
-        FuncStmt::For { var_name, iterable, body, .. } => {
+        FuncStmt::For {
+            var_name,
+            iterable,
+            body,
+            ..
+        } => {
             out.push_str(&ind);
             out.push_str("for ");
             out.push_str(var_name);
@@ -717,7 +823,9 @@ fn format_schema_field(field: &SchemaField, depth: usize, config: &FormatConfig,
     let indent = " ".repeat(depth * config.indent_width);
     out.push_str(&indent);
     out.push_str(&field.name);
-    if field.optional { out.push('?'); }
+    if field.optional {
+        out.push('?');
+    }
     out.push_str(": ");
     match &field.shape {
         SchemaFieldShape::Primitive(ty) => {
@@ -739,7 +847,9 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
     let indent = " ".repeat(depth * config.indent_width);
     out.push_str(&indent);
     out.push_str(&field.name);
-    if field.optional { out.push('?'); }
+    if field.optional {
+        out.push('?');
+    }
     out.push_str(": ");
     match &field.shape {
         TypeFieldShape::Primitive(ty) => {
@@ -765,13 +875,17 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
     let ind = indent(depth, config);
     out.push_str(&ind);
     out.push_str(&fd.name);
-    if fd.optional { out.push('?'); }
+    if fd.optional {
+        out.push('?');
+    }
     out.push_str(": ");
     match &fd.ty {
         Some(ty) => {
             out.push_str(&format_type(ty));
             match &fd.value {
-                None => { out.push_str(";\n"); }
+                None => {
+                    out.push_str(";\n");
+                }
                 Some(FieldValue::Expr(e)) => {
                     out.push_str(" = ");
                     format_expr(e, 0, depth, config, out);
@@ -790,7 +904,9 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
         // Type omitted — inferred from the enclosing section's binding.
         // No `=`: the value follows the colon directly.
         None => match &fd.value {
-            None => { out.push_str(";\n"); } // shouldn't occur (parser requires a value here), but format gracefully
+            None => {
+                out.push_str(";\n");
+            } // shouldn't occur (parser requires a value here), but format gracefully
             Some(FieldValue::Expr(e)) => {
                 format_expr(e, 0, depth, config, out);
                 out.push_str(";\n");
@@ -810,7 +926,12 @@ fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &
 /// A nested field body reuses `SectionItem` (a field or a `...Source;`
 /// spread) — mirrors the top-level section-item printing, one indent
 /// level deeper.
-fn format_nested_section_item(item: &SectionItem, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_nested_section_item(
+    item: &SectionItem,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     match item {
         SectionItem::Field(f) => format_field_decl(f, depth, config, out),
         SectionItem::Spread(ss) => {
@@ -822,7 +943,12 @@ fn format_nested_section_item(item: &SectionItem, depth: usize, config: &FormatC
     }
 }
 
-fn format_section_items(items: &[SectionItem], depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_section_items(
+    items: &[SectionItem],
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     for item in items {
         match item {
             SectionItem::Field(fd) => format_field_decl(fd, depth, config, out),
@@ -879,7 +1005,10 @@ mod tests {
         let formatted = fmt(src);
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
-        assert!(formatted.contains("functionGroup EdgeInsect"), "got: {formatted}");
+        assert!(
+            formatted.contains("functionGroup EdgeInsect"),
+            "got: {formatted}"
+        );
         assert!(formatted.contains("private "), "got: {formatted}");
     }
 
@@ -894,8 +1023,14 @@ mod tests {
             "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
-        assert!(formatted.contains("for i in [0, 1, 2] {\n"), "got: {formatted}");
+        assert!(
+            formatted.lines().all(|l| l.chars().count() <= 100),
+            "got: {formatted}"
+        );
+        assert!(
+            formatted.contains("for i in [0, 1, 2] {\n"),
+            "got: {formatted}"
+        );
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }
@@ -906,7 +1041,10 @@ mod tests {
         // because SOME container expressions need wrapping elsewhere.
         let src = "var p: Port = { container: 8080; host: 8081; };\n";
         let formatted = fmt(src);
-        assert_eq!(formatted, "var p: Port = { container: 8080; host: 8081; };\n");
+        assert_eq!(
+            formatted,
+            "var p: Port = { container: 8080; host: 8081; };\n"
+        );
     }
 
     #[test]
@@ -946,9 +1084,15 @@ mod tests {
             "\"gamma-service\", \"delta-service\", \"epsilon-service\", \"zeta-service\"];\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
+        assert!(
+            formatted.lines().all(|l| l.chars().count() <= 100),
+            "got: {formatted}"
+        );
         assert!(formatted.contains("[\n"), "got: {formatted}");
-        assert!(formatted.contains("\"alpha-service\",\n"), "got: {formatted}");
+        assert!(
+            formatted.contains("\"alpha-service\",\n"),
+            "got: {formatted}"
+        );
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }
@@ -967,14 +1111,20 @@ mod tests {
             "};\n",
         );
         let formatted = fmt(src);
-        assert!(formatted.lines().all(|l| l.chars().count() <= 100), "got: {formatted}");
+        assert!(
+            formatted.lines().all(|l| l.chars().count() <= 100),
+            "got: {formatted}"
+        );
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }
 
     #[test]
     fn export_var_has_export_prefix() {
-        assert_eq!(fmt("export var x: int = 1;").trim(), "export var x: int = 1;");
+        assert_eq!(
+            fmt("export var x: int = 1;").trim(),
+            "export var x: int = 1;"
+        );
     }
 
     #[test]
@@ -989,7 +1139,10 @@ mod tests {
 
     #[test]
     fn import_with_alias() {
-        assert_eq!(fmt(r#"import "a.spar" as a;"#).trim(), r#"import "a.spar" as a;"#);
+        assert_eq!(
+            fmt(r#"import "a.spar" as a;"#).trim(),
+            r#"import "a.spar" as a;"#
+        );
     }
 
     #[test]
@@ -1123,7 +1276,10 @@ mod tests {
 
     #[test]
     fn list_literal_formatted() {
-        assert_eq!(fmt("var xs: [int] = [1, 2, 3];").trim(), "var xs: [int] = [1, 2, 3];");
+        assert_eq!(
+            fmt("var xs: [int] = [1, 2, 3];").trim(),
+            "var xs: [int] = [1, 2, 3];"
+        );
     }
 
     #[test]
@@ -1133,7 +1289,10 @@ mod tests {
 
     #[test]
     fn fn_call_positional_formatted() {
-        assert_eq!(fmt("var x: str = env(\"PORT\");").trim(), "var x: str = env(\"PORT\");");
+        assert_eq!(
+            fmt("var x: str = env(\"PORT\");").trim(),
+            "var x: str = env(\"PORT\");"
+        );
     }
 
     #[test]
@@ -1226,7 +1385,10 @@ function pick(flag: bool) -> int {
     fn multiple_blank_lines_collapse_to_one() {
         let src = "var a: int = 1;\n\n\n\nvar b: int = 2;";
         let out = format_source(src).unwrap();
-        assert!(!out.contains("\n\n\n"), "more than one consecutive blank line found");
+        assert!(
+            !out.contains("\n\n\n"),
+            "more than one consecutive blank line found"
+        );
     }
 
     #[test]
@@ -1236,7 +1398,10 @@ function pick(flag: bool) -> int {
         let once = format_source(src).unwrap();
         let twice = format_source(&once).unwrap();
         assert_eq!(once, twice, "idempotency broken on escape sequences");
-        assert!(once.contains(r#"\"hi\""#), "escaped quote must be re-escaped in output");
+        assert!(
+            once.contains(r#"\"hi\""#),
+            "escaped quote must be re-escaped in output"
+        );
     }
 
     #[test]
@@ -1265,7 +1430,11 @@ function pick(flag: bool) -> int {
             })],
         };
         let out = format_program(&program, &FormatConfig::default());
-        assert!(out.contains(r#"import "dir\\file.spar""#), "backslash must be re-escaped: {}", out);
+        assert!(
+            out.contains(r#"import "dir\\file.spar""#),
+            "backslash must be re-escaped: {}",
+            out
+        );
     }
 
     #[test]
@@ -1285,15 +1454,26 @@ function pick(flag: bool) -> int {
             })],
         };
         let out = format_program(&program, &FormatConfig::default());
-        assert!(out.contains("[A.B]{"), "multi-segment path must be joined with '.'");
+        assert!(
+            out.contains("[A.B]{"),
+            "multi-segment path must be joined with '.'"
+        );
     }
 
     #[test]
     fn formats_schema_file_with_pragma() {
         let src = "@SchemaFile\nSchema [X]{\n    a: int;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.starts_with("@SchemaFile\n"), "must start with @SchemaFile pragma: {}", formatted);
-        assert!(formatted.contains("Schema [X]{"), "must contain schema section header: {}", formatted);
+        assert!(
+            formatted.starts_with("@SchemaFile\n"),
+            "must start with @SchemaFile pragma: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("Schema [X]{"),
+            "must contain schema section header: {}",
+            formatted
+        );
     }
 
     #[test]
@@ -1318,9 +1498,18 @@ function pick(flag: bool) -> int {
             "import asPartOf \"common.spar\";\n",
         );
         let once = format_source(src).expect("format");
-        assert!(once.contains("import { A, B as C } from \"shared.spar\";"), "got: {once}");
-        assert!(once.contains("import type { PostgresType } from \"types.spar\";"), "got: {once}");
-        assert!(once.contains("import asPartOf \"common.spar\";"), "got: {once}");
+        assert!(
+            once.contains("import { A, B as C } from \"shared.spar\";"),
+            "got: {once}"
+        );
+        assert!(
+            once.contains("import type { PostgresType } from \"types.spar\";"),
+            "got: {once}"
+        );
+        assert!(
+            once.contains("import asPartOf \"common.spar\";"),
+            "got: {once}"
+        );
         let twice = format_source(&once).expect("format again");
         assert_eq!(once, twice, "formatting must be idempotent");
     }
@@ -1329,15 +1518,27 @@ function pick(flag: bool) -> int {
     fn formats_schema_file_optional_section() {
         let src = "@SchemaFile\nSchema? [Y]{\n    b: str;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("Schema? [Y]{"), "optional schema marker: {}", formatted);
+        assert!(
+            formatted.contains("Schema? [Y]{"),
+            "optional schema marker: {}",
+            formatted
+        );
     }
 
     #[test]
     fn formats_schema_field_required_and_optional() {
         let src = "@SchemaFile\nSchema [X]{\n    a: int;\n    b?: str;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("    a: int;"), "required field: {}", formatted);
-        assert!(formatted.contains("    b?: str;"), "optional field: {}", formatted);
+        assert!(
+            formatted.contains("    a: int;"),
+            "required field: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("    b?: str;"),
+            "optional field: {}",
+            formatted
+        );
     }
 
     #[test]
@@ -1351,31 +1552,59 @@ function pick(flag: bool) -> int {
     fn formats_nested_section_schema_field() {
         let src = "@SchemaFile\nSchema [X]{\n    x: section = { host: str; };\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("x: section = {"), "nested section field: {}", formatted);
-        assert!(formatted.contains("host: str;"), "nested field: {}", formatted);
+        assert!(
+            formatted.contains("x: section = {"),
+            "nested section field: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("host: str;"),
+            "nested field: {}",
+            formatted
+        );
     }
 
     #[test]
     fn formats_type_decl_round_trip() {
         let src = "type [Border]{\n    width?: int;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("type [Border]{"), "must contain type header: {}", formatted);
-        assert!(formatted.contains("width?: int;"), "must contain the optional field: {}", formatted);
+        assert!(
+            formatted.contains("type [Border]{"),
+            "must contain type header: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("width?: int;"),
+            "must contain the optional field: {}",
+            formatted
+        );
     }
 
     #[test]
     fn formats_export_type_and_named_field_round_trip() {
         let src = "type [Border]{\n    width?: int;\n}\nexport type [Decoration]{\n    border?: Border;\n}\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("export type [Decoration]{"), "must contain export type header: {}", formatted);
-        assert!(formatted.contains("border?: Border;"), "must contain the named-type field: {}", formatted);
+        assert!(
+            formatted.contains("export type [Decoration]{"),
+            "must contain export type header: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("border?: Border;"),
+            "must contain the named-type field: {}",
+            formatted
+        );
     }
 
     #[test]
     fn formats_type_binding_on_section_round_trip() {
         let src = "type [PostgresType]{\n    image: str;\n}\n[Postgres] -> PostgresType {\n    image: str = \"postgres:16\";\n};\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("[Postgres] -> PostgresType {"), "must round-trip the type binding: {}", formatted);
+        assert!(
+            formatted.contains("[Postgres] -> PostgresType {"),
+            "must round-trip the type binding: {}",
+            formatted
+        );
     }
 
     #[test]
@@ -1387,7 +1616,10 @@ function pick(flag: bool) -> int {
         let x_pos = out.find("var x").unwrap();
         let c_pos = out.find("// between").unwrap();
         let y_pos = out.find("var y").unwrap();
-        assert!(x_pos < c_pos && c_pos < y_pos, "comment between x and y: {out}");
+        assert!(
+            x_pos < c_pos && c_pos < y_pos,
+            "comment between x and y: {out}"
+        );
     }
 
     #[test]
@@ -1398,7 +1630,10 @@ function pick(flag: bool) -> int {
         let a_pos = out.find("a: int").unwrap();
         let c_pos = out.find("// commented").unwrap();
         let b_pos = out.find("b: int").unwrap();
-        assert!(a_pos < c_pos && c_pos < b_pos, "comment between a and b: {out}");
+        assert!(
+            a_pos < c_pos && c_pos < b_pos,
+            "comment between a and b: {out}"
+        );
     }
 
     #[test]

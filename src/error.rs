@@ -8,11 +8,21 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize, line: u32, col: u32) -> Self {
-        Self { start, end, line, col }
+        Self {
+            start,
+            end,
+            line,
+            col,
+        }
     }
 
     pub fn dummy() -> Self {
-        Self { start: 0, end: 0, line: 0, col: 0 }
+        Self {
+            start: 0,
+            end: 0,
+            line: 0,
+            col: 0,
+        }
     }
 }
 
@@ -53,10 +63,18 @@ impl std::fmt::Display for SparError {
                 write!(f, "error[lex] at {}:{} — {}", span.line, span.col, message)
             }
             SparError::ParseError { message, span } => {
-                write!(f, "error[parse] at {}:{} — {}", span.line, span.col, message)
+                write!(
+                    f,
+                    "error[parse] at {}:{} — {}",
+                    span.line, span.col, message
+                )
             }
             SparError::ResolveError { message, span, .. } => {
-                write!(f, "error[resolve] at {}:{} — {}", span.line, span.col, message)
+                write!(
+                    f,
+                    "error[resolve] at {}:{} — {}",
+                    span.line, span.col, message
+                )
             }
             SparError::TypeError { message, span, .. } => {
                 write!(f, "error[type] at {}:{} — {}", span.line, span.col, message)
@@ -65,7 +83,11 @@ impl std::fmt::Display for SparError {
                 write!(f, "error[eval] at {}:{} — {}", span.line, span.col, message)
             }
             SparError::SchemaError { message, span } => {
-                write!(f, "error[schema] at {}:{} — {}", span.line, span.col, message)
+                write!(
+                    f,
+                    "error[schema] at {}:{} — {}",
+                    span.line, span.col, message
+                )
             }
         }
     }

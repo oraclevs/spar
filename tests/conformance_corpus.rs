@@ -14,6 +14,11 @@ fn compiler_accepts_shared_conformance_corpus() {
             ..spar::CompileOptions::for_path(&path)
         };
         let compilation = spar::Compiler::new(options).compile(&source);
-        assert!(compilation.errors.is_empty(), "{}: {:?}", path.display(), compilation.errors);
+        assert!(
+            compilation.errors.is_empty(),
+            "{}: {:?}",
+            path.display(),
+            compilation.errors
+        );
     }
 }

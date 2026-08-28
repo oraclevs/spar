@@ -43,9 +43,18 @@ fn parse_function_decl_section_return() {
             assert_eq!(f.params.len(), 2);
             assert!(matches!(f.ret, crate::ast::SparType::Section));
             // The return statement is now a FuncStmt::Return in body.stmts
-            let ret_stmt = f.body.stmts.iter().find_map(|s| {
-                if let crate::ast::FuncStmt::Return(rv, _) = s { Some(rv) } else { None }
-            }).expect("should have a Return stmt");
+            let ret_stmt = f
+                .body
+                .stmts
+                .iter()
+                .find_map(|s| {
+                    if let crate::ast::FuncStmt::Return(rv, _) = s {
+                        Some(rv)
+                    } else {
+                        None
+                    }
+                })
+                .expect("should have a Return stmt");
             match ret_stmt {
                 crate::ast::ReturnValue::SectionBlock(fields) => {
                     assert_eq!(fields.len(), 2);
@@ -62,15 +71,13 @@ fn parse_named_call() {
     let src = r#"var x: str = greet(name: "world");"#;
     let prog = parse_ok(src);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Var(v) => {
-            match v.value.as_ref().unwrap() {
-                crate::ast::Expr::Call { args, .. } => {
-                    assert_eq!(args.len(), 1);
-                    assert_eq!(args[0].param_name, "name");
-                }
-                _ => panic!("expected Call"),
+        crate::ast::TopLevelItem::Var(v) => match v.value.as_ref().unwrap() {
+            crate::ast::Expr::Call { args, .. } => {
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0].param_name, "name");
             }
-        }
+            _ => panic!("expected Call"),
+        },
         _ => panic!("expected Var"),
     }
 }
@@ -80,14 +87,12 @@ fn parse_comparison_expr() {
     let src = r#"var x: bool = a == b;"#;
     let prog = parse_ok(src);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Var(v) => {
-            match v.value.as_ref().unwrap() {
-                crate::ast::Expr::BinaryOp(b) => {
-                    assert_eq!(b.op, crate::ast::BinOp::Eq);
-                }
-                _ => panic!("expected BinaryOp"),
+        crate::ast::TopLevelItem::Var(v) => match v.value.as_ref().unwrap() {
+            crate::ast::Expr::BinaryOp(b) => {
+                assert_eq!(b.op, crate::ast::BinOp::Eq);
             }
-        }
+            _ => panic!("expected BinaryOp"),
+        },
         _ => panic!(),
     }
 }
@@ -97,14 +102,12 @@ fn parse_unary_not() {
     let src = r#"var x: bool = !flag;"#;
     let prog = parse_ok(src);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Var(v) => {
-            match v.value.as_ref().unwrap() {
-                crate::ast::Expr::Unary { op, .. } => {
-                    assert_eq!(*op, crate::ast::UnOp::Not);
-                }
-                _ => panic!("expected Unary"),
+        crate::ast::TopLevelItem::Var(v) => match v.value.as_ref().unwrap() {
+            crate::ast::Expr::Unary { op, .. } => {
+                assert_eq!(*op, crate::ast::UnOp::Not);
             }
-        }
+            _ => panic!("expected Unary"),
+        },
         _ => panic!(),
     }
 }
@@ -114,14 +117,12 @@ fn parse_comprehension() {
     let src = r#"var y: [str] = for x in items { x };"#;
     let prog = parse_ok(src);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Var(v) => {
-            match v.value.as_ref().unwrap() {
-                crate::ast::Expr::Comprehension { var_name, .. } => {
-                    assert_eq!(var_name, "x");
-                }
-                _ => panic!("expected Comprehension"),
+        crate::ast::TopLevelItem::Var(v) => match v.value.as_ref().unwrap() {
+            crate::ast::Expr::Comprehension { var_name, .. } => {
+                assert_eq!(var_name, "x");
             }
-        }
+            _ => panic!("expected Comprehension"),
+        },
         _ => panic!(),
     }
 }
@@ -191,7 +192,10 @@ fn bool_type_in_return_section_parses() {
             return { error: bool = false; };
         }
     "#;
-    assert!(parse_ok_result(src).is_ok(), "bool as type in return block must parse");
+    assert!(
+        parse_ok_result(src).is_ok(),
+        "bool as type in return block must parse"
+    );
 }
 
 #[test]
@@ -236,7 +240,9 @@ fn for_loop_statement_parses() {
         }
     "#;
     let prog = parse_ok_result(src).expect("for-loop must parse");
-    let crate::ast::TopLevelItem::Function(f) = &prog.items[0] else { panic!() };
+    let crate::ast::TopLevelItem::Function(f) = &prog.items[0] else {
+        panic!()
+    };
     assert!(matches!(f.body.stmts[0], crate::ast::FuncStmt::For { .. }));
 }
 
@@ -282,7 +288,10 @@ fn parses_required_schema_section() {
             assert_eq!(s.fields.len(), 1);
             assert_eq!(s.fields[0].name, "a");
         }
-        other => panic!("expected SchemaSection, got {:?}", std::mem::discriminant(other)),
+        other => panic!(
+            "expected SchemaSection, got {:?}",
+            std::mem::discriminant(other)
+        ),
     }
 }
 
@@ -361,11 +370,15 @@ fn import_schema_and_aliased_import_coexist() {
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 2);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::Import(d) => assert!(matches!(d.kind, crate::ast::ImportKind::Schema)),
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(matches!(d.kind, crate::ast::ImportKind::Schema))
+        }
         _ => panic!(),
     }
     match &prog.items[1] {
-        crate::ast::TopLevelItem::Import(d) => assert!(!matches!(d.kind, crate::ast::ImportKind::Schema)),
+        crate::ast::TopLevelItem::Import(d) => {
+            assert!(!matches!(d.kind, crate::ast::ImportKind::Schema))
+        }
         _ => panic!(),
     }
 }
@@ -391,7 +404,10 @@ fn schema_section_without_pragma_is_parse_error() {
     let src = "Schema [X]{ a: int; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let result = crate::parser::Parser::new(tokens).parse();
-    assert!(result.is_err(), "schema section in non-schema file must be a parse error");
+    assert!(
+        result.is_err(),
+        "schema section in non-schema file must be a parse error"
+    );
 }
 
 #[test]
@@ -423,8 +439,13 @@ fn parse_type_decl_with_named_and_nested_fields() {
             assert_eq!(t.name, "Decoration");
             assert!(t.exported);
             assert_eq!(t.fields.len(), 3);
-            assert!(matches!(t.fields[1].shape, crate::ast::TypeFieldShape::Named(ref n) if n == "Border"));
-            assert!(matches!(t.fields[2].shape, crate::ast::TypeFieldShape::Section(_)));
+            assert!(
+                matches!(t.fields[1].shape, crate::ast::TypeFieldShape::Named(ref n) if n == "Border")
+            );
+            assert!(matches!(
+                t.fields[2].shape,
+                crate::ast::TypeFieldShape::Section(_)
+            ));
         }
         other => panic!("expected TopLevelItem::Type, got {:?}", other),
     }
@@ -457,8 +478,10 @@ fn parse_schema_decl_still_requires_schema_file() {
     // confirms the keyword-prefix migration didn't disturb it.
     let src = r#"Schema [X]{ a: int; }"#;
     let err = parse_err(src);
-    assert!(err.contains("not a schema file") || err.contains("@SchemaFile"),
-        "expected the existing schema-file-required error, got: {err}");
+    assert!(
+        err.contains("not a schema file") || err.contains("@SchemaFile"),
+        "expected the existing schema-file-required error, got: {err}"
+    );
 }
 
 #[test]
@@ -602,10 +625,7 @@ fn parse_schema_file_still_rejects_non_type_imports() {
     // Task 5 flips `import type` to legal inside @SchemaFile; every OTHER
     // import form must stay rejected there — asserted now so a regression
     // in Task 5 is caught by an already-passing Task 1 test.
-    let src = concat!(
-        "@SchemaFile\n",
-        "import \"x.spar\" as x;\n",
-    );
+    let src = concat!("@SchemaFile\n", "import \"x.spar\" as x;\n",);
     let _ = parse_err(src);
 }
 
@@ -631,10 +651,7 @@ fn parse_schema_file_still_rejects_selective_import() {
 
 #[test]
 fn parse_schema_file_still_rejects_as_part_of() {
-    let src = concat!(
-        "@SchemaFile\n",
-        "import asPartOf \"types.spar\";\n",
-    );
+    let src = concat!("@SchemaFile\n", "import asPartOf \"types.spar\";\n",);
     let _ = parse_err(src);
 }
 
@@ -649,12 +666,18 @@ fn parse_spread_inside_nested_field_body() {
     let prog = parse_ok(src);
     match &prog.items[0] {
         crate::ast::TopLevelItem::Section(sd) => {
-            let env_field = sd.items.iter().find_map(|it| {
-                if let crate::ast::SectionItem::Field(f) = it {
-                    if f.name == "environment" { return Some(f); }
-                }
-                None
-            }).expect("expected an environment field");
+            let env_field = sd
+                .items
+                .iter()
+                .find_map(|it| {
+                    if let crate::ast::SectionItem::Field(f) = it {
+                        if f.name == "environment" {
+                            return Some(f);
+                        }
+                    }
+                    None
+                })
+                .expect("expected an environment field");
             match &env_field.value {
                 Some(crate::ast::FieldValue::Nested(items)) => {
                     assert_eq!(items.len(), 1);
@@ -681,12 +704,18 @@ fn parse_spread_mixed_with_fields_inside_nested_body() {
     let prog = parse_ok(src);
     match &prog.items[0] {
         crate::ast::TopLevelItem::Section(sd) => {
-            let env_field = sd.items.iter().find_map(|it| {
-                if let crate::ast::SectionItem::Field(f) = it {
-                    if f.name == "environment" { return Some(f); }
-                }
-                None
-            }).expect("expected an environment field");
+            let env_field = sd
+                .items
+                .iter()
+                .find_map(|it| {
+                    if let crate::ast::SectionItem::Field(f) = it {
+                        if f.name == "environment" {
+                            return Some(f);
+                        }
+                    }
+                    None
+                })
+                .expect("expected an environment field");
             match &env_field.value {
                 Some(crate::ast::FieldValue::Nested(items)) => assert_eq!(items.len(), 2),
                 other => panic!("expected FieldValue::Nested, got {:?}", other),
@@ -703,7 +732,9 @@ fn parse_var_decl_with_named_type() {
     let src = "var x: Leaf = someExpr;";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else {
+        panic!("expected var")
+    };
     assert_eq!(v.ty, crate::ast::SparType::Named("Leaf".to_string()));
 }
 
@@ -712,8 +743,13 @@ fn parse_var_decl_with_list_of_named_type() {
     let src = "var xs: [Leaf] = someExpr;";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
-    assert_eq!(v.ty, crate::ast::SparType::List(Box::new(crate::ast::SparType::Named("Leaf".to_string()))));
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else {
+        panic!("expected var")
+    };
+    assert_eq!(
+        v.ty,
+        crate::ast::SparType::List(Box::new(crate::ast::SparType::Named("Leaf".to_string())))
+    );
 }
 
 #[test]
@@ -721,8 +757,13 @@ fn parse_function_param_and_return_with_named_type() {
     let src = "function f(l: Leaf) -> Leaf { return l; }";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Function(f) = &program.items[0] else { panic!("expected function") };
-    assert_eq!(f.params[0].ty, crate::ast::SparType::Named("Leaf".to_string()));
+    let crate::ast::TopLevelItem::Function(f) = &program.items[0] else {
+        panic!("expected function")
+    };
+    assert_eq!(
+        f.params[0].ty,
+        crate::ast::SparType::Named("Leaf".to_string())
+    );
     assert_eq!(f.ret, crate::ast::SparType::Named("Leaf".to_string()));
 }
 
@@ -731,8 +772,12 @@ fn parse_section_field_with_explicit_named_type_and_eq_disambiguates_as_type() {
     let src = "[Tree]{ root: Leaf = someExpr; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else { panic!("expected section") };
-    let crate::ast::SectionItem::Field(f) = &s.items[0] else { panic!("expected field") };
+    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else {
+        panic!("expected section")
+    };
+    let crate::ast::SectionItem::Field(f) = &s.items[0] else {
+        panic!("expected field")
+    };
     assert_eq!(f.ty, Some(crate::ast::SparType::Named("Leaf".to_string())));
 }
 
@@ -741,10 +786,19 @@ fn parse_section_field_bare_ident_no_eq_is_still_untyped_value_regression() {
     let src = "[Man] -> Human { name: someVar; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else { panic!("expected section") };
-    let crate::ast::SectionItem::Field(f) = &s.items[0] else { panic!("expected field") };
+    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else {
+        panic!("expected section")
+    };
+    let crate::ast::SectionItem::Field(f) = &s.items[0] else {
+        panic!("expected field")
+    };
     assert_eq!(f.ty, None);
-    assert!(matches!(&f.value, Some(crate::ast::FieldValue::Expr(crate::ast::Expr::NamespaceRef(_)))));
+    assert!(matches!(
+        &f.value,
+        Some(crate::ast::FieldValue::Expr(
+            crate::ast::Expr::NamespaceRef(_)
+        ))
+    ));
 }
 
 // ── Expr::Object ──────────────────────────────────────────────────────────────
@@ -754,8 +808,12 @@ fn parse_bare_object_literal_as_var_value() {
     let src = "var x: Leaf = { name: \"a\"; size: 1; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
-    let Some(crate::ast::Expr::Object(items, _)) = &v.value else { panic!("expected object literal, got {:?}", v.value) };
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else {
+        panic!("expected var")
+    };
+    let Some(crate::ast::Expr::Object(items, _)) = &v.value else {
+        panic!("expected object literal, got {:?}", v.value)
+    };
     assert_eq!(items.len(), 2);
 }
 
@@ -764,8 +822,12 @@ fn parse_object_literal_inside_list_literal() {
     let src = "var xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
-    let Some(crate::ast::Expr::List(elems, _)) = &v.value else { panic!("expected list") };
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else {
+        panic!("expected var")
+    };
+    let Some(crate::ast::Expr::List(elems, _)) = &v.value else {
+        panic!("expected list")
+    };
     assert_eq!(elems.len(), 2);
     assert!(matches!(&elems[0], crate::ast::Expr::Object(_, _)));
     assert!(matches!(&elems[1], crate::ast::Expr::Object(_, _)));
@@ -776,8 +838,12 @@ fn parse_object_literal_with_spread() {
     let src = "var x: Leaf = { ...Other; size: 1; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else { panic!("expected var") };
-    let Some(crate::ast::Expr::Object(items, _)) = &v.value else { panic!("expected object literal") };
+    let crate::ast::TopLevelItem::Var(v) = &program.items[0] else {
+        panic!("expected var")
+    };
+    let Some(crate::ast::Expr::Object(items, _)) = &v.value else {
+        panic!("expected object literal")
+    };
     assert!(matches!(&items[0], crate::ast::SectionItem::Spread(_)));
     assert!(matches!(&items[1], crate::ast::SectionItem::Field(_)));
 }
@@ -789,7 +855,9 @@ fn parse_enum_decl_basic() {
     let src = "enum Devices { Ios, Android, Windows, MacOs };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else {
+        panic!("expected enum")
+    };
     assert_eq!(e.name, "Devices");
     assert!(!e.exported);
     assert_eq!(e.variants, vec!["Ios", "Android", "Windows", "MacOs"]);
@@ -800,7 +868,9 @@ fn parse_exported_enum_decl() {
     let src = "export enum Devices { Ios, Android };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else {
+        panic!("expected enum")
+    };
     assert!(e.exported);
 }
 
@@ -809,7 +879,9 @@ fn parse_enum_decl_trailing_comma_allowed() {
     let src = "enum Devices { Ios, Android, };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else { panic!("expected enum") };
+    let crate::ast::TopLevelItem::Enum(e) = &program.items[0] else {
+        panic!("expected enum")
+    };
     assert_eq!(e.variants, vec!["Ios", "Android"]);
 }
 
@@ -818,9 +890,16 @@ fn parse_enum_variant_ref_is_two_segment_namespace_ref() {
     let src = "enum Devices { Android };\nvar x: Devices = Devices::Android;";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Var(v) = &program.items[1] else { panic!("expected var") };
-    let Some(crate::ast::Expr::NamespaceRef(nr)) = &v.value else { panic!("expected namespace ref") };
-    assert_eq!(nr.segments, vec!["Devices".to_string(), "Android".to_string()]);
+    let crate::ast::TopLevelItem::Var(v) = &program.items[1] else {
+        panic!("expected var")
+    };
+    let Some(crate::ast::Expr::NamespaceRef(nr)) = &v.value else {
+        panic!("expected namespace ref")
+    };
+    assert_eq!(
+        nr.segments,
+        vec!["Devices".to_string(), "Android".to_string()]
+    );
 }
 
 #[test]
@@ -879,7 +958,9 @@ fn parse_function_group_rejects_nested_function_group() {
 fn parse_dot_field_access() {
     let src = "var x: str = person.name;";
     let prog = parse_ok(src);
-    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else {
+        panic!("expected var")
+    };
     let Some(crate::ast::Expr::FieldAccess { field, .. }) = &v.value else {
         panic!("expected FieldAccess, got {:?}", v.value)
     };
@@ -892,19 +973,27 @@ fn parse_dot_after_index() {
     // access after an index used to be a parse error.
     let src = "var x: str = people[0].name;";
     let prog = parse_ok(src);
-    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else {
+        panic!("expected var")
+    };
     let Some(crate::ast::Expr::FieldAccess { base, field, .. }) = &v.value else {
         panic!("expected FieldAccess, got {:?}", v.value)
     };
     assert_eq!(field, "name");
-    assert!(matches!(base.as_ref(), crate::ast::Expr::Index { .. }), "base should be an Index expr, got {:?}", base);
+    assert!(
+        matches!(base.as_ref(), crate::ast::Expr::Index { .. }),
+        "base should be an Index expr, got {:?}",
+        base
+    );
 }
 
 #[test]
 fn parse_dot_chain_multi_hop() {
     let src = "var x: str = a.b.c;";
     let prog = parse_ok(src);
-    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else {
+        panic!("expected var")
+    };
     // a.b.c => FieldAccess{ base: FieldAccess{ base: a, field: "b" }, field: "c" }
     let Some(crate::ast::Expr::FieldAccess { base, field, .. }) = &v.value else {
         panic!("expected outer FieldAccess, got {:?}", v.value)
@@ -917,7 +1006,9 @@ fn parse_dot_chain_multi_hop() {
 fn parse_dot_after_index_and_index_after_dot() {
     let src = "var x: int = a.b[0];";
     let prog = parse_ok(src);
-    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else { panic!("expected var") };
+    let crate::ast::TopLevelItem::Var(v) = &prog.items[0] else {
+        panic!("expected var")
+    };
     let Some(crate::ast::Expr::Index { source, .. }) = &v.value else {
         panic!("expected outer Index, got {:?}", v.value)
     };

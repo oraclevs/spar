@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::depgraph::DeclId;
-use crate::error::{SparError, Span};
+use crate::error::{Span, SparError};
 use crate::loader::LoadedImport;
 use crate::naming;
 
@@ -46,10 +46,10 @@ pub(crate) fn stmts_always_return(stmts: &[FuncStmt]) -> bool {
 
 fn func_stmt_span(stmt: &FuncStmt) -> Span {
     match stmt {
-        FuncStmt::LocalVar(l)          => l.span.clone(),
-        FuncStmt::If(i)                => i.span.clone(),
-        FuncStmt::Return(_, s)         => s.clone(),
-        FuncStmt::For { span, .. }     => span.clone(),
+        FuncStmt::LocalVar(l) => l.span.clone(),
+        FuncStmt::If(i) => i.span.clone(),
+        FuncStmt::Return(_, s) => s.clone(),
+        FuncStmt::For { span, .. } => span.clone(),
     }
 }
 
@@ -107,9 +107,9 @@ pub struct FunctionEntry {
 
 #[derive(Debug, Clone)]
 pub struct TypeEntry {
-    pub fields:   Vec<TypeField>,
+    pub fields: Vec<TypeField>,
     pub exported: bool,
-    pub span:     Span,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -123,17 +123,17 @@ pub struct FunctionGroupEntry {
 pub struct EnumEntry {
     pub variants: Vec<String>,
     pub exported: bool,
-    pub span:     Span,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct SymbolTable {
-    pub globals:         HashMap<String, GlobalEntry>,
-    pub sections:        HashMap<Vec<String>, SectionEntry>,
-    pub imports:         HashMap<String, ImportEntry>,
-    pub functions:       HashMap<String, FunctionEntry>,
-    pub types:           HashMap<String, TypeEntry>,
-    pub enums:           HashMap<String, EnumEntry>,
+    pub globals: HashMap<String, GlobalEntry>,
+    pub sections: HashMap<Vec<String>, SectionEntry>,
+    pub imports: HashMap<String, ImportEntry>,
+    pub functions: HashMap<String, FunctionEntry>,
+    pub types: HashMap<String, TypeEntry>,
+    pub enums: HashMap<String, EnumEntry>,
     pub function_groups: HashMap<String, FunctionGroupEntry>,
 }
 
@@ -171,21 +171,28 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for (i, row) in dp.iter_mut().enumerate() { row[0] = i; }
-    for (j, val) in dp[0].iter_mut().enumerate() { *val = j; }
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, val) in dp[0].iter_mut().enumerate() {
+        *val = j;
+    }
     for i in 1..=m {
         for j in 1..=n {
-            dp[i][j] = if a[i-1] == b[j-1] {
-                dp[i-1][j-1]
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1]
             } else {
-                1 + dp[i-1][j].min(dp[i][j-1]).min(dp[i-1][j-1])
+                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
             };
         }
     }
     dp[m][n]
 }
 
-pub(crate) fn suggest(name: &str, candidates: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
+pub(crate) fn suggest(
+    name: &str,
+    candidates: impl Iterator<Item = impl AsRef<str>>,
+) -> Option<String> {
     candidates
         .map(|c| {
             let s = c.as_ref().to_string();
@@ -200,55 +207,60 @@ pub(crate) fn suggest(name: &str, candidates: impl Iterator<Item = impl AsRef<st
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub struct Resolver {
-    globals:         HashMap<String, GlobalEntry>,
-    sections:        HashMap<Vec<String>, SectionEntry>,
-    imports:         HashMap<String, ImportEntry>,
-    functions:       HashMap<String, FunctionEntry>,
-    types:           HashMap<String, TypeEntry>,
-    enums:           HashMap<String, EnumEntry>,
+    globals: HashMap<String, GlobalEntry>,
+    sections: HashMap<Vec<String>, SectionEntry>,
+    imports: HashMap<String, ImportEntry>,
+    functions: HashMap<String, FunctionEntry>,
+    types: HashMap<String, TypeEntry>,
+    enums: HashMap<String, EnumEntry>,
     function_groups: HashMap<String, FunctionGroupEntry>,
-    loaded_exports:  HashMap<String, HashSet<String>>,  // alias → exported names
-    errors:          Vec<SparError>,
+    loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
+    errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
 }
 
 impl Resolver {
     pub fn new() -> Self {
         Self {
-            globals:         HashMap::new(),
-            sections:        HashMap::new(),
-            imports:         HashMap::new(),
-            functions:       HashMap::new(),
-            types:           HashMap::new(),
-            enums:           HashMap::new(),
+            globals: HashMap::new(),
+            sections: HashMap::new(),
+            imports: HashMap::new(),
+            functions: HashMap::new(),
+            types: HashMap::new(),
+            enums: HashMap::new(),
             function_groups: HashMap::new(),
-            loaded_exports:  HashMap::new(),
-            errors:          Vec::new(),
+            loaded_exports: HashMap::new(),
+            errors: Vec::new(),
             current_section: None,
         }
     }
 
     fn with_loaded(exports: HashMap<String, HashSet<String>>) -> Self {
         Self {
-            globals:         HashMap::new(),
-            sections:        HashMap::new(),
-            imports:         HashMap::new(),
-            functions:       HashMap::new(),
-            types:           HashMap::new(),
-            enums:           HashMap::new(),
+            globals: HashMap::new(),
+            sections: HashMap::new(),
+            imports: HashMap::new(),
+            functions: HashMap::new(),
+            types: HashMap::new(),
+            enums: HashMap::new(),
             function_groups: HashMap::new(),
-            loaded_exports:  exports,
-            errors:          Vec::new(),
+            loaded_exports: exports,
+            errors: Vec::new(),
             current_section: None,
         }
     }
 
     /// Resolve a program with no imports (or with a pre-built slice of imports).
     /// The instance-method form enables `Resolver::new().resolve(&prog, &[])`.
-    pub fn resolve(mut self, program: &Program, loaded_imports: &[LoadedImport]) -> Result<SymbolTable, Vec<SparError>> {
+    pub fn resolve(
+        mut self,
+        program: &Program,
+        loaded_imports: &[LoadedImport],
+    ) -> Result<SymbolTable, Vec<SparError>> {
         // Populate loaded_exports from the slice (use path stem as alias)
         for li in loaded_imports {
-            let alias = li.path
+            let alias = li
+                .path
                 .rsplit('/')
                 .next()
                 .unwrap_or(&li.path)
@@ -262,12 +274,12 @@ impl Resolver {
         self.resolve_function_bodies(program);
         if self.errors.is_empty() {
             Ok(SymbolTable {
-                globals:         self.globals,
-                sections:        self.sections,
-                imports:         self.imports,
-                functions:       self.functions,
-                types:           self.types,
-                enums:           self.enums,
+                globals: self.globals,
+                sections: self.sections,
+                imports: self.imports,
+                functions: self.functions,
+                types: self.types,
+                enums: self.enums,
                 function_groups: self.function_groups,
             })
         } else {
@@ -292,12 +304,12 @@ impl Resolver {
         r.resolve_function_bodies(program);
         if r.errors.is_empty() {
             Ok(SymbolTable {
-                globals:         r.globals,
-                sections:        r.sections,
-                imports:         r.imports,
-                functions:       r.functions,
-                types:           r.types,
-                enums:           r.enums,
+                globals: r.globals,
+                sections: r.sections,
+                imports: r.imports,
+                functions: r.functions,
+                types: r.types,
+                enums: r.enums,
                 function_groups: r.function_groups,
             })
         } else {
@@ -322,7 +334,9 @@ impl Resolver {
     }
 
     fn check_function_group_import_collisions(&mut self) {
-        let colliding: Vec<(String, Span)> = self.function_groups.iter()
+        let colliding: Vec<(String, Span)> = self
+            .function_groups
+            .iter()
             .filter(|(name, _)| self.imports.contains_key(name.as_str()))
             .map(|(name, entry)| (name.clone(), entry.span.clone()))
             .collect();
@@ -344,11 +358,11 @@ impl Resolver {
     fn register(&mut self, program: &Program) {
         for item in &program.items {
             match item {
-                TopLevelItem::Import(decl)    => self.register_import(decl),
-                TopLevelItem::Var(decl)       => self.register_var(decl),
-                TopLevelItem::Dynamic(decl)   => self.register_dynamic(decl),
-                TopLevelItem::Section(decl)   => self.register_section(decl),
-                TopLevelItem::Function(decl)  => self.register_function(decl),
+                TopLevelItem::Import(decl) => self.register_import(decl),
+                TopLevelItem::Var(decl) => self.register_var(decl),
+                TopLevelItem::Dynamic(decl) => self.register_dynamic(decl),
+                TopLevelItem::Section(decl) => self.register_section(decl),
+                TopLevelItem::Function(decl) => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.register_type(decl),
                 TopLevelItem::Enum(decl) => self.register_enum(decl),
@@ -390,17 +404,23 @@ impl Resolver {
 
         if self.enums.contains_key(&decl.name) {
             self.push_error(
-                format!("'{}' is already declared as an enum — a type can't share a name with an enum", decl.name),
+                format!(
+                    "'{}' is already declared as an enum — a type can't share a name with an enum",
+                    decl.name
+                ),
                 decl.name_span.clone(),
             );
             return;
         }
 
-        self.types.insert(decl.name.clone(), TypeEntry {
-            fields:   decl.fields.clone(),
-            exported: decl.exported,
-            span:     decl.span.clone(),
-        });
+        self.types.insert(
+            decl.name.clone(),
+            TypeEntry {
+                fields: decl.fields.clone(),
+                exported: decl.exported,
+                span: decl.span.clone(),
+            },
+        );
     }
 
     fn register_enum(&mut self, decl: &EnumDecl) {
@@ -418,7 +438,10 @@ impl Resolver {
 
         if self.types.contains_key(&decl.name) {
             self.push_error(
-                format!("'{}' is already declared as a type — an enum can't share a name with a type", decl.name),
+                format!(
+                    "'{}' is already declared as a type — an enum can't share a name with a type",
+                    decl.name
+                ),
                 decl.name_span.clone(),
             );
             return;
@@ -432,11 +455,14 @@ impl Resolver {
             return;
         }
 
-        self.enums.insert(decl.name.clone(), EnumEntry {
-            variants: decl.variants.clone(),
-            exported: decl.exported,
-            span:     decl.span.clone(),
-        });
+        self.enums.insert(
+            decl.name.clone(),
+            EnumEntry {
+                variants: decl.variants.clone(),
+                exported: decl.exported,
+                span: decl.span.clone(),
+            },
+        );
     }
 
     fn register_function(&mut self, decl: &FunctionDecl) {
@@ -524,7 +550,10 @@ impl Resolver {
         for f in &decl.functions {
             if functions.contains_key(&f.name) {
                 self.push_error(
-                    format!("function '{}' is already defined in functionGroup '{}'", f.name, decl.name),
+                    format!(
+                        "function '{}' is already defined in functionGroup '{}'",
+                        f.name, decl.name
+                    ),
                     f.name_span.clone(),
                 );
                 continue;
@@ -533,11 +562,14 @@ impl Resolver {
             functions.insert(f.name.clone(), entry);
         }
 
-        self.function_groups.insert(decl.name.clone(), FunctionGroupEntry {
-            is_private: decl.is_private,
-            functions,
-            span: decl.span.clone(),
-        });
+        self.function_groups.insert(
+            decl.name.clone(),
+            FunctionGroupEntry {
+                is_private: decl.is_private,
+                functions,
+                span: decl.span.clone(),
+            },
+        );
     }
 
     fn register_import(&mut self, decl: &ImportDecl) {
@@ -545,7 +577,9 @@ impl Resolver {
         // TypeSelective / AsPartOf imports are already spliced away by
         // loader::expand_imports before resolve ever runs — only a plain
         // aliased import reaches this function.
-        let ImportKind::Aliased(alias) = &decl.kind else { return };
+        let ImportKind::Aliased(alias) = &decl.kind else {
+            return;
+        };
 
         let namespace = alias.clone().unwrap_or_else(|| {
             decl.path
@@ -575,16 +609,22 @@ impl Resolver {
             return;
         }
 
-        self.imports.insert(namespace, ImportEntry {
-            path: decl.path.clone(),
-            span: decl.span.clone(),
-        });
+        self.imports.insert(
+            namespace,
+            ImportEntry {
+                path: decl.path.clone(),
+                span: decl.span.clone(),
+            },
+        );
     }
 
     fn register_var(&mut self, decl: &VarDecl) {
         if self.globals.contains_key(&decl.name) {
             self.push_error(
-                format!("duplicate declaration: `{}` is already declared in the global scope", decl.name),
+                format!(
+                    "duplicate declaration: `{}` is already declared in the global scope",
+                    decl.name
+                ),
                 decl.span.clone(),
             );
             return;
@@ -613,7 +653,10 @@ impl Resolver {
     fn register_dynamic(&mut self, decl: &DynamicDecl) {
         if self.globals.contains_key(&decl.name) {
             self.push_error(
-                format!("duplicate declaration: `{}` is already declared in the global scope", decl.name),
+                format!(
+                    "duplicate declaration: `{}` is already declared in the global scope",
+                    decl.name
+                ),
                 decl.span.clone(),
             );
             return;
@@ -653,8 +696,10 @@ impl Resolver {
 
         if self.sections.contains_key(&decl.path) {
             self.push_error(
-                format!("duplicate section `[{}]` — each section path must be unique",
-                    decl.path.join(".")),
+                format!(
+                    "duplicate section `[{}]` — each section path must be unique",
+                    decl.path.join(".")
+                ),
                 decl.span.clone(),
             );
             return;
@@ -665,8 +710,11 @@ impl Resolver {
             if let SectionItem::Field(f) = item {
                 if fields.contains_key(&f.name) {
                     self.push_error(
-                        format!("duplicate field `{}` in section `[{}]`",
-                            f.name, decl.path.join(".")),
+                        format!(
+                            "duplicate field `{}` in section `[{}]`",
+                            f.name,
+                            decl.path.join(".")
+                        ),
                         f.span.clone(),
                     );
                 } else {
@@ -680,22 +728,28 @@ impl Resolver {
                             f.span.clone(),
                         );
                     }
-                    fields.insert(f.name.clone(), FieldEntry {
-                        ty: f.ty.clone(),
-                        optional: f.optional,
-                        span: f.span.clone(),
-                    });
+                    fields.insert(
+                        f.name.clone(),
+                        FieldEntry {
+                            ty: f.ty.clone(),
+                            optional: f.optional,
+                            span: f.span.clone(),
+                        },
+                    );
                 }
             }
         }
 
-        self.sections.insert(decl.path.clone(), SectionEntry {
-            fields,
-            type_binding: decl.type_binding.as_ref().map(|b| b.name.clone()),
-            exported: decl.exported,
-            private:  decl.private,
-            span: decl.span.clone(),
-        });
+        self.sections.insert(
+            decl.path.clone(),
+            SectionEntry {
+                fields,
+                type_binding: decl.type_binding.as_ref().map(|b| b.name.clone()),
+                exported: decl.exported,
+                private: decl.private,
+                span: decl.span.clone(),
+            },
+        );
 
         // Register nested section-type fields recursively. A field is a
         // nested section if its value is FieldValue::Nested, regardless
@@ -719,13 +773,18 @@ impl Resolver {
         for item in items {
             // A spread contributes fields only known at eval time — can't
             // statically know their names, so nothing to register here.
-            let SectionItem::Field(field) = item else { continue };
+            let SectionItem::Field(field) = item else {
+                continue;
+            };
 
             if matches!(field.value, Some(FieldValue::Nested(_))) {
                 if field_map.contains_key(&field.name) {
                     self.push_error(
-                        format!("duplicate field `{}` in section `[{}]`",
-                            field.name, path.join(".")),
+                        format!(
+                            "duplicate field `{}` in section `[{}]`",
+                            field.name,
+                            path.join(".")
+                        ),
                         field.span.clone(),
                     );
                 } else {
@@ -744,17 +803,23 @@ impl Resolver {
                             field.span.clone(),
                         );
                     }
-                    field_map.insert(field.name.clone(), FieldEntry {
-                        ty: field.ty.clone(),
-                        optional: field.optional,
-                        span: field.span.clone(),
-                    });
+                    field_map.insert(
+                        field.name.clone(),
+                        FieldEntry {
+                            ty: field.ty.clone(),
+                            optional: field.optional,
+                            span: field.span.clone(),
+                        },
+                    );
                 }
             } else {
                 if field_map.contains_key(&field.name) {
                     self.push_error(
-                        format!("duplicate field `{}` in section `[{}]`",
-                            field.name, path.join(".")),
+                        format!(
+                            "duplicate field `{}` in section `[{}]`",
+                            field.name,
+                            path.join(".")
+                        ),
                         field.span.clone(),
                     );
                 } else {
@@ -768,25 +833,34 @@ impl Resolver {
                             field.span.clone(),
                         );
                     }
-                    field_map.insert(field.name.clone(), FieldEntry {
-                        ty: field.ty.clone(),
-                        optional: field.optional,
-                        span: field.span.clone(),
-                    });
+                    field_map.insert(
+                        field.name.clone(),
+                        FieldEntry {
+                            ty: field.ty.clone(),
+                            optional: field.optional,
+                            span: field.span.clone(),
+                        },
+                    );
                 }
             }
         }
-        let span = items.first().map(|it| match it {
-            SectionItem::Field(f) => f.span.clone(),
-            SectionItem::Spread(s) => s.span.clone(),
-        }).unwrap_or_else(Span::dummy);
-        self.sections.insert(path.clone(), SectionEntry {
-            fields: field_map,
-            type_binding: None, // a nested section can't declare its own `-> Type` binding
-            exported: false,
-            private:  false,   // nested sections inherit parent privacy at emit time only
-            span,
-        });
+        let span = items
+            .first()
+            .map(|it| match it {
+                SectionItem::Field(f) => f.span.clone(),
+                SectionItem::Spread(s) => s.span.clone(),
+            })
+            .unwrap_or_else(Span::dummy);
+        self.sections.insert(
+            path.clone(),
+            SectionEntry {
+                fields: field_map,
+                type_binding: None, // a nested section can't declare its own `-> Type` binding
+                exported: false,
+                private: false, // nested sections inherit parent privacy at emit time only
+                span,
+            },
+        );
     }
 }
 
@@ -796,8 +870,8 @@ impl Resolver {
     fn resolve_program(&mut self, program: &Program) {
         for item in &program.items {
             match item {
-                TopLevelItem::Import(_)     => {}
-                TopLevelItem::Var(decl)     => {
+                TopLevelItem::Import(_) => {}
+                TopLevelItem::Var(decl) => {
                     self.check_named_type_exists(&decl.ty, &decl.span);
                     if let Some(val) = &decl.value {
                         self.resolve_expr(val);
@@ -809,7 +883,7 @@ impl Resolver {
                     }
                 }
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
-                TopLevelItem::Function(f)   => {
+                TopLevelItem::Function(f) => {
                     for p in &f.params {
                         self.check_named_type_exists(&p.ty, &p.span);
                     }
@@ -844,7 +918,9 @@ impl Resolver {
                 TopLevelItem::FunctionGroup(g) => {
                     for f in &g.functions {
                         let deps = self.resolve_one_function_body(f);
-                        if let Some(entry) = self.function_groups.get_mut(&g.name)
+                        if let Some(entry) = self
+                            .function_groups
+                            .get_mut(&g.name)
                             .and_then(|ge| ge.functions.get_mut(&f.name))
                         {
                             entry.closure_deps = deps;
@@ -900,7 +976,9 @@ impl Resolver {
                 });
             }
             match stmt {
-                FuncStmt::Return(_, _) => { terminated = true; }
+                FuncStmt::Return(_, _) => {
+                    terminated = true;
+                }
                 FuncStmt::LocalVar(_) => {}
                 FuncStmt::If(if_stmt) => {
                     let then_stmts = if_stmt.then_stmts.clone();
@@ -961,11 +1039,11 @@ impl Resolver {
                         self.check_named_type_exists(ty, &field.span);
                     }
                     match &field.value {
-                    Some(FieldValue::Expr(val)) => self.resolve_expr(val),
-                    Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
-                    None => {}
+                        Some(FieldValue::Expr(val)) => self.resolve_expr(val),
+                        Some(FieldValue::Nested(sub)) => self.resolve_nested_fields(sub),
+                        None => {}
                     }
-                },
+                }
                 SectionItem::Spread(s) => self.resolve_spread(s),
             }
         }
@@ -981,7 +1059,12 @@ impl Resolver {
                 TypeFieldShape::Primitive(_) => {}
                 TypeFieldShape::Named(name) => {
                     if !self.types.contains_key(name) && !self.enums.contains_key(name) {
-                        let candidates: Vec<String> = self.types.keys().chain(self.enums.keys()).cloned().collect();
+                        let candidates: Vec<String> = self
+                            .types
+                            .keys()
+                            .chain(self.enums.keys())
+                            .cloned()
+                            .collect();
                         let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                         self.push_error_hint(
                             format!("undefined type: `{name}` is not declared"),
@@ -1003,7 +1086,12 @@ impl Resolver {
         match ty {
             SparType::Named(name) => {
                 if !self.types.contains_key(name) && !self.enums.contains_key(name) {
-                    let candidates: Vec<String> = self.types.keys().chain(self.enums.keys()).cloned().collect();
+                    let candidates: Vec<String> = self
+                        .types
+                        .keys()
+                        .chain(self.enums.keys())
+                        .cloned()
+                        .collect();
                     let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                     self.push_error_hint(
                         format!("undefined type: `{}` is not declared", name),
@@ -1019,12 +1107,16 @@ impl Resolver {
 
     fn resolve_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Object(items, _)  => self.resolve_nested_fields(items),
-            Expr::Literal(_)        => {}
-            Expr::NamespaceRef(nr)  => self.resolve_namespace_ref(nr),
-            Expr::FieldAccess { base, field, span, .. } => self.resolve_field_access(base, field, span),
-            Expr::FnCall(fc)        => {
-                for arg in &fc.args { self.resolve_expr(arg); }
+            Expr::Object(items, _) => self.resolve_nested_fields(items),
+            Expr::Literal(_) => {}
+            Expr::NamespaceRef(nr) => self.resolve_namespace_ref(nr),
+            Expr::FieldAccess {
+                base, field, span, ..
+            } => self.resolve_field_access(base, field, span),
+            Expr::FnCall(fc) => {
+                for arg in &fc.args {
+                    self.resolve_expr(arg);
+                }
             }
             Expr::BinaryOp(op) => {
                 self.resolve_expr(&op.lhs);
@@ -1038,17 +1130,26 @@ impl Resolver {
                 }
             }
             Expr::List(items, _) => {
-                for item in items { self.resolve_expr(item); }
+                for item in items {
+                    self.resolve_expr(item);
+                }
             }
             Expr::Grouped(inner, _) => self.resolve_expr(inner),
-            Expr::Call { name, name_span, args, .. } => {
+            Expr::Call {
+                name,
+                name_span,
+                args,
+                ..
+            } => {
                 let segments: Vec<&str> = name.split("::").collect();
                 match segments.len() {
                     3 => {
                         // Cross-file functionGroup call: alias::Group::fn(...)
                         let alias = segments[0];
                         let group = segments[1];
-                        if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
+                        if self.imports.contains_key(alias)
+                            || self.loaded_exports.contains_key(alias)
+                        {
                             if let Some(exports) = self.loaded_exports.get(alias) {
                                 if !exports.contains(group) {
                                     self.push_error(
@@ -1061,9 +1162,14 @@ impl Resolver {
                             // `loaded_exports` is a flat name-only set, it
                             // doesn't carry a group's inner function names.
                         } else {
-                            self.push_error(format!("undefined function '{name}'"), name_span.clone());
+                            self.push_error(
+                                format!("undefined function '{name}'"),
+                                name_span.clone(),
+                            );
                         }
-                        for arg in args { self.resolve_expr(&arg.value); }
+                        for arg in args {
+                            self.resolve_expr(&arg.value);
+                        }
                     }
                     2 => {
                         let ns = segments[0];
@@ -1071,12 +1177,18 @@ impl Resolver {
                         if let Some(group) = self.function_groups.get(ns) {
                             if !group.functions.contains_key(fn_name) {
                                 self.push_error(
-                                    format!("function '{fn_name}' not found in functionGroup '{ns}'"),
+                                    format!(
+                                        "function '{fn_name}' not found in functionGroup '{ns}'"
+                                    ),
                                     name_span.clone(),
                                 );
                             }
-                            for arg in args { self.resolve_expr(&arg.value); }
-                        } else if self.imports.contains_key(ns) || self.loaded_exports.contains_key(ns) {
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
+                        } else if self.imports.contains_key(ns)
+                            || self.loaded_exports.contains_key(ns)
+                        {
                             if let Some(exports) = self.loaded_exports.get(ns) {
                                 if !exports.contains(fn_name) {
                                     self.push_error(
@@ -1085,10 +1197,17 @@ impl Resolver {
                                     );
                                 }
                             }
-                            for arg in args { self.resolve_expr(&arg.value); }
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
                         } else {
-                            self.push_error(format!("undefined function '{name}'"), name_span.clone());
-                            for arg in args { self.resolve_expr(&arg.value); }
+                            self.push_error(
+                                format!("undefined function '{name}'"),
+                                name_span.clone(),
+                            );
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
                         }
                     }
                     _ => {
@@ -1132,7 +1251,9 @@ impl Resolver {
                                 format!("undefined function '{name}'"),
                                 name_span.clone(),
                             );
-                            for arg in args { self.resolve_expr(&arg.value); }
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
                         }
                     }
                 }
@@ -1142,7 +1263,12 @@ impl Resolver {
                 self.resolve_expr(source);
                 self.resolve_expr(index);
             }
-            Expr::Comprehension { var_name, source, body, .. } => {
+            Expr::Comprehension {
+                var_name,
+                source,
+                body,
+                ..
+            } => {
                 self.resolve_expr(source);
                 // The body can reference the comprehension variable
                 let mut locals = HashSet::new();
@@ -1156,7 +1282,6 @@ impl Resolver {
 
     fn resolve_namespace_ref(&mut self, nr: &NamespaceRef) {
         match nr.segments.as_slice() {
-
             // ── 1 segment ────────────────────────────────────────────────────
             [name] => {
                 if name == "self" || name == "global" {
@@ -1165,7 +1290,9 @@ impl Resolver {
                     // the `self.x`/`global.x` case before ever calling
                     // this function on a bare self/global NamespaceRef.
                     self.push_error(
-                        format!("`{name}` must be followed by `.field` — bare `{name}` is not a value"),
+                        format!(
+                            "`{name}` must be followed by `.field` — bare `{name}` is not a value"
+                        ),
                         nr.span.clone(),
                     );
                     return;
@@ -1174,7 +1301,9 @@ impl Resolver {
                     let candidates: Vec<String> = self.globals.keys().cloned().collect();
                     let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                     self.push_error_hint(
-                        format!("undefined reference: `{name}` is not declared in the global scope"),
+                        format!(
+                            "undefined reference: `{name}` is not declared in the global scope"
+                        ),
                         hint,
                         nr.span.clone(),
                     );
@@ -1207,7 +1336,13 @@ impl Resolver {
                         nr.span.clone(),
                     );
                 } else {
-                    let hint = suggest(ns, self.imports.keys().chain(self.enums.keys()).map(|s| s.as_str()));
+                    let hint = suggest(
+                        ns,
+                        self.imports
+                            .keys()
+                            .chain(self.enums.keys())
+                            .map(|s| s.as_str()),
+                    );
                     self.push_error_hint(
                         format!("undefined namespace: `{ns}` is not an import alias or enum"),
                         hint,
@@ -1221,15 +1356,21 @@ impl Resolver {
             // static lookups — deferred, same "no error unless the alias
             // itself is unknown" policy as the 2-segment import-alias case.
             [first, ..] => {
-                if !self.imports.contains_key(first.as_str()) && !self.enums.contains_key(first.as_str()) {
+                if !self.imports.contains_key(first.as_str())
+                    && !self.enums.contains_key(first.as_str())
+                {
                     if self.migration_hint_target(first) {
                         self.push_error(
-                            format!("field access via '::' is no longer supported — use '.' instead"),
+                            format!(
+                                "field access via '::' is no longer supported — use '.' instead"
+                            ),
                             nr.span.clone(),
                         );
                     } else {
                         self.push_error(
-                            format!("undefined namespace: `{first}` is not an import alias or enum"),
+                            format!(
+                                "undefined namespace: `{first}` is not an import alias or enum"
+                            ),
                             nr.span.clone(),
                         );
                     }
@@ -1244,22 +1385,39 @@ impl Resolver {
     /// whether an unresolvable `::` reference gets the specific migration
     /// hint or the generic "undefined namespace" message.
     fn migration_hint_target(&self, name: &str) -> bool {
-        name == "self" || name == "global"
+        name == "self"
+            || name == "global"
             || self.sections.contains_key(&vec![name.to_string()])
             || self.globals.contains_key(name)
     }
 
     fn resolve_field_access(&mut self, base: &Expr, field: &str, span: &Span) {
-        // self.field — defer field-existence to the typechecker (which
-        // knows the current section's field types); only check that
-        // `self` is even valid here.
         if let Expr::NamespaceRef(nr) = base {
+            // An import alias is a valid dot-access base (`shared.port`).
+            // Export validation already happened while collecting imports.
+            if nr.segments.len() == 1 && self.imports.contains_key(&nr.segments[0]) {
+                return;
+            }
             if nr.segments == ["self"] {
-                if self.current_section.is_none() {
+                let Some(section_path) = self.current_section.clone() else {
                     self.push_error(
                         "`self` can only be used inside a section's own field values".to_string(),
                         span.clone(),
                     );
+                    return;
+                };
+                if let Some(entry) = self.sections.get(&section_path) {
+                    if !entry.fields.contains_key(field) {
+                        let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
+                        self.push_error_hint(
+                            format!(
+                                "undefined reference: `{field}` is not a field in section `[{}]`",
+                                section_path.join(".")
+                            ),
+                            hint,
+                            span.clone(),
+                        );
+                    }
                 }
                 return;
             }
@@ -1270,7 +1428,9 @@ impl Resolver {
                     let candidates: Vec<String> = self.globals.keys().cloned().collect();
                     let hint = suggest(field, candidates.iter().map(|s| s.as_str()));
                     self.push_error_hint(
-                        format!("undefined reference: `{field}` is not declared in the global scope"),
+                        format!(
+                            "undefined reference: `{field}` is not declared in the global scope"
+                        ),
                         hint,
                         span.clone(),
                     );
@@ -1278,10 +1438,22 @@ impl Resolver {
                 return;
             }
             // A bare name naming a top-level section (e.g. `Database.pool`)
-            // is a section-field access, not a global-var lookup — field-
-            // existence is deferred to the typechecker, same as a var-typed
-            // base; skip resolve_expr's global-only check for this name.
-            if nr.segments.len() == 1 && self.sections.contains_key(&vec![nr.segments[0].clone()]) {
+            // is a section-field access — check field existence directly,
+            // same as the old `Section::field` 2-segment check did.
+            let key = vec![nr.segments.first().cloned().unwrap_or_default()];
+            if nr.segments.len() == 1 && self.sections.contains_key(&key) {
+                let entry = &self.sections[&key];
+                if !entry.fields.contains_key(field) {
+                    let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
+                    self.push_error_hint(
+                        format!(
+                            "undefined reference: `{field}` is not a field in section `[{}]`",
+                            nr.segments[0]
+                        ),
+                        hint,
+                        span.clone(),
+                    );
+                }
                 return;
             }
         }
@@ -1291,15 +1463,38 @@ impl Resolver {
         self.resolve_expr(base);
     }
 
-    fn check_field_access_with_locals(&self, base: &Expr, field: &str, span: &Span, locals: &HashSet<String>) -> Result<(), SparError> {
+    fn check_field_access_with_locals(
+        &self,
+        base: &Expr,
+        field: &str,
+        span: &Span,
+        locals: &HashSet<String>,
+    ) -> Result<(), SparError> {
         if let Expr::NamespaceRef(nr) = base {
+            if nr.segments.len() == 1 && self.imports.contains_key(&nr.segments[0]) {
+                return Ok(());
+            }
             if nr.segments == ["self"] {
-                if self.current_section.is_none() {
+                let Some(section_path) = self.current_section.clone() else {
                     return Err(SparError::ResolveError {
-                        message: "`self` can only be used inside a section's own field values".to_string(),
+                        message: "`self` can only be used inside a section's own field values"
+                            .to_string(),
                         hint: None,
                         span: span.clone(),
                     });
+                };
+                if let Some(entry) = self.sections.get(&section_path) {
+                    if !entry.fields.contains_key(field) {
+                        let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
+                        return Err(SparError::ResolveError {
+                            message: format!(
+                                "undefined reference: `{field}` is not a field in section `[{}]`",
+                                section_path.join(".")
+                            ),
+                            hint,
+                            span: span.clone(),
+                        });
+                    }
                 }
                 return Ok(());
             }
@@ -1310,16 +1505,29 @@ impl Resolver {
                 let candidates: Vec<String> = self.globals.keys().cloned().collect();
                 let hint = suggest(field, candidates.iter().map(|s| s.as_str()));
                 return Err(SparError::ResolveError {
-                    message: format!("undefined reference: `{field}` is not declared in the global scope"),
+                    message: format!(
+                        "undefined reference: `{field}` is not declared in the global scope"
+                    ),
                     hint,
                     span: span.clone(),
                 });
             }
-            if nr.segments.len() == 1
-                && !locals.contains(&nr.segments[0])
-                && self.sections.contains_key(&vec![nr.segments[0].clone()])
-            {
-                return Ok(());
+            if nr.segments.len() == 1 && !locals.contains(&nr.segments[0]) {
+                let key = vec![nr.segments[0].clone()];
+                if let Some(entry) = self.sections.get(&key) {
+                    if !entry.fields.contains_key(field) {
+                        let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
+                        return Err(SparError::ResolveError {
+                            message: format!(
+                                "undefined reference: `{field}` is not a field in section `[{}]`",
+                                nr.segments[0]
+                            ),
+                            hint,
+                            span: span.clone(),
+                        });
+                    }
+                    return Ok(());
+                }
             }
         }
         self.resolve_expr_with_locals(base, locals)
@@ -1327,11 +1535,7 @@ impl Resolver {
 
     // ── Function body helpers ─────────────────────────────────────────────────
 
-    fn resolve_func_stmts(
-        &mut self,
-        stmts: &[FuncStmt],
-        local_names: &mut HashSet<String>,
-    ) {
+    fn resolve_func_stmts(&mut self, stmts: &[FuncStmt], local_names: &mut HashSet<String>) {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
@@ -1348,26 +1552,30 @@ impl Resolver {
                     }
                     local_names.insert(lv.name.clone());
                 }
-                FuncStmt::Return(ret_value, _) => {
-                    match ret_value {
-                        ReturnValue::Expr(e) => {
-                            if let Err(err) = self.resolve_expr_with_locals(e, local_names) {
+                FuncStmt::Return(ret_value, _) => match ret_value {
+                    ReturnValue::Expr(e) => {
+                        if let Err(err) = self.resolve_expr_with_locals(e, local_names) {
+                            self.errors.push(err);
+                        }
+                    }
+                    ReturnValue::SectionBlock(fields) => {
+                        for rf in fields {
+                            if let Some(ty) = &rf.ty {
+                                self.check_named_type_exists(ty, &rf.span);
+                            }
+                            if let Err(err) = self.resolve_expr_with_locals(&rf.value, local_names)
+                            {
                                 self.errors.push(err);
                             }
                         }
-                        ReturnValue::SectionBlock(fields) => {
-                            for rf in fields {
-                                if let Some(ty) = &rf.ty {
-                                    self.check_named_type_exists(ty, &rf.span);
-                                }
-                                if let Err(err) = self.resolve_expr_with_locals(&rf.value, local_names) {
-                                    self.errors.push(err);
-                                }
-                            }
-                        }
                     }
-                }
-                FuncStmt::For { var_name, iterable, body, .. } => {
+                },
+                FuncStmt::For {
+                    var_name,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     if let Err(e) = self.resolve_expr_with_locals(iterable, local_names) {
                         self.errors.push(e);
                     }
@@ -1425,7 +1633,9 @@ impl Resolver {
             match item {
                 SectionItem::Field(f) => match &f.value {
                     Some(FieldValue::Expr(e)) => self.resolve_expr_with_locals(e, locals)?,
-                    Some(FieldValue::Nested(sub)) => self.resolve_nested_fields_with_locals(sub, locals)?,
+                    Some(FieldValue::Nested(sub)) => {
+                        self.resolve_nested_fields_with_locals(sub, locals)?
+                    }
                     None => {}
                 },
                 SectionItem::Spread(sp) => self.resolve_expr_with_locals(&sp.expr, locals)?,
@@ -1452,7 +1662,9 @@ impl Resolver {
                 Ok(())
             }
             Expr::NamespaceRef(nr) => self.check_ns_ref_with_locals(nr, locals),
-            Expr::FieldAccess { base, field, span, .. } => self.check_field_access_with_locals(base, field, span, locals),
+            Expr::FieldAccess {
+                base, field, span, ..
+            } => self.check_field_access_with_locals(base, field, span, locals),
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.resolve_expr_with_locals(arg, locals)?;
@@ -1470,17 +1682,26 @@ impl Resolver {
                 Ok(())
             }
             Expr::Grouped(inner, _) => self.resolve_expr_with_locals(inner, locals),
-            Expr::Call { name, name_span, args, .. } => {
+            Expr::Call {
+                name,
+                name_span,
+                args,
+                ..
+            } => {
                 let segments: Vec<&str> = name.split("::").collect();
                 match segments.len() {
                     3 => {
                         let alias = segments[0];
                         let group = segments[1];
-                        if self.imports.contains_key(alias) || self.loaded_exports.contains_key(alias) {
+                        if self.imports.contains_key(alias)
+                            || self.loaded_exports.contains_key(alias)
+                        {
                             if let Some(exports) = self.loaded_exports.get(alias) {
                                 if !exports.contains(group) {
                                     return Err(SparError::ResolveError {
-                                        message: format!("'{group}' is not exported by import '{alias}'"),
+                                        message: format!(
+                                            "'{group}' is not exported by import '{alias}'"
+                                        ),
                                         hint: None,
                                         span: name_span.clone(),
                                     });
@@ -1503,7 +1724,9 @@ impl Resolver {
                         if let Some(group) = self.function_groups.get(ns) {
                             if !group.functions.contains_key(fn_name) {
                                 return Err(SparError::ResolveError {
-                                    message: format!("function '{fn_name}' not found in functionGroup '{ns}'"),
+                                    message: format!(
+                                        "function '{fn_name}' not found in functionGroup '{ns}'"
+                                    ),
                                     hint: None,
                                     span: name_span.clone(),
                                 });
@@ -1517,7 +1740,9 @@ impl Resolver {
                             if let Some(exports) = self.loaded_exports.get(ns) {
                                 if !exports.contains(fn_name) {
                                     return Err(SparError::ResolveError {
-                                        message: format!("function '{fn_name}' not exported from '{ns}'"),
+                                        message: format!(
+                                            "function '{fn_name}' not exported from '{ns}'"
+                                        ),
                                         hint: None,
                                         span: name_span.clone(),
                                     });
@@ -1535,10 +1760,12 @@ impl Resolver {
                         })
                     }
                     _ => {
-                        let entry = self.functions.get(name.as_str()).ok_or_else(|| SparError::ResolveError {
-                            message: format!("undefined function '{name}'"),
-                            hint: None,
-                            span: name_span.clone(),
+                        let entry = self.functions.get(name.as_str()).ok_or_else(|| {
+                            SparError::ResolveError {
+                                message: format!("undefined function '{name}'"),
+                                hint: None,
+                                span: name_span.clone(),
+                            }
                         })?;
                         let param_names: HashSet<String> =
                             entry.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1586,7 +1813,12 @@ impl Resolver {
                 self.resolve_expr_with_locals(source, locals)?;
                 self.resolve_expr_with_locals(index, locals)
             }
-            Expr::Comprehension { var_name, source, body, .. } => {
+            Expr::Comprehension {
+                var_name,
+                source,
+                body,
+                ..
+            } => {
                 self.resolve_expr_with_locals(source, locals)?;
                 let mut inner_locals = locals.clone();
                 inner_locals.insert(var_name.clone());
@@ -1608,7 +1840,9 @@ impl Resolver {
                 }
                 if name == "self" || name == "global" {
                     return Err(SparError::ResolveError {
-                        message: format!("`{name}` must be followed by `.field` — bare `{name}` is not a value"),
+                        message: format!(
+                            "`{name}` must be followed by `.field` — bare `{name}` is not a value"
+                        ),
                         hint: None,
                         span: nr.span.clone(),
                     });
@@ -1649,9 +1883,7 @@ impl Resolver {
                     });
                 }
                 Err(SparError::ResolveError {
-                    message: format!(
-                        "undefined namespace: `{ns}` is not an import alias or enum"
-                    ),
+                    message: format!("undefined namespace: `{ns}` is not an import alias or enum"),
                     hint: None,
                     span: nr.span.clone(),
                 })
@@ -1661,11 +1893,14 @@ impl Resolver {
             // static lookups — deferred, same policy as the 2-segment
             // import-alias case.
             [first, ..] => {
-                if self.imports.contains_key(first.as_str()) || self.enums.contains_key(first.as_str()) {
+                if self.imports.contains_key(first.as_str())
+                    || self.enums.contains_key(first.as_str())
+                {
                     Ok(())
                 } else if self.migration_hint_target(first) {
                     Err(SparError::ResolveError {
-                        message: "field access via '::' is no longer supported — use '.' instead".to_string(),
+                        message: "field access via '::' is no longer supported — use '.' instead"
+                            .to_string(),
                         hint: None,
                         span: nr.span.clone(),
                     })
@@ -1699,14 +1934,22 @@ impl Resolver {
                                 deps.insert(DeclId::Global(name.clone()));
                             }
                             // Check if name is a top-level section name
-                            if self.sections.keys().any(|k| k.first().map(|s| s.as_str()) == Some(name.as_str())) {
+                            if self
+                                .sections
+                                .keys()
+                                .any(|k| k.first().map(|s| s.as_str()) == Some(name.as_str()))
+                            {
                                 deps.insert(DeclId::Section(name.clone()));
                             }
                         }
                     }
                     [top, ..] => {
                         // e.g. Server::host — top-level section name is segments[0]
-                        if self.sections.keys().any(|k| k.first().map(|s| s.as_str()) == Some(top.as_str())) {
+                        if self
+                            .sections
+                            .keys()
+                            .any(|k| k.first().map(|s| s.as_str()) == Some(top.as_str()))
+                        {
                             deps.insert(DeclId::Section(top.clone()));
                         }
                     }
@@ -1734,7 +1977,12 @@ impl Resolver {
             Expr::Unary { operand, .. } => {
                 self.collect_closure_deps_expr(operand, local_names, deps);
             }
-            Expr::Comprehension { var_name, source, body, .. } => {
+            Expr::Comprehension {
+                var_name,
+                source,
+                body,
+                ..
+            } => {
                 self.collect_closure_deps_expr(source, local_names, deps);
                 let mut inner = local_names.clone();
                 inner.insert(var_name.clone());
@@ -1795,17 +2043,20 @@ impl Resolver {
                     self.collect_closure_deps_expr(&lv.value, &locals, deps);
                     locals.insert(lv.name.clone());
                 }
-                FuncStmt::Return(ret_value, _) => {
-                    match ret_value {
-                        ReturnValue::Expr(e) => self.collect_closure_deps_expr(e, &locals, deps),
-                        ReturnValue::SectionBlock(fields) => {
-                            for rf in fields {
-                                self.collect_closure_deps_expr(&rf.value, &locals, deps);
-                            }
+                FuncStmt::Return(ret_value, _) => match ret_value {
+                    ReturnValue::Expr(e) => self.collect_closure_deps_expr(e, &locals, deps),
+                    ReturnValue::SectionBlock(fields) => {
+                        for rf in fields {
+                            self.collect_closure_deps_expr(&rf.value, &locals, deps);
                         }
                     }
-                }
-                FuncStmt::For { var_name, iterable, body, .. } => {
+                },
+                FuncStmt::For {
+                    var_name,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     self.collect_closure_deps_expr(iterable, &locals, deps);
                     let mut loop_locals = locals.clone();
                     loop_locals.insert(var_name.clone());
@@ -1849,7 +2100,9 @@ impl Resolver {
                     );
                 }
             }
-            Expr::Call { name, name_span, .. } => {
+            Expr::Call {
+                name, name_span, ..
+            } => {
                 if !self.functions.contains_key(name.as_str()) {
                     self.push_error(
                         format!("undefined function `{name}` in spread"),
@@ -1869,13 +2122,16 @@ mod tests {
     fn resolve_ok(src: &str) -> SymbolTable {
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        Resolver::new().resolve(&program, &[]).expect("resolve failed")
+        Resolver::new()
+            .resolve(&program, &[])
+            .expect("resolve failed")
     }
 
     fn resolve_err(src: &str) -> Vec<String> {
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        Resolver::new().resolve(&program, &[])
+        Resolver::new()
+            .resolve(&program, &[])
             .unwrap_err()
             .into_iter()
             .map(|e| e.to_string())
@@ -1917,22 +2173,22 @@ mod tests {
     fn test_valid_global_ns_ref() {
         let src = r#"
             var port: int = 3000;
-            var bind: str = global::port;
+            var bind: str = global.port;
         "#;
         resolve_ok(src);
     }
 
     #[test]
     fn test_undefined_global_ns_ref() {
-        assert!(has_error("var bind: str = global::missing;", "missing"));
-        assert!(has_error("var bind: str = global::missing;", "not declared"));
+        assert!(has_error("var bind: str = global.missing;", "missing"));
+        assert!(has_error("var bind: str = global.missing;", "not declared"));
     }
 
     #[test]
     fn test_valid_section_field_ref() {
         let src = r#"
             [Database]{ pool: int = 5; };
-            var p: int = Database::pool;
+            var p: int = Database.pool;
         "#;
         resolve_ok(src);
     }
@@ -1940,14 +2196,17 @@ mod tests {
     #[test]
     fn test_undefined_section_namespace() {
         assert!(has_error("var x: str = cache::host;", "cache"));
-        assert!(has_error("var x: str = cache::host;", "undefined namespace"));
+        assert!(has_error(
+            "var x: str = cache::host;",
+            "undefined namespace"
+        ));
     }
 
     #[test]
     fn test_undefined_field_in_known_section() {
         let src = r#"
             [Database]{ pool: int = 5; };
-            var x: int = Database::timeout;
+            var x: int = Database.timeout;
         "#;
         assert!(has_error(src, "timeout"));
         assert!(has_error(src, "not a field in section"));
@@ -1957,22 +2216,22 @@ mod tests {
     fn test_valid_three_segment_ref() {
         let src = r#"
             [Server]{ port: int = 3000; };
-            var p: int = global::Server::port;
+            var p: int = Server.port;
         "#;
         resolve_ok(src);
     }
 
     #[test]
     fn test_undefined_section_in_three_segment() {
-        assert!(has_error("var x: int = global::ghost::port;", "ghost"));
-        assert!(has_error("var x: int = global::ghost::port;", "not declared"));
+        assert!(has_error("var x: int = ghost.port;", "ghost"));
+        assert!(has_error("var x: int = ghost.port;", "not declared"));
     }
 
     #[test]
     fn test_undefined_field_in_three_segment() {
         let src = r#"
             [Server]{ port: int = 3000; };
-            var x: str = global::Server::host;
+            var x: str = Server.host;
         "#;
         assert!(has_error(src, "host"));
         assert!(has_error(src, "not a field"));
@@ -1999,7 +2258,10 @@ mod tests {
     #[test]
     fn test_unknown_namespace_error() {
         assert!(has_error("var x: str = unknown::value;", "unknown"));
-        assert!(has_error("var x: str = unknown::value;", "undefined namespace"));
+        assert!(has_error(
+            "var x: str = unknown::value;",
+            "undefined namespace"
+        ));
     }
 
     #[test]
@@ -2013,15 +2275,21 @@ mod tests {
 
     #[test]
     fn test_local_spread_undefined() {
-        assert!(has_error("[Server]{ ...missing_defaults; };", "missing_defaults"));
-        assert!(has_error("[Server]{ ...missing_defaults; };", "not a declared section"));
+        assert!(has_error(
+            "[Server]{ ...missing_defaults; };",
+            "missing_defaults"
+        ));
+        assert!(has_error(
+            "[Server]{ ...missing_defaults; };",
+            "not a declared section"
+        ));
     }
 
     #[test]
     fn test_global_spread_valid() {
         let src = r#"
             [Defaults]{ workers: int = 4; };
-            [Server]{ ...global::Defaults; };
+            [Server]{ ...global.Defaults; };
         "#;
         resolve_ok(src);
     }
@@ -2090,7 +2358,7 @@ mod tests {
     #[test]
     fn test_forward_reference() {
         let src = r#"
-            var bind: str = global::port;
+            var bind: str = global.port;
             var port: int = 3000;
         "#;
         resolve_ok(src);
@@ -2100,7 +2368,7 @@ mod tests {
     fn test_interp_string_valid_ref() {
         let src = r#"
             var host: str = "localhost";
-            var url: str = "http://${global::host}";
+            var url: str = "http://${global.host}";
         "#;
         resolve_ok(src);
     }
@@ -2147,10 +2415,12 @@ mod tests {
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let errs = Resolver::new().resolve(&program, &[]).unwrap_err();
         assert!(
-            errs.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
-                if message.contains("camelCase")
-            )),
-            "expected camelCase error for 'BaseUrl', got: {:?}", errs
+            errs.iter()
+                .any(|e| matches!(e, SparError::ResolveError { message, .. }
+                    if message.contains("camelCase")
+                )),
+            "expected camelCase error for 'BaseUrl', got: {:?}",
+            errs
         );
     }
 
@@ -2174,11 +2444,20 @@ mod tests {
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let result = Resolver::new().resolve(&program, &[]);
-        let has_naming_err = result.as_ref().err().map(|es| {
-            es.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
-                if message.contains("PascalCase") || message.contains("camelCase")))
-        }).unwrap_or(false);
-        assert!(!has_naming_err, "'Server' is valid PascalCase — must not produce a naming error");
+        let has_naming_err = result
+            .as_ref()
+            .err()
+            .map(|es| {
+                es.iter().any(|e| {
+                    matches!(e, SparError::ResolveError { message, .. }
+                if message.contains("PascalCase") || message.contains("camelCase"))
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            !has_naming_err,
+            "'Server' is valid PascalCase — must not produce a naming error"
+        );
     }
 
     #[test]
@@ -2187,11 +2466,20 @@ mod tests {
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let result = Resolver::new().resolve(&program, &[]);
-        let has_naming_err = result.as_ref().err().map(|es| {
-            es.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
-                if message.contains("camelCase")))
-        }).unwrap_or(false);
-        assert!(!has_naming_err, "'baseUrl' is valid camelCase — must not produce a naming error");
+        let has_naming_err = result
+            .as_ref()
+            .err()
+            .map(|es| {
+                es.iter().any(|e| {
+                    matches!(e, SparError::ResolveError { message, .. }
+                if message.contains("camelCase"))
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            !has_naming_err,
+            "'baseUrl' is valid camelCase — must not produce a naming error"
+        );
     }
 
     #[test]
@@ -2201,120 +2489,163 @@ mod tests {
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let symbols = Resolver::new().resolve(&program, &[]).unwrap();
         assert!(
-            symbols.sections.contains_key(&vec!["Outer".to_string(), "inner".to_string()]),
+            symbols
+                .sections
+                .contains_key(&vec!["Outer".to_string(), "inner".to_string()]),
             "nested section must be registered in symbol table"
         );
     }
 
     #[test]
     fn private_section_resolves_and_is_referenceable() {
-        use crate::{Lexer, Parser};
         use crate::typechecker::TypeChecker;
+        use crate::{Lexer, Parser};
         let src = r#"
 private [Defaults]{ timeout: int = 30; };
-[Server]{ timeout: int = Defaults::timeout; };
+[Server]{ timeout: int = Defaults.timeout; };
 "#;
-        let tokens  = Lexer::new(src).tokenize().unwrap();
+        let tokens = Lexer::new(src).tokenize().unwrap();
         let program = Parser::new(tokens).parse().unwrap();
         let symbols = Resolver::new().resolve(&program, &[]).unwrap();
         assert!(TypeChecker::check(&program, &symbols).is_ok());
         let path = vec!["Defaults".to_string()];
-        assert!(symbols.sections.contains_key(&path), "Defaults must be in symbol table");
-        assert!(symbols.sections[&path].private, "Defaults must be marked private");
+        assert!(
+            symbols.sections.contains_key(&path),
+            "Defaults must be in symbol table"
+        );
+        assert!(
+            symbols.sections[&path].private,
+            "Defaults must be marked private"
+        );
     }
 
     #[test]
     fn cross_file_function_call_resolves_ok() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("base.spar"), r#"function main() -> int { return 42; }"#).unwrap();
+        fs::write(
+            dir.path().join("base.spar"),
+            r#"function main() -> int { return 42; }"#,
+        )
+        .unwrap();
 
         let src = r#"import "base.spar" as base; var port: int = base::main();"#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let mut loader = crate::loader::ImportLoader::new(dir.path());
-        let imports    = crate::loader::collect_imports(&program, &mut loader).unwrap();
-        assert!(Resolver::resolve_with_imports(&program, &imports).is_ok(),
-            "cross-file function call via alias must not produce undefined-function error");
+        let imports = crate::loader::collect_imports(&program, &mut loader).unwrap();
+        assert!(
+            Resolver::resolve_with_imports(&program, &imports).is_ok(),
+            "cross-file function call via alias must not produce undefined-function error"
+        );
     }
 
     #[test]
     fn cross_file_function_call_inside_section_resolves_ok() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("base.spar"), r#"function main() -> int { return 42; }"#).unwrap();
+        fs::write(
+            dir.path().join("base.spar"),
+            r#"function main() -> int { return 42; }"#,
+        )
+        .unwrap();
 
         let src = r#"import "base.spar" as base; [Server]{ port: int = base::main(); };"#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let mut loader = crate::loader::ImportLoader::new(dir.path());
-        let imports    = crate::loader::collect_imports(&program, &mut loader).unwrap();
+        let imports = crate::loader::collect_imports(&program, &mut loader).unwrap();
         let result = Resolver::resolve_with_imports(&program, &imports);
-        assert!(result.is_ok(),
-            "cross-file function call inside section must resolve ok, got: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "cross-file function call inside section must resolve ok, got: {:?}",
+            result.unwrap_err()
+        );
     }
 
     #[test]
     fn cross_file_function_call_unexported_errors() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("base.spar"), r#"private function secret() -> int { return 1; }"#).unwrap();
+        fs::write(
+            dir.path().join("base.spar"),
+            r#"private function secret() -> int { return 1; }"#,
+        )
+        .unwrap();
 
         let src = r#"import "base.spar" as base; var x: int = base::secret();"#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let mut loader = crate::loader::ImportLoader::new(dir.path());
-        let imports    = crate::loader::collect_imports(&program, &mut loader).unwrap();
+        let imports = crate::loader::collect_imports(&program, &mut loader).unwrap();
         let result = Resolver::resolve_with_imports(&program, &imports);
-        assert!(result.is_err(), "calling private cross-file function must error");
+        assert!(
+            result.is_err(),
+            "calling private cross-file function must error"
+        );
         let errs = result.unwrap_err();
         assert!(
-            errs.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
-                if message.contains("secret") || message.contains("not exported")
-            )),
-            "error must mention the unexported function, got: {:?}", errs
+            errs.iter()
+                .any(|e| matches!(e, SparError::ResolveError { message, .. }
+                    if message.contains("secret") || message.contains("not exported")
+                )),
+            "error must mention the unexported function, got: {:?}",
+            errs
         );
     }
 
     #[test]
     fn resolve_with_imports_validates_exported_field() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("db.spar"), r#"export var host: str = "localhost";"#).unwrap();
+        fs::write(
+            dir.path().join("db.spar"),
+            r#"export var host: str = "localhost";"#,
+        )
+        .unwrap();
 
-        let src     = r#"import "db.spar" as db; var endpoint: str = db::host;"#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let src = r#"import "db.spar" as db; var endpoint: str = db::host;"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let mut loader = crate::loader::ImportLoader::new(dir.path());
-        let imports    = crate::loader::collect_imports(&program, &mut loader).unwrap();
+        let imports = crate::loader::collect_imports(&program, &mut loader).unwrap();
         assert!(Resolver::resolve_with_imports(&program, &imports).is_ok());
     }
 
     #[test]
     fn resolve_with_imports_errors_on_nonexported_field() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
         let dir = tempdir().unwrap();
         // db.keel exports 'host' but NOT 'port'
-        fs::write(dir.path().join("db.spar"), r#"export var host: str = "localhost";"#).unwrap();
+        fs::write(
+            dir.path().join("db.spar"),
+            r#"export var host: str = "localhost";"#,
+        )
+        .unwrap();
 
-        let src     = r#"import "db.spar" as db; var x: str = db::port;"#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let src = r#"import "db.spar" as db; var x: str = db::port;"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let mut loader = crate::loader::ImportLoader::new(dir.path());
-        let imports    = crate::loader::collect_imports(&program, &mut loader).unwrap();
-        let result     = Resolver::resolve_with_imports(&program, &imports);
-        assert!(result.is_err(), "referencing non-exported field must be an error");
+        let imports = crate::loader::collect_imports(&program, &mut loader).unwrap();
+        let result = Resolver::resolve_with_imports(&program, &imports);
+        assert!(
+            result.is_err(),
+            "referencing non-exported field must be an error"
+        );
         let errs = result.unwrap_err();
         assert!(
-            errs.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
-                if message.contains("port") || message.contains("not exported")
-            )),
-            "error must mention the missing field, got: {:?}", errs
+            errs.iter()
+                .any(|e| matches!(e, SparError::ResolveError { message, .. }
+                    if message.contains("port") || message.contains("not exported")
+                )),
+            "error must mention the missing field, got: {:?}",
+            errs
         );
     }
 
@@ -2345,12 +2676,16 @@ function classify(score: int) -> str {
     if score >= 80 { return "B"; }
 }
 "#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
         let errs = Resolver::new().resolve(&program, &[]).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SparError::ResolveError { message, .. }
             if message.contains("does not guarantee a value is returned"))),
-            "got: {:?}", errs);
+            "got: {:?}",
+            errs
+        );
     }
 
     #[test]
@@ -2387,12 +2722,16 @@ function f(debug: bool) -> int {
     return dead;
 }
 "#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
         let errs = Resolver::new().resolve(&program, &[]).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, SparError::ResolveError { message, .. }
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SparError::ResolveError { message, .. }
             if message.contains("unreachable"))),
-            "got: {:?}", errs);
+            "got: {:?}",
+            errs
+        );
     }
 
     #[test]
@@ -2418,10 +2757,12 @@ function f(flag: bool) -> int {
     return x;
 }
 "#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        assert!(Resolver::new().resolve(&program, &[]).is_err(),
-            "x must be undefined outside the bare if");
+        assert!(
+            Resolver::new().resolve(&program, &[]).is_err(),
+            "x must be undefined outside the bare if"
+        );
     }
 
     #[test]
@@ -2452,6 +2793,9 @@ function f(a: bool, b: bool) -> int {
         let sym = resolve_ok(src);
         let f = &sym.functions["f"];
         // appName is locally declared inside f; it should NOT appear as a closure dep
-        assert!(!f.closure_deps.iter().any(|d| matches!(d, DeclId::Global(n) if n == "appName")));
+        assert!(!f
+            .closure_deps
+            .iter()
+            .any(|d| matches!(d, DeclId::Global(n) if n == "appName")));
     }
 }

@@ -1,14 +1,19 @@
 fn check_ok(src: &str) {
     let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
     let prog = crate::parser::Parser::new(tokens).parse().expect("parse");
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).expect("resolve");
-    crate::typechecker::TypeChecker::check(&prog, &symbols).expect("type check failed unexpectedly");
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .expect("resolve");
+    crate::typechecker::TypeChecker::check(&prog, &symbols)
+        .expect("type check failed unexpectedly");
 }
 
 fn check_err(src: &str) -> String {
     let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
     let prog = crate::parser::Parser::new(tokens).parse().expect("parse");
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).expect("resolve");
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .expect("resolve");
     match crate::typechecker::TypeChecker::check(&prog, &symbols) {
         Ok(_) => panic!("expected type error"),
         Err(e) => format!("{:?}", e),
@@ -134,17 +139,20 @@ fn for_loop_over_non_list_is_type_error() {
 
 #[test]
 fn for_loop_over_list_typechecks_ok() {
-    check_ok(r#"
+    check_ok(
+        r#"
         function f(nums: [int]) -> int {
             for n in nums { return n; }
             return 0;
         }
-    "#);
+    "#,
+    );
 }
 
 #[test]
 fn nested_for_loops_typecheck() {
-    check_ok(r#"
+    check_ok(
+        r#"
         function flatten(grid: [[int]]) -> int {
             for row in grid {
                 for cell in row {
@@ -153,19 +161,22 @@ fn nested_for_loops_typecheck() {
             }
             return 0;
         }
-    "#);
+    "#,
+    );
 }
 
 #[test]
 fn bool_type_in_return_section_typechecks() {
-    check_ok(r#"
+    check_ok(
+        r#"
         function f(major: int) -> section {
             if major <= 0 {
                 return { error: bool = true; message: str = "bad"; };
             }
             return { error: bool = false; };
         }
-    "#);
+    "#,
+    );
 }
 
 #[test]
@@ -339,7 +350,10 @@ fn spread_in_nested_field_missing_required_field_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+    assert!(
+        err.contains("missing required field") && err.contains("port"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -358,7 +372,10 @@ fn spread_in_nested_field_wrong_primitive_type_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("port") && err.contains("int") && err.contains("str"), "got: {err}");
+    assert!(
+        err.contains("port") && err.contains("int") && err.contains("str"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -378,7 +395,10 @@ fn spread_in_nested_field_extra_field_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("extra") && err.contains("not declared"), "got: {err}");
+    assert!(
+        err.contains("extra") && err.contains("not declared"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -414,7 +434,10 @@ fn spread_in_nested_field_unbound_source_wrong_shape_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+    assert!(
+        err.contains("missing required field") && err.contains("port"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -445,7 +468,10 @@ fn spread_only_top_level_bound_section_wrong_shape_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+    assert!(
+        err.contains("missing required field") && err.contains("port"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -485,7 +511,10 @@ fn spread_mixed_with_explicit_fields_still_missing_required_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("missing required field") && err.contains("port"), "got: {err}");
+    assert!(
+        err.contains("missing required field") && err.contains("port"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -512,7 +541,10 @@ fn spread_mixed_with_explicit_fields_contributes_undeclared_field_errors() {
         };
     "#;
     let err = check_err(src);
-    assert!(err.contains("nodeEnv") && err.contains("not declared"), "got: {err}");
+    assert!(
+        err.contains("nodeEnv") && err.contains("not declared"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -573,7 +605,9 @@ fn list_of_named_type_object_literals_passes() {
 
 #[test]
 fn list_of_named_type_bad_element_errors() {
-    let err = check_err("type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { wrong: 1; }];\n");
+    let err = check_err(
+        "type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { wrong: 1; }];\n",
+    );
     assert!(err.contains("not declared in type"), "got: {err}");
 }
 
@@ -699,7 +733,7 @@ fn named_field_access_on_global_var_has_correct_type() {
     let src = r#"
         type [Human]{ name: str; age: int; }
         var person: Human = { name: "Mike"; age: 5; };
-        var pname: str = person::name;
+        var pname: str = person.name;
     "#;
     check_ok(src);
 }
@@ -709,7 +743,7 @@ fn named_field_access_on_global_var_type_mismatch_errors() {
     let src = r#"
         type [Human]{ name: str; age: int; }
         var person: Human = { name: "Mike"; age: 5; };
-        var pname: int = person::name;
+        var pname: int = person.name;
     "#;
     let errs = check_err(src);
     assert!(errs.contains("type mismatch"), "got: {errs}");
@@ -721,7 +755,7 @@ fn named_field_access_on_loop_var_has_correct_type() {
         type [Human]{ name: str; age: int; }
         function looper(people: [Human]) -> int {
             for person in people {
-                if person::name == "jude" { return 6; }
+                if person.name == "jude" { return 6; }
                 return 0;
             }
             return 0;

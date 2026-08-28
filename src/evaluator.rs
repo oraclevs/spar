@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::depgraph::DeclId;
-use crate::error::{SparError, Span};
+use crate::error::{Span, SparError};
 use crate::resolver::SymbolTable;
 
 const MAX_CALL_DEPTH: usize = 20;
@@ -22,22 +22,24 @@ pub enum ConfigValue {
 impl ConfigValue {
     pub fn coerce_to_str(&self) -> String {
         match self {
-            ConfigValue::Str(s)   => s.clone(),
-            ConfigValue::Int(n)   => n.to_string(),
+            ConfigValue::Str(s) => s.clone(),
+            ConfigValue::Int(n) => n.to_string(),
             ConfigValue::Float(f) => f.to_string(),
-            ConfigValue::Bool(b)  => b.to_string(),
-            ConfigValue::List(_)  => unreachable!("lists cannot appear in string interpolation"),
-            ConfigValue::Section(_) => unreachable!("sections cannot appear in string interpolation"),
+            ConfigValue::Bool(b) => b.to_string(),
+            ConfigValue::List(_) => unreachable!("lists cannot appear in string interpolation"),
+            ConfigValue::Section(_) => {
+                unreachable!("sections cannot appear in string interpolation")
+            }
         }
     }
 
     pub fn type_name(&self) -> &'static str {
         match self {
-            ConfigValue::Str(_)     => "str",
-            ConfigValue::Int(_)     => "int",
-            ConfigValue::Float(_)   => "float",
-            ConfigValue::Bool(_)    => "bool",
-            ConfigValue::List(_)    => "list",
+            ConfigValue::Str(_) => "str",
+            ConfigValue::Int(_) => "int",
+            ConfigValue::Float(_) => "float",
+            ConfigValue::Bool(_) => "bool",
+            ConfigValue::List(_) => "list",
             ConfigValue::Section(_) => "section",
         }
     }
@@ -45,7 +47,7 @@ impl ConfigValue {
 
 #[derive(Debug)]
 pub struct EvalResult {
-    pub globals:  HashMap<String, ConfigValue>,
+    pub globals: HashMap<String, ConfigValue>,
     pub sections: HashMap<Vec<String>, HashMap<String, ConfigValue>>,
     pub warnings: Vec<String>,
 }
@@ -55,13 +57,30 @@ pub struct EvalResult {
 #[derive(Debug)]
 enum EvalErr {
     EnvVarMissing(String),
-    CyclicRef { name: String, span: Span },
+    CyclicRef {
+        name: String,
+        span: Span,
+    },
     DivisionByZero(Span),
-    ImportRef { alias: String, symbol: String },
-    NotScalar { name: String, span: Span },
-    TypeMismatch { expected: &'static str, got: &'static str },
-    MaxCallDepth { name: String },
-    PathNotFound { path: String, span: Span },
+    ImportRef {
+        alias: String,
+        symbol: String,
+    },
+    NotScalar {
+        name: String,
+        span: Span,
+    },
+    TypeMismatch {
+        expected: &'static str,
+        got: &'static str,
+    },
+    MaxCallDepth {
+        name: String,
+    },
+    PathNotFound {
+        path: String,
+        span: Span,
+    },
 }
 
 impl EvalErr {
@@ -79,9 +98,7 @@ impl EvalErr {
                 span,
             },
             EvalErr::EnvVarMissing(name) => SparError::EvalError {
-                message: format!(
-                    "env var `{name}` is not set and has no `??` fallback"
-                ),
+                message: format!("env var `{name}` is not set and has no `??` fallback"),
                 span: Span::dummy(),
             },
             EvalErr::ImportRef { alias, symbol } => SparError::EvalError {
@@ -92,15 +109,11 @@ impl EvalErr {
                 span: Span::dummy(),
             },
             EvalErr::NotScalar { name, span } => SparError::EvalError {
-                message: format!(
-                    "'{}' is a nested section, not a scalar value", name
-                ),
+                message: format!("'{}' is a nested section, not a scalar value", name),
                 span,
             },
             EvalErr::PathNotFound { path, span } => SparError::EvalError {
-                message: format!(
-                    "undefined path: `{path}` does not refer to any known field"
-                ),
+                message: format!("undefined path: `{path}` does not refer to any known field"),
                 span,
             },
             EvalErr::TypeMismatch { expected, got } => SparError::EvalError {
@@ -128,20 +141,20 @@ type EvalResult_ = Result<ConfigValue, EvalErr>;
 /// already mid-evaluation (which would trip its cyclic-reference guard).
 struct SelfFrame {
     top_name: String,
-    fields:   HashMap<Vec<String>, ConfigValue>,
+    fields: HashMap<Vec<String>, ConfigValue>,
 }
 
 pub struct Evaluator {
-    program:           Program,
-    symbols:           SymbolTable,
-    call_depth:        usize,
-    global_cache:      HashMap<String, ConfigValue>,
-    section_cache:     HashMap<Vec<String>, HashMap<String, ConfigValue>>,
-    evaluating:        HashSet<String>,
-    evaluating_sects:  HashSet<Vec<String>>,
-    self_stack:        Vec<SelfFrame>,
-    errors:            Vec<SparError>,
-    warnings:          Vec<String>,
+    program: Program,
+    symbols: SymbolTable,
+    call_depth: usize,
+    global_cache: HashMap<String, ConfigValue>,
+    section_cache: HashMap<Vec<String>, HashMap<String, ConfigValue>>,
+    evaluating: HashSet<String>,
+    evaluating_sects: HashSet<Vec<String>>,
+    self_stack: Vec<SelfFrame>,
+    errors: Vec<SparError>,
+    warnings: Vec<String>,
     imported_programs: HashMap<String, Program>,
 }
 
@@ -150,14 +163,14 @@ impl Evaluator {
         Evaluator {
             program,
             symbols,
-            call_depth:        0,
-            global_cache:      HashMap::new(),
-            section_cache:     HashMap::new(),
-            evaluating:        HashSet::new(),
-            evaluating_sects:  HashSet::new(),
-            self_stack:        Vec::new(),
-            errors:            Vec::new(),
-            warnings:          Vec::new(),
+            call_depth: 0,
+            global_cache: HashMap::new(),
+            section_cache: HashMap::new(),
+            evaluating: HashSet::new(),
+            evaluating_sects: HashSet::new(),
+            self_stack: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
             imported_programs: HashMap::new(),
         }
     }
@@ -176,7 +189,8 @@ impl Evaluator {
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
         base_dir: &std::path::Path,
     ) -> Result<EvalResult, Vec<SparError>> {
-        let imported: HashMap<String, Program> = loaded.iter()
+        let imported: HashMap<String, Program> = loaded
+            .iter()
             .filter_map(|(alias, li)| {
                 let full = base_dir.join(&li.path);
                 let src = std::fs::read_to_string(&full).ok()?;
@@ -217,9 +231,12 @@ impl Evaluator {
     pub fn run(&mut self) -> Result<EvalResult, SparError> {
         let graph = self.build_dep_graph();
         let order = crate::depgraph::topological_sort(&graph).map_err(|cycle| {
-            let names: Vec<_> = cycle.iter().map(|d| match d {
-                DeclId::Global(n) | DeclId::Section(n) => n.clone(),
-            }).collect();
+            let names: Vec<_> = cycle
+                .iter()
+                .map(|d| match d {
+                    DeclId::Global(n) | DeclId::Section(n) => n.clone(),
+                })
+                .collect();
             SparError::EvalError {
                 message: format!("cyclic dependency detected: {:?}", names),
                 span: Span::dummy(),
@@ -228,14 +245,18 @@ impl Evaluator {
 
         for decl_id in &order {
             match decl_id {
-                DeclId::Global(name) => { self.eval_global(name); }
-                DeclId::Section(name) => { self.eval_section_by_top_name(name); }
+                DeclId::Global(name) => {
+                    self.eval_global(name);
+                }
+                DeclId::Section(name) => {
+                    self.eval_section_by_top_name(name);
+                }
             }
         }
 
         if self.errors.is_empty() {
             Ok(EvalResult {
-                globals:  self.global_cache.clone(),
+                globals: self.global_cache.clone(),
                 sections: self.section_cache.clone(),
                 warnings: self.warnings.clone(),
             })
@@ -329,7 +350,9 @@ impl Evaluator {
                 }
             }
             Expr::Call { name, args, .. } => {
-                for arg in args { self.collect_expr_deps(&arg.value, deps); }
+                for arg in args {
+                    self.collect_expr_deps(&arg.value, deps);
+                }
                 if let Some(fe) = self.symbols.functions.get(name) {
                     deps.extend(fe.closure_deps.clone());
                 }
@@ -344,15 +367,21 @@ impl Evaluator {
                 self.collect_expr_deps(body, deps);
             }
             Expr::List(items, _) => {
-                for item in items { self.collect_expr_deps(item, deps); }
+                for item in items {
+                    self.collect_expr_deps(item, deps);
+                }
             }
             Expr::Grouped(inner, _) => self.collect_expr_deps(inner, deps),
             Expr::FnCall(fc) => {
-                for arg in &fc.args { self.collect_expr_deps(arg, deps); }
+                for arg in &fc.args {
+                    self.collect_expr_deps(arg, deps);
+                }
             }
             Expr::String(s) => {
                 for part in &s.parts {
-                    if let StringPart::Expr(e) = part { self.collect_expr_deps(e, deps); }
+                    if let StringPart::Expr(e) = part {
+                        self.collect_expr_deps(e, deps);
+                    }
                 }
             }
             Expr::Index { source, index, .. } => {
@@ -383,12 +412,10 @@ impl Evaluator {
             return None;
         }
 
-        let value_expr = self.program.items.iter().find_map(|item| {
-            match item {
-                TopLevelItem::Var(d) if d.name == name     => d.value.clone(),
-                TopLevelItem::Dynamic(d) if d.name == name => d.value.clone(),
-                _                                           => None,
-            }
+        let value_expr = self.program.items.iter().find_map(|item| match item {
+            TopLevelItem::Var(d) if d.name == name => d.value.clone(),
+            TopLevelItem::Dynamic(d) if d.name == name => d.value.clone(),
+            _ => None,
         });
 
         let expr = value_expr?;
@@ -415,7 +442,10 @@ impl Evaluator {
 impl Evaluator {
     fn eval_section_by_top_name(&mut self, top_name: &str) {
         // Collect all section paths with this top name first (avoid borrow conflicts)
-        let paths: Vec<Vec<String>> = self.program.items.iter()
+        let paths: Vec<Vec<String>> = self
+            .program
+            .items
+            .iter()
             .filter_map(|item| {
                 if let TopLevelItem::Section(s) = item {
                     if s.path.first().map(|s| s.as_str()) == Some(top_name) {
@@ -448,7 +478,11 @@ impl Evaluator {
 
         let decl = self.program.items.iter().find_map(|item| {
             if let TopLevelItem::Section(d) = item {
-                if d.path == path_vec { Some(d.clone()) } else { None }
+                if d.path == path_vec {
+                    Some(d.clone())
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -459,7 +493,7 @@ impl Evaluator {
         self.evaluating_sects.insert(path_vec.clone());
         self.self_stack.push(SelfFrame {
             top_name: path_vec[0].clone(),
-            fields:   HashMap::new(),
+            fields: HashMap::new(),
         });
         let fields = self.eval_section_decl(&decl);
         self.self_stack.pop();
@@ -502,7 +536,10 @@ impl Evaluator {
                                     // Section-returning function call — register at nested path
                                     let nested_path = [parent_path, &[field.name.clone()]].concat();
                                     if let Some(frame) = self.self_stack.last_mut() {
-                                        frame.fields.insert(nested_path.clone(), ConfigValue::Section(map.clone()));
+                                        frame.fields.insert(
+                                            nested_path.clone(),
+                                            ConfigValue::Section(map.clone()),
+                                        );
                                     }
                                     self.section_cache.insert(nested_path, map);
                                 }
@@ -513,14 +550,20 @@ impl Evaluator {
                                     }
                                     result.insert(field.name.clone(), val);
                                 }
-                                Err(e)  => { self.push_eval_error(e); }
+                                Err(e) => {
+                                    self.push_eval_error(e);
+                                }
                             }
                         }
                         Some(FieldValue::Nested(sub_items)) => {
                             let nested_path = [parent_path, &[field.name.clone()]].concat();
-                            let nested_map = self.eval_section_fields(sub_items, &nested_path, &HashMap::new());
+                            let nested_map =
+                                self.eval_section_fields(sub_items, &nested_path, &HashMap::new());
                             if let Some(frame) = self.self_stack.last_mut() {
-                                frame.fields.insert(nested_path.clone(), ConfigValue::Section(nested_map.clone()));
+                                frame.fields.insert(
+                                    nested_path.clone(),
+                                    ConfigValue::Section(nested_map.clone()),
+                                );
                             }
                             self.section_cache.insert(nested_path, nested_map);
                             // Do NOT insert into result — nested sections aren't scalar values
@@ -623,12 +666,16 @@ impl Evaluator {
 // ── Expression evaluation ─────────────────────────────────────────────────────
 
 impl Evaluator {
-    fn eval_expr(&mut self, expr: &Expr, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_expr(
+        &mut self,
+        expr: &Expr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         match expr {
-            Expr::Literal(Literal::Int(n))   => Ok(ConfigValue::Int(*n)),
+            Expr::Literal(Literal::Int(n)) => Ok(ConfigValue::Int(*n)),
             Expr::Literal(Literal::Float(f)) => Ok(ConfigValue::Float(*f)),
-            Expr::Literal(Literal::Bool(b))  => Ok(ConfigValue::Bool(*b)),
-            Expr::String(s)                  => self.eval_interp_string(s, local_scope),
+            Expr::Literal(Literal::Bool(b)) => Ok(ConfigValue::Bool(*b)),
+            Expr::String(s) => self.eval_interp_string(s, local_scope),
             Expr::Object(items, _) => {
                 // parent_path is empty — an anonymous object literal has no
                 // path identity of its own. Nested self-references /
@@ -650,8 +697,10 @@ impl Evaluator {
             }
             Expr::Grouped(inner, _) => self.eval_expr(inner, local_scope),
             Expr::NamespaceRef(nr) => self.eval_namespace_ref(nr, local_scope),
-            Expr::FieldAccess { base, field, span, .. } => self.eval_field_access(base, field, span, local_scope),
-            Expr::FnCall(fc)       => {
+            Expr::FieldAccess {
+                base, field, span, ..
+            } => self.eval_field_access(base, field, span, local_scope),
+            Expr::FnCall(fc) => {
                 let fc = fc.clone();
                 self.eval_fn_call(&fc, local_scope)
             }
@@ -669,19 +718,34 @@ impl Evaluator {
                 let op = op.clone();
                 match (op, self.eval_expr(&operand, local_scope)?) {
                     (UnOp::Not, ConfigValue::Bool(b)) => Ok(ConfigValue::Bool(!b)),
-                    (UnOp::Not, v) => Err(EvalErr::TypeMismatch { expected: "bool", got: v.type_name() }),
+                    (UnOp::Not, v) => Err(EvalErr::TypeMismatch {
+                        expected: "bool",
+                        got: v.type_name(),
+                    }),
                     (UnOp::Neg, ConfigValue::Int(n)) => Ok(ConfigValue::Int(-n)),
                     (UnOp::Neg, ConfigValue::Float(f)) => Ok(ConfigValue::Float(-f)),
-                    (UnOp::Neg, v) => Err(EvalErr::TypeMismatch { expected: "int or float", got: v.type_name() }),
+                    (UnOp::Neg, v) => Err(EvalErr::TypeMismatch {
+                        expected: "int or float",
+                        got: v.type_name(),
+                    }),
                 }
             }
-            Expr::Index { source, index, span } => {
+            Expr::Index {
+                source,
+                index,
+                span,
+            } => {
                 let source = source.clone();
                 let index = index.clone();
                 let span = span.clone();
                 self.eval_index(&source, &index, &span, local_scope)
             }
-            Expr::Comprehension { var_name, source, body, .. } => {
+            Expr::Comprehension {
+                var_name,
+                source,
+                body,
+                ..
+            } => {
                 let var_name = var_name.clone();
                 let source = source.clone();
                 let body = body.clone();
@@ -696,18 +760,25 @@ impl Evaluator {
                         }
                         Ok(ConfigValue::List(results))
                     }
-                    v => Err(EvalErr::TypeMismatch { expected: "list", got: v.type_name() }),
+                    v => Err(EvalErr::TypeMismatch {
+                        expected: "list",
+                        got: v.type_name(),
+                    }),
                 }
             }
         }
     }
 
-    fn eval_interp_string(&mut self, s: &InterpolString, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_interp_string(
+        &mut self,
+        s: &InterpolString,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         let mut result = String::new();
         for part in &s.parts {
             match part {
                 StringPart::Literal(text) => result.push_str(text),
-                StringPart::Expr(expr)    => {
+                StringPart::Expr(expr) => {
                     let val = self.eval_expr(expr, local_scope)?;
                     result.push_str(&val.coerce_to_str());
                 }
@@ -719,8 +790,8 @@ impl Evaluator {
     fn eval_section_field_direct(
         &mut self,
         section_path: &[String],
-        field_name:   &str,
-        span:         &Span,
+        field_name: &str,
+        span: &Span,
     ) -> EvalResult_ {
         if let Some(cached) = self.section_cache.get(section_path) {
             if let Some(val) = cached.get(field_name) {
@@ -739,10 +810,14 @@ impl Evaluator {
                 if &frame.top_name == top {
                     let mut key = section_path.to_vec();
                     key.push(field_name.to_string());
-                    return frame.fields.get(&key).cloned().ok_or_else(|| EvalErr::PathNotFound {
-                        path: format!("{}::{field_name}", section_path.join("::")),
-                        span: span.clone(),
-                    });
+                    return frame
+                        .fields
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| EvalErr::PathNotFound {
+                            path: format!("{}::{field_name}", section_path.join("::")),
+                            span: span.clone(),
+                        });
                 }
             }
         }
@@ -781,20 +856,32 @@ impl Evaluator {
         }
     }
 
+    #[allow(dead_code)]
     fn eval_self_ref(&mut self, nr: &NamespaceRef) -> EvalResult_ {
-        let frame = self.self_stack.last().ok_or_else(|| EvalErr::PathNotFound {
-            path: "self".to_string(),
-            span: nr.span.clone(),
-        })?;
+        let frame = self
+            .self_stack
+            .last()
+            .ok_or_else(|| EvalErr::PathNotFound {
+                path: "self".to_string(),
+                span: nr.span.clone(),
+            })?;
         let mut key = vec![frame.top_name.clone()];
         key.extend(nr.segments[1..].iter().cloned());
-        frame.fields.get(&key).cloned().ok_or_else(|| EvalErr::PathNotFound {
-            path: format!("self::{}", nr.segments[1..].join("::")),
-            span: nr.span.clone(),
-        })
+        frame
+            .fields
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| EvalErr::PathNotFound {
+                path: format!("self::{}", nr.segments[1..].join("::")),
+                span: nr.span.clone(),
+            })
     }
 
-    fn eval_namespace_ref(&mut self, nr: &NamespaceRef, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_namespace_ref(
+        &mut self,
+        nr: &NamespaceRef,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         match nr.segments.as_slice() {
             [name] => {
                 // Check local scope first
@@ -819,7 +906,8 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imp_sym.clone(), imp_prog);
                     sub.imported_programs = self.imported_programs.clone();
                     if imp_sym.lookup_section(&[name.to_string()]).is_some() {
-                        return sub.eval_section_by_path(&[name.to_string()])
+                        return sub
+                            .eval_section_by_path(&[name.to_string()])
                             .map(ConfigValue::Section)
                             .ok_or_else(|| EvalErr::ImportRef {
                                 alias: ns.to_string(),
@@ -854,7 +942,10 @@ impl Evaluator {
                         .unwrap_or_else(|_| self.symbols.clone());
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.imported_programs = self.imported_programs.clone();
-                    let inner_nr = NamespaceRef { segments: rest.to_vec(), span: nr.span.clone() };
+                    let inner_nr = NamespaceRef {
+                        segments: rest.to_vec(),
+                        span: nr.span.clone(),
+                    };
                     return sub.eval_namespace_ref(&inner_nr, &HashMap::new());
                 }
                 Err(EvalErr::CyclicRef {
@@ -865,35 +956,86 @@ impl Evaluator {
         }
     }
 
-    fn eval_field_access(&mut self, base: &Expr, field: &str, span: &Span, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_field_access(
+        &mut self,
+        base: &Expr,
+        field: &str,
+        span: &Span,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         if let Expr::NamespaceRef(nr) = base {
-            if nr.segments == ["self"] {
-                let self_ref = NamespaceRef { segments: vec!["self".to_string(), field.to_string()], span: span.clone() };
-                return self.eval_self_ref(&self_ref);
+            if nr.segments.len() == 1 && self.imported_programs.contains_key(&nr.segments[0]) {
+                let imported = NamespaceRef {
+                    segments: vec![nr.segments[0].clone(), field.to_string()],
+                    span: span.clone(),
+                };
+                return self.eval_namespace_ref(&imported, local_scope);
             }
-            if nr.segments == ["global"] {
+        }
+        // A chain of bare identifiers rooted at `self`/`global` or a known
+        // top-level section (`self.a.b`, `global.Section.field`,
+        // `Section.nested.deeper.field`) is a static path — nested-section
+        // intermediates aren't independently addressable ConfigValues while
+        // still being built (see `eval_section_fields`'s "Do NOT insert
+        // into result" note, and `self`'s frame.fields is only populated
+        // for a nested section *after* that section finishes evaluating),
+        // so the whole path must be resolved in one `eval_section_field_direct`
+        // call rather than hop-by-hop.
+        if let Some((is_self, rest)) = self.flatten_prefixed_path(base) {
+            if is_self {
+                let top_name = self
+                    .self_stack
+                    .last()
+                    .map(|f| f.top_name.clone())
+                    .ok_or_else(|| EvalErr::PathNotFound {
+                        path: "self".to_string(),
+                        span: span.clone(),
+                    })?;
+                let mut section_path = vec![top_name];
+                section_path.extend(rest);
+                return self.eval_section_field_direct(&section_path, field, span);
+            }
+            if rest.is_empty() {
                 return self.eval_global(field).ok_or_else(|| EvalErr::CyclicRef {
                     name: field.to_string(),
                     span: span.clone(),
                 });
             }
+            return self.eval_section_field_direct(&rest, field, span);
         }
-        // A chain of bare identifiers rooted at a known top-level section
-        // (`Section.nested.deeper.field`) is a static path — nested-section
-        // intermediates aren't independently addressable ConfigValues (see
-        // `eval_section_fields`'s "Do NOT insert into result" note), so the
-        // whole path must be resolved in one `eval_section_field_direct`
-        // call rather than hop-by-hop.
         if let Some(section_path) = self.flatten_static_section_path(base, local_scope) {
             return self.eval_section_field_direct(&section_path, field, span);
         }
         let base_val = self.eval_expr(base, local_scope)?;
         match base_val {
-            ConfigValue::Section(map) => map.get(field).cloned().ok_or_else(|| EvalErr::CyclicRef {
+            ConfigValue::Section(map) => {
+                map.get(field).cloned().ok_or_else(|| EvalErr::CyclicRef {
+                    name: field.to_string(),
+                    span: span.clone(),
+                })
+            }
+            _ => Err(EvalErr::CyclicRef {
                 name: field.to_string(),
                 span: span.clone(),
             }),
-            _ => Err(EvalErr::CyclicRef { name: field.to_string(), span: span.clone() }),
+        }
+    }
+
+    /// If `expr` is a chain of bare-identifier `FieldAccess`es rooted at
+    /// `self` or `global`, returns `(true, path)` for `self` or `(false,
+    /// path)` for `global`, where `path` is the segments between the root
+    /// and the field being accessed (e.g. `self.a.b` called with base=`a`'s
+    /// FieldAccess returns `(true, ["a"])`).
+    fn flatten_prefixed_path(&self, expr: &Expr) -> Option<(bool, Vec<String>)> {
+        match expr {
+            Expr::NamespaceRef(nr) if nr.segments == ["self"] => Some((true, vec![])),
+            Expr::NamespaceRef(nr) if nr.segments == ["global"] => Some((false, vec![])),
+            Expr::FieldAccess { base, field, .. } => {
+                let (is_self, mut path) = self.flatten_prefixed_path(base)?;
+                path.push(field.clone());
+                Some((is_self, path))
+            }
+            _ => None,
         }
     }
 
@@ -903,12 +1045,19 @@ impl Evaluator {
     /// "nested", "deeper"]`). Returns `None` for anything else (a call,
     /// index, self/global base, or a root that's a local/global var) —
     /// those fall through to normal per-hop expression evaluation.
-    fn flatten_static_section_path(&self, expr: &Expr, local_scope: &HashMap<String, ConfigValue>) -> Option<Vec<String>> {
+    fn flatten_static_section_path(
+        &self,
+        expr: &Expr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Option<Vec<String>> {
         match expr {
             Expr::NamespaceRef(nr) if nr.segments.len() == 1 => {
                 let name = &nr.segments[0];
                 if !local_scope.contains_key(name.as_str())
-                    && self.symbols.lookup_section(std::slice::from_ref(name)).is_some()
+                    && self
+                        .symbols
+                        .lookup_section(std::slice::from_ref(name))
+                        .is_some()
                 {
                     Some(vec![name.clone()])
                 } else {
@@ -924,15 +1073,21 @@ impl Evaluator {
         }
     }
 
-    fn eval_fn_call(&mut self, fc: &FnCall, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_fn_call(
+        &mut self,
+        fc: &FnCall,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         match fc.name.as_str() {
             "env" => {
                 let key = match self.eval_expr(&fc.args[0], local_scope)? {
                     ConfigValue::Str(s) => s,
-                    other => return Err(EvalErr::CyclicRef {
-                        name: format!("env() arg must be str, got {}", other.type_name()),
-                        span: Span::dummy(),
-                    }),
+                    other => {
+                        return Err(EvalErr::CyclicRef {
+                            name: format!("env() arg must be str, got {}", other.type_name()),
+                            span: Span::dummy(),
+                        })
+                    }
                 };
                 std::env::var(&key)
                     .map(ConfigValue::Str)
@@ -945,39 +1100,50 @@ impl Evaluator {
             "int" => {
                 let val = self.eval_expr(&fc.args[0], local_scope)?;
                 match val {
-                    ConfigValue::Int(i)   => Ok(ConfigValue::Int(i)),
+                    ConfigValue::Int(i) => Ok(ConfigValue::Int(i)),
                     ConfigValue::Float(f) => Ok(ConfigValue::Int(f as i64)),
-                    ConfigValue::Str(s)   => s.trim().parse::<i64>().map(ConfigValue::Int).map_err(|_| {
-                        EvalErr::CyclicRef {
-                            name: format!("cannot convert {:?} to int", s),
-                            span: fc.span.clone(),
-                        }
+                    ConfigValue::Str(s) => {
+                        s.trim().parse::<i64>().map(ConfigValue::Int).map_err(|_| {
+                            EvalErr::CyclicRef {
+                                name: format!("cannot convert {:?} to int", s),
+                                span: fc.span.clone(),
+                            }
+                        })
+                    }
+                    v => Err(EvalErr::TypeMismatch {
+                        expected: "int, float, or str",
+                        got: v.type_name(),
                     }),
-                    v => Err(EvalErr::TypeMismatch { expected: "int, float, or str", got: v.type_name() }),
                 }
             }
             "float" => {
                 let val = self.eval_expr(&fc.args[0], local_scope)?;
                 match val {
-                    ConfigValue::Int(i)   => Ok(ConfigValue::Float(i as f64)),
+                    ConfigValue::Int(i) => Ok(ConfigValue::Float(i as f64)),
                     ConfigValue::Float(f) => Ok(ConfigValue::Float(f)),
-                    ConfigValue::Str(s)   => s.trim().parse::<f64>().map(ConfigValue::Float).map_err(|_| {
-                        EvalErr::CyclicRef {
-                            name: format!("cannot convert {:?} to float", s),
-                            span: fc.span.clone(),
-                        }
+                    ConfigValue::Str(s) => {
+                        s.trim()
+                            .parse::<f64>()
+                            .map(ConfigValue::Float)
+                            .map_err(|_| EvalErr::CyclicRef {
+                                name: format!("cannot convert {:?} to float", s),
+                                span: fc.span.clone(),
+                            })
+                    }
+                    v => Err(EvalErr::TypeMismatch {
+                        expected: "int, float, or str",
+                        got: v.type_name(),
                     }),
-                    v => Err(EvalErr::TypeMismatch { expected: "int, float, or str", got: v.type_name() }),
                 }
             }
             "bool" => {
                 let val = self.eval_expr(&fc.args[0], local_scope)?;
                 match val {
                     ConfigValue::Bool(b) => Ok(ConfigValue::Bool(b)),
-                    ConfigValue::Str(s)  => match s.trim() {
-                        "true"  => Ok(ConfigValue::Bool(true)),
+                    ConfigValue::Str(s) => match s.trim() {
+                        "true" => Ok(ConfigValue::Bool(true)),
                         "false" => Ok(ConfigValue::Bool(false)),
-                        other   => Err(EvalErr::CyclicRef {
+                        other => Err(EvalErr::CyclicRef {
                             name: format!(
                                 "cannot convert {:?} to bool (expected \"true\" or \"false\")",
                                 other
@@ -985,7 +1151,10 @@ impl Evaluator {
                             span: fc.span.clone(),
                         }),
                     },
-                    v => Err(EvalErr::TypeMismatch { expected: "str or bool", got: v.type_name() }),
+                    v => Err(EvalErr::TypeMismatch {
+                        expected: "str or bool",
+                        got: v.type_name(),
+                    }),
                 }
             }
             other => Err(EvalErr::CyclicRef {
@@ -995,7 +1164,11 @@ impl Evaluator {
         }
     }
 
-    fn eval_binop(&mut self, op: &BinaryOp, local_scope: &HashMap<String, ConfigValue>) -> EvalResult_ {
+    fn eval_binop(
+        &mut self,
+        op: &BinaryOp,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         if op.op == BinOp::Fallback {
             return match self.eval_expr(&op.lhs, local_scope) {
                 Ok(val) => Ok(val),
@@ -1006,7 +1179,17 @@ impl Evaluator {
             };
         }
 
-        if matches!(op.op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or) {
+        if matches!(
+            op.op,
+            BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::LtEq
+                | BinOp::GtEq
+                | BinOp::And
+                | BinOp::Or
+        ) {
             return self.eval_comparison_or_logical(op, local_scope);
         }
 
@@ -1014,27 +1197,38 @@ impl Evaluator {
         let rhs = self.eval_expr(&op.rhs, local_scope)?;
 
         match (&op.op, &lhs, &rhs) {
-            (BinOp::Add, ConfigValue::Int(a),   ConfigValue::Int(b))   => Ok(ConfigValue::Int(a + b)),
-            (BinOp::Add, ConfigValue::Float(a), ConfigValue::Float(b)) => Ok(ConfigValue::Float(a + b)),
-            (BinOp::Add, ConfigValue::Str(a),   ConfigValue::Str(b))   => {
+            (BinOp::Add, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a + b)),
+            (BinOp::Add, ConfigValue::Float(a), ConfigValue::Float(b)) => {
+                Ok(ConfigValue::Float(a + b))
+            }
+            (BinOp::Add, ConfigValue::Str(a), ConfigValue::Str(b)) => {
                 Ok(ConfigValue::Str(format!("{a}{b}")))
             }
-            (BinOp::Sub, ConfigValue::Int(a),   ConfigValue::Int(b))   => Ok(ConfigValue::Int(a - b)),
-            (BinOp::Sub, ConfigValue::Float(a), ConfigValue::Float(b)) => Ok(ConfigValue::Float(a - b)),
-            (BinOp::Mul, ConfigValue::Int(a),   ConfigValue::Int(b))   => Ok(ConfigValue::Int(a * b)),
-            (BinOp::Mul, ConfigValue::Float(a), ConfigValue::Float(b)) => Ok(ConfigValue::Float(a * b)),
-            (BinOp::Div, ConfigValue::Int(_),   ConfigValue::Int(0))   => {
+            (BinOp::Sub, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a - b)),
+            (BinOp::Sub, ConfigValue::Float(a), ConfigValue::Float(b)) => {
+                Ok(ConfigValue::Float(a - b))
+            }
+            (BinOp::Mul, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a * b)),
+            (BinOp::Mul, ConfigValue::Float(a), ConfigValue::Float(b)) => {
+                Ok(ConfigValue::Float(a * b))
+            }
+            (BinOp::Div, ConfigValue::Int(_), ConfigValue::Int(0)) => {
                 Err(EvalErr::DivisionByZero(op.span.clone()))
             }
-            (BinOp::Div, ConfigValue::Int(a),   ConfigValue::Int(b))   => Ok(ConfigValue::Int(a / b)),
+            (BinOp::Div, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a / b)),
             (BinOp::Div, ConfigValue::Float(a), ConfigValue::Float(b)) => {
-                if *b == 0.0 { Err(EvalErr::DivisionByZero(op.span.clone())) }
-                else { Ok(ConfigValue::Float(a / b)) }
+                if *b == 0.0 {
+                    Err(EvalErr::DivisionByZero(op.span.clone()))
+                } else {
+                    Ok(ConfigValue::Float(a / b))
+                }
             }
             (op_kind, l, r) => unreachable!(
                 "evaluator reached invalid binop {:?} on {} and {} — \
                  type checker should have caught this",
-                op_kind, l.type_name(), r.type_name()
+                op_kind,
+                l.type_name(),
+                r.type_name()
             ),
         }
     }
@@ -1077,8 +1271,8 @@ impl Evaluator {
                 let rhs = self.eval_expr(&b.rhs, local_scope)?;
                 Ok(ConfigValue::Bool(lhs != rhs))
             }
-            BinOp::Lt   => self.eval_numeric_cmp(b, local_scope, |a, b| a < b, |a, b| a < b),
-            BinOp::Gt   => self.eval_numeric_cmp(b, local_scope, |a, b| a > b, |a, b| a > b),
+            BinOp::Lt => self.eval_numeric_cmp(b, local_scope, |a, b| a < b, |a, b| a < b),
+            BinOp::Gt => self.eval_numeric_cmp(b, local_scope, |a, b| a > b, |a, b| a > b),
             BinOp::LtEq => self.eval_numeric_cmp(b, local_scope, |a, b| a <= b, |a, b| a <= b),
             BinOp::GtEq => self.eval_numeric_cmp(b, local_scope, |a, b| a >= b, |a, b| a >= b),
             _ => unreachable!(),
@@ -1089,14 +1283,16 @@ impl Evaluator {
         &mut self,
         b: &BinaryOp,
         local_scope: &HashMap<String, ConfigValue>,
-        int_cmp:   impl Fn(i64, i64) -> bool,
+        int_cmp: impl Fn(i64, i64) -> bool,
         float_cmp: impl Fn(f64, f64) -> bool,
     ) -> EvalResult_ {
         let lhs = self.eval_expr(&b.lhs, local_scope)?;
         let rhs = self.eval_expr(&b.rhs, local_scope)?;
         match (lhs, rhs) {
-            (ConfigValue::Int(l),   ConfigValue::Int(r))   => Ok(ConfigValue::Bool(int_cmp(l, r))),
-            (ConfigValue::Float(l), ConfigValue::Float(r)) => Ok(ConfigValue::Bool(float_cmp(l, r))),
+            (ConfigValue::Int(l), ConfigValue::Int(r)) => Ok(ConfigValue::Bool(int_cmp(l, r))),
+            (ConfigValue::Float(l), ConfigValue::Float(r)) => {
+                Ok(ConfigValue::Bool(float_cmp(l, r)))
+            }
             _ => unreachable!("typechecker ensures numeric operands"),
         }
     }
@@ -1112,7 +1308,9 @@ impl Evaluator {
         caller_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(EvalErr::MaxCallDepth { name: name.to_string() });
+            return Err(EvalErr::MaxCallDepth {
+                name: name.to_string(),
+            });
         }
         self.call_depth += 1;
 
@@ -1127,7 +1325,9 @@ impl Evaluator {
                 let func_decl = imp_prog.items.iter().find_map(|item| {
                     if let TopLevelItem::FunctionGroup(g) = item {
                         if g.name == group && !g.is_private {
-                            return g.functions.iter()
+                            return g
+                                .functions
+                                .iter()
                                 .find(|f| f.name == fn_name && !f.is_private)
                                 .cloned();
                         }
@@ -1145,14 +1345,18 @@ impl Evaluator {
                     }
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.call_depth = self.call_depth;
-                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                    let result = sub
+                        .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                         .unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }
             }
             self.call_depth -= 1;
-            return Err(EvalErr::ImportRef { alias: alias.to_string(), symbol: format!("{group}::{fn_name}") });
+            return Err(EvalErr::ImportRef {
+                alias: alias.to_string(),
+                symbol: format!("{group}::{fn_name}"),
+            });
         }
 
         if segments.len() == 2 {
@@ -1174,7 +1378,8 @@ impl Evaluator {
                     let val = self.eval_expr(&arg.value, caller_scope)?;
                     local_scope.insert(arg.param_name.clone(), val);
                 }
-                let result = self.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                let result = self
+                    .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                     .unwrap_or(ConfigValue::Int(0));
                 self.call_depth -= 1;
                 return Ok(result);
@@ -1184,7 +1389,9 @@ impl Evaluator {
             if let Some(imp_prog) = self.imported_programs.get(ns).cloned() {
                 let func_decl = imp_prog.items.iter().find_map(|item| {
                     if let TopLevelItem::Function(f) = item {
-                        if f.name == fn_name && !f.is_private { return Some(f.clone()); }
+                        if f.name == fn_name && !f.is_private {
+                            return Some(f.clone());
+                        }
                     }
                     None
                 });
@@ -1199,23 +1406,34 @@ impl Evaluator {
                     }
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.call_depth = self.call_depth;
-                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                    let result = sub
+                        .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                         .unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }
             }
             self.call_depth -= 1;
-            return Err(EvalErr::ImportRef { alias: ns.to_string(), symbol: fn_name.to_string() });
+            return Err(EvalErr::ImportRef {
+                alias: ns.to_string(),
+                symbol: fn_name.to_string(),
+            });
         }
 
         // 1 segment: local plain function call.
-        let func_decl = self.program.items.iter().find_map(|item| {
-            if let TopLevelItem::Function(f) = item {
-                if f.name == name { return Some(f.clone()); }
-            }
-            None
-        }).unwrap(); // resolver ensures function exists
+        let func_decl = self
+            .program
+            .items
+            .iter()
+            .find_map(|item| {
+                if let TopLevelItem::Function(f) = item {
+                    if f.name == name {
+                        return Some(f.clone());
+                    }
+                }
+                None
+            })
+            .unwrap(); // resolver ensures function exists
 
         let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
         for arg in args {
@@ -1223,7 +1441,8 @@ impl Evaluator {
             local_scope.insert(arg.param_name.clone(), val);
         }
 
-        let result = self.eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
+        let result = self
+            .eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
             .unwrap(); // resolver ensures every path returns
 
         self.call_depth -= 1;
@@ -1256,7 +1475,12 @@ impl Evaluator {
                     };
                     return Ok(Some(val));
                 }
-                FuncStmt::For { var_name, iterable, body, .. } => {
+                FuncStmt::For {
+                    var_name,
+                    iterable,
+                    body,
+                    ..
+                } => {
                     let items = match self.eval_expr(&iterable.clone(), local_scope)? {
                         ConfigValue::List(items) => items,
                         _ => unreachable!("typechecker ensures for-loop iterable is a list"),
@@ -1273,7 +1497,7 @@ impl Evaluator {
                 FuncStmt::If(if_stmt) => {
                     let cond = self.eval_expr(&if_stmt.condition.clone(), local_scope)?;
                     let branch = match cond {
-                        ConfigValue::Bool(true)  => if_stmt.then_stmts.clone(),
+                        ConfigValue::Bool(true) => if_stmt.then_stmts.clone(),
                         ConfigValue::Bool(false) => if_stmt.else_stmts.clone(),
                         _ => unreachable!("typechecker ensures bool condition"),
                     };
@@ -1298,17 +1522,21 @@ mod tests {
     use super::*;
 
     fn eval_ok(src: &str) -> EvalResult {
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        let table   = crate::resolver::Resolver::new().resolve(&program, &[]).expect("resolve");
+        let table = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .expect("resolve");
         crate::typechecker::TypeChecker::check(&program, &table).expect("typecheck");
         Evaluator::evaluate(&program, &table).expect("eval failed")
     }
 
     fn eval_err(src: &str) -> Vec<String> {
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        let table   = crate::resolver::Resolver::new().resolve(&program, &[]).expect("resolve");
+        let table = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .expect("resolve");
         Evaluator::evaluate(&program, &table)
             .unwrap_err()
             .into_iter()
@@ -1331,41 +1559,59 @@ mod tests {
 [Man]{ aster: int = 6; };
 [MetaData]{
     tool:    str = "stackforge";
-    version: int = Man::aster;
+    version: int = Man.aster;
     flag:    bool = false;
 };
-var x: str = MetaData::tool;
+var x: str = MetaData.tool;
 "#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
-        let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
-        let result  = Evaluator::evaluate(&program, &symbols).unwrap();
+        let symbols = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .unwrap();
+        let result = Evaluator::evaluate(&program, &symbols).unwrap();
 
-        let metadata = result.sections
+        let metadata = result
+            .sections
             .get(&vec!["MetaData".to_string()])
             .expect("MetaData section must exist in EvalResult");
 
-        assert!(metadata.contains_key("tool"),    "MetaData must contain 'tool'");
-        assert!(metadata.contains_key("version"), "MetaData must contain 'version'");
-        assert!(metadata.contains_key("flag"),    "MetaData must contain 'flag'");
+        assert!(
+            metadata.contains_key("tool"),
+            "MetaData must contain 'tool'"
+        );
+        assert!(
+            metadata.contains_key("version"),
+            "MetaData must contain 'version'"
+        );
+        assert!(
+            metadata.contains_key("flag"),
+            "MetaData must contain 'flag'"
+        );
     }
 
     #[test]
     fn variable_can_reference_section_field_correctly() {
         let src = r#"
 [Config]{ host: str = "localhost"; };
-var endpoint: str = Config::host;
+var endpoint: str = Config.host;
 "#;
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
-        let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
-        let result  = Evaluator::evaluate(&program, &symbols).unwrap();
+        let symbols = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .unwrap();
+        let result = Evaluator::evaluate(&program, &symbols).unwrap();
 
         assert_eq!(
             result.globals.get("endpoint"),
             Some(&ConfigValue::Str("localhost".to_string()))
         );
-        assert!(result.sections.get(&vec!["Config".to_string()]).unwrap().contains_key("host"));
+        assert!(result
+            .sections
+            .get(&vec!["Config".to_string()])
+            .unwrap()
+            .contains_key("host"));
     }
 
     #[test]
@@ -1431,7 +1677,10 @@ var endpoint: str = Config::host;
     #[test]
     fn test_division_by_zero_error() {
         let errs = eval_err("var x: int = 10 / 0;");
-        assert!(errs.iter().any(|e| e.contains("division by zero")), "got: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("division by zero")),
+            "got: {errs:?}"
+        );
     }
 
     #[test]
@@ -1442,19 +1691,23 @@ var endpoint: str = Config::host;
 
     #[test]
     fn test_string_interpolation_str_ref() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             var name: str = "world";
-            var msg: str = "hello ${global::name}";
-        "#);
+            var msg: str = "hello ${global.name}";
+        "#,
+        );
         assert_eq!(global(&r, "msg"), ConfigValue::Str("hello world".into()));
     }
 
     #[test]
     fn test_string_interpolation_int_coerced() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             var port: int = 3000;
-            var bind: str = "0.0.0.0:${global::port}";
-        "#);
+            var bind: str = "0.0.0.0:${global.port}";
+        "#,
+        );
         assert_eq!(global(&r, "bind"), ConfigValue::Str("0.0.0.0:3000".into()));
     }
 
@@ -1483,7 +1736,8 @@ var endpoint: str = Config::host;
         std::env::remove_var("SPAR_TEST_MISSING_XYZ");
         let errs = eval_err(r#"var x: str = env("SPAR_TEST_MISSING_XYZ");"#);
         assert!(
-            errs.iter().any(|e| e.contains("not set") || e.contains("EnvVar")),
+            errs.iter()
+                .any(|e| e.contains("not set") || e.contains("EnvVar")),
             "got: {errs:?}"
         );
     }
@@ -1511,71 +1765,97 @@ var endpoint: str = Config::host;
 
     #[test]
     fn test_namespace_ref_global_prefix() {
-        let r = eval_ok("var port: int = 3000; var copy: int = global::port;");
+        let r = eval_ok("var port: int = 3000; var copy: int = global.port;");
         assert_eq!(global(&r, "copy"), ConfigValue::Int(3000));
     }
 
     #[test]
     fn test_namespace_ref_section_field() {
-        let r = eval_ok("[Db]{ pool: int = 5; }; var p: int = Db::pool;");
+        let r = eval_ok("[Db]{ pool: int = 5; }; var p: int = Db.pool;");
         assert_eq!(global(&r, "p"), ConfigValue::Int(5));
     }
 
     #[test]
     fn test_namespace_ref_nested_section_field_3seg() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             [Server]{ rateLimit: section = { enabled: bool = true; }; };
-            var isDone: bool = Server::rateLimit::enabled;
-        "#);
+            var isDone: bool = Server.rateLimit.enabled;
+        "#,
+        );
         assert_eq!(global(&r, "isDone"), ConfigValue::Bool(true));
     }
 
     #[test]
     fn test_forward_reference() {
-        let r = eval_ok(r#"
-            var bind: str = "host:${global::port}";
+        let r = eval_ok(
+            r#"
+            var bind: str = "host:${global.port}";
             var port: int = 9000;
-        "#);
+        "#,
+        );
         assert_eq!(global(&r, "bind"), ConfigValue::Str("host:9000".into()));
     }
 
     #[test]
     fn test_cycle_detection_error() {
-        let errs = eval_err("var a: str = global::b; var b: str = global::a;");
+        let errs = eval_err("var a: str = global.b; var b: str = global.a;");
         assert!(errs.iter().any(|e| e.contains("cyclic")), "got: {errs:?}");
     }
 
     #[test]
     fn test_simple_section_evaluation() {
         let r = eval_ok(r#"[Server]{ port: int = 8080; host: str = "localhost"; };"#);
-        assert_eq!(section_field(&r, &["Server"], "port"), ConfigValue::Int(8080));
-        assert_eq!(section_field(&r, &["Server"], "host"), ConfigValue::Str("localhost".into()));
+        assert_eq!(
+            section_field(&r, &["Server"], "port"),
+            ConfigValue::Int(8080)
+        );
+        assert_eq!(
+            section_field(&r, &["Server"], "host"),
+            ConfigValue::Str("localhost".into())
+        );
     }
 
     #[test]
     fn test_section_field_references_global() {
-        let r = eval_ok("var timeout: int = 30; [Db]{ timeout: int = global::timeout; };");
+        let r = eval_ok("var timeout: int = 30; [Db]{ timeout: int = global.timeout; };");
         assert_eq!(section_field(&r, &["Db"], "timeout"), ConfigValue::Int(30));
     }
 
     #[test]
     fn test_spread_merges_fields() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             [Defaults]{ workers: int = 4; timeout: int = 30; };
             [Server]{ ...Defaults; port: int = 8080; };
-        "#);
-        assert_eq!(section_field(&r, &["Server"], "workers"), ConfigValue::Int(4));
-        assert_eq!(section_field(&r, &["Server"], "port"),    ConfigValue::Int(8080));
+        "#,
+        );
+        assert_eq!(
+            section_field(&r, &["Server"], "workers"),
+            ConfigValue::Int(4)
+        );
+        assert_eq!(
+            section_field(&r, &["Server"], "port"),
+            ConfigValue::Int(8080)
+        );
     }
 
     #[test]
     fn test_spread_explicit_overrides_spread() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             [Defaults]{ workers: int = 4; port: int = 3000; };
             [Server]{ ...Defaults; port: int = 8080; };
-        "#);
-        assert_eq!(section_field(&r, &["Server"], "port"),    ConfigValue::Int(8080));
-        assert_eq!(section_field(&r, &["Server"], "workers"), ConfigValue::Int(4));
+        "#,
+        );
+        assert_eq!(
+            section_field(&r, &["Server"], "port"),
+            ConfigValue::Int(8080)
+        );
+        assert_eq!(
+            section_field(&r, &["Server"], "workers"),
+            ConfigValue::Int(4)
+        );
     }
 
     #[test]
@@ -1599,10 +1879,7 @@ var endpoint: str = Config::host;
             r.sections.contains_key(&nested_key),
             "nested section must appear in EvalResult.sections"
         );
-        assert_eq!(
-            r.sections[&nested_key]["key"],
-            ConfigValue::Str("v".into())
-        );
+        assert_eq!(r.sections[&nested_key]["key"], ConfigValue::Str("v".into()));
     }
 
     #[test]
@@ -1620,31 +1897,36 @@ var endpoint: str = Config::host;
 
     #[test]
     fn early_return_scalar_function() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             function double(x: int) -> int {
                 return x * 2;
             }
             var n: int = double(x: 5);
-        "#);
+        "#,
+        );
         assert_eq!(global(&r, "n"), ConfigValue::Int(10));
     }
 
     #[test]
     fn early_return_from_if_branch() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             function absVal(x: int) -> int {
                 if x < 0 { return 0 - x; } else { return x; }
             }
             var a: int = absVal(x: 0 - 3);
             var b: int = absVal(x: 7);
-        "#);
+        "#,
+        );
         assert_eq!(global(&r, "a"), ConfigValue::Int(3));
         assert_eq!(global(&r, "b"), ConfigValue::Int(7));
     }
 
     #[test]
     fn early_return_in_then_branch_else_falls_through() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             function clamp(x: int) -> int {
                 if x > 100 { return 100; }
                 else { var y: int = x; }
@@ -1652,38 +1934,46 @@ var endpoint: str = Config::host;
             }
             var a: int = clamp(x: 200);
             var b: int = clamp(x: 42);
-        "#);
+        "#,
+        );
         assert_eq!(global(&r, "a"), ConfigValue::Int(100));
         assert_eq!(global(&r, "b"), ConfigValue::Int(42));
     }
 
     #[test]
     fn section_returning_function_result_in_section_cache() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             function makeDb() -> section {
                 return { host: str = "localhost"; port: int = 5432; };
             }
             [App]{ db: section = makeDb(); };
-        "#);
+        "#,
+        );
         let db_path = vec!["App".to_string(), "db".to_string()];
         assert!(
             r.sections.contains_key(&db_path),
             "section fn result must appear in sections map"
         );
-        assert_eq!(r.sections[&db_path]["host"], ConfigValue::Str("localhost".into()));
+        assert_eq!(
+            r.sections[&db_path]["host"],
+            ConfigValue::Str("localhost".into())
+        );
         assert_eq!(r.sections[&db_path]["port"], ConfigValue::Int(5432));
     }
 
     #[test]
     fn local_var_used_in_return_after_if() {
-        let r = eval_ok(r#"
+        let r = eval_ok(
+            r#"
             function choose(flag: bool) -> int {
                 if flag { return 1; }
                 else { var result: int = 99; }
                 return result;
             }
             var x: int = choose(flag: false);
-        "#);
+        "#,
+        );
         assert_eq!(global(&r, "x"), ConfigValue::Int(99));
     }
 }

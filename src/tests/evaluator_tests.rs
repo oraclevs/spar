@@ -1,9 +1,13 @@
 fn eval_src(src: &str) -> crate::evaluator::EvalResult {
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .unwrap();
     crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap();
-    crate::evaluator::Evaluator::new(symbols, prog).run().unwrap()
+    crate::evaluator::Evaluator::new(symbols, prog)
+        .run()
+        .unwrap()
 }
 
 #[test]
@@ -13,7 +17,10 @@ fn eval_function_returning_str() {
         var result: str = greet(name: "world");
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("world".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("world".into())
+    );
 }
 
 #[test]
@@ -27,8 +34,14 @@ fn eval_function_returning_section() {
     let r = eval_src(src);
     // Section-valued fields are stored at their nested path, not as scalar values in the parent
     let nested_path = vec!["Server".to_string(), "server".to_string()];
-    let nested = r.sections.get(&nested_path).expect("nested section must be in sections map");
-    assert_eq!(nested["host"], crate::evaluator::ConfigValue::Str("localhost".into()));
+    let nested = r
+        .sections
+        .get(&nested_path)
+        .expect("nested section must be in sections map");
+    assert_eq!(
+        nested["host"],
+        crate::evaluator::ConfigValue::Str("localhost".into())
+    );
 }
 
 #[test]
@@ -72,7 +85,10 @@ fn eval_function_with_if_else() {
         var result: str = choose(flag: true);
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("yes".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("yes".into())
+    );
 }
 
 #[test]
@@ -96,7 +112,9 @@ fn eval_recursive_function_depth_limit() {
     "#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .unwrap();
     let result = crate::evaluator::Evaluator::new(symbols, prog).run();
     assert!(result.is_err());
 }
@@ -105,7 +123,7 @@ fn eval_recursive_function_depth_limit() {
 
 #[test]
 fn arithmetic_precedence() {
-    let src = r#"function f() -> int { return 2 + 3 * 4; } var n: int = f(n: 0);"#;
+    let _src = r#"function f() -> int { return 2 + 3 * 4; } var n: int = f(n: 0);"#;
     // Can't call f() at global scope with named args; test via section field instead
     let src = r#"
         function mul(a: int, b: int) -> int { return a * b; }
@@ -140,14 +158,20 @@ fn conversion_float_to_int() {
 fn conversion_int_to_str() {
     let src = r#"function f(x: int) -> str { return str(x); } var s: str = f(x: 42);"#;
     let r = eval_src(src);
-    assert_eq!(r.globals["s"], crate::evaluator::ConfigValue::Str("42".into()));
+    assert_eq!(
+        r.globals["s"],
+        crate::evaluator::ConfigValue::Str("42".into())
+    );
 }
 
 #[test]
 fn list_index_basic() {
     let src = r#"var names: [str] = ["dev", "staging", "prod"]; var first: str = names[0];"#;
     let r = eval_src(src);
-    assert_eq!(r.globals["first"], crate::evaluator::ConfigValue::Str("dev".into()));
+    assert_eq!(
+        r.globals["first"],
+        crate::evaluator::ConfigValue::Str("dev".into())
+    );
 }
 
 #[test]
@@ -157,8 +181,14 @@ fn spread_function_call() {
         [App]{ ...defaults(); limit: int = 500; };
     "#;
     let r = eval_src(src);
-    assert_eq!(r.sections[&vec!["App".to_string()]]["limit"], crate::evaluator::ConfigValue::Int(500));
-    assert_eq!(r.sections[&vec!["App".to_string()]]["tier"], crate::evaluator::ConfigValue::Str("free".into()));
+    assert_eq!(
+        r.sections[&vec!["App".to_string()]]["limit"],
+        crate::evaluator::ConfigValue::Int(500)
+    );
+    assert_eq!(
+        r.sections[&vec!["App".to_string()]]["tier"],
+        crate::evaluator::ConfigValue::Str("free".into())
+    );
 }
 
 #[test]
@@ -168,7 +198,10 @@ fn spread_explicit_overrides() {
         [App]{ ...defaults(); env: str = "prod"; };
     "#;
     let r = eval_src(src);
-    assert_eq!(r.sections[&vec!["App".to_string()]]["env"], crate::evaluator::ConfigValue::Str("prod".into()));
+    assert_eq!(
+        r.sections[&vec!["App".to_string()]]["env"],
+        crate::evaluator::ConfigValue::Str("prod".into())
+    );
 }
 
 #[test]
@@ -195,9 +228,15 @@ fn eval_multiple_sections_same_prefix() {
     "#;
     let r = eval_src(src);
     let server = &r.sections[&vec!["Server".to_string()]];
-    assert_eq!(server["host"], crate::evaluator::ConfigValue::Str("0.0.0.0".into()));
+    assert_eq!(
+        server["host"],
+        crate::evaluator::ConfigValue::Str("0.0.0.0".into())
+    );
     let server_prod = &r.sections[&vec!["Server".to_string(), "prod".to_string()]];
-    assert_eq!(server_prod["host"], crate::evaluator::ConfigValue::Str("prod.example.com".into()));
+    assert_eq!(
+        server_prod["host"],
+        crate::evaluator::ConfigValue::Str("prod.example.com".into())
+    );
 }
 
 // ── Phase 11d tests ───────────────────────────────────────────────────────────
@@ -229,7 +268,10 @@ fn for_loop_no_match_falls_through_to_next_stmt() {
         var result: str = f(nums: [1, 2, 3]);
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("not found".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("not found".into())
+    );
 }
 
 #[test]
@@ -245,8 +287,14 @@ fn for_loop_return_propagates_out() {
         var b: str = summarize(nums: [1, 2, 3]);
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["a"], crate::evaluator::ConfigValue::Str("found a negative".into()));
-    assert_eq!(r.globals["b"], crate::evaluator::ConfigValue::Str("all non-negative".into()));
+    assert_eq!(
+        r.globals["a"],
+        crate::evaluator::ConfigValue::Str("found a negative".into())
+    );
+    assert_eq!(
+        r.globals["b"],
+        crate::evaluator::ConfigValue::Str("all non-negative".into())
+    );
 }
 
 #[test]
@@ -263,7 +311,10 @@ fn bool_type_in_return_section_evaluates() {
     let r = eval_src(src);
     let rel = &r.sections[&vec!["Release".to_string()]];
     assert_eq!(rel["error"], crate::evaluator::ConfigValue::Bool(false));
-    assert_eq!(rel["version"], crate::evaluator::ConfigValue::Str("ok".into()));
+    assert_eq!(
+        rel["version"],
+        crate::evaluator::ConfigValue::Str("ok".into())
+    );
 }
 
 #[test]
@@ -281,7 +332,7 @@ fn eval_same_section_qualified_self_reference() {
     let src = r#"
         [A]{
             a1: str = "hi";
-            a2: str = A::a1;
+            a2: str = A.a1;
         };
     "#;
     let r = eval_src(src);
@@ -297,7 +348,7 @@ fn eval_cross_section_nested_to_nested_reference() {
     let src = r#"
         [X]{
             nested: section = {
-                v: str = Y::inner::val;
+                v: str = Y.inner.val;
             };
         };
         [Y]{
@@ -323,21 +374,26 @@ fn eval_genuine_nested_cycle_reports_cyclic_error_not_overflow() {
     let src = r#"
         [X]{
             nested: section = {
-                v: str = Y::inner::val;
+                v: str = Y.inner.val;
             };
         };
         [Y]{
             inner: section = {
-                val: str = X::nested::v;
+                val: str = X.nested.v;
             };
         };
     "#;
-    let tokens  = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let prog    = crate::parser::Parser::new(tokens).parse().unwrap();
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .unwrap();
     crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap();
     let result = crate::evaluator::Evaluator::new(symbols, prog).run();
-    assert!(result.is_err(), "a genuine circular nested reference must error, not hang or panic");
+    assert!(
+        result.is_err(),
+        "a genuine circular nested reference must error, not hang or panic"
+    );
 }
 
 #[test]
@@ -346,7 +402,7 @@ fn eval_self_reference_multi_level_nesting() {
         [Postgres]{
             environment: section = {
                 postgresDb: str = "my_app";
-                postgresUser: str = self::environment::postgresDb;
+                postgresUser: str = self.environment.postgresDb;
             };
         };
     "#;
@@ -363,7 +419,7 @@ fn eval_self_reference_direct_child_field() {
     let src = r#"
         [A]{
             a1: str = "hi";
-            a2: str = self::a1;
+            a2: str = self.a1;
         };
     "#;
     let r = eval_src(src);
@@ -390,9 +446,18 @@ fn eval_spread_inside_nested_field_body() {
     "#;
     let r = eval_src(src);
     let path = vec!["Api".to_string(), "environment".to_string()];
-    let nested = r.sections.get(&path).expect("nested environment section must be in sections map");
-    assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
-    assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
+    let nested = r
+        .sections
+        .get(&path)
+        .expect("nested environment section must be in sections map");
+    assert_eq!(
+        nested["nodeEnv"],
+        crate::evaluator::ConfigValue::Str("production".into())
+    );
+    assert_eq!(
+        nested["port"],
+        crate::evaluator::ConfigValue::Str("3000".into())
+    );
 }
 
 #[test]
@@ -418,9 +483,18 @@ fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
     for _ in 0..20 {
         let r = eval_src(src);
         let path = vec!["Api".to_string(), "environment".to_string()];
-        let nested = r.sections.get(&path).expect("nested environment section must be in sections map");
-        assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
-        assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
+        let nested = r
+            .sections
+            .get(&path)
+            .expect("nested environment section must be in sections map");
+        assert_eq!(
+            nested["nodeEnv"],
+            crate::evaluator::ConfigValue::Str("production".into())
+        );
+        assert_eq!(
+            nested["port"],
+            crate::evaluator::ConfigValue::Str("3000".into())
+        );
     }
 }
 
@@ -444,15 +518,23 @@ fn list_of_object_literals_evaluates_to_list_of_section_config_values() {
         panic!("expected ConfigValue::List, got {:?}", r.globals["xs"])
     };
     assert_eq!(items.len(), 2);
-    let crate::evaluator::ConfigValue::Section(first) = &items[0] else { panic!("expected Section element") };
-    assert_eq!(first["name"], crate::evaluator::ConfigValue::Str("a".into()));
+    let crate::evaluator::ConfigValue::Section(first) = &items[0] else {
+        panic!("expected Section element")
+    };
+    assert_eq!(
+        first["name"],
+        crate::evaluator::ConfigValue::Str("a".into())
+    );
 }
 
 #[test]
 fn enum_variant_evaluates_to_bare_string() {
     let src = "enum Devices { Ios, Android };\nvar x: Devices = Devices::Android;\n";
     let r = eval_src(src);
-    assert_eq!(r.globals["x"], crate::evaluator::ConfigValue::Str("Android".into()));
+    assert_eq!(
+        r.globals["x"],
+        crate::evaluator::ConfigValue::Str("Android".into())
+    );
 }
 
 #[test]
@@ -461,7 +543,7 @@ fn eval_named_field_access_on_loop_var() {
         type [Human]{ name: str; age: int; }
         function looper(people: [Human]) -> str {
             for person in people {
-                return person::name;
+                return person.name;
             }
             return "none";
         }
@@ -469,7 +551,10 @@ fn eval_named_field_access_on_loop_var() {
         var result: str = looper(people: people);
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("jude".into())
+    );
 }
 
 #[test]
@@ -477,10 +562,13 @@ fn eval_named_field_access_on_global_var() {
     let src = r#"
         type [Human]{ name: str; age: int; }
         var person: Human = { name: "Mike"; age: 5; };
-        var pname: str = person::name;
+        var pname: str = person.name;
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["pname"], crate::evaluator::ConfigValue::Str("Mike".into()));
+    assert_eq!(
+        r.globals["pname"],
+        crate::evaluator::ConfigValue::Str("Mike".into())
+    );
 }
 
 #[test]
@@ -493,7 +581,7 @@ fn eval_original_bug_report_repro() {
 
         function looper(people: [Human]) -> int {
             for person in people {
-                if person::name == "jude" {
+                if person.name == "jude" {
                     return 6;
                 }
                 return 0;
@@ -572,7 +660,8 @@ fn eval_cross_file_function_group_call() {
                 function f() -> int { return 1; }
             }
         "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let src = r#"
         import "shared.spar" as shared;
@@ -582,16 +671,24 @@ fn eval_cross_file_function_group_call() {
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
 
     let mut loader = crate::loader::ImportLoader::new(dir.path());
-    let loaded = crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
+    let loaded =
+        crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
 
-    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &loaded)
-        .expect("resolve failed");
+    let symbols =
+        crate::resolver::Resolver::resolve_with_imports(&program, &loaded).expect("resolve failed");
 
     let result = crate::evaluator::Evaluator::evaluate_with_imports_and_base(
-        &program, &symbols, &loaded, dir.path(),
-    ).expect("eval failed");
+        &program,
+        &symbols,
+        &loaded,
+        dir.path(),
+    )
+    .expect("eval failed");
 
-    assert_eq!(result.globals["result"], crate::evaluator::ConfigValue::Int(7));
+    assert_eq!(
+        result.globals["result"],
+        crate::evaluator::ConfigValue::Int(7)
+    );
 }
 
 #[test]
@@ -607,7 +704,8 @@ fn eval_cross_file_private_function_group_not_exported() {
                 function f() -> int { return 1; }
             }
         "#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let src = r#"
         import "shared.spar" as shared;
@@ -617,10 +715,14 @@ fn eval_cross_file_private_function_group_not_exported() {
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
 
     let mut loader = crate::loader::ImportLoader::new(dir.path());
-    let loaded = crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
+    let loaded =
+        crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
 
     let result = crate::resolver::Resolver::resolve_with_imports(&program, &loaded);
-    assert!(result.is_err(), "private functionGroup must not be reachable via import alias");
+    assert!(
+        result.is_err(),
+        "private functionGroup must not be reachable via import alias"
+    );
 }
 
 #[test]
@@ -637,7 +739,10 @@ fn eval_dot_field_access_on_loop_var() {
         var result: str = looper(people: people);
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("jude".into())
+    );
 }
 
 #[test]
@@ -648,7 +753,10 @@ fn eval_dot_field_access_after_index() {
         var result: str = people[0].name;
     "#;
     let r = eval_src(src);
-    assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Str("jude".into()));
+    assert_eq!(
+        r.globals["result"],
+        crate::evaluator::ConfigValue::Str("jude".into())
+    );
 }
 
 #[test]
@@ -661,7 +769,10 @@ fn eval_self_dot_field_access() {
     "#;
     let r = eval_src(src);
     let path = vec!["Server".to_string()];
-    assert_eq!(r.sections[&path]["display"], crate::evaluator::ConfigValue::Str("port-8080".into()));
+    assert_eq!(
+        r.sections[&path]["display"],
+        crate::evaluator::ConfigValue::Str("port-8080".into())
+    );
 }
 
 #[test]

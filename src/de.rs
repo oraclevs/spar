@@ -570,10 +570,12 @@ mod tests {
     fn test_interpolated_string() {
         let src = r#"
             var host: str = "localhost";
-            var url: str  = "http://${global::host}";
+            var url: str  = "http://${global.host}";
         "#;
         #[derive(Deserialize)]
-        struct U { url: String }
+        struct U {
+            url: String,
+        }
         let u: U = from_str(src).unwrap();
         assert_eq!(u.url, "http://localhost");
     }

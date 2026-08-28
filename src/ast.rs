@@ -184,9 +184,9 @@ pub enum SparType {
     Int,
     Float,
     Bool,
-    Section,                // inline nested section body
+    Section, // inline nested section body
     List(Box<SparType>),
-    Named(String),          // a declared `type [X]{...}`, referenced by name
+    Named(String), // a declared `type [X]{...}`, referenced by name
 }
 
 /// The right-hand side of a field declaration.
@@ -351,7 +351,7 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct FunctionBody {
     pub stmts: Vec<FuncStmt>,
-    pub span:  Span,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

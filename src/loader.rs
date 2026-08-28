@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use crate::ast::Program;
 use crate::error::SparError;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct LoadedImport {
-    pub path:    String,
+    pub path: String,
     pub exports: HashSet<String>,
 }
 
@@ -15,7 +15,9 @@ pub struct ImportLoader {
 
 impl ImportLoader {
     pub fn new(base: &Path) -> Self {
-        Self { base_dir: base.to_path_buf() }
+        Self {
+            base_dir: base.to_path_buf(),
+        }
     }
 }
 
@@ -39,7 +41,9 @@ fn expand_imports_inner(
     use crate::ast::{ImportKind, TopLevelItem};
 
     let mut errors: Vec<SparError> = Vec::new();
-    let mut declared: HashSet<String> = program.items.iter()
+    let mut declared: HashSet<String> = program
+        .items
+        .iter()
         .filter_map(top_level_name)
         .map(|s| s.to_string())
         .collect();
@@ -60,7 +64,9 @@ fn expand_imports_inner(
                 continue;
             }
             ImportKind::Selective(requested) => splice_selective(&decl, requested, false, loader),
-            ImportKind::TypeSelective(requested) => splice_selective(&decl, requested, true, loader),
+            ImportKind::TypeSelective(requested) => {
+                splice_selective(&decl, requested, true, loader)
+            }
             ImportKind::AsPartOf => splice_as_part_of(&decl, loader, visiting),
         };
 
@@ -89,7 +95,11 @@ fn expand_imports_inner(
     }
 
     program.items = new_items;
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
@@ -127,12 +137,31 @@ fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span>
 fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelItem {
     use crate::ast::TopLevelItem;
     match item {
-        TopLevelItem::Var(mut v) => { v.exported = false; TopLevelItem::Var(v) }
-        TopLevelItem::Section(mut s) => { s.exported = false; s.private = true; TopLevelItem::Section(s) }
-        TopLevelItem::Function(mut f) => { f.is_private = true; TopLevelItem::Function(f) }
-        TopLevelItem::Type(mut t) => { t.exported = false; TopLevelItem::Type(t) }
-        TopLevelItem::Enum(mut e) => { e.exported = false; TopLevelItem::Enum(e) }
-        TopLevelItem::FunctionGroup(mut g) => { g.is_private = true; TopLevelItem::FunctionGroup(g) }
+        TopLevelItem::Var(mut v) => {
+            v.exported = false;
+            TopLevelItem::Var(v)
+        }
+        TopLevelItem::Section(mut s) => {
+            s.exported = false;
+            s.private = true;
+            TopLevelItem::Section(s)
+        }
+        TopLevelItem::Function(mut f) => {
+            f.is_private = true;
+            TopLevelItem::Function(f)
+        }
+        TopLevelItem::Type(mut t) => {
+            t.exported = false;
+            TopLevelItem::Type(t)
+        }
+        TopLevelItem::Enum(mut e) => {
+            e.exported = false;
+            TopLevelItem::Enum(e)
+        }
+        TopLevelItem::FunctionGroup(mut g) => {
+            g.is_private = true;
+            TopLevelItem::FunctionGroup(g)
+        }
         other => other,
     }
 }
@@ -150,31 +179,76 @@ fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelIt
 /// anchored on one of those will still carry a foreign span. A complete
 /// fix needs file-provenance on `Span`/`SparError` plus a multi-file-aware
 /// renderer; tracked as follow-up work, not attempted here.
-fn retag_top_level_span(item: crate::ast::TopLevelItem, span: &crate::error::Span) -> crate::ast::TopLevelItem {
+fn retag_top_level_span(
+    item: crate::ast::TopLevelItem,
+    span: &crate::error::Span,
+) -> crate::ast::TopLevelItem {
     use crate::ast::TopLevelItem;
     match item {
-        TopLevelItem::Var(mut v) => { v.span = span.clone(); TopLevelItem::Var(v) }
-        TopLevelItem::Section(mut s) => { s.span = span.clone(); TopLevelItem::Section(s) }
-        TopLevelItem::Function(mut f) => { f.span = span.clone(); f.name_span = span.clone(); TopLevelItem::Function(f) }
-        TopLevelItem::Type(mut t) => { t.span = span.clone(); t.name_span = span.clone(); TopLevelItem::Type(t) }
-        TopLevelItem::Enum(mut e) => { e.span = span.clone(); e.name_span = span.clone(); TopLevelItem::Enum(e) }
-        TopLevelItem::FunctionGroup(mut g) => { g.span = span.clone(); g.name_span = span.clone(); TopLevelItem::FunctionGroup(g) }
+        TopLevelItem::Var(mut v) => {
+            v.span = span.clone();
+            TopLevelItem::Var(v)
+        }
+        TopLevelItem::Section(mut s) => {
+            s.span = span.clone();
+            TopLevelItem::Section(s)
+        }
+        TopLevelItem::Function(mut f) => {
+            f.span = span.clone();
+            f.name_span = span.clone();
+            TopLevelItem::Function(f)
+        }
+        TopLevelItem::Type(mut t) => {
+            t.span = span.clone();
+            t.name_span = span.clone();
+            TopLevelItem::Type(t)
+        }
+        TopLevelItem::Enum(mut e) => {
+            e.span = span.clone();
+            e.name_span = span.clone();
+            TopLevelItem::Enum(e)
+        }
+        TopLevelItem::FunctionGroup(mut g) => {
+            g.span = span.clone();
+            g.name_span = span.clone();
+            TopLevelItem::FunctionGroup(g)
+        }
         other => other,
     }
 }
 
-fn rename_top_level_item(item: crate::ast::TopLevelItem, new_name: &str) -> crate::ast::TopLevelItem {
+fn rename_top_level_item(
+    item: crate::ast::TopLevelItem,
+    new_name: &str,
+) -> crate::ast::TopLevelItem {
     use crate::ast::TopLevelItem;
     match item {
-        TopLevelItem::Var(mut v) => { v.name = new_name.to_string(); TopLevelItem::Var(v) }
+        TopLevelItem::Var(mut v) => {
+            v.name = new_name.to_string();
+            TopLevelItem::Var(v)
+        }
         TopLevelItem::Section(mut s) => {
-            if let Some(first) = s.path.first_mut() { *first = new_name.to_string(); }
+            if let Some(first) = s.path.first_mut() {
+                *first = new_name.to_string();
+            }
             TopLevelItem::Section(s)
         }
-        TopLevelItem::Function(mut f) => { f.name = new_name.to_string(); TopLevelItem::Function(f) }
-        TopLevelItem::Type(mut t) => { t.name = new_name.to_string(); TopLevelItem::Type(t) }
-        TopLevelItem::Enum(mut e) => { e.name = new_name.to_string(); TopLevelItem::Enum(e) }
-        TopLevelItem::FunctionGroup(mut g) => { g.name = new_name.to_string(); TopLevelItem::FunctionGroup(g) }
+        TopLevelItem::Function(mut f) => {
+            f.name = new_name.to_string();
+            TopLevelItem::Function(f)
+        }
+        TopLevelItem::Type(mut t) => {
+            t.name = new_name.to_string();
+            TopLevelItem::Type(t)
+        }
+        TopLevelItem::Enum(mut e) => {
+            e.name = new_name.to_string();
+            TopLevelItem::Enum(e)
+        }
+        TopLevelItem::FunctionGroup(mut g) => {
+            g.name = new_name.to_string();
+            TopLevelItem::FunctionGroup(g)
+        }
         other => other,
     }
 }
@@ -190,32 +264,43 @@ fn splice_selective(
     let full_path = loader.base_dir.join(&decl.path);
     if !full_path.exists() {
         return Err(vec![SparError::ResolveError {
-            message: format!("cannot find import file '{}' — file does not exist", decl.path),
+            message: format!(
+                "cannot find import file '{}' — file does not exist",
+                decl.path
+            ),
             hint: Some("check the file path and ensure it is relative to the current file".into()),
             span: decl.span.clone(),
         }]);
     }
 
-    let src = std::fs::read_to_string(&full_path).map_err(|e| vec![SparError::ResolveError {
-        message: format!("cannot read import file '{}': {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let src = std::fs::read_to_string(&full_path).map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("cannot read import file '{}': {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| vec![SparError::ResolveError {
-        message: format!("import file '{}' has a lex error: {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("import file '{}' has a lex error: {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
-    let imported_program = crate::parser::Parser::new(tokens).parse().map_err(|e| vec![SparError::ResolveError {
-        message: format!("import file '{}' has a parse error: {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let imported_program = crate::parser::Parser::new(tokens).parse().map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("import file '{}' has a parse error: {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
-    let available: Vec<(&str, &TopLevelItem)> = imported_program.items.iter().filter_map(|it| {
-        match it {
+    let available: Vec<(&str, &TopLevelItem)> = imported_program
+        .items
+        .iter()
+        .filter_map(|it| match it {
             TopLevelItem::Var(v) if v.exported => Some((v.name.as_str(), it)),
             TopLevelItem::Section(s) if s.exported => s.path.first().map(|n| (n.as_str(), it)),
             TopLevelItem::Function(f) if !f.is_private => Some((f.name.as_str(), it)),
@@ -223,8 +308,8 @@ fn splice_selective(
             TopLevelItem::Enum(e) if e.exported => Some((e.name.as_str(), it)),
             TopLevelItem::FunctionGroup(g) if !g.is_private => Some((g.name.as_str(), it)),
             _ => None,
-        }
-    }).collect();
+        })
+        .collect();
 
     let mut errors = Vec::new();
     let mut spliced = Vec::new();
@@ -307,7 +392,11 @@ fn splice_selective(
         i += 1;
     }
 
-    if errors.is_empty() { Ok(spliced) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(spliced)
+    } else {
+        Err(errors)
+    }
 }
 
 fn collect_named_type_refs(fields: &[crate::ast::TypeField], out: &mut Vec<String>) {
@@ -327,14 +416,17 @@ fn splice_as_part_of(
     visiting: &mut Vec<PathBuf>,
 ) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
     let full_path = loader.base_dir.join(&decl.path);
-    let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+    let canonical = full_path
+        .canonicalize()
+        .unwrap_or_else(|_| full_path.clone());
 
     if let Some(cycle) = crate::depgraph::find_cycle_in_stack(visiting, &canonical) {
-        let chain: Vec<String> = cycle.iter()
-            .map(|p| p.display().to_string())
-            .collect();
+        let chain: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
         return Err(vec![SparError::ResolveError {
-            message: format!("import cycle detected via `asPartOf`: {}", chain.join(" -> ")),
+            message: format!(
+                "import cycle detected via `asPartOf`: {}",
+                chain.join(" -> ")
+            ),
             hint: None,
             span: decl.span.clone(),
         }]);
@@ -342,29 +434,38 @@ fn splice_as_part_of(
 
     if !full_path.exists() {
         return Err(vec![SparError::ResolveError {
-            message: format!("cannot find import file '{}' — file does not exist", decl.path),
+            message: format!(
+                "cannot find import file '{}' — file does not exist",
+                decl.path
+            ),
             hint: Some("check the file path and ensure it is relative to the current file".into()),
             span: decl.span.clone(),
         }]);
     }
 
-    let src = std::fs::read_to_string(&full_path).map_err(|e| vec![SparError::ResolveError {
-        message: format!("cannot read import file '{}': {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let src = std::fs::read_to_string(&full_path).map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("cannot read import file '{}': {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| vec![SparError::ResolveError {
-        message: format!("import file '{}' has a lex error: {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("import file '{}' has a lex error: {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
-    let mut sub_program = crate::parser::Parser::new(tokens).parse().map_err(|e| vec![SparError::ResolveError {
-        message: format!("import file '{}' has a parse error: {}", decl.path, e),
-        hint: None,
-        span: decl.span.clone(),
-    }])?;
+    let mut sub_program = crate::parser::Parser::new(tokens).parse().map_err(|e| {
+        vec![SparError::ResolveError {
+            message: format!("import file '{}' has a parse error: {}", decl.path, e),
+            hint: None,
+            span: decl.span.clone(),
+        }]
+    })?;
 
     let sub_base = full_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut sub_loader = ImportLoader::new(&sub_base);
@@ -387,8 +488,12 @@ pub fn collect_imports(
     let mut result: HashMap<String, LoadedImport> = HashMap::new();
 
     for item in &program.items {
-        let TopLevelItem::Import(decl) = item else { continue };
-        let crate::ast::ImportKind::Aliased(decl_alias) = &decl.kind else { continue };
+        let TopLevelItem::Import(decl) = item else {
+            continue;
+        };
+        let crate::ast::ImportKind::Aliased(decl_alias) = &decl.kind else {
+            continue;
+        };
 
         let alias = decl_alias.clone().unwrap_or_else(|| {
             decl.path
@@ -407,7 +512,7 @@ pub fn collect_imports(
                     decl.path
                 ),
                 hint: Some(
-                    "check the file path and ensure it is relative to the current file".into()
+                    "check the file path and ensure it is relative to the current file".into(),
                 ),
                 span: decl.span.clone(),
             });
@@ -455,72 +560,93 @@ pub fn collect_imports(
         let mut exports = HashSet::new();
         for item in &imported_program.items {
             match item {
-                TopLevelItem::Var(v) if v.exported => { exports.insert(v.name.clone()); }
+                TopLevelItem::Var(v) if v.exported => {
+                    exports.insert(v.name.clone());
+                }
                 TopLevelItem::Section(s) if s.exported => {
                     if let Some(name) = s.path.first() {
                         exports.insert(name.clone());
                     }
                 }
-                TopLevelItem::Function(f) if !f.is_private => { exports.insert(f.name.clone()); }
-                TopLevelItem::Type(t) if t.exported => { exports.insert(t.name.clone()); }
-                TopLevelItem::FunctionGroup(g) if !g.is_private => { exports.insert(g.name.clone()); }
+                TopLevelItem::Function(f) if !f.is_private => {
+                    exports.insert(f.name.clone());
+                }
+                TopLevelItem::Type(t) if t.exported => {
+                    exports.insert(t.name.clone());
+                }
+                TopLevelItem::FunctionGroup(g) if !g.is_private => {
+                    exports.insert(g.name.clone());
+                }
                 _ => {}
             }
         }
 
-        result.insert(alias, LoadedImport {
-            path: decl.path.clone(),
-            exports,
-        });
+        result.insert(
+            alias,
+            LoadedImport {
+                path: decl.path.clone(),
+                exports,
+            },
+        );
     }
 
-    if errors.is_empty() { Ok(result) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(result)
+    } else {
+        Err(errors)
+    }
 }
 
 fn type_fields_to_schema_fields(
     type_fields: &[crate::ast::TypeField],
     schema_prog: &Program,
 ) -> Vec<crate::ast::SchemaField> {
-    use crate::ast::{TypeFieldShape, SchemaFieldShape, SchemaField, TopLevelItem};
+    use crate::ast::{SchemaField, SchemaFieldShape, TopLevelItem, TypeFieldShape};
 
-    type_fields.iter().map(|tf| {
-        let shape = match &tf.shape {
-            TypeFieldShape::Primitive(ty) => SchemaFieldShape::Primitive(ty.clone()),
-            TypeFieldShape::Section(nested) => {
-                SchemaFieldShape::Section(type_fields_to_schema_fields(nested, schema_prog))
-            }
-            TypeFieldShape::Named(other_name) => {
-                let is_enum = schema_prog.items.iter().any(|it| {
-                    matches!(it, TopLevelItem::Enum(e) if &e.name == other_name)
-                });
-                if is_enum {
-                    // An enum-typed field has a single named value, not
-                    // nested fields — reuse `Primitive(SparType::Named)`
-                    // rather than expanding into a `Section`, so schema
-                    // value-checking compares it the same way a `var x:
-                    // EnumName = EnumName::Variant;` declaration already does.
-                    SchemaFieldShape::Primitive(crate::ast::SparType::Named(other_name.clone()))
-                } else {
-                    let other_fields = schema_prog.items.iter().find_map(|it| {
-                        if let TopLevelItem::Type(t) = it {
-                            if &t.name == other_name { return Some(&t.fields); }
-                        }
-                        None
-                    });
-                    let expanded = other_fields
-                        .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
-                        .unwrap_or_default();
-                    SchemaFieldShape::Section(expanded)
+    type_fields
+        .iter()
+        .map(|tf| {
+            let shape = match &tf.shape {
+                TypeFieldShape::Primitive(ty) => SchemaFieldShape::Primitive(ty.clone()),
+                TypeFieldShape::Section(nested) => {
+                    SchemaFieldShape::Section(type_fields_to_schema_fields(nested, schema_prog))
                 }
+                TypeFieldShape::Named(other_name) => {
+                    let is_enum = schema_prog
+                        .items
+                        .iter()
+                        .any(|it| matches!(it, TopLevelItem::Enum(e) if &e.name == other_name));
+                    if is_enum {
+                        // An enum-typed field has a single named value, not
+                        // nested fields — reuse `Primitive(SparType::Named)`
+                        // rather than expanding into a `Section`, so schema
+                        // value-checking compares it the same way a `var x:
+                        // EnumName = EnumName::Variant;` declaration already does.
+                        SchemaFieldShape::Primitive(crate::ast::SparType::Named(other_name.clone()))
+                    } else {
+                        let other_fields = schema_prog.items.iter().find_map(|it| {
+                            if let TopLevelItem::Type(t) = it {
+                                if &t.name == other_name {
+                                    return Some(&t.fields);
+                                }
+                            }
+                            None
+                        });
+                        let expanded = other_fields
+                            .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
+                            .unwrap_or_default();
+                        SchemaFieldShape::Section(expanded)
+                    }
+                }
+            };
+            SchemaField {
+                name: tf.name.clone(),
+                optional: tf.optional,
+                shape,
+                span: tf.span.clone(),
             }
-        };
-        SchemaField {
-            name: tf.name.clone(),
-            optional: tf.optional,
-            shape,
-            span: tf.span.clone(),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Convert every `SchemaFrom`/`SchemaFrom?` in `schema_prog` into an
@@ -529,17 +655,21 @@ fn type_fields_to_schema_fields(
 /// `import type {...}` targets, so `source_type` lookups see real
 /// `TypeDecl`s.
 fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
-    use crate::ast::{TopLevelItem, SchemaSectionDecl};
+    use crate::ast::{SchemaSectionDecl, TopLevelItem};
 
     let mut errors: Vec<SparError> = Vec::new();
     let mut generated: Vec<TopLevelItem> = Vec::new();
 
     for item in &schema_prog.items {
-        let TopLevelItem::SchemaFrom(sf) = item else { continue };
+        let TopLevelItem::SchemaFrom(sf) = item else {
+            continue;
+        };
 
         let source = schema_prog.items.iter().find_map(|it| {
             if let TopLevelItem::Type(t) = it {
-                if t.name == sf.source_type { return Some(t); }
+                if t.name == sf.source_type {
+                    return Some(t);
+                }
             }
             None
         });
@@ -567,10 +697,16 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
         }
     }
 
-    schema_prog.items.retain(|it| !matches!(it, TopLevelItem::SchemaFrom(_)));
+    schema_prog
+        .items
+        .retain(|it| !matches!(it, TopLevelItem::SchemaFrom(_)));
     schema_prog.items.extend(generated);
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate config `program` against any `import schema "..."` declarations it contains.
@@ -584,7 +720,10 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
 pub fn validate_schema_imports(
     program: &crate::ast::Program,
     base_dir: &std::path::Path,
-) -> Result<std::collections::HashMap<String, Vec<crate::ast::SchemaField>>, Vec<crate::error::SparError>> {
+) -> Result<
+    std::collections::HashMap<String, Vec<crate::ast::SchemaField>>,
+    Vec<crate::error::SparError>,
+> {
     use crate::ast::TopLevelItem;
     use crate::error::SparError;
 
@@ -597,7 +736,9 @@ pub fn validate_schema_imports(
         std::collections::HashMap::new();
     for cfg_item in &program.items {
         if let TopLevelItem::Section(s) = cfg_item {
-            if s.private { continue; }  // private sections are never emitted; skip schema validation
+            if s.private {
+                continue;
+            } // private sections are never emitted; skip schema validation
             if let Some(name) = s.path.first() {
                 config_sections.insert(name.clone(), s);
             }
@@ -612,8 +753,12 @@ pub fn validate_schema_imports(
     let mut has_schema_imports = false;
 
     for item in &program.items {
-        let TopLevelItem::Import(decl) = item else { continue };
-        if !matches!(decl.kind, crate::ast::ImportKind::Schema) { continue; }
+        let TopLevelItem::Import(decl) = item else {
+            continue;
+        };
+        if !matches!(decl.kind, crate::ast::ImportKind::Schema) {
+            continue;
+        }
         has_schema_imports = true;
 
         // Resolve and load the schema file
@@ -664,11 +809,16 @@ pub fn validate_schema_imports(
 
         // Resolve `import type {...}` inside the schema file so any
         // `SchemaFrom` below has real `TypeDecl`s to convert.
-        let schema_file_base = full_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let schema_file_base = full_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
         let mut schema_expand_loader = ImportLoader::new(&schema_file_base);
         if let Err(es) = expand_imports(&mut schema_prog, &mut schema_expand_loader) {
             errors.extend(es.into_iter().map(|e| match e {
-                SparError::ResolveError { message, span, .. } => SparError::SchemaError { message, span },
+                SparError::ResolveError { message, span, .. } => {
+                    SparError::SchemaError { message, span }
+                }
                 other => other,
             }));
             continue;
@@ -682,7 +832,7 @@ pub fn validate_schema_imports(
         // Build schema section map for this import: name → (optional, fields)
         let mut schema_sections: std::collections::HashMap<
             String,
-            (bool, &Vec<crate::ast::SchemaField>)
+            (bool, &Vec<crate::ast::SchemaField>),
         > = std::collections::HashMap::new();
 
         for schema_item in &schema_prog.items {
@@ -714,12 +864,20 @@ pub fn validate_schema_imports(
                     // Fix 2: skip field-level validation for sections that contain spread items.
                     // Spreads are resolved at runtime; we cannot statically know which fields
                     // they contribute, so a "missing required field" error would be a false positive.
-                    let has_spreads = cfg_section.items.iter()
+                    let has_spreads = cfg_section
+                        .items
+                        .iter()
                         .any(|i| matches!(i, crate::ast::SectionItem::Spread(_)));
                     if !has_spreads {
-                        let config_fields: Vec<&crate::ast::FieldDecl> = cfg_section.items.iter()
+                        let config_fields: Vec<&crate::ast::FieldDecl> = cfg_section
+                            .items
+                            .iter()
                             .filter_map(|i| {
-                                if let crate::ast::SectionItem::Field(f) = i { Some(f) } else { None }
+                                if let crate::ast::SectionItem::Field(f) = i {
+                                    Some(f)
+                                } else {
+                                    None
+                                }
                             })
                             .collect();
                         validate_fields(
@@ -752,7 +910,11 @@ pub fn validate_schema_imports(
         }
     }
 
-    if errors.is_empty() { Ok(bindings) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(bindings)
+    } else {
+        Err(errors)
+    }
 }
 
 fn validate_fields(
@@ -762,7 +924,7 @@ fn validate_fields(
     errors: &mut Vec<crate::error::SparError>,
     section_span: &crate::error::Span,
 ) {
-    use crate::ast::{SchemaFieldShape, FieldValue, SparType};
+    use crate::ast::{FieldValue, SchemaFieldShape, SparType};
     use crate::error::SparError;
 
     // Check: every required schema field is present with correct type
@@ -839,14 +1001,28 @@ fn validate_fields(
                             // A spread's contributed fields can't be statically
                             // known here — same "can't verify" precedent as the
                             // has_spreads skip above, one level deeper.
-                            let has_spreads = nested_items.iter()
+                            let has_spreads = nested_items
+                                .iter()
                                 .any(|i| matches!(i, crate::ast::SectionItem::Spread(_)));
                             if !has_spreads {
-                                let nested_config: Vec<&crate::ast::FieldDecl> = nested_items.iter()
-                                    .filter_map(|i| if let crate::ast::SectionItem::Field(f) = i { Some(f) } else { None })
+                                let nested_config: Vec<&crate::ast::FieldDecl> = nested_items
+                                    .iter()
+                                    .filter_map(|i| {
+                                        if let crate::ast::SectionItem::Field(f) = i {
+                                            Some(f)
+                                        } else {
+                                            None
+                                        }
+                                    })
                                     .collect();
                                 let nested_path = format!("{}::{}", section_path, sf.name);
-                                validate_fields(nested_schema, &nested_config, &nested_path, errors, &cf.span);
+                                validate_fields(
+                                    nested_schema,
+                                    &nested_config,
+                                    &nested_path,
+                                    errors,
+                                    &cf.span,
+                                );
                             }
                         }
                     }
@@ -871,10 +1047,10 @@ fn validate_fields(
 
 fn kl_type_name(ty: &crate::ast::SparType) -> String {
     match ty {
-        crate::ast::SparType::Str     => "str".to_string(),
-        crate::ast::SparType::Int     => "int".to_string(),
-        crate::ast::SparType::Float   => "float".to_string(),
-        crate::ast::SparType::Bool    => "bool".to_string(),
+        crate::ast::SparType::Str => "str".to_string(),
+        crate::ast::SparType::Int => "int".to_string(),
+        crate::ast::SparType::Float => "float".to_string(),
+        crate::ast::SparType::Bool => "bool".to_string(),
         crate::ast::SparType::Section => "section".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
         crate::ast::SparType::Named(name) => name.clone(),
@@ -884,8 +1060,8 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::ast::TopLevelItem;
+    use tempfile::tempdir;
 
     fn parse_src(src: &str) -> Program {
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -905,7 +1081,8 @@ mod tests {
             errs.iter().any(|e| matches!(e,
                 SparError::ResolveError { message, .. } if message.contains("does not exist")
             )),
-            "error must explain that the file was not found, got: {:?}", errs
+            "error must explain that the file was not found, got: {:?}",
+            errs
         );
     }
 
@@ -916,12 +1093,17 @@ mod tests {
         fs::write(
             dir.path().join("db.spar"),
             r#"export var host: str = "localhost";"#,
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import "db.spar" as db;"#;
         let program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         let result = collect_imports(&program, &mut loader);
-        assert!(result.is_ok(), "existing import must succeed, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "existing import must succeed, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -931,14 +1113,21 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             r#"export var version: str = "1.0"; var internal: int = 42;"#,
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import "shared.spar" as shared;"#;
         let program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         let loaded = collect_imports(&program, &mut loader).unwrap();
         let imp = &loaded["shared"];
-        assert!(imp.exports.contains("version"), "exported var must appear in exports");
-        assert!(!imp.exports.contains("internal"), "non-exported var must not appear");
+        assert!(
+            imp.exports.contains("version"),
+            "exported var must appear in exports"
+        );
+        assert!(
+            !imp.exports.contains("internal"),
+            "non-exported var must not appear"
+        );
     }
 
     #[test]
@@ -951,7 +1140,8 @@ mod tests {
                 functionGroup EdgeInsect { function only() -> int { return 1; } }
                 private functionGroup Hidden { function f() -> int { return 1; } }
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import "shared.spar" as shared;"#;
         let program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
@@ -968,14 +1158,21 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             "export type [PostgresType]{ image: str; }\ntype [Internal]{ a: int; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import "shared.spar" as shared;"#;
         let program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         let loaded = collect_imports(&program, &mut loader).unwrap();
         let imp = &loaded["shared"];
-        assert!(imp.exports.contains("PostgresType"), "exported type must appear in exports");
-        assert!(!imp.exports.contains("Internal"), "non-exported type must not appear");
+        assert!(
+            imp.exports.contains("PostgresType"),
+            "exported type must appear in exports"
+        );
+        assert!(
+            !imp.exports.contains("Internal"),
+            "non-exported type must not appear"
+        );
     }
 
     #[test]
@@ -984,10 +1181,11 @@ mod tests {
         let dir = tempdir().unwrap();
 
         // Schema declares only [Server]
-        fs::write(dir.path().join("schema.spar"), concat!(
-            "@SchemaFile\n",
-            "Schema [Server]{ port: int; }\n",
-        )).unwrap();
+        fs::write(
+            dir.path().join("schema.spar"),
+            concat!("@SchemaFile\n", "Schema [Server]{ port: int; }\n",),
+        )
+        .unwrap();
 
         // Config has [Server] (public) and private [Defaults]
         let src = concat!(
@@ -997,7 +1195,11 @@ mod tests {
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
-        assert!(result.is_ok(), "private section must not be validated against schema, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "private section must not be validated against schema, got: {:?}",
+            result.err()
+        );
     }
 
     // ── Phase 3: expand_imports (selective import) ──────────────────────
@@ -1013,16 +1215,27 @@ mod tests {
                 "export [Server]{ port: int = 8080; };\n",
                 "var internal: int = 42;\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import { version, Server } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        assert!(program.items.iter().all(|it| !matches!(it, TopLevelItem::Import(_))),
-            "the consumed import decl must be removed");
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")));
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Section(s) if s.path == vec!["Server".to_string()])));
+        assert!(
+            program
+                .items
+                .iter()
+                .all(|it| !matches!(it, TopLevelItem::Import(_))),
+            "the consumed import decl must be removed"
+        );
+        assert!(program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")));
+        assert!(program.items.iter().any(
+            |it| matches!(it, TopLevelItem::Section(s) if s.path == vec!["Server".to_string()])
+        ));
     }
 
     #[test]
@@ -1042,7 +1255,8 @@ mod tests {
                 "function greet() -> str { return \"hi\"; }\n",
                 "export type [PostgresType]{ image: str; }\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import { version, Server, greet, PostgresType } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
@@ -1053,10 +1267,17 @@ mod tests {
                 TopLevelItem::Var(v) => assert!(!v.exported, "spliced var must not stay exported"),
                 TopLevelItem::Section(s) => {
                     assert!(!s.exported, "spliced section must not stay exported");
-                    assert!(s.private, "spliced section must become private (exempt from schema/emit)");
+                    assert!(
+                        s.private,
+                        "spliced section must become private (exempt from schema/emit)"
+                    );
                 }
-                TopLevelItem::Function(f) => assert!(f.is_private, "spliced function must become private"),
-                TopLevelItem::Type(t) => assert!(!t.exported, "spliced type must not stay exported"),
+                TopLevelItem::Function(f) => {
+                    assert!(f.is_private, "spliced function must become private")
+                }
+                TopLevelItem::Type(t) => {
+                    assert!(!t.exported, "spliced type must not stay exported")
+                }
                 _ => {}
             }
         }
@@ -1072,7 +1293,11 @@ mod tests {
         // import line — so multiple names each get their own position.
         use std::fs;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("shared.spar"), "export var greeting: str = \"hi\";\n").unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export var greeting: str = \"hi\";\n",
+        )
+        .unwrap();
         let src = r#"import { greeting } from "shared.spar";"#;
         let mut program = parse_src(src);
         let item_span = match &program.items[0] {
@@ -1085,9 +1310,17 @@ mod tests {
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        let spliced_span = program.items.iter().find_map(|it| {
-            if let TopLevelItem::Var(v) = it { Some(v.span.clone()) } else { None }
-        }).expect("expected a spliced var");
+        let spliced_span = program
+            .items
+            .iter()
+            .find_map(|it| {
+                if let TopLevelItem::Var(v) = it {
+                    Some(v.span.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("expected a spliced var");
         assert_eq!(spliced_span, item_span,
             "spliced item's span must point at its own name in the import braces, not the source file's coordinates");
     }
@@ -1101,21 +1334,41 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             "export var a: str = \"a\";\nexport var b: str = \"b\";\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import { a, b } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        let a_span = program.items.iter().find_map(|it| {
-            if let TopLevelItem::Var(v) = it { if v.name == "a" { return Some(v.span.clone()); } }
-            None
-        }).expect("expected spliced var a");
-        let b_span = program.items.iter().find_map(|it| {
-            if let TopLevelItem::Var(v) = it { if v.name == "b" { return Some(v.span.clone()); } }
-            None
-        }).expect("expected spliced var b");
-        assert_ne!(a_span, b_span, "each spliced item must get its own distinct span");
+        let a_span = program
+            .items
+            .iter()
+            .find_map(|it| {
+                if let TopLevelItem::Var(v) = it {
+                    if v.name == "a" {
+                        return Some(v.span.clone());
+                    }
+                }
+                None
+            })
+            .expect("expected spliced var a");
+        let b_span = program
+            .items
+            .iter()
+            .find_map(|it| {
+                if let TopLevelItem::Var(v) = it {
+                    if v.name == "b" {
+                        return Some(v.span.clone());
+                    }
+                }
+                None
+            })
+            .expect("expected spliced var b");
+        assert_ne!(
+            a_span, b_span,
+            "each spliced item must get its own distinct span"
+        );
     }
 
     #[test]
@@ -1125,14 +1378,21 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             "export type [PostgresType]{ image: str; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import { PostgresType as PgType } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PgType")));
-        assert!(!program.items.iter().any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")));
+        assert!(program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PgType")));
+        assert!(!program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")));
     }
 
     #[test]
@@ -1152,7 +1412,11 @@ mod tests {
     fn expand_imports_rejects_collision_with_existing_declaration() {
         use std::fs;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("shared.spar"), "export var host: str = \"remote\";\n").unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export var host: str = \"remote\";\n",
+        )
+        .unwrap();
         let src = concat!(
             "var host: str = \"local\";\n",
             "import { host } from \"shared.spar\";\n",
@@ -1176,13 +1440,17 @@ mod tests {
                 "export var host: str = \"localhost\";\n",
                 "private [Defaults]{ timeout: int = 30; };\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import asPartOf "common.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "host")));
+        assert!(program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "host")));
         assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Section(s) if s.private)),
             "private sections must be pulled in too — true textual inclusion, not a namespaced import");
     }
@@ -1191,19 +1459,32 @@ mod tests {
     fn expand_imports_as_part_of_is_transitive() {
         use std::fs;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("base.spar"), "export var version: str = \"1.0\";\n").unwrap();
+        fs::write(
+            dir.path().join("base.spar"),
+            "export var version: str = \"1.0\";\n",
+        )
+        .unwrap();
         fs::write(
             dir.path().join("middle.spar"),
             "import asPartOf \"base.spar\";\nexport var name: str = \"mid\";\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import asPartOf "middle.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
 
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")),
-            "transitively-included file's declarations must flatten in too");
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "name")));
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")),
+            "transitively-included file's declarations must flatten in too"
+        );
+        assert!(program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "name")));
     }
 
     #[test]
@@ -1226,7 +1507,11 @@ mod tests {
     fn expand_imports_type_selective_rejects_non_type_name() {
         use std::fs;
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("shared.spar"), "export var host: str = \"x\";\n").unwrap();
+        fs::write(
+            dir.path().join("shared.spar"),
+            "export var host: str = \"x\";\n",
+        )
+        .unwrap();
         let src = r#"import type { host } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
@@ -1248,15 +1533,22 @@ mod tests {
                 "export type [Libs]{ dependencies?: [str]; }\n",
                 "export type [FlutterType]{ projectName: str; packages?: Libs; }\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import type { FlutterType } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
-        let has_libs = program.items.iter().any(|it| matches!(
-            it, TopLevelItem::Type(t) if t.name == "Libs"
-        ));
-        assert!(has_libs, "Libs must be transitively spliced in, got items: {:?}", program.items);
+        let has_libs = program.items.iter().any(|it| {
+            matches!(
+                it, TopLevelItem::Type(t) if t.name == "Libs"
+            )
+        });
+        assert!(
+            has_libs,
+            "Libs must be transitively spliced in, got items: {:?}",
+            program.items
+        );
     }
 
     #[test]
@@ -1266,15 +1558,22 @@ mod tests {
         fs::write(
             dir.path().join("types.spar"),
             "export enum Protocol { Http, Https };\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import type { Protocol } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
-        let has_protocol = program.items.iter().any(|it| matches!(
-            it, TopLevelItem::Enum(e) if e.name == "Protocol"
-        ));
-        assert!(has_protocol, "Protocol enum must be spliced in, got items: {:?}", program.items);
+        let has_protocol = program.items.iter().any(|it| {
+            matches!(
+                it, TopLevelItem::Enum(e) if e.name == "Protocol"
+            )
+        });
+        assert!(
+            has_protocol,
+            "Protocol enum must be spliced in, got items: {:?}",
+            program.items
+        );
     }
 
     #[test]
@@ -1287,15 +1586,22 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             "functionGroup EdgeInsect { function only() -> int { return 1; } }\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import { EdgeInsect } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
-        let has_group = program.items.iter().any(|it| matches!(
-            it, TopLevelItem::FunctionGroup(g) if g.name == "EdgeInsect"
-        ));
-        assert!(has_group, "EdgeInsect functionGroup must be spliced in, got items: {:?}", program.items);
+        let has_group = program.items.iter().any(|it| {
+            matches!(
+                it, TopLevelItem::FunctionGroup(g) if g.name == "EdgeInsect"
+            )
+        });
+        assert!(
+            has_group,
+            "EdgeInsect functionGroup must be spliced in, got items: {:?}",
+            program.items
+        );
     }
 
     #[test]
@@ -1310,15 +1616,22 @@ mod tests {
                 "export enum RestartPolicy { Always, Never };\n",
                 "export type [Container]{ name: str; restart: RestartPolicy; }\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = r#"import type { Container } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
-        let has_restart_policy = program.items.iter().any(|it| matches!(
-            it, TopLevelItem::Enum(e) if e.name == "RestartPolicy"
-        ));
-        assert!(has_restart_policy, "RestartPolicy enum must be transitively spliced in, got items: {:?}", program.items);
+        let has_restart_policy = program.items.iter().any(|it| {
+            matches!(
+                it, TopLevelItem::Enum(e) if e.name == "RestartPolicy"
+            )
+        });
+        assert!(
+            has_restart_policy,
+            "RestartPolicy enum must be transitively spliced in, got items: {:?}",
+            program.items
+        );
     }
 
     // ── Phase 3: import type inside @SchemaFile (Task 5) ─────────────────
@@ -1330,7 +1643,8 @@ mod tests {
         fs::write(
             dir.path().join("types.spar"),
             "export type [PostgresType]{ image: str; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
@@ -1338,7 +1652,8 @@ mod tests {
                 "import type { PostgresType } from \"types.spar\";\n",
                 "Schema [Postgres]{ image: str; }\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "[Postgres]{ image: str = \"postgres:16\"; };\n",
@@ -1361,11 +1676,13 @@ mod tests {
         fs::write(
             dir.path().join("lib.spar"),
             "export [Colors]{ red: str = \"#ff0000\"; };\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             "@SchemaFile\nSchema [Container]{ x?: str; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "import { Colors } from \"lib.spar\";\n",
@@ -1422,15 +1739,32 @@ mod tests {
         };
         expand_schema_from(&mut program).expect("expand must succeed");
 
-        assert!(!program.items.iter().any(|it| matches!(it, TopLevelItem::SchemaFrom(_))));
-        let generated = program.items.iter().find_map(|it| {
-            if let TopLevelItem::SchemaSection(s) = it { Some(s) } else { None }
-        }).expect("SchemaFrom must generate a SchemaSection");
+        assert!(!program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::SchemaFrom(_))));
+        let generated = program
+            .items
+            .iter()
+            .find_map(|it| {
+                if let TopLevelItem::SchemaSection(s) = it {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .expect("SchemaFrom must generate a SchemaSection");
         assert_eq!(generated.name, "Postgres");
         assert!(!generated.marker.optional);
         assert_eq!(generated.fields.len(), 2);
-        assert!(generated.fields.iter().any(|f| f.name == "image" && !f.optional));
-        assert!(generated.fields.iter().any(|f| f.name == "port" && f.optional));
+        assert!(generated
+            .fields
+            .iter()
+            .any(|f| f.name == "image" && !f.optional));
+        assert!(generated
+            .fields
+            .iter()
+            .any(|f| f.name == "port" && f.optional));
     }
 
     #[test]
@@ -1473,11 +1807,23 @@ mod tests {
         };
         expand_schema_from(&mut program).expect("expand must succeed");
 
-        let generated = program.items.iter().find_map(|it| {
-            if let TopLevelItem::SchemaSection(s) = it { Some(s) } else { None }
-        }).expect("SchemaFrom must generate a SchemaSection");
+        let generated = program
+            .items
+            .iter()
+            .find_map(|it| {
+                if let TopLevelItem::SchemaSection(s) = it {
+                    Some(s)
+                } else {
+                    None
+                }
+            })
+            .expect("SchemaFrom must generate a SchemaSection");
         assert!(generated.marker.optional);
-        let border_field = generated.fields.iter().find(|f| f.name == "border").expect("border field");
+        let border_field = generated
+            .fields
+            .iter()
+            .find(|f| f.name == "border")
+            .expect("border field");
         match &border_field.shape {
             crate::ast::SchemaFieldShape::Section(nested) => {
                 assert!(nested.iter().any(|f| f.name == "width"));
@@ -1490,15 +1836,13 @@ mod tests {
     fn expand_schema_from_errors_on_undeclared_type() {
         let mut program = Program {
             is_schema_file: true,
-            items: vec![
-                TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
-                    name: "Postgres".into(),
-                    source_type: "NoSuchType".into(),
-                    source_type_span: crate::error::Span::dummy(),
-                    marker: crate::ast::SchemaMarker { optional: false },
-                    span: crate::error::Span::dummy(),
-                }),
-            ],
+            items: vec![TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
+                name: "Postgres".into(),
+                source_type: "NoSuchType".into(),
+                source_type_span: crate::error::Span::dummy(),
+                marker: crate::ast::SchemaMarker { optional: false },
+                span: crate::error::Span::dummy(),
+            })],
         };
         let err = expand_schema_from(&mut program).unwrap_err();
         assert!(err.iter().any(|e| matches!(e, SparError::SchemaError { message, .. } if message.contains("NoSuchType"))),
@@ -1512,7 +1856,8 @@ mod tests {
         fs::write(
             dir.path().join("types.spar"),
             "export type [PostgresType]{ image: str; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
@@ -1520,7 +1865,8 @@ mod tests {
                 "import type { PostgresType } from \"types.spar\";\n",
                 "SchemaFrom [Postgres, PostgresType];\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "[Postgres]{ image: str = \"postgres:16\"; };\n",
@@ -1540,7 +1886,8 @@ mod tests {
                 "export enum RestartPolicy { Always, Never };\n",
                 "export type [ServiceType]{ image: str; restart: RestartPolicy; }\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
@@ -1548,7 +1895,8 @@ mod tests {
                 "import type { ServiceType } from \"types.spar\";\n",
                 "SchemaFrom [Service, ServiceType];\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "import type { RestartPolicy } from \"types.spar\";\n",
@@ -1566,7 +1914,8 @@ mod tests {
         fs::write(
             dir.path().join("types.spar"),
             "export type [PostgresType]{ image: str; port: int; }\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
@@ -1574,7 +1923,8 @@ mod tests {
                 "import type { PostgresType } from \"types.spar\";\n",
                 "SchemaFrom [Postgres, PostgresType];\n",
             ),
-        ).unwrap();
+        )
+        .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "[Postgres]{ image: str = \"postgres:16\"; };\n", // missing required `port`

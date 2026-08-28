@@ -87,7 +87,14 @@ mod tests {
         let cycle = find_cycle_in_stack(&stack, std::path::Path::new("/a.spar"));
         assert!(cycle.is_some());
         let cycle = cycle.unwrap();
-        assert_eq!(cycle, vec![PathBuf::from("/a.spar"), PathBuf::from("/b.spar"), PathBuf::from("/a.spar")]);
+        assert_eq!(
+            cycle,
+            vec![
+                PathBuf::from("/a.spar"),
+                PathBuf::from("/b.spar"),
+                PathBuf::from("/a.spar")
+            ]
+        );
     }
 
     #[test]

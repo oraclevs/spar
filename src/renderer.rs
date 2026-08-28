@@ -1,44 +1,61 @@
 use crate::error::SparError;
 
 pub struct ErrorRenderer<'a> {
-    pub source:   &'a str,
+    pub source: &'a str,
     pub filename: &'a str,
-    pub colored:  bool,
+    pub colored: bool,
 }
 
 impl<'a> ErrorRenderer<'a> {
     /// Plain-text renderer — all existing tests use this.
     pub fn new(source: &'a str, filename: &'a str) -> Self {
-        Self { source, filename, colored: false }
+        Self {
+            source,
+            filename,
+            colored: false,
+        }
     }
 
     /// Renderer with ANSI colour codes for terminal output.
     pub fn with_color(source: &'a str, filename: &'a str) -> Self {
-        Self { source, filename, colored: true }
+        Self {
+            source,
+            filename,
+            colored: true,
+        }
     }
 
     pub fn render(&self, error: &SparError) -> String {
         let (code, message, span, hint) = match error {
-            SparError::LexError    { message, span }         => ("lex",     message, span, None),
-            SparError::ParseError  { message, span }         => ("parse",   message, span, None),
-            SparError::ResolveError{ message, span, hint }   => ("resolve", message, span, hint.as_ref()),
-            SparError::TypeError   { message, span, hint }   => ("type",    message, span, hint.as_ref()),
-            SparError::EvalError   { message, span }         => ("eval",    message, span, None),
-            SparError::SchemaError { message, span }         => ("schema",  message, span, None),
+            SparError::LexError { message, span } => ("lex", message, span, None),
+            SparError::ParseError { message, span } => ("parse", message, span, None),
+            SparError::ResolveError {
+                message,
+                span,
+                hint,
+            } => ("resolve", message, span, hint.as_ref()),
+            SparError::TypeError {
+                message,
+                span,
+                hint,
+            } => ("type", message, span, hint.as_ref()),
+            SparError::EvalError { message, span } => ("eval", message, span, None),
+            SparError::SchemaError { message, span } => ("schema", message, span, None),
         };
 
-        let line_text = self.source
+        let line_text = self
+            .source
             .lines()
             .nth(span.line.saturating_sub(1) as usize)
             .unwrap_or("");
 
         let line_no_str = span.line.to_string();
-        let w           = line_no_str.len();
-        let pad         = " ".repeat(w);
+        let w = line_no_str.len();
+        let pad = " ".repeat(w);
 
-        let col_offset  = span.col.saturating_sub(1) as usize;
+        let col_offset = span.col.saturating_sub(1) as usize;
         let caret_width = span.end.saturating_sub(span.start).max(1);
-        let caret_body  = format!("{}{}", " ".repeat(col_offset), "^".repeat(caret_width));
+        let caret_body = format!("{}{}", " ".repeat(col_offset), "^".repeat(caret_width));
 
         let mut out = if self.colored {
             format!(
@@ -48,10 +65,10 @@ impl<'a> ErrorRenderer<'a> {
                  {line_no:<w$}  |  {line_text}\n\
                  {pad}  |  \x1b[1;31m{caret_body}\x1b[0m",
                 filename = self.filename,
-                line     = span.line,
-                col      = span.col,
-                line_no  = line_no_str,
-                w        = w,
+                line = span.line,
+                col = span.col,
+                line_no = line_no_str,
+                w = w,
             )
         } else {
             format!(
@@ -61,10 +78,10 @@ impl<'a> ErrorRenderer<'a> {
                  {line_no:<w$}  |  {line_text}\n\
                  {pad}  |  {caret_body}",
                 filename = self.filename,
-                line     = span.line,
-                col      = span.col,
-                line_no  = line_no_str,
-                w        = w,
+                line = span.line,
+                col = span.col,
+                line_no = line_no_str,
+                w = w,
             )
         };
 

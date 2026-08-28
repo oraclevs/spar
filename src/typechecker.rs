@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::error::{SparError, Span};
+use crate::error::{Span, SparError};
 use crate::resolver::{stmts_always_return, GlobalEntry, SymbolTable};
 
 pub fn display_type(ty: &SparType) -> String {
     match ty {
-        SparType::Str          => "str".into(),
-        SparType::Int          => "int".into(),
-        SparType::Float        => "float".into(),
-        SparType::Bool         => "bool".into(),
-        SparType::Section      => "section".into(),
-        SparType::List(inner)  => format!("[{}]", display_type(inner)),
-        SparType::Named(name)  => name.clone(),
+        SparType::Str => "str".into(),
+        SparType::Int => "int".into(),
+        SparType::Float => "float".into(),
+        SparType::Bool => "bool".into(),
+        SparType::Section => "section".into(),
+        SparType::List(inner) => format!("[{}]", display_type(inner)),
+        SparType::Named(name) => name.clone(),
     }
 }
 
@@ -46,7 +46,7 @@ fn spread_source_name(spread: &SpreadStmt) -> Option<&str> {
 
 pub struct TypeChecker<'a> {
     symbols: &'a SymbolTable,
-    errors:  Vec<SparError>,
+    errors: Vec<SparError>,
     /// Section name → schema-derived field list, for sections validated
     /// against an `import schema "...";` but with no `-> Type` binding of
     /// their own. Empty unless populated via `check_with_schema`.
@@ -56,10 +56,32 @@ pub struct TypeChecker<'a> {
 }
 
 impl<'a> TypeChecker<'a> {
+    /// Infer the fully resolved type of an expression using the same rules as
+    /// normal type checking. Language tooling should use this instead of
+    /// duplicating Spar's inference logic.
+    pub fn infer_expression(expr: &Expr, symbols: &'a SymbolTable) -> Option<SparType> {
+        TypeChecker {
+            symbols,
+            errors: Vec::new(),
+            schema_bindings: HashMap::new(),
+            current_section: None,
+        }
+        .infer_type(expr)
+    }
+
     pub fn check(program: &Program, symbols: &'a SymbolTable) -> Result<(), Vec<SparError>> {
-        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings: HashMap::new(), current_section: None };
+        let mut tc = TypeChecker {
+            symbols,
+            errors: Vec::new(),
+            schema_bindings: HashMap::new(),
+            current_section: None,
+        };
         tc.check_program(program);
-        if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
+        if tc.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(tc.errors)
+        }
     }
 
     pub fn check_with_imports(
@@ -80,9 +102,18 @@ impl<'a> TypeChecker<'a> {
         symbols: &'a SymbolTable,
         schema_bindings: HashMap<String, Vec<SchemaField>>,
     ) -> Result<(), Vec<SparError>> {
-        let mut tc = TypeChecker { symbols, errors: Vec::new(), schema_bindings, current_section: None };
+        let mut tc = TypeChecker {
+            symbols,
+            errors: Vec::new(),
+            schema_bindings,
+            current_section: None,
+        };
         tc.check_program(program);
-        if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }
+        if tc.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(tc.errors)
+        }
     }
 
     fn push_type_error(&mut self, message: impl Into<String>, hint: Option<String>, span: Span) {
@@ -96,11 +127,11 @@ impl<'a> TypeChecker<'a> {
     fn check_program(&mut self, program: &Program) {
         for item in &program.items {
             match item {
-                TopLevelItem::Import(_)     => {}
-                TopLevelItem::Var(decl)     => self.check_var(decl),
+                TopLevelItem::Import(_) => {}
+                TopLevelItem::Var(decl) => self.check_var(decl),
                 TopLevelItem::Dynamic(decl) => self.check_dynamic(decl),
                 TopLevelItem::Section(decl) => self.check_section(decl),
-                TopLevelItem::Function(f)   => self.check_function_decl(f),
+                TopLevelItem::Function(f) => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(_) => {} // Task 4 replaces this with real validation
                 TopLevelItem::Enum(_) => {} // nothing to typecheck — resolver already validated the declaration
@@ -163,11 +194,21 @@ impl<'a> TypeChecker<'a> {
         match &decl.type_binding {
             Some(binding) => self.check_type_binding(decl, binding, &path_str),
             None => {
-                let fields: Vec<&FieldDecl> = decl.items.iter()
-                    .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                let fields: Vec<&FieldDecl> = decl
+                    .items
+                    .iter()
+                    .filter_map(|i| {
+                        if let SectionItem::Field(f) = i {
+                            Some(f)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 match self.schema_bindings.get(&path_str).cloned() {
-                    Some(schema_fields) => self.check_schema_bound_fields(&fields, &schema_fields, &path_str),
+                    Some(schema_fields) => {
+                        self.check_schema_bound_fields(&fields, &schema_fields, &path_str)
+                    }
                     None => self.check_untyped_section_fields(&fields, &path_str),
                 }
             }
@@ -183,7 +224,12 @@ impl<'a> TypeChecker<'a> {
     /// `loader::validate_schema_imports`'s own "not declared in the schema"
     /// error — this only still walks its expression so calls/refs inside it
     /// get resolved and checked.
-    fn check_schema_bound_fields(&mut self, fields: &[&FieldDecl], schema_fields: &[SchemaField], path_str: &str) {
+    fn check_schema_bound_fields(
+        &mut self,
+        fields: &[&FieldDecl],
+        schema_fields: &[SchemaField],
+        path_str: &str,
+    ) {
         for field in fields {
             if let Some(ty) = &field.ty {
                 self.check_field(field, ty, path_str);
@@ -194,10 +240,20 @@ impl<'a> TypeChecker<'a> {
                 None => match &field.value {
                     Some(FieldValue::Expr(e)) => self.check_expr_internal(e),
                     Some(FieldValue::Nested(items)) => {
-                        let subs: Vec<&FieldDecl> = items.iter()
-                            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                        let subs: Vec<&FieldDecl> = items
+                            .iter()
+                            .filter_map(|i| {
+                                if let SectionItem::Field(f) = i {
+                                    Some(f)
+                                } else {
+                                    None
+                                }
+                            })
                             .collect();
-                        self.check_untyped_section_fields(&subs, &format!("{path_str}.{}", field.name));
+                        self.check_untyped_section_fields(
+                            &subs,
+                            &format!("{path_str}.{}", field.name),
+                        );
                     }
                     None => {}
                 },
@@ -208,7 +264,9 @@ impl<'a> TypeChecker<'a> {
     fn check_field_against_schema(&mut self, field: &FieldDecl, sf: &SchemaField, path_str: &str) {
         match &sf.shape {
             SchemaFieldShape::Primitive(expected_ty) => match &field.value {
-                Some(FieldValue::Expr(val)) => self.check_expr_type(val, expected_ty, &field.name, &field.span),
+                Some(FieldValue::Expr(val)) => {
+                    self.check_expr_type(val, expected_ty, &field.name, &field.span)
+                }
                 Some(FieldValue::Nested(_)) => {
                     self.push_type_error(
                         format!(
@@ -223,7 +281,10 @@ impl<'a> TypeChecker<'a> {
                 None => {
                     if !field.optional {
                         self.push_type_error(
-                            format!("required field `{}` in section `[{path_str}]` has no value", field.name),
+                            format!(
+                                "required field `{}` in section `[{path_str}]` has no value",
+                                field.name
+                            ),
                             None,
                             field.span.clone(),
                         );
@@ -232,8 +293,15 @@ impl<'a> TypeChecker<'a> {
             },
             SchemaFieldShape::Section(nested_schema_fields) => match &field.value {
                 Some(FieldValue::Nested(items)) => {
-                    let subs: Vec<&FieldDecl> = items.iter()
-                        .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                    let subs: Vec<&FieldDecl> = items
+                        .iter()
+                        .filter_map(|i| {
+                            if let SectionItem::Field(f) = i {
+                                Some(f)
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
                     let nested_path = format!("{path_str}.{}", field.name);
                     self.check_schema_bound_fields(&subs, nested_schema_fields, &nested_path);
@@ -257,7 +325,10 @@ impl<'a> TypeChecker<'a> {
                 None => {
                     if !field.optional {
                         self.push_type_error(
-                            format!("required field `{}` in section `[{path_str}]` has no value", field.name),
+                            format!(
+                                "required field `{}` in section `[{path_str}]` has no value",
+                                field.name
+                            ),
                             None,
                             field.span.clone(),
                         );
@@ -311,7 +382,8 @@ impl<'a> TypeChecker<'a> {
                     format!(
                         "field '{}' in '[{path_str}]' has type '{}' but uses a section \
                          body '{{ ... }}' — only 'section'-typed fields can have a nested body",
-                        field.name, display_type(other_ty)
+                        field.name,
+                        display_type(other_ty)
                     ),
                     Some("change the field type to 'section' or use an expression value".into()),
                     field.span.clone(),
@@ -324,8 +396,15 @@ impl<'a> TypeChecker<'a> {
                 // against — same "nothing to compare against" precedent
                 // as an unbound top-level section (check_section, above).
                 let nested_path = format!("{path_str}.{}", field.name);
-                let subs: Vec<&FieldDecl> = sub_items.iter()
-                    .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                let subs: Vec<&FieldDecl> = sub_items
+                    .iter()
+                    .filter_map(|i| {
+                        if let SectionItem::Field(f) = i {
+                            Some(f)
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 self.check_untyped_section_fields(&subs, &nested_path);
                 return;
@@ -383,14 +462,25 @@ impl<'a> TypeChecker<'a> {
         // spread's contribution is merged with the explicit fields for
         // coverage/type checking; an unresolvable spread falls back to
         // skipping entirely (see check_mixed_spread_and_fields).
-        let has_spreads = decl.items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
+        let has_spreads = decl
+            .items
+            .iter()
+            .any(|i| matches!(i, SectionItem::Spread(_)));
         if has_spreads {
             self.check_mixed_spread_and_fields(&decl.items, &entry.fields, &binding.name, path_str);
             return;
         }
 
-        let config_fields: Vec<&FieldDecl> = decl.items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let config_fields: Vec<&FieldDecl> = decl
+            .items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         self.validate_type_fields(&entry.fields, &config_fields, &binding.name, path_str);
@@ -403,7 +493,13 @@ impl<'a> TypeChecker<'a> {
         type_name: &str,
         path_str: &str,
     ) {
-        self.validate_type_fields_with_coverage(type_fields, config_fields, type_name, path_str, None);
+        self.validate_type_fields_with_coverage(
+            type_fields,
+            config_fields,
+            type_name,
+            path_str,
+            None,
+        );
     }
 
     /// `covered_by_spread`, when given, names fields a resolvable spread
@@ -473,13 +569,26 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     TypeFieldShape::Section(nested_type_fields) => {
-                        self.validate_nested_type_field(cf, nested_type_fields, type_name, path_str, &tf.name);
+                        self.validate_nested_type_field(
+                            cf,
+                            nested_type_fields,
+                            type_name,
+                            path_str,
+                            &tf.name,
+                        );
                     }
                     TypeFieldShape::Named(other_type_name) => {
-                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned() else {
+                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned()
+                        else {
                             continue; // resolver already reported the undefined type
                         };
-                        self.validate_nested_type_field(cf, &other_entry.fields, other_type_name, path_str, &tf.name);
+                        self.validate_nested_type_field(
+                            cf,
+                            &other_entry.fields,
+                            other_type_name,
+                            path_str,
+                            &tf.name,
+                        );
                     }
                 },
             }
@@ -549,14 +658,28 @@ impl<'a> TypeChecker<'a> {
 
         // A spread mixed with explicit fields — same "can't statically
         // attribute coverage" precedent as the top-level case.
-        let has_spreads = nested_items.iter().any(|i| matches!(i, SectionItem::Spread(_)));
+        let has_spreads = nested_items
+            .iter()
+            .any(|i| matches!(i, SectionItem::Spread(_)));
         if has_spreads {
-            self.check_mixed_spread_and_fields(nested_items, nested_type_fields, type_name, &nested_path);
+            self.check_mixed_spread_and_fields(
+                nested_items,
+                nested_type_fields,
+                type_name,
+                &nested_path,
+            );
             return;
         }
 
-        let nested_config: Vec<&FieldDecl> = nested_items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let nested_config: Vec<&FieldDecl> = nested_items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         self.validate_type_fields(nested_type_fields, &nested_config, type_name, &nested_path);
     }
@@ -626,13 +749,28 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     TypeFieldShape::Section(nested_type_fields) => {
-                        self.validate_nested_type_field_with_locals(cf, nested_type_fields, type_name, path_str, &tf.name, locals);
+                        self.validate_nested_type_field_with_locals(
+                            cf,
+                            nested_type_fields,
+                            type_name,
+                            path_str,
+                            &tf.name,
+                            locals,
+                        );
                     }
                     TypeFieldShape::Named(other_type_name) => {
-                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned() else {
+                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned()
+                        else {
                             continue; // resolver already reported the undefined type
                         };
-                        self.validate_nested_type_field_with_locals(cf, &other_entry.fields, other_type_name, path_str, &tf.name, locals);
+                        self.validate_nested_type_field_with_locals(
+                            cf,
+                            &other_entry.fields,
+                            other_type_name,
+                            path_str,
+                            &tf.name,
+                            locals,
+                        );
                     }
                 },
             }
@@ -675,11 +813,24 @@ impl<'a> TypeChecker<'a> {
                 return;
             }
         };
-        let nested_config: Vec<&FieldDecl> = nested_items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let nested_config: Vec<&FieldDecl> = nested_items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         let nested_path = format!("{}::{}", path_str, field_name);
-        self.validate_type_fields_with_locals(nested_type_fields, &nested_config, type_name, &nested_path, locals);
+        self.validate_type_fields_with_locals(
+            nested_type_fields,
+            &nested_config,
+            type_name,
+            &nested_path,
+            locals,
+        );
     }
 
     /// A spread MIXED with explicit fields (not spread-only, which gets
@@ -704,11 +855,19 @@ impl<'a> TypeChecker<'a> {
 
         for item in items {
             match item {
-                SectionItem::Field(f) => { covered.insert(f.name.clone()); }
+                SectionItem::Field(f) => {
+                    covered.insert(f.name.clone());
+                }
                 SectionItem::Spread(sp) => {
-                    let Some(name) = spread_source_name(sp) else { return }; // unresolvable — skip the whole check
-                    let Some(shape) = self.derive_section_shape(name) else { return };
-                    for tf in &shape { covered.insert(tf.name.clone()); }
+                    let Some(name) = spread_source_name(sp) else {
+                        return;
+                    }; // unresolvable — skip the whole check
+                    let Some(shape) = self.derive_section_shape(name) else {
+                        return;
+                    };
+                    for tf in &shape {
+                        covered.insert(tf.name.clone());
+                    }
                     resolved_spreads.push((name, shape, &sp.span));
                 }
             }
@@ -718,10 +877,23 @@ impl<'a> TypeChecker<'a> {
             self.check_spread_contribution(&shape, expected, source_label, expected_label, span);
         }
 
-        let config_fields: Vec<&FieldDecl> = items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let config_fields: Vec<&FieldDecl> = items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
-        self.validate_type_fields_with_coverage(expected, &config_fields, expected_label, path_str, Some(&covered));
+        self.validate_type_fields_with_coverage(
+            expected,
+            &config_fields,
+            expected_label,
+            path_str,
+            Some(&covered),
+        );
     }
 
     /// Check one resolvable spread's OWN contributed fields against
@@ -758,7 +930,11 @@ impl<'a> TypeChecker<'a> {
                                 self.push_type_error(
                                     format!(
                                         "spread `...{}` field `{}` is `{}` but `{}` expects `{}`",
-                                        source_label, sf.name, display_type(&actual), expected_label, display_type(&want)
+                                        source_label,
+                                        sf.name,
+                                        display_type(&actual),
+                                        expected_label,
+                                        display_type(&want)
                                     ),
                                     None,
                                     span.clone(),
@@ -766,7 +942,13 @@ impl<'a> TypeChecker<'a> {
                             }
                         }
                         (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
-                            self.check_spread_contribution(&actual_nested, &want_nested, source_label, expected_label, span);
+                            self.check_spread_contribution(
+                                &actual_nested,
+                                &want_nested,
+                                source_label,
+                                expected_label,
+                                span,
+                            );
                         }
                         (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
                             self.push_type_error(
@@ -808,9 +990,20 @@ impl<'a> TypeChecker<'a> {
         expected_label: &str,
         path_str: &str,
     ) {
-        let Some(source_name) = spread_source_name(spread) else { return };
-        let Some(source_shape) = self.derive_section_shape(source_name) else { return };
-        self.check_shape_matches(&source_shape, expected, source_name, expected_label, path_str, &spread.span);
+        let Some(source_name) = spread_source_name(spread) else {
+            return;
+        };
+        let Some(source_shape) = self.derive_section_shape(source_name) else {
+            return;
+        };
+        self.check_shape_matches(
+            &source_shape,
+            expected,
+            source_name,
+            expected_label,
+            path_str,
+            &spread.span,
+        );
     }
 
     /// The structural shape of a top-level section: if it's type-bound,
@@ -819,7 +1012,10 @@ impl<'a> TypeChecker<'a> {
     /// unbound, every field already has an explicit type (Phase 2's rule),
     /// so derive an equivalent ad-hoc shape straight from those.
     fn derive_section_shape(&self, name: &str) -> Option<Vec<TypeField>> {
-        let entry = self.symbols.sections.get(std::slice::from_ref(&name.to_string()))?;
+        let entry = self
+            .symbols
+            .sections
+            .get(std::slice::from_ref(&name.to_string()))?;
         match &entry.type_binding {
             Some(type_name) => self.symbols.types.get(type_name).map(|t| t.fields.clone()),
             None => Some(self.derive_ad_hoc_shape(&[name.to_string()])),
@@ -831,18 +1027,30 @@ impl<'a> TypeChecker<'a> {
     /// under their own path (see resolver.rs's `register_nested_section`),
     /// so a `section`-typed field recurses into `path + [field_name]`.
     fn derive_ad_hoc_shape(&self, path: &[String]) -> Vec<TypeField> {
-        let Some(entry) = self.symbols.sections.get(path) else { return Vec::new() };
-        entry.fields.iter().map(|(name, fe)| {
-            let shape = match &fe.ty {
-                Some(SparType::Section) => {
-                    let nested_path: Vec<String> = path.iter().cloned().chain([name.clone()]).collect();
-                    TypeFieldShape::Section(self.derive_ad_hoc_shape(&nested_path))
+        let Some(entry) = self.symbols.sections.get(path) else {
+            return Vec::new();
+        };
+        entry
+            .fields
+            .iter()
+            .map(|(name, fe)| {
+                let shape = match &fe.ty {
+                    Some(SparType::Section) => {
+                        let nested_path: Vec<String> =
+                            path.iter().cloned().chain([name.clone()]).collect();
+                        TypeFieldShape::Section(self.derive_ad_hoc_shape(&nested_path))
+                    }
+                    Some(other) => TypeFieldShape::Primitive(other.clone()),
+                    None => TypeFieldShape::Primitive(SparType::Str), // unreachable: unbound fields always have an explicit type
+                };
+                TypeField {
+                    name: name.clone(),
+                    optional: fe.optional,
+                    shape,
+                    span: fe.span.clone(),
                 }
-                Some(other) => TypeFieldShape::Primitive(other.clone()),
-                None => TypeFieldShape::Primitive(SparType::Str), // unreachable: unbound fields always have an explicit type
-            };
-            TypeField { name: name.clone(), optional: fe.optional, shape, span: fe.span.clone() }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Structural exact-match comparison between two abstract shapes —
@@ -883,7 +1091,11 @@ impl<'a> TypeChecker<'a> {
                                 self.push_type_error(
                                     format!(
                                         "spread `...{}` field `{}` is `{}` but `{}` expects `{}`",
-                                        source_label, ef.name, display_type(&actual), expected_label, display_type(&want)
+                                        source_label,
+                                        ef.name,
+                                        display_type(&actual),
+                                        expected_label,
+                                        display_type(&want)
                                     ),
                                     None,
                                     span.clone(),
@@ -891,7 +1103,14 @@ impl<'a> TypeChecker<'a> {
                             }
                         }
                         (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
-                            self.check_shape_matches(&actual_nested, &want_nested, source_label, expected_label, path_str, span);
+                            self.check_shape_matches(
+                                &actual_nested,
+                                &want_nested,
+                                source_label,
+                                expected_label,
+                                path_str,
+                                span,
+                            );
                         }
                         (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
                             self.push_type_error(
@@ -961,23 +1180,22 @@ impl<'a> TypeChecker<'a> {
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {
         match expr {
             Expr::Object(_, _) => None, // shape only checkable against an expected type — see check_expr_type (Task 4)
-            Expr::Literal(Literal::Int(_))   => Some(SparType::Int),
+            Expr::Literal(Literal::Int(_)) => Some(SparType::Int),
             Expr::Literal(Literal::Float(_)) => Some(SparType::Float),
-            Expr::Literal(Literal::Bool(_))  => Some(SparType::Bool),
-            Expr::String(_)                  => Some(SparType::Str),
-            Expr::List(items, _) => {
-                items.first()
-                    .and_then(|e| self.infer_type(e))
-                    .map(|t| SparType::List(Box::new(t)))
-            }
+            Expr::Literal(Literal::Bool(_)) => Some(SparType::Bool),
+            Expr::String(_) => Some(SparType::Str),
+            Expr::List(items, _) => items
+                .first()
+                .and_then(|e| self.infer_type(e))
+                .map(|t| SparType::List(Box::new(t))),
             Expr::NamespaceRef(nr) => self.infer_namespace_type(nr),
             Expr::FieldAccess { base, field, .. } => self.infer_field_access(base, field),
             Expr::FnCall(fc) => match fc.name.as_str() {
                 "env" | "str" => Some(SparType::Str),
-                "int"         => Some(SparType::Int),
-                "float"       => Some(SparType::Float),
-                "bool"        => Some(SparType::Bool),
-                _             => None,
+                "int" => Some(SparType::Int),
+                "float" => Some(SparType::Float),
+                "bool" => Some(SparType::Bool),
+                _ => None,
             },
             Expr::BinaryOp(op) => {
                 let lhs = self.infer_type(&op.lhs)?;
@@ -989,11 +1207,19 @@ impl<'a> TypeChecker<'a> {
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
                     let t = self.infer_type(operand)?;
-                    if t == SparType::Bool { Some(SparType::Bool) } else { None }
+                    if t == SparType::Bool {
+                        Some(SparType::Bool)
+                    } else {
+                        None
+                    }
                 }
                 UnOp::Neg => {
                     let t = self.infer_type(operand)?;
-                    if matches!(t, SparType::Int | SparType::Float) { Some(t) } else { None }
+                    if matches!(t, SparType::Int | SparType::Float) {
+                        Some(t)
+                    } else {
+                        None
+                    }
                 }
             },
             Expr::Index { source, .. } => match self.infer_type(source)? {
@@ -1006,7 +1232,7 @@ impl<'a> TypeChecker<'a> {
                 let source_ty = self.infer_type(source)?;
                 match source_ty {
                     SparType::List(_) => None, // body type unknown without locals
-                    _ => None,               // source is not a list; error reported elsewhere
+                    _ => None,                 // source is not a list; error reported elsewhere
                 }
             }
         }
@@ -1026,7 +1252,9 @@ impl<'a> TypeChecker<'a> {
         if let Expr::NamespaceRef(nr) = base {
             if nr.segments == ["self"] {
                 let section_path = self.current_section.as_ref()?;
-                return self.symbols.lookup_section(section_path)
+                return self
+                    .symbols
+                    .lookup_section(section_path)
                     .and_then(|s| s.fields.get(field))
                     .and_then(|f| f.ty.clone());
             }
@@ -1036,7 +1264,10 @@ impl<'a> TypeChecker<'a> {
         }
         let base_ty = self.infer_type(base)?;
         match base_ty {
-            SparType::Named(type_name) => self.symbols.types.get(&type_name)
+            SparType::Named(type_name) => self
+                .symbols
+                .types
+                .get(&type_name)
                 .and_then(|te| te.fields.iter().find(|f| &f.name == field))
                 .map(|f| self.field_shape_to_type(&f.shape)),
             _ => None,
@@ -1052,7 +1283,10 @@ impl<'a> TypeChecker<'a> {
     fn call_return_type(&self, name: &str) -> Option<SparType> {
         let segments: Vec<&str> = name.split("::").collect();
         match segments.len() {
-            2 => self.symbols.function_groups.get(segments[0])
+            2 => self
+                .symbols
+                .function_groups
+                .get(segments[0])
                 .and_then(|g| g.functions.get(segments[1]))
                 .map(|fe| fe.ret.clone()),
             1 => self.symbols.functions.get(name).map(|fe| fe.ret.clone()),
@@ -1072,18 +1306,22 @@ impl<'a> TypeChecker<'a> {
     fn infer_binop_type(&self, op: &BinOp, lhs: &SparType, rhs: &SparType) -> Option<SparType> {
         match op {
             BinOp::Add => match (lhs, rhs) {
-                (SparType::Str,   SparType::Str)   => Some(SparType::Str),
-                (SparType::Int,   SparType::Int)   => Some(SparType::Int),
+                (SparType::Str, SparType::Str) => Some(SparType::Str),
+                (SparType::Int, SparType::Int) => Some(SparType::Int),
                 (SparType::Float, SparType::Float) => Some(SparType::Float),
-                _                              => None,
+                _ => None,
             },
             BinOp::Sub | BinOp::Mul | BinOp::Div => match (lhs, rhs) {
-                (SparType::Int,   SparType::Int)   => Some(SparType::Int),
+                (SparType::Int, SparType::Int) => Some(SparType::Int),
                 (SparType::Float, SparType::Float) => Some(SparType::Float),
-                _                              => None,
+                _ => None,
             },
             BinOp::Fallback => {
-                if lhs == rhs { Some(lhs.clone()) } else { None }
+                if lhs == rhs {
+                    Some(lhs.clone())
+                } else {
+                    None
+                }
             }
             BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                 // Comparison operators return bool
@@ -1107,8 +1345,15 @@ impl<'a> TypeChecker<'a> {
         let Some(entry) = self.symbols.types.get(name).cloned() else {
             return; // resolver already reported the undefined type
         };
-        let config_fields: Vec<&FieldDecl> = items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let config_fields: Vec<&FieldDecl> = items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         self.validate_type_fields(&entry.fields, &config_fields, name, label);
     }
@@ -1189,7 +1434,7 @@ impl<'a> TypeChecker<'a> {
 
         let inferred = match self.infer_type(expr) {
             Some(t) => t,
-            None    => return,
+            None => return,
         };
 
         if &inferred != declared_ty {
@@ -1232,41 +1477,49 @@ impl<'a> TypeChecker<'a> {
 
                 if let (Some(l), Some(r)) = (&lhs_ty, &rhs_ty) {
                     let valid = match op.op {
-                        BinOp::Add => matches!((l, r),
-                            (SparType::Str,   SparType::Str)   |
-                            (SparType::Int,   SparType::Int)   |
-                            (SparType::Float, SparType::Float)),
-                        BinOp::Sub | BinOp::Mul | BinOp::Div => matches!((l, r),
-                            (SparType::Int,   SparType::Int) |
-                            (SparType::Float, SparType::Float)),
+                        BinOp::Add => matches!(
+                            (l, r),
+                            (SparType::Str, SparType::Str)
+                                | (SparType::Int, SparType::Int)
+                                | (SparType::Float, SparType::Float)
+                        ),
+                        BinOp::Sub | BinOp::Mul | BinOp::Div => matches!(
+                            (l, r),
+                            (SparType::Int, SparType::Int) | (SparType::Float, SparType::Float)
+                        ),
                         BinOp::Fallback => l == r,
-                        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+                        BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::Lt
+                        | BinOp::Gt
+                        | BinOp::LtEq
+                        | BinOp::GtEq => {
                             // Comparison operators work on comparable types
-                            matches!((l, r),
-                                (SparType::Int, SparType::Int) |
-                                (SparType::Float, SparType::Float) |
-                                (SparType::Str, SparType::Str) |
-                                (SparType::Bool, SparType::Bool))
+                            matches!(
+                                (l, r),
+                                (SparType::Int, SparType::Int)
+                                    | (SparType::Float, SparType::Float)
+                                    | (SparType::Str, SparType::Str)
+                                    | (SparType::Bool, SparType::Bool)
+                            )
                         }
-                        BinOp::And | BinOp::Or => {
-                            l == &SparType::Bool && r == &SparType::Bool
-                        }
+                        BinOp::And | BinOp::Or => l == &SparType::Bool && r == &SparType::Bool,
                     };
                     if !valid {
                         let op_sym = match op.op {
-                            BinOp::Add      => "+",
-                            BinOp::Sub      => "-",
-                            BinOp::Mul      => "*",
-                            BinOp::Div      => "/",
+                            BinOp::Add => "+",
+                            BinOp::Sub => "-",
+                            BinOp::Mul => "*",
+                            BinOp::Div => "/",
                             BinOp::Fallback => "??",
-                            BinOp::Eq       => "==",
-                            BinOp::NotEq    => "!=",
-                            BinOp::Lt       => "<",
-                            BinOp::Gt       => ">",
-                            BinOp::LtEq     => "<=",
-                            BinOp::GtEq     => ">=",
-                            BinOp::And      => "&&",
-                            BinOp::Or       => "||",
+                            BinOp::Eq => "==",
+                            BinOp::NotEq => "!=",
+                            BinOp::Lt => "<",
+                            BinOp::Gt => ">",
+                            BinOp::LtEq => "<=",
+                            BinOp::GtEq => ">=",
+                            BinOp::And => "&&",
+                            BinOp::Or => "||",
                         };
                         let msg = match op.op {
                             BinOp::And | BinOp::Or => format!(
@@ -1285,25 +1538,35 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             Expr::FnCall(fc) => {
-                for arg in &fc.args { self.check_expr_internal(arg); }
+                for arg in &fc.args {
+                    self.check_expr_internal(arg);
+                }
             }
             Expr::String(s) => {
                 for part in &s.parts {
-                    if let StringPart::Expr(e) = part { self.check_expr_internal(e); }
+                    if let StringPart::Expr(e) = part {
+                        self.check_expr_internal(e);
+                    }
                 }
             }
             Expr::List(items, _) => {
-                for item in items { self.check_expr_internal(item); }
+                for item in items {
+                    self.check_expr_internal(item);
+                }
             }
             Expr::Grouped(inner, _) => self.check_expr_internal(inner),
             Expr::Call { args, .. } => {
-                for arg in args { self.check_expr_internal(&arg.value); }
+                for arg in args {
+                    self.check_expr_internal(&arg.value);
+                }
                 let result = self.check_call(expr);
                 if let Err(e) = result {
                     self.errors.push(e);
                 }
             }
-            Expr::Unary { op, operand, span, .. } => {
+            Expr::Unary {
+                op, operand, span, ..
+            } => {
                 self.check_expr_internal(operand);
                 let operand_ty = self.infer_type(operand);
                 match op {
@@ -1312,7 +1575,10 @@ impl<'a> TypeChecker<'a> {
                             self.push_type_error(
                                 format!(
                                     "operator `!` requires a bool operand, got {}",
-                                    operand_ty.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                    operand_ty
+                                        .as_ref()
+                                        .map(|t| display_type(t))
+                                        .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 None,
                                 span.clone(),
@@ -1324,7 +1590,10 @@ impl<'a> TypeChecker<'a> {
                             self.push_type_error(
                                 format!(
                                     "unary `-` requires int or float, got {}",
-                                    operand_ty.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                    operand_ty
+                                        .as_ref()
+                                        .map(|t| display_type(t))
+                                        .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 None,
                                 span.clone(),
@@ -1333,7 +1602,11 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            Expr::Index { source, index, span } => {
+            Expr::Index {
+                source,
+                index,
+                span,
+            } => {
                 self.check_expr_internal(source);
                 self.check_expr_internal(index);
                 let index_ty = self.infer_type(index);
@@ -1341,7 +1614,10 @@ impl<'a> TypeChecker<'a> {
                     self.push_type_error(
                         format!(
                             "list index must be int, got {}",
-                            index_ty.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                            index_ty
+                                .as_ref()
+                                .map(|t| display_type(t))
+                                .unwrap_or_else(|| "unknown".into()),
                         ),
                         None,
                         span.clone(),
@@ -1358,7 +1634,9 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            Expr::Comprehension { source, body, span, .. } => {
+            Expr::Comprehension {
+                source, body, span, ..
+            } => {
                 self.check_expr_internal(source);
                 self.check_expr_internal(body);
                 let source_ty = self.infer_type(source);
@@ -1366,7 +1644,10 @@ impl<'a> TypeChecker<'a> {
                     self.push_type_error(
                         format!(
                             "for-comprehension source must be a list, got {}",
-                            source_ty.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                            source_ty
+                                .as_ref()
+                                .map(|t| display_type(t))
+                                .unwrap_or_else(|| "unknown".into()),
                         ),
                         None,
                         span.clone(),
@@ -1388,9 +1669,18 @@ impl<'a> TypeChecker<'a> {
     /// intentionally matches `check_call`'s existing whole-argument error
     /// granularity, not a shortcut.
     fn object_matches_named_type(&self, items: &[SectionItem], name: &str) -> bool {
-        let Some(entry) = self.symbols.types.get(name) else { return false };
-        let config_fields: Vec<&FieldDecl> = items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+        let Some(entry) = self.symbols.types.get(name) else {
+            return false;
+        };
+        let config_fields: Vec<&FieldDecl> = items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         for tf in &entry.fields {
             let cf = config_fields.iter().find(|f| f.name == tf.name);
@@ -1406,31 +1696,57 @@ impl<'a> TypeChecker<'a> {
                                 _ => None,
                             },
                         };
-                        if actual.as_ref() != Some(expected_ty) { return false; }
+                        if actual.as_ref() != Some(expected_ty) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.nested_items_match_type_fields(nested_items, nested) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.object_matches_named_type(nested_items, other_name) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.object_matches_named_type(nested_items, other_name) {
+                            return false;
+                        }
                     }
                 },
             }
         }
         for cf in &config_fields {
-            if !entry.fields.iter().any(|tf| tf.name == cf.name) { return false; }
+            if !entry.fields.iter().any(|tf| tf.name == cf.name) {
+                return false;
+            }
         }
         true
     }
 
     /// Locals-aware twin of `object_matches_named_type`, for a call
     /// argument built inside a function body.
-    fn object_matches_named_type_with_locals(&self, items: &[SectionItem], name: &str, locals: &HashMap<String, SparType>) -> bool {
-        let Some(entry) = self.symbols.types.get(name) else { return false };
-        let config_fields: Vec<&FieldDecl> = items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+    fn object_matches_named_type_with_locals(
+        &self,
+        items: &[SectionItem],
+        name: &str,
+        locals: &HashMap<String, SparType>,
+    ) -> bool {
+        let Some(entry) = self.symbols.types.get(name) else {
+            return false;
+        };
+        let config_fields: Vec<&FieldDecl> = items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         for tf in &entry.fields {
             let cf = config_fields.iter().find(|f| f.name == tf.name);
@@ -1446,30 +1762,57 @@ impl<'a> TypeChecker<'a> {
                                 _ => None,
                             },
                         };
-                        if actual.as_ref() != Some(expected_ty) { return false; }
+                        if actual.as_ref() != Some(expected_ty) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.nested_items_match_type_fields(nested_items, nested) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.object_matches_named_type_with_locals(nested_items, other_name, locals) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.object_matches_named_type_with_locals(
+                            nested_items,
+                            other_name,
+                            locals,
+                        ) {
+                            return false;
+                        }
                     }
                 },
             }
         }
         for cf in &config_fields {
-            if !entry.fields.iter().any(|tf| tf.name == cf.name) { return false; }
+            if !entry.fields.iter().any(|tf| tf.name == cf.name) {
+                return false;
+            }
         }
         true
     }
 
     /// Structural check for a nested `section`-shaped field (not a `Named`
     /// type — an inline `TypeFieldShape::Section(...)`).
-    fn nested_items_match_type_fields(&self, items: &[SectionItem], type_fields: &[TypeField]) -> bool {
-        let config_fields: Vec<&FieldDecl> = items.iter()
-            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+    fn nested_items_match_type_fields(
+        &self,
+        items: &[SectionItem],
+        type_fields: &[TypeField],
+    ) -> bool {
+        let config_fields: Vec<&FieldDecl> = items
+            .iter()
+            .filter_map(|i| {
+                if let SectionItem::Field(f) = i {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
             .collect();
         for tf in type_fields {
             let cf = config_fields.iter().find(|f| f.name == tf.name);
@@ -1485,21 +1828,33 @@ impl<'a> TypeChecker<'a> {
                                 _ => None,
                             },
                         };
-                        if actual.as_ref() != Some(expected_ty) { return false; }
+                        if actual.as_ref() != Some(expected_ty) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.nested_items_match_type_fields(nested_items, nested) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.nested_items_match_type_fields(nested_items, nested) {
+                            return false;
+                        }
                     }
                     TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else { return false };
-                        if !self.object_matches_named_type(nested_items, other_name) { return false; }
+                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
+                            return false;
+                        };
+                        if !self.object_matches_named_type(nested_items, other_name) {
+                            return false;
+                        }
                     }
                 },
             }
         }
         for cf in &config_fields {
-            if !type_fields.iter().any(|tf| tf.name == cf.name) { return false; }
+            if !type_fields.iter().any(|tf| tf.name == cf.name) {
+                return false;
+            }
         }
         true
     }
@@ -1508,13 +1863,17 @@ impl<'a> TypeChecker<'a> {
         if let Expr::Call { name, args, .. } = call {
             if let Some(entry) = self.symbols.functions.get(name) {
                 for arg in args {
-                    let param_ty = entry.params.iter()
+                    let param_ty = entry
+                        .params
+                        .iter()
                         .find(|(n, _)| n == &arg.param_name)
                         .map(|(_, t)| t.clone());
                     if let Some(param_ty) = param_ty {
                         if let Expr::Object(items, _) = &arg.value {
                             let ok = match &param_ty {
-                                SparType::Named(name) => self.object_matches_named_type(items, name),
+                                SparType::Named(name) => {
+                                    self.object_matches_named_type(items, name)
+                                }
                                 _ => false,
                             };
                             if !ok {
@@ -1537,7 +1896,10 @@ impl<'a> TypeChecker<'a> {
                                     "argument '{}' expects {} but got {}",
                                     arg.param_name,
                                     display_type(&param_ty),
-                                    actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                    actual
+                                        .as_ref()
+                                        .map(|t| display_type(t))
+                                        .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 hint: None,
                                 span: arg.span.clone(),
@@ -1560,13 +1922,17 @@ impl<'a> TypeChecker<'a> {
         if let Expr::Call { name, args, .. } = call {
             if let Some(entry) = self.symbols.functions.get(name) {
                 for arg in args {
-                    let param_ty = entry.params.iter()
+                    let param_ty = entry
+                        .params
+                        .iter()
                         .find(|(n, _)| n == &arg.param_name)
                         .map(|(_, t)| t.clone());
                     if let Some(param_ty) = param_ty {
                         if let Expr::Object(items, _) = &arg.value {
                             let ok = match &param_ty {
-                                SparType::Named(name) => self.object_matches_named_type_with_locals(items, name, locals),
+                                SparType::Named(name) => {
+                                    self.object_matches_named_type_with_locals(items, name, locals)
+                                }
                                 _ => false,
                             };
                             if !ok {
@@ -1589,7 +1955,10 @@ impl<'a> TypeChecker<'a> {
                                     "argument '{}' expects {} but got {}",
                                     arg.param_name,
                                     display_type(&param_ty),
-                                    actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                    actual
+                                        .as_ref()
+                                        .map(|t| display_type(t))
+                                        .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 hint: None,
                                 span: arg.span.clone(),
@@ -1667,9 +2036,7 @@ impl<'a> TypeChecker<'a> {
                 self.check_call_with_locals(expr, locals)?;
                 Ok(())
             }
-            Expr::Unary { operand, .. } => {
-                self.check_expr_with_locals(operand, locals)
-            }
+            Expr::Unary { operand, .. } => self.check_expr_with_locals(operand, locals),
             Expr::Index { source, index, .. } => {
                 self.check_expr_with_locals(source, locals)?;
                 self.check_expr_with_locals(index, locals)
@@ -1688,7 +2055,9 @@ impl<'a> TypeChecker<'a> {
     // ── Function declaration type checking ────────────────────────────────────
 
     fn check_function_decl(&mut self, f: &FunctionDecl) {
-        let mut local_types: HashMap<String, SparType> = f.params.iter()
+        let mut local_types: HashMap<String, SparType> = f
+            .params
+            .iter()
             .map(|p| (p.name.clone(), p.ty.clone()))
             .collect();
         self.check_func_stmts(&f.body.stmts, &f.ret, &mut local_types);
@@ -1709,23 +2078,53 @@ impl<'a> TypeChecker<'a> {
 
                     let handled_as_named_object = match (&lv.ty, &lv.value) {
                         (SparType::Named(name), Expr::Object(items, _)) => {
-                            let config_fields: Vec<&FieldDecl> = items.iter()
-                                .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                            let config_fields: Vec<&FieldDecl> = items
+                                .iter()
+                                .filter_map(|i| {
+                                    if let SectionItem::Field(f) = i {
+                                        Some(f)
+                                    } else {
+                                        None
+                                    }
+                                })
                                 .collect();
                             if let Some(entry) = self.symbols.types.get(name).cloned() {
-                                self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, &lv.name, local_types);
+                                self.validate_type_fields_with_locals(
+                                    &entry.fields,
+                                    &config_fields,
+                                    name,
+                                    &lv.name,
+                                    local_types,
+                                );
                             }
                             true
                         }
-                        (SparType::List(elem_ty), Expr::List(elems, _)) if matches!(elem_ty.as_ref(), SparType::Named(_)) => {
-                            let SparType::Named(name) = elem_ty.as_ref() else { unreachable!() };
+                        (SparType::List(elem_ty), Expr::List(elems, _))
+                            if matches!(elem_ty.as_ref(), SparType::Named(_)) =>
+                        {
+                            let SparType::Named(name) = elem_ty.as_ref() else {
+                                unreachable!()
+                            };
                             for elem in elems {
                                 if let Expr::Object(items, _) = elem {
-                                    let config_fields: Vec<&FieldDecl> = items.iter()
-                                        .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                                    let config_fields: Vec<&FieldDecl> = items
+                                        .iter()
+                                        .filter_map(|i| {
+                                            if let SectionItem::Field(f) = i {
+                                                Some(f)
+                                            } else {
+                                                None
+                                            }
+                                        })
                                         .collect();
                                     if let Some(entry) = self.symbols.types.get(name).cloned() {
-                                        self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, &lv.name, local_types);
+                                        self.validate_type_fields_with_locals(
+                                            &entry.fields,
+                                            &config_fields,
+                                            name,
+                                            &lv.name,
+                                            local_types,
+                                        );
                                     }
                                 }
                             }
@@ -1761,13 +2160,21 @@ impl<'a> TypeChecker<'a> {
                 FuncStmt::Return(ret_value, span) => {
                     self.check_return_value(ret_value, ret_ty, local_types, span);
                 }
-                FuncStmt::For { var_name, iterable, body, span } => {
+                FuncStmt::For {
+                    var_name,
+                    iterable,
+                    body,
+                    span,
+                } => {
                     let iterable_ty = self.infer_type_with_locals(iterable, local_types);
                     let elem_ty = match iterable_ty {
                         Some(SparType::List(elem)) => Some(*elem),
                         Some(other) => {
                             self.errors.push(SparError::TypeError {
-                                message: format!("`for ... in` requires a list, found '{}'", display_type(&other)),
+                                message: format!(
+                                    "`for ... in` requires a list, found '{}'",
+                                    display_type(&other)
+                                ),
                                 hint: None,
                                 span: span.clone(),
                             });
@@ -1827,7 +2234,9 @@ impl<'a> TypeChecker<'a> {
                             self.errors.push(SparError::TypeError {
                                 message: format!(
                                     "return field '{}' declared as '{}' but value has type '{}'",
-                                    field.name, display_type(field_ty), display_type(&actual_ty)
+                                    field.name,
+                                    display_type(field_ty),
+                                    display_type(&actual_ty)
                                 ),
                                 hint: None,
                                 span: field.span.clone(),
@@ -1846,34 +2255,64 @@ impl<'a> TypeChecker<'a> {
                 });
             }
             (SparType::Named(name), ReturnValue::SectionBlock(fields)) => {
-                let Some(entry) = self.symbols.types.get(name).cloned() else { return }; // resolver already reported it
+                let Some(entry) = self.symbols.types.get(name).cloned() else {
+                    return;
+                }; // resolver already reported it
                 for rf in fields {
                     if let Err(e) = self.check_expr_with_locals(&rf.value, local_types) {
                         self.errors.push(e);
                     }
                 }
-                let config_fields: Vec<FieldDecl> = fields.iter().map(|rf| FieldDecl {
-                    name: rf.name.clone(),
-                    optional: false,
-                    ty: rf.ty.clone(),
-                    value: Some(FieldValue::Expr(rf.value.clone())),
-                    span: rf.span.clone(),
-                }).collect();
+                let config_fields: Vec<FieldDecl> = fields
+                    .iter()
+                    .map(|rf| FieldDecl {
+                        name: rf.name.clone(),
+                        optional: false,
+                        ty: rf.ty.clone(),
+                        value: Some(FieldValue::Expr(rf.value.clone())),
+                        span: rf.span.clone(),
+                    })
+                    .collect();
                 let config_field_refs: Vec<&FieldDecl> = config_fields.iter().collect();
-                self.validate_type_fields_with_locals(&entry.fields, &config_field_refs, name, "return", local_types);
+                self.validate_type_fields_with_locals(
+                    &entry.fields,
+                    &config_field_refs,
+                    name,
+                    "return",
+                    local_types,
+                );
             }
-            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _))) if matches!(elem_ty.as_ref(), SparType::Named(_)) => {
-                let SparType::Named(name) = elem_ty.as_ref() else { unreachable!() };
-                let Some(entry) = self.symbols.types.get(name).cloned() else { return };
+            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _)))
+                if matches!(elem_ty.as_ref(), SparType::Named(_)) =>
+            {
+                let SparType::Named(name) = elem_ty.as_ref() else {
+                    unreachable!()
+                };
+                let Some(entry) = self.symbols.types.get(name).cloned() else {
+                    return;
+                };
                 for item in items {
                     if let Expr::Object(obj_items, _) = item {
                         if let Err(e) = self.check_expr_with_locals(item, local_types) {
                             self.errors.push(e);
                         }
-                        let config_fields: Vec<&FieldDecl> = obj_items.iter()
-                            .filter_map(|i| if let SectionItem::Field(f) = i { Some(f) } else { None })
+                        let config_fields: Vec<&FieldDecl> = obj_items
+                            .iter()
+                            .filter_map(|i| {
+                                if let SectionItem::Field(f) = i {
+                                    Some(f)
+                                } else {
+                                    None
+                                }
+                            })
                             .collect();
-                        self.validate_type_fields_with_locals(&entry.fields, &config_fields, name, "return", local_types);
+                        self.validate_type_fields_with_locals(
+                            &entry.fields,
+                            &config_fields,
+                            name,
+                            "return",
+                            local_types,
+                        );
                     } else {
                         self.errors.push(SparError::TypeError {
                             message: format!(
@@ -1896,7 +2335,10 @@ impl<'a> TypeChecker<'a> {
                         message: format!(
                             "function declares return type '{}' but this 'return' provides '{}'",
                             display_type(ty),
-                            actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                            actual
+                                .as_ref()
+                                .map(|t| display_type(t))
+                                .unwrap_or_else(|| "unknown".into()),
                         ),
                         hint: None,
                         span: span.clone(),
@@ -1931,7 +2373,10 @@ impl<'a> TypeChecker<'a> {
             self.errors.push(SparError::TypeError {
                 message: format!(
                     "if condition must be 'bool', found '{}'",
-                    cond_ty.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                    cond_ty
+                        .as_ref()
+                        .map(|t| display_type(t))
+                        .unwrap_or_else(|| "unknown".into()),
                 ),
                 hint: None,
                 span: if_stmt.span.clone(),
@@ -1949,14 +2394,18 @@ impl<'a> TypeChecker<'a> {
         // Only check type agreement when NEITHER branch is terminal
         if !then_terminal && !else_terminal {
             for (name, then_ty) in &then_types {
-                if local_types.contains_key(name) { continue; }
+                if local_types.contains_key(name) {
+                    continue;
+                }
                 if let Some(else_ty) = else_types.get(name) {
                     if then_ty != else_ty {
                         self.errors.push(SparError::TypeError {
                             message: format!(
                                 "'{}' has type '{}' in the if-branch but '{}' in the else-branch \
                                  — both branches must declare it with the same type",
-                                name, display_type(then_ty), display_type(else_ty)
+                                name,
+                                display_type(then_ty),
+                                display_type(else_ty)
                             ),
                             hint: None,
                             span: if_stmt.span.clone(),
@@ -1968,9 +2417,13 @@ impl<'a> TypeChecker<'a> {
 
         // Merge non-terminal branch(es) into outer scope
         match (then_terminal, else_terminal) {
-            (true, true)  => {}
-            (false, true) => { local_types.extend(then_types); }
-            (true, false) => { local_types.extend(else_types); }
+            (true, true) => {}
+            (false, true) => {
+                local_types.extend(then_types);
+            }
+            (true, false) => {
+                local_types.extend(else_types);
+            }
             (false, false) => {
                 for (name, ty) in &then_types {
                     if else_types.get(name) == Some(ty) {
@@ -1990,9 +2443,9 @@ impl<'a> TypeChecker<'a> {
     ) -> Option<SparType> {
         match expr {
             Expr::Literal(lit) => match lit {
-                Literal::Int(_)   => Some(SparType::Int),
+                Literal::Int(_) => Some(SparType::Int),
                 Literal::Float(_) => Some(SparType::Float),
-                Literal::Bool(_)  => Some(SparType::Bool),
+                Literal::Bool(_) => Some(SparType::Bool),
             },
             Expr::String(_) => Some(SparType::Str),
             Expr::NamespaceRef(nr) if nr.segments.len() == 1 => {
@@ -2007,7 +2460,10 @@ impl<'a> TypeChecker<'a> {
                     if nr.segments.len() == 1 {
                         if let Some(ty) = locals.get(&nr.segments[0]) {
                             return match ty {
-                                SparType::Named(type_name) => self.symbols.types.get(type_name)
+                                SparType::Named(type_name) => self
+                                    .symbols
+                                    .types
+                                    .get(type_name)
                                     .and_then(|te| te.fields.iter().find(|f| &f.name == field))
                                     .map(|f| self.field_shape_to_type(&f.shape)),
                                 _ => None,
@@ -2021,24 +2477,37 @@ impl<'a> TypeChecker<'a> {
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
                     let t = self.infer_type_with_locals(operand, locals)?;
-                    if t != SparType::Bool { return None; }
+                    if t != SparType::Bool {
+                        return None;
+                    }
                     Some(SparType::Bool)
                 }
                 UnOp::Neg => {
                     let t = self.infer_type_with_locals(operand, locals)?;
-                    if matches!(t, SparType::Int | SparType::Float) { Some(t) } else { None }
+                    if matches!(t, SparType::Int | SparType::Float) {
+                        Some(t)
+                    } else {
+                        None
+                    }
                 }
             },
             Expr::Index { source, index, .. } => {
                 let idx_ty = self.infer_type_with_locals(index, locals)?;
-                if idx_ty != SparType::Int { return None; }
+                if idx_ty != SparType::Int {
+                    return None;
+                }
                 match self.infer_type_with_locals(source, locals)? {
                     SparType::List(elem) => Some(*elem),
                     _ => None,
                 }
             }
             Expr::BinaryOp(b) => self.infer_binary_type_with_locals(b, locals),
-            Expr::Comprehension { source, body, var_name, .. } => {
+            Expr::Comprehension {
+                source,
+                body,
+                var_name,
+                ..
+            } => {
                 let source_ty = self.infer_type_with_locals(source, locals)?;
                 let elem_ty = match source_ty {
                     SparType::List(inner) => *inner,
@@ -2050,7 +2519,9 @@ impl<'a> TypeChecker<'a> {
                 Some(SparType::List(Box::new(body_ty)))
             }
             Expr::List(items, _) => {
-                let first = items.first().and_then(|e| self.infer_type_with_locals(e, locals))?;
+                let first = items
+                    .first()
+                    .and_then(|e| self.infer_type_with_locals(e, locals))?;
                 Some(SparType::List(Box::new(first)))
             }
             Expr::Grouped(inner, _) => self.infer_type_with_locals(inner, locals),
@@ -2081,7 +2552,11 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             BinOp::Eq | BinOp::NotEq => {
-                if lty == rty { Some(SparType::Bool) } else { None }
+                if lty == rty {
+                    Some(SparType::Bool)
+                } else {
+                    None
+                }
             }
             BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                 if matches!(lty, SparType::Int | SparType::Float) && lty == rty {
@@ -2098,7 +2573,11 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             BinOp::Fallback => {
-                if lty == rty { Some(lty) } else { None }
+                if lty == rty {
+                    Some(lty)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -2109,16 +2588,20 @@ mod tests {
     use super::*;
 
     fn check_ok(src: &str) {
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        let table   = crate::resolver::Resolver::new().resolve(&program, &[]).expect("resolve");
+        let table = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .expect("resolve");
         TypeChecker::check(&program, &table).expect("type check failed unexpectedly");
     }
 
     fn check_err(src: &str) -> Vec<String> {
-        let tokens  = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
-        let table   = crate::resolver::Resolver::new().resolve(&program, &[]).expect("resolve");
+        let table = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .expect("resolve");
         TypeChecker::check(&program, &table)
             .unwrap_err()
             .into_iter()
@@ -2132,11 +2615,13 @@ mod tests {
 
     #[test]
     fn test_clean_program() {
-        check_ok(r#"
+        check_ok(
+            r#"
             var port: int = 3000;
             var name: str = "keel";
             [Server]{ bind: str = "0.0.0.0"; };
-        "#);
+        "#,
+        );
     }
 
     #[test]
@@ -2163,7 +2648,10 @@ mod tests {
 
     #[test]
     fn test_int_var_str_mismatch() {
-        assert!(has_type_error(r#"var port: int = "3000";"#, "type mismatch"));
+        assert!(has_type_error(
+            r#"var port: int = "3000";"#,
+            "type mismatch"
+        ));
     }
 
     #[test]
@@ -2200,7 +2688,7 @@ mod tests {
     fn test_namespace_ref_int_to_int() {
         let src = r#"
             var port: int = 3000;
-            var p2: int = global::port;
+            var p2: int = global.port;
         "#;
         check_ok(src);
     }
@@ -2209,7 +2697,7 @@ mod tests {
     fn test_namespace_ref_str_to_int_mismatch() {
         let src = r#"
             var name: str = "keel";
-            var bad: int = global::name;
+            var bad: int = global.name;
         "#;
         assert!(has_type_error(src, "type mismatch"));
     }
@@ -2218,7 +2706,7 @@ mod tests {
     fn test_section_field_ref_type() {
         let src = r#"
             [Db]{ pool: int = 5; };
-            var p: int = Db::pool;
+            var p: int = Db.pool;
         "#;
         check_ok(src);
     }
@@ -2230,7 +2718,10 @@ mod tests {
 
     #[test]
     fn test_env_in_int_field() {
-        assert!(has_type_error(r#"var port: int = env("PORT");"#, "type mismatch"));
+        assert!(has_type_error(
+            r#"var port: int = env("PORT");"#,
+            "type mismatch"
+        ));
     }
 
     #[test]
@@ -2243,7 +2734,8 @@ mod tests {
         let src = r#"var port: int = env("PORT") ?? 3000;"#;
         let errs = check_err(src);
         assert!(
-            errs.iter().any(|e| e.contains("??") || e.contains("Fallback")),
+            errs.iter()
+                .any(|e| e.contains("??") || e.contains("Fallback")),
             "got: {errs:?}"
         );
     }
@@ -2266,7 +2758,10 @@ mod tests {
 
     #[test]
     fn test_invalid_typed_list_element() {
-        assert!(has_type_error(r#"var ports: [int] = [3000, "bad", 9090];"#, "list element type mismatch"));
+        assert!(has_type_error(
+            r#"var ports: [int] = [3000, "bad", 9090];"#,
+            "list element type mismatch"
+        ));
     }
 
     #[test]
@@ -2306,7 +2801,8 @@ mod tests {
         match crate::parser::Parser::new(tokens).parse() {
             Err(_) => return, // parser rejection is fine
             Ok(program) => {
-                let symbols = crate::resolver::Resolver::new().resolve(&program, &[])
+                let symbols = crate::resolver::Resolver::new()
+                    .resolve(&program, &[])
                     .unwrap_or_else(|_| crate::resolver::SymbolTable {
                         globals: Default::default(),
                         sections: Default::default(),
@@ -2331,7 +2827,8 @@ mod tests {
         match crate::parser::Parser::new(tokens).parse() {
             Err(_) => return, // parse rejection is fine
             Ok(program) => {
-                let symbols = crate::resolver::Resolver::new().resolve(&program, &[])
+                let symbols = crate::resolver::Resolver::new()
+                    .resolve(&program, &[])
                     .unwrap_or_else(|_| crate::resolver::SymbolTable {
                         globals: Default::default(),
                         sections: Default::default(),
@@ -2342,7 +2839,10 @@ mod tests {
                         function_groups: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
-                assert!(result.is_err(), "section field with expr value must be rejected");
+                assert!(
+                    result.is_err(),
+                    "section field with expr value must be rejected"
+                );
             }
         }
     }
@@ -2359,19 +2859,26 @@ mod tests {
         "#;
         let errs = check_err(src);
         let errs_str = format!("{:?}", errs);
-        assert!(errs_str.contains("int") || errs_str.contains("str") || errs_str.contains("type") || errs_str.contains("arg"),
-            "expected type mismatch error, got: {errs:?}");
+        assert!(
+            errs_str.contains("int")
+                || errs_str.contains("str")
+                || errs_str.contains("type")
+                || errs_str.contains("arg"),
+            "expected type mismatch error, got: {errs:?}"
+        );
     }
 
     // ── Group 4: early-return type checking ───────────────────────────────────
 
     #[test]
     fn return_with_correct_type_is_ok() {
-        check_ok(r#"
+        check_ok(
+            r#"
             function f(x: int) -> int {
                 return x;
             }
-        "#);
+        "#,
+        );
     }
 
     #[test]
@@ -2384,11 +2891,13 @@ mod tests {
 
     #[test]
     fn return_in_both_branches_is_ok() {
-        check_ok(r#"
+        check_ok(
+            r#"
             function pick(b: bool) -> int {
                 if b { return 1; } else { return 2; }
             }
-        "#);
+        "#,
+        );
     }
 
     #[test]
@@ -2403,11 +2912,13 @@ mod tests {
 
     #[test]
     fn section_fn_with_section_block_return_is_ok() {
-        check_ok(r#"
+        check_ok(
+            r#"
             function make() -> section {
                 return { port: int = 8080; };
             }
-        "#);
+        "#,
+        );
     }
 
     #[test]
@@ -2429,12 +2940,14 @@ mod tests {
     #[test]
     fn terminal_branch_exemption_local_available_after_if() {
         // then-branch always returns; else-branch declares `y` — `y` must be available after
-        check_ok(r#"
+        check_ok(
+            r#"
             function f(b: bool) -> int {
                 if b { return 0; } else { var y: int = 1; }
                 return y;
             }
-        "#);
+        "#,
+        );
     }
 
     #[test]

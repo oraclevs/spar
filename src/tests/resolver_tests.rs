@@ -1,7 +1,9 @@
 fn resolve_ok(src: &str) -> crate::resolver::SymbolTable {
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap()
+    crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .unwrap()
 }
 
 fn resolve_err(src: &str) -> String {
@@ -25,28 +27,40 @@ fn named_type_on_var_resolves_when_type_exists() {
 fn named_type_on_var_errors_when_type_missing() {
     let src = "var x: Ghost = 1;\n";
     let errs = resolve_err(src);
-    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+    assert!(
+        errs.contains("undefined type") && errs.contains("Ghost"),
+        "got: {errs}"
+    );
 }
 
 #[test]
 fn named_type_on_list_var_errors_when_type_missing() {
     let src = "var xs: [Ghost] = [];\n";
     let errs = resolve_err(src);
-    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+    assert!(
+        errs.contains("undefined type") && errs.contains("Ghost"),
+        "got: {errs}"
+    );
 }
 
 #[test]
 fn named_type_on_function_param_and_return_errors_when_type_missing() {
     let src = "function f(l: Ghost) -> Ghost { return l; }\n";
     let errs = resolve_err(src);
-    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+    assert!(
+        errs.contains("undefined type") && errs.contains("Ghost"),
+        "got: {errs}"
+    );
 }
 
 #[test]
 fn named_type_on_section_field_errors_when_type_missing() {
     let src = "[Tree]{ root: Ghost = 1; };\n";
     let errs = resolve_err(src);
-    assert!(errs.contains("undefined type") && errs.contains("Ghost"), "got: {errs}");
+    assert!(
+        errs.contains("undefined type") && errs.contains("Ghost"),
+        "got: {errs}"
+    );
 }
 
 #[test]
@@ -115,7 +129,10 @@ fn resolver_closure_deps_captured() {
     "#;
     let sym = resolve_ok(src);
     let f = &sym.functions["greet"];
-    assert!(f.closure_deps.iter().any(|d| matches!(d, crate::depgraph::DeclId::Global(n) if n == "appName")));
+    assert!(f
+        .closure_deps
+        .iter()
+        .any(|d| matches!(d, crate::depgraph::DeclId::Global(n) if n == "appName")));
 }
 
 // ── Phase 11d tests ───────────────────────────────────────────────────────────
@@ -190,12 +207,16 @@ fn for_loop_var_not_in_scope_after_loop() {
 
 // ── Schema validation helpers ────────────────────────────────────────────────
 
-fn schema_validate(schema_src: &str, config_src: &str)
-    -> Result<std::collections::HashMap<String, Vec<crate::ast::SchemaField>>, Vec<crate::error::SparError>>
-{
+fn schema_validate(
+    schema_src: &str,
+    config_src: &str,
+) -> Result<
+    std::collections::HashMap<String, Vec<crate::ast::SchemaField>>,
+    Vec<crate::error::SparError>,
+> {
     use std::io::Write;
-    use tempfile::NamedTempFile;
     use std::path::Path;
+    use tempfile::NamedTempFile;
 
     let mut schema_file = NamedTempFile::new().unwrap();
     write!(schema_file, "{}", schema_src).unwrap();
@@ -205,7 +226,9 @@ fn schema_validate(schema_src: &str, config_src: &str)
     // Replace the placeholder path in config_src
     let config_src_resolved = config_src.replace("SCHEMA_PATH", &schema_path);
 
-    let tokens = crate::lexer::Lexer::new(&config_src_resolved).tokenize().unwrap();
+    let tokens = crate::lexer::Lexer::new(&config_src_resolved)
+        .tokenize()
+        .unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     let base = Path::new(".");
     crate::loader::validate_schema_imports(&prog, base)
@@ -246,7 +269,11 @@ fn missing_required_field_is_schema_error() {
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("missing") || combined.contains("b"), "must mention missing field 'b': {}", combined);
+    assert!(
+        combined.contains("missing") || combined.contains("b"),
+        "must mention missing field 'b': {}",
+        combined
+    );
 }
 
 #[test]
@@ -254,7 +281,11 @@ fn missing_optional_field_is_fine() {
     let schema_src = "@SchemaFile\nSchema [X]{ a: int; b?: str; }\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
-    assert!(result.is_ok(), "omitting optional field must be fine: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "omitting optional field must be fine: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -263,7 +294,11 @@ fn extra_field_not_in_schema_is_error() {
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; extra: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("extra") || combined.contains("not declared"), "must mention extra field: {}", combined);
+    assert!(
+        combined.contains("extra") || combined.contains("not declared"),
+        "must mention extra field: {}",
+        combined
+    );
 }
 
 #[test]
@@ -273,7 +308,11 @@ fn wrong_type_on_present_field_is_schema_error() {
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("type") || combined.contains("bool") || combined.contains("int"), "must mention type mismatch: {}", combined);
+    assert!(
+        combined.contains("type") || combined.contains("bool") || combined.contains("int"),
+        "must mention type mismatch: {}",
+        combined
+    );
 }
 
 #[test]
@@ -287,7 +326,11 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     use tempfile::NamedTempFile;
 
     let mut schema_file = NamedTempFile::new().unwrap();
-    write!(schema_file, "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }}\n").unwrap();
+    write!(
+        schema_file,
+        "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }}\n"
+    )
+    .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
 
     let config_src = format!(
@@ -300,9 +343,16 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     let schema_bindings = crate::loader::validate_schema_imports(&program, Path::new("."))
         .expect("schema validation must pass — fields match the schema");
 
-    let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
-    let result = crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings);
-    assert!(result.is_ok(), "schema-bound untyped fields must not error: {:?}", result.err());
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&program, &[])
+        .unwrap();
+    let result =
+        crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings);
+    assert!(
+        result.is_ok(),
+        "schema-bound untyped fields must not error: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -314,12 +364,15 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     use tempfile::NamedTempFile;
 
     let mut schema_file = NamedTempFile::new().unwrap();
-    write!(schema_file, "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }}\n").unwrap();
+    write!(
+        schema_file,
+        "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }}\n"
+    )
+    .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
 
-    let config_src = format!(
-        "import schema \"{schema_path}\";\n[Flutter]{{ gitInit: \"yes\"; }};\n"
-    );
+    let config_src =
+        format!("import schema \"{schema_path}\";\n[Flutter]{{ gitInit: \"yes\"; }};\n");
 
     let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
@@ -327,10 +380,16 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     let schema_bindings = crate::loader::validate_schema_imports(&program, Path::new("."))
         .expect("schema validation must pass at the loader stage — value-type checking is the typechecker's job here");
 
-    let symbols = crate::resolver::Resolver::new().resolve(&program, &[]).unwrap();
-    let errs = crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings)
-        .unwrap_err();
-    assert!(!errs.is_empty(), "a str value for a schema-declared bool field must still error");
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&program, &[])
+        .unwrap();
+    let errs =
+        crate::typechecker::TypeChecker::check_with_schema(&program, &symbols, schema_bindings)
+            .unwrap_err();
+    assert!(
+        !errs.is_empty(),
+        "a str value for a schema-declared bool field must still error"
+    );
 }
 
 #[test]
@@ -339,29 +398,42 @@ fn missing_required_section_is_schema_error() {
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n"; // [Y] not [X]
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("X") || combined.contains("missing") || combined.contains("required"), "must mention missing section X: {}", combined);
+    assert!(
+        combined.contains("X") || combined.contains("missing") || combined.contains("required"),
+        "must mention missing section X: {}",
+        combined
+    );
 }
 
 #[test]
 fn missing_optional_section_is_fine() {
-    let schema_src = "@SchemaFile\nSchema? [X]{ a: int; }\n";
+    let _schema_src = "@SchemaFile\nSchema? [X]{ a: int; }\n";
     // config has no [X] section at all
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n";
     // [inference] This will also fail on extra-section check since [Y] isn't in schema.
     // To isolate this test, schema must declare [Y] too.
     let schema_src2 = "@SchemaFile\nSchema? [X]{ a: int; }\nSchema [Y]{ z: int; }\n";
     let result = schema_validate(schema_src2, config_src);
-    assert!(result.is_ok(), "omitting optional section must be fine: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "omitting optional section must be fine: {:?}",
+        result.err()
+    );
 }
 
 #[test]
 fn config_section_with_no_schema_entry_is_error() {
     // symmetric strictness: config declares a section the schema never mentions
     let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
+    let config_src =
+        "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("Unrelated") || combined.contains("not declared"), "must reject undeclared section: {}", combined);
+    assert!(
+        combined.contains("Unrelated") || combined.contains("not declared"),
+        "must reject undeclared section: {}",
+        combined
+    );
 }
 
 #[test]
@@ -384,7 +456,11 @@ Schema [X]{
 "#;
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("host") || combined.contains("missing"), "must mention missing nested field 'host': {}", combined);
+    assert!(
+        combined.contains("host") || combined.contains("missing"),
+        "must mention missing nested field 'host': {}",
+        combined
+    );
 }
 
 #[test]
@@ -393,7 +469,11 @@ fn importing_a_non_schema_file_as_schema_is_error() {
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(not_a_schema, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(combined.contains("schema file") || combined.contains("@SchemaFile"), "must explain that the imported file is not a schema file: {}", combined);
+    assert!(
+        combined.contains("schema file") || combined.contains("@SchemaFile"),
+        "must explain that the imported file is not a schema file: {}",
+        combined
+    );
 }
 
 // ── Fix 1: two schema imports — Rule 2 must be per combined set ──────────────
@@ -404,8 +484,8 @@ fn importing_a_non_schema_file_as_schema_is_error() {
 #[test]
 fn two_schema_imports_each_owning_one_section_passes() {
     use std::io::Write;
-    use tempfile::NamedTempFile;
     use std::path::Path;
+    use tempfile::NamedTempFile;
 
     // Schema A declares [A]
     let mut schema_a = NamedTempFile::new().unwrap();
@@ -460,7 +540,7 @@ fn resolver_accepts_self_reference_inside_section() {
         [Postgres]{
             environment: section = {
                 postgresDb: str = "my_app";
-                postgresUser: str = self::environment::postgresDb;
+                postgresUser: str = self.environment.postgresDb;
             };
         };
     "#;
@@ -506,7 +586,10 @@ fn resolver_rejects_duplicate_type() {
 fn resolver_rejects_type_named_schema() {
     let src = r#"type [Schema]{ a: int; }"#;
     let err = resolve_err(src);
-    assert!(err.contains("reserved") || err.contains("Schema"), "got: {err}");
+    assert!(
+        err.contains("reserved") || err.contains("Schema"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -524,7 +607,10 @@ fn resolver_rejects_undefined_named_type_reference() {
         }
     "#;
     let err = resolve_err(src);
-    assert!(err.contains("undefined type") || err.contains("NoSuchType"), "got: {err}");
+    assert!(
+        err.contains("undefined type") || err.contains("NoSuchType"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -535,7 +621,10 @@ fn resolver_rejects_unknown_type_binding() {
         };
     "#;
     let err = resolve_err(src);
-    assert!(err.contains("undefined type") || err.contains("NoSuchType"), "got: {err}");
+    assert!(
+        err.contains("undefined type") || err.contains("NoSuchType"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -558,7 +647,8 @@ fn imported_type_selectively_can_bind_a_section() {
     fs::write(
         dir.path().join("types.spar"),
         "export type [PostgresType]{ image: str; }\n",
-    ).unwrap();
+    )
+    .unwrap();
     let src = concat!(
         "import type { PostgresType } from \"types.spar\";\n",
         "[Postgres] -> PostgresType {\n",
@@ -569,7 +659,10 @@ fn imported_type_selectively_can_bind_a_section() {
     let mut program = crate::parser::Parser::new(tokens).parse().unwrap();
     let mut loader = crate::loader::ImportLoader::new(dir.path());
     crate::loader::expand_imports(&mut program, &mut loader).expect("expand must succeed");
-    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &std::collections::HashMap::new());
+    let symbols = crate::resolver::Resolver::resolve_with_imports(
+        &program,
+        &std::collections::HashMap::new(),
+    );
     assert!(symbols.is_ok(), "got: {:?}", symbols.err());
 }
 
@@ -629,7 +722,10 @@ fn enum_variant_ref_resolves() {
 #[test]
 fn enum_undeclared_variant_errors() {
     let errs = resolve_err("enum Devices { Ios, Android };\nvar x: Devices = Devices::Ghost;\n");
-    assert!(errs.contains("Ghost") && errs.contains("Devices"), "got: {errs}");
+    assert!(
+        errs.contains("Ghost") && errs.contains("Devices"),
+        "got: {errs}"
+    );
 }
 
 #[test]
@@ -649,7 +745,7 @@ fn named_field_access_on_global_var_resolves() {
     let src = r#"
         type [Human]{ name: str; age: int; }
         var person: Human = { name: "Mike"; age: 5; };
-        var pname: str = person::name;
+        var pname: str = person.name;
     "#;
     resolve_ok(src);
 }
@@ -660,7 +756,7 @@ fn named_field_access_on_function_local_var_resolves() {
         type [Human]{ name: str; age: int; }
         function greet(h: Human) -> str {
             var local: Human = h;
-            return local::name;
+            return local.name;
         }
     "#;
     resolve_ok(src);
@@ -672,7 +768,7 @@ fn named_field_access_on_loop_var_resolves() {
         type [Human]{ name: str; age: int; }
         function looper(people: [Human]) -> int {
             for person in people {
-                if person::name == "jude" { return 6; }
+                if person.name == "jude" { return 6; }
                 return 0;
             }
             return 0;
@@ -692,7 +788,10 @@ fn function_group_registers_its_functions() {
         }
     "#;
     let table = resolve_ok(src);
-    let group = table.function_groups.get("EdgeInsect").expect("group must be registered");
+    let group = table
+        .function_groups
+        .get("EdgeInsect")
+        .expect("group must be registered");
     assert!(!group.is_private);
     assert!(group.functions.contains_key("only"));
     assert!(group.functions.contains_key("semantic"));
@@ -706,7 +805,10 @@ fn function_group_duplicate_name_errors() {
         functionGroup EdgeInsect { function other() -> int { return 2; } }
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("already defined") && errs.contains("EdgeInsect"), "got: {errs}");
+    assert!(
+        errs.contains("already defined") && errs.contains("EdgeInsect"),
+        "got: {errs}"
+    );
 }
 
 #[test]
@@ -718,7 +820,10 @@ fn function_group_duplicate_inner_function_errors() {
         }
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("already defined") && errs.contains("only"), "got: {errs}");
+    assert!(
+        errs.contains("already defined") && errs.contains("only"),
+        "got: {errs}"
+    );
 }
 
 #[test]
@@ -736,7 +841,10 @@ fn function_group_missing_return_on_all_paths_errors() {
         }
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("does not guarantee a value is returned"), "got: {errs}");
+    assert!(
+        errs.contains("does not guarantee a value is returned"),
+        "got: {errs}"
+    );
 }
 
 // ── functionGroup call resolution ────────────────────────────────────────────
@@ -761,7 +869,10 @@ fn function_group_call_undefined_function_errors() {
         var x: int = EdgeInsect::missing();
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("missing") && errs.contains("EdgeInsect"), "got: {errs}");
+    assert!(
+        errs.contains("missing") && errs.contains("EdgeInsect"),
+        "got: {errs}"
+    );
 }
 
 #[test]
@@ -786,7 +897,10 @@ fn function_group_name_colliding_with_import_alias_errors() {
         }
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("EdgeInsect") && errs.contains("import alias"), "got: {errs}");
+    assert!(
+        errs.contains("EdgeInsect") && errs.contains("import alias"),
+        "got: {errs}"
+    );
 }
 
 // ── enum-typed field inside a `type [X]{...}` declaration ───────────────────
@@ -885,19 +999,28 @@ fn old_style_section_double_colon_field_access_errors_with_migration_hint() {
         var p: int = Database::pool;
     "#;
     let errs = resolve_err(src);
-    assert!(errs.contains("'.'") || errs.to_lowercase().contains("no longer supported"), "got: {errs}");
+    assert!(
+        errs.contains("'.'") || errs.to_lowercase().contains("no longer supported"),
+        "got: {errs}"
+    );
 }
 
 #[test]
 fn old_style_self_double_colon_errors_with_migration_hint() {
     let src = r#"[Server]{ port: int = 8080; display: str = self::port; };"#;
     let errs = resolve_err(src);
-    assert!(errs.to_lowercase().contains("no longer supported") || errs.contains("'.'"), "got: {errs}");
+    assert!(
+        errs.to_lowercase().contains("no longer supported") || errs.contains("'.'"),
+        "got: {errs}"
+    );
 }
 
 #[test]
 fn unknown_double_colon_namespace_still_gets_generic_error() {
     let src = r#"var x: str = totallyUnknownThing::field;"#;
     let errs = resolve_err(src);
-    assert!(errs.contains("undefined namespace") || errs.contains("undefined function"), "got: {errs}");
+    assert!(
+        errs.contains("undefined namespace") || errs.contains("undefined function"),
+        "got: {errs}"
+    );
 }

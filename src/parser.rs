@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::error::{SparError, Span};
+use crate::error::{Span, SparError};
 use crate::token::{SpannedToken, Token};
 
 pub struct Parser {
@@ -13,7 +13,10 @@ impl Parser {
     }
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).map(|st| &st.token).unwrap_or(&Token::Eof)
+        self.tokens
+            .get(self.pos)
+            .map(|st| &st.token)
+            .unwrap_or(&Token::Eof)
     }
 
     fn peek_span(&self) -> Span {
@@ -34,7 +37,11 @@ impl Parser {
             Ok(self.advance().clone())
         } else {
             Err(SparError::ParseError {
-                message: format!("expected {}, found {}", expected.human_name(), self.peek().human_name()),
+                message: format!(
+                    "expected {}, found {}",
+                    expected.human_name(),
+                    self.peek().human_name()
+                ),
                 span: self.peek_span(),
             })
         }
@@ -79,7 +86,10 @@ impl Parser {
             let (name, name_span) = self.expect_ident()?;
             if name != "SchemaFile" {
                 return Err(SparError::ParseError {
-                    message: format!("unknown file pragma `@{}`; only `@SchemaFile` is supported", name),
+                    message: format!(
+                        "unknown file pragma `@{}`; only `@SchemaFile` is supported",
+                        name
+                    ),
                     span: name_span,
                 });
             }
@@ -90,7 +100,9 @@ impl Parser {
 
         let mut items = Vec::new();
         loop {
-            if self.at(&Token::Eof) { break; }
+            if self.at(&Token::Eof) {
+                break;
+            }
             items.push(self.parse_top_level_item()?);
         }
 
@@ -136,14 +148,18 @@ impl Parser {
                 if let TopLevelItem::SchemaFrom(sf) = item {
                     return Err(SparError::ParseError {
                         message: "`SchemaFrom [...]` is only legal inside a schema file — \
-                                   add `@SchemaFile` at the top of this file".to_string(),
+                                   add `@SchemaFile` at the top of this file"
+                            .to_string(),
                         span: sf.span.clone(),
                     });
                 }
             }
         }
 
-        Ok(Program { is_schema_file, items })
+        Ok(Program {
+            is_schema_file,
+            items,
+        })
     }
 
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
@@ -218,7 +234,11 @@ impl Parser {
             self.advance();
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl { path, kind: ImportKind::Schema, span });
+            return Ok(ImportDecl {
+                path,
+                kind: ImportKind::Schema,
+                span,
+            });
         }
 
         // `import asPartOf "path";`
@@ -226,7 +246,11 @@ impl Parser {
             self.advance();
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl { path, kind: ImportKind::AsPartOf, span });
+            return Ok(ImportDecl {
+                path,
+                kind: ImportKind::AsPartOf,
+                span,
+            });
         }
 
         // `import type { A, B } from "path";`
@@ -236,7 +260,11 @@ impl Parser {
             self.expect_from_keyword()?;
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl { path, kind: ImportKind::TypeSelective(items), span });
+            return Ok(ImportDecl {
+                path,
+                kind: ImportKind::TypeSelective(items),
+                span,
+            });
         }
 
         // `import { A, B as C } from "path";`
@@ -245,7 +273,11 @@ impl Parser {
             self.expect_from_keyword()?;
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl { path, kind: ImportKind::Selective(items), span });
+            return Ok(ImportDecl {
+                path,
+                kind: ImportKind::Selective(items),
+                span,
+            });
         }
 
         // `import "path" [as alias];`
@@ -258,14 +290,20 @@ impl Parser {
             None
         };
         self.expect(&Token::Semicolon)?;
-        Ok(ImportDecl { path, kind: ImportKind::Aliased(alias), span })
+        Ok(ImportDecl {
+            path,
+            kind: ImportKind::Aliased(alias),
+            span,
+        })
     }
 
     fn parse_import_items(&mut self) -> Result<Vec<ImportItem>, SparError> {
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         loop {
-            if self.at(&Token::RBrace) { break; }
+            if self.at(&Token::RBrace) {
+                break;
+            }
             let item_span = self.peek_span();
             let (name, name_span) = self.expect_ident()?;
             let alias = if self.at(&Token::As) {
@@ -275,7 +313,12 @@ impl Parser {
             } else {
                 None
             };
-            items.push(ImportItem { name, name_span, alias, span: item_span });
+            items.push(ImportItem {
+                name,
+                name_span,
+                alias,
+                span: item_span,
+            });
             if self.at(&Token::Comma) {
                 self.advance();
             } else {
@@ -286,7 +329,7 @@ impl Parser {
         if items.is_empty() {
             return Err(self.error(
                 "selective import must name at least one item — \
-                 use `import \"path\" as alias;` to import a whole file"
+                 use `import \"path\" as alias;` to import a whole file",
             ));
         }
         Ok(items)
@@ -294,7 +337,10 @@ impl Parser {
 
     fn expect_from_keyword(&mut self) -> Result<(), SparError> {
         match self.peek() {
-            Token::Ident(s) if s == "from" => { self.advance(); Ok(()) }
+            Token::Ident(s) if s == "from" => {
+                self.advance();
+                Ok(())
+            }
             _ => Err(self.error(format!(
                 "expected 'from' after import list, found {}",
                 self.peek().human_name()
@@ -308,13 +354,22 @@ impl Parser {
         let content = match self.peek() {
             Token::StringFragment(_) => {
                 let st = self.advance().clone();
-                if let Token::StringFragment(s) = st.token { s } else { unreachable!() }
+                if let Token::StringFragment(s) = st.token {
+                    s
+                } else {
+                    unreachable!()
+                }
             }
             Token::InterpolStart => {
                 return Err(self.error("import paths cannot contain interpolation"));
             }
             Token::StringEnd => String::new(),
-            _ => return Err(self.error(format!("expected string content, found {}", self.peek().human_name()))),
+            _ => {
+                return Err(self.error(format!(
+                    "expected string content, found {}",
+                    self.peek().human_name()
+                )))
+            }
         };
 
         if self.at(&Token::InterpolStart) {
@@ -349,7 +404,14 @@ impl Parser {
         };
 
         self.expect(&Token::Semicolon)?;
-        Ok(VarDecl { exported, name, optional, ty, value, span })
+        Ok(VarDecl {
+            exported,
+            name,
+            optional,
+            ty,
+            value,
+            span,
+        })
     }
 
     fn parse_dynamic_decl(&mut self) -> Result<DynamicDecl, SparError> {
@@ -377,13 +439,18 @@ impl Parser {
         };
 
         self.expect(&Token::Semicolon)?;
-        Ok(DynamicDecl { name, optional, value, span })
+        Ok(DynamicDecl {
+            name,
+            optional,
+            value,
+            span,
+        })
     }
 
     fn parse_section_item(&mut self) -> Result<SectionItem, SparError> {
         match self.peek() {
             Token::DotDotDot => Ok(SectionItem::Spread(self.parse_spread()?)),
-            Token::Ident(_)  => Ok(SectionItem::Field(self.parse_field_decl()?)),
+            Token::Ident(_) => Ok(SectionItem::Field(self.parse_field_decl()?)),
             _ => Err(self.error("expected a field declaration or `...` spread")),
         }
     }
@@ -396,22 +463,38 @@ impl Parser {
     /// — a value can never start with one of these.
     fn at_type_start(&self) -> bool {
         match self.peek() {
-            Token::TypeStr | Token::TypeInt | Token::TypeFloat | Token::TypeBool | Token::TypeSection => true,
+            Token::TypeStr
+            | Token::TypeInt
+            | Token::TypeFloat
+            | Token::TypeBool
+            | Token::TypeSection => true,
             // A bare Ident is only a type-start when immediately followed by
             // `=` — otherwise it's the type-omitted value form (`name: someVar;`).
             Token::Ident(_) => matches!(
                 self.tokens.get(self.pos + 1).map(|st| &st.token),
                 Some(Token::Eq)
             ),
-            Token::LBracket => matches!(
-                self.tokens.get(self.pos + 1).map(|st| &st.token),
-                Some(Token::TypeStr) | Some(Token::TypeInt) | Some(Token::TypeFloat) | Some(Token::TypeBool)
-            ) || (
-                // `[Ident] =` — list of a named type, same `=`-disambiguation.
-                matches!(self.tokens.get(self.pos + 1).map(|st| &st.token), Some(Token::Ident(_)))
-                && matches!(self.tokens.get(self.pos + 2).map(|st| &st.token), Some(Token::RBracket))
-                && matches!(self.tokens.get(self.pos + 3).map(|st| &st.token), Some(Token::Eq))
-            ),
+            Token::LBracket => {
+                matches!(
+                    self.tokens.get(self.pos + 1).map(|st| &st.token),
+                    Some(Token::TypeStr)
+                        | Some(Token::TypeInt)
+                        | Some(Token::TypeFloat)
+                        | Some(Token::TypeBool)
+                ) || (
+                    // `[Ident] =` — list of a named type, same `=`-disambiguation.
+                    matches!(
+                        self.tokens.get(self.pos + 1).map(|st| &st.token),
+                        Some(Token::Ident(_))
+                    ) && matches!(
+                        self.tokens.get(self.pos + 2).map(|st| &st.token),
+                        Some(Token::RBracket)
+                    ) && matches!(
+                        self.tokens.get(self.pos + 3).map(|st| &st.token),
+                        Some(Token::Eq)
+                    )
+                )
+            }
             _ => false,
         }
     }
@@ -455,7 +538,13 @@ impl Parser {
                 None
             };
             self.expect(&Token::Semicolon)?;
-            Ok(FieldDecl { name, optional, ty: Some(ty), value, span })
+            Ok(FieldDecl {
+                name,
+                optional,
+                ty: Some(ty),
+                value,
+                span,
+            })
         } else {
             let value = if self.at(&Token::LBrace) {
                 self.expect(&Token::LBrace)?;
@@ -469,7 +558,13 @@ impl Parser {
                 Some(FieldValue::Expr(self.parse_expr()?))
             };
             self.expect(&Token::Semicolon)?;
-            Ok(FieldDecl { name, optional, ty: None, value, span })
+            Ok(FieldDecl {
+                name,
+                optional,
+                ty: None,
+                value,
+                span,
+            })
         }
     }
 
@@ -503,7 +598,12 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         // Schema sections do NOT have a trailing semicolon
-        Ok(SchemaSectionDecl { name, marker: SchemaMarker { optional }, fields, span })
+        Ok(SchemaSectionDecl {
+            name,
+            marker: SchemaMarker { optional },
+            fields,
+            span,
+        })
     }
 
     fn parse_schema_from_decl(&mut self) -> Result<SchemaFromDecl, SparError> {
@@ -564,7 +664,12 @@ impl Parser {
         };
 
         self.expect(&Token::Semicolon)?;
-        Ok(SchemaField { name, optional, shape, span })
+        Ok(SchemaField {
+            name,
+            optional,
+            shape,
+            span,
+        })
     }
 
     /// Parse `type [Name]{ ... }`. The caller only `peek()`ed the `type`
@@ -590,7 +695,13 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Semicolon)?;
-        Ok(EnumDecl { name, name_span, exported, variants, span })
+        Ok(EnumDecl {
+            name,
+            name_span,
+            exported,
+            variants,
+            span,
+        })
     }
 
     fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, SparError> {
@@ -607,7 +718,13 @@ impl Parser {
         self.expect(&Token::RBrace)?;
         // Type declarations do NOT have a trailing semicolon (same as
         // function and schema-section declarations).
-        Ok(TypeDecl { name, name_span, exported, fields, span })
+        Ok(TypeDecl {
+            name,
+            name_span,
+            exported,
+            fields,
+            span,
+        })
     }
 
     /// Parse a single type field: `name: Type;`, `name?: Type;`,
@@ -626,7 +743,12 @@ impl Parser {
         self.expect(&Token::Colon)?;
         let shape = self.parse_type_field_shape()?;
         self.expect(&Token::Semicolon)?;
-        Ok(TypeField { name, optional, shape, span })
+        Ok(TypeField {
+            name,
+            optional,
+            shape,
+            span,
+        })
     }
 
     fn parse_type_field_shape(&mut self) -> Result<TypeFieldShape, SparError> {
@@ -696,7 +818,10 @@ impl Parser {
         }
         self.advance(); // consume '->'
         let (name, name_span) = self.expect_ident()?;
-        Ok(Some(TypeBinding { name, span: name_span }))
+        Ok(Some(TypeBinding {
+            name,
+            span: name_span,
+        }))
     }
 
     /// Parse a regular section body: `{ ...fields/spreads... };`, including
@@ -809,13 +934,13 @@ impl Parser {
         let mut lhs = self.parse_additive_expr()?;
         loop {
             let op = match self.peek() {
-                Token::EqEq  => BinOp::Eq,
+                Token::EqEq => BinOp::Eq,
                 Token::NotEq => BinOp::NotEq,
-                Token::Lt    => BinOp::Lt,
-                Token::Gt    => BinOp::Gt,
-                Token::LtEq  => BinOp::LtEq,
-                Token::GtEq  => BinOp::GtEq,
-                _            => break,
+                Token::Lt => BinOp::Lt,
+                Token::Gt => BinOp::Gt,
+                Token::LtEq => BinOp::LtEq,
+                Token::GtEq => BinOp::GtEq,
+                _ => break,
             };
             self.advance();
             let rhs = self.parse_additive_expr()?;
@@ -834,9 +959,9 @@ impl Parser {
         let mut lhs = self.parse_mult_expr()?;
         loop {
             let op = match self.peek() {
-                Token::Plus  => BinOp::Add,
+                Token::Plus => BinOp::Add,
                 Token::Minus => BinOp::Sub,
-                _            => break,
+                _ => break,
             };
             self.advance();
             let rhs = self.parse_mult_expr()?;
@@ -855,9 +980,9 @@ impl Parser {
         let mut lhs = self.parse_unary()?;
         loop {
             let op = match self.peek() {
-                Token::Star  => BinOp::Mul,
+                Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
-                _            => break,
+                _ => break,
             };
             self.advance();
             let rhs = self.parse_unary()?;
@@ -956,7 +1081,10 @@ impl Parser {
                 self.parse_fn_call("bool".to_string(), span)
             }
             Token::KwFor => self.parse_comprehension(),
-            _ => Err(self.error(format!("expected an expression, found {}", self.peek().human_name()))),
+            _ => Err(self.error(format!(
+                "expected an expression, found {}",
+                self.peek().human_name()
+            ))),
         }?;
 
         // Postfix indexing/field-access: expr[index], expr.field — one
@@ -1043,7 +1171,12 @@ impl Parser {
                     self.expect(&Token::InterpolEnd)?;
                     parts.push(StringPart::Expr(Box::new(expr)));
                 }
-                _ => return Err(self.error(format!("unexpected {} inside string", self.peek().human_name()))),
+                _ => {
+                    return Err(self.error(format!(
+                        "unexpected {} inside string",
+                        self.peek().human_name()
+                    )))
+                }
             }
         }
 
@@ -1116,7 +1249,12 @@ impl Parser {
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(Expr::Call { name, name_span, args, span })
+        Ok(Expr::Call {
+            name,
+            name_span,
+            args,
+            span,
+        })
     }
 
     fn parse_comprehension(&mut self) -> Result<Expr, SparError> {
@@ -1148,7 +1286,11 @@ impl Parser {
             let (param_name, _) = self.expect_ident()?;
             self.expect(&Token::Colon)?;
             let ty = self.parse_type()?;
-            params.push(Param { name: param_name, ty, span: param_span });
+            params.push(Param {
+                name: param_name,
+                ty,
+                span: param_span,
+            });
             if self.at(&Token::Comma) {
                 self.advance();
             }
@@ -1159,20 +1301,34 @@ impl Parser {
         let ret = self.parse_type()?;
         self.expect(&Token::LBrace)?;
         let mut stmts = Vec::new();
-        while self.at(&Token::Var) || self.at(&Token::KwIf) || self.at(&Token::KwReturn) || self.at(&Token::KwFor) {
+        while self.at(&Token::Var)
+            || self.at(&Token::KwIf)
+            || self.at(&Token::KwReturn)
+            || self.at(&Token::KwFor)
+        {
             stmts.push(self.parse_func_stmt()?);
         }
         let body_span = self.peek_span();
         self.expect(&Token::RBrace)?;
         Ok(FunctionDecl {
-            name, name_span, params, ret, ret_span,
-            body: FunctionBody { stmts, span: body_span },
+            name,
+            name_span,
+            params,
+            ret,
+            ret_span,
+            body: FunctionBody {
+                stmts,
+                span: body_span,
+            },
             is_private,
             span,
         })
     }
 
-    fn parse_function_group_decl(&mut self, is_private: bool) -> Result<FunctionGroupDecl, SparError> {
+    fn parse_function_group_decl(
+        &mut self,
+        is_private: bool,
+    ) -> Result<FunctionGroupDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'functionGroup' ident
         let (name, name_span) = self.expect_ident()?;
@@ -1187,7 +1343,13 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
-        Ok(FunctionGroupDecl { is_private, name, name_span, functions, span })
+        Ok(FunctionGroupDecl {
+            is_private,
+            name,
+            name_span,
+            functions,
+            span,
+        })
     }
 
     fn parse_func_stmt(&mut self) -> Result<FuncStmt, SparError> {
@@ -1215,7 +1377,12 @@ impl Parser {
                         (None, self.parse_or()?)
                     };
                     self.expect(&Token::Semicolon)?;
-                    fields.push(ReturnField { name: field_name, ty, value, span: field_span });
+                    fields.push(ReturnField {
+                        name: field_name,
+                        ty,
+                        value,
+                        span: field_span,
+                    });
                 }
                 self.expect(&Token::RBrace)?;
                 ReturnValue::SectionBlock(fields)
@@ -1240,7 +1407,12 @@ impl Parser {
             body.push(self.parse_func_stmt()?);
         }
         self.expect(&Token::RBrace)?;
-        Ok(FuncStmt::For { var_name, iterable, body, span })
+        Ok(FuncStmt::For {
+            var_name,
+            iterable,
+            body,
+            span,
+        })
     }
 
     fn parse_local_var_decl(&mut self) -> Result<LocalVarDecl, SparError> {
@@ -1252,7 +1424,12 @@ impl Parser {
         self.expect(&Token::Eq)?;
         let value = self.parse_or()?;
         self.expect(&Token::Semicolon)?;
-        Ok(LocalVarDecl { name, ty, value, span })
+        Ok(LocalVarDecl {
+            name,
+            ty,
+            value,
+            span,
+        })
     }
 
     fn parse_if_stmt(&mut self) -> Result<IfStmt, SparError> {
@@ -1277,7 +1454,12 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(IfStmt { condition, then_stmts, else_stmts, span })
+        Ok(IfStmt {
+            condition,
+            then_stmts,
+            else_stmts,
+            span,
+        })
     }
 }
 
@@ -1285,16 +1467,20 @@ impl Parser {
 mod tests {
     use super::*;
     use crate::ast::{
-        BinOp, Expr, FnCall, FieldValue, SparType, Literal, SectionItem, StringPart, TopLevelItem,
+        BinOp, Expr, FieldValue, FnCall, Literal, SectionItem, SparType, StringPart, TopLevelItem,
     };
 
     fn parse_str(src: &str) -> Program {
-        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex failed");
+        let tokens = crate::lexer::Lexer::new(src)
+            .tokenize()
+            .expect("lex failed");
         Parser::new(tokens).parse().expect("parse failed")
     }
 
     fn parse_err(src: &str) -> String {
-        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex failed");
+        let tokens = crate::lexer::Lexer::new(src)
+            .tokenize()
+            .expect("lex failed");
         Parser::new(tokens).parse().unwrap_err().to_string()
     }
 
@@ -1305,7 +1491,9 @@ mod tests {
     #[test]
     fn test_import_no_alias() {
         let item = first_item(r#"import "base.spar";"#);
-        let TopLevelItem::Import(decl) = item else { panic!("not import") };
+        let TopLevelItem::Import(decl) = item else {
+            panic!("not import")
+        };
         assert_eq!(decl.path, "base.spar");
         assert!(matches!(decl.kind, ImportKind::Aliased(None)));
     }
@@ -1313,7 +1501,9 @@ mod tests {
     #[test]
     fn test_import_with_alias() {
         let item = first_item(r#"import "config/base.spar" as config;"#);
-        let TopLevelItem::Import(decl) = item else { panic!("not import") };
+        let TopLevelItem::Import(decl) = item else {
+            panic!("not import")
+        };
         assert_eq!(decl.path, "config/base.spar");
         assert!(matches!(decl.kind, ImportKind::Aliased(Some(ref a)) if a == "config"));
     }
@@ -1321,13 +1511,18 @@ mod tests {
     #[test]
     fn test_import_interpolation_error() {
         let err = parse_err(r#"import "${bad}.spar";"#);
-        assert!(err.contains("import paths cannot contain interpolation"), "got: {err}");
+        assert!(
+            err.contains("import paths cannot contain interpolation"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn test_required_var_decl() {
         let item = first_item("var port: int = 3000;");
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
         assert!(!decl.exported);
         assert_eq!(decl.name, "port");
         assert!(!decl.optional);
@@ -1340,7 +1535,9 @@ mod tests {
     #[test]
     fn test_optional_var_no_value() {
         let item = first_item("var log_level?: str;");
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
         assert!(decl.optional);
         assert_eq!(decl.ty, SparType::Str);
         assert!(decl.value.is_none());
@@ -1349,7 +1546,9 @@ mod tests {
     #[test]
     fn test_exported_var() {
         let item = first_item(r#"export var version: str = "1.0.0";"#);
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
         assert!(decl.exported);
         assert_eq!(decl.name, "version");
     }
@@ -1357,7 +1556,9 @@ mod tests {
     #[test]
     fn test_typed_list_var() {
         let item = first_item("var ports: [int] = [3000, 8080];");
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
         assert_eq!(decl.ty, SparType::List(Box::new(SparType::Int)));
         assert!(matches!(decl.value, Some(Expr::List(_, _))));
     }
@@ -1365,7 +1566,9 @@ mod tests {
     #[test]
     fn test_dynamic_var_with_value() {
         let item = first_item(r#"dynamic var tags = [2026, "prod", true];"#);
-        let TopLevelItem::Dynamic(decl) = item else { panic!("not dynamic") };
+        let TopLevelItem::Dynamic(decl) = item else {
+            panic!("not dynamic")
+        };
         assert_eq!(decl.name, "tags");
         assert!(!decl.optional);
         assert!(matches!(decl.value, Some(Expr::List(_, _))));
@@ -1374,7 +1577,9 @@ mod tests {
     #[test]
     fn test_dynamic_var_optional_no_value() {
         let item = first_item("dynamic var meta?;");
-        let TopLevelItem::Dynamic(decl) = item else { panic!("not dynamic") };
+        let TopLevelItem::Dynamic(decl) = item else {
+            panic!("not dynamic")
+        };
         assert!(decl.optional);
         assert!(decl.value.is_none());
     }
@@ -1382,13 +1587,18 @@ mod tests {
     #[test]
     fn test_dynamic_non_list_error() {
         let err = parse_err("dynamic var bad = 3000;");
-        assert!(err.contains("dynamic variables must be assigned a list literal"), "got: {err}");
+        assert!(
+            err.contains("dynamic variables must be assigned a list literal"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn test_simple_section() {
         let item = first_item("[server]{ port: int = 3000; };");
-        let TopLevelItem::Section(decl) = item else { panic!("not section") };
+        let TopLevelItem::Section(decl) = item else {
+            panic!("not section")
+        };
         assert!(!decl.exported);
         assert_eq!(decl.path, vec!["server"]);
         assert_eq!(decl.items.len(), 1);
@@ -1398,7 +1608,9 @@ mod tests {
     #[test]
     fn test_exported_section() {
         let item = first_item("export [defaults]{ workers: int = 4; };");
-        let TopLevelItem::Section(decl) = item else { panic!("not section") };
+        let TopLevelItem::Section(decl) = item else {
+            panic!("not section")
+        };
         assert!(decl.exported);
     }
 
@@ -1422,8 +1634,12 @@ mod tests {
     #[test]
     fn test_optional_field_in_section() {
         let item = first_item("[server]{ log_level?: str; };");
-        let TopLevelItem::Section(decl) = item else { panic!("not section") };
-        let SectionItem::Field(f) = &decl.items[0] else { panic!("not field") };
+        let TopLevelItem::Section(decl) = item else {
+            panic!("not section")
+        };
+        let SectionItem::Field(f) = &decl.items[0] else {
+            panic!("not field")
+        };
         assert!(f.optional);
         assert!(f.value.is_none());
     }
@@ -1431,26 +1647,42 @@ mod tests {
     #[test]
     fn test_local_spread() {
         let item = first_item("[project]{ ...base_project; };");
-        let TopLevelItem::Section(decl) = item else { panic!("not section") };
-        let SectionItem::Spread(s) = &decl.items[0] else { panic!("not spread") };
-        let Expr::NamespaceRef(nr) = &s.expr else { panic!("expected NamespaceRef") };
+        let TopLevelItem::Section(decl) = item else {
+            panic!("not section")
+        };
+        let SectionItem::Spread(s) = &decl.items[0] else {
+            panic!("not spread")
+        };
+        let Expr::NamespaceRef(nr) = &s.expr else {
+            panic!("expected NamespaceRef")
+        };
         assert_eq!(nr.segments, vec!["base_project"]);
     }
 
     #[test]
     fn test_namespaced_spread() {
         let item = first_item("[project]{ ...global::base_project; };");
-        let TopLevelItem::Section(decl) = item else { panic!("not section") };
-        let SectionItem::Spread(s) = &decl.items[0] else { panic!("not spread") };
-        let Expr::NamespaceRef(nr) = &s.expr else { panic!("expected NamespaceRef") };
+        let TopLevelItem::Section(decl) = item else {
+            panic!("not section")
+        };
+        let SectionItem::Spread(s) = &decl.items[0] else {
+            panic!("not spread")
+        };
+        let Expr::NamespaceRef(nr) = &s.expr else {
+            panic!("expected NamespaceRef")
+        };
         assert_eq!(nr.segments, vec!["global", "base_project"]);
     }
 
     #[test]
     fn test_arithmetic_expr() {
         let item = first_item("var timeout: int = 30 * 3;");
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
-        let Some(Expr::BinaryOp(op)) = decl.value else { panic!("not binop") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        let Some(Expr::BinaryOp(op)) = decl.value else {
+            panic!("not binop")
+        };
         assert_eq!(op.op, BinOp::Mul);
         assert!(matches!(*op.lhs, Expr::Literal(Literal::Int(30))));
         assert!(matches!(*op.rhs, Expr::Literal(Literal::Int(3))));
@@ -1459,8 +1691,12 @@ mod tests {
     #[test]
     fn test_fallback_expr() {
         let item = first_item(r#"var port: int = env("PORT") ?? 3000;"#);
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
-        let Some(Expr::BinaryOp(op)) = decl.value else { panic!("not binop") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        let Some(Expr::BinaryOp(op)) = decl.value else {
+            panic!("not binop")
+        };
         assert_eq!(op.op, BinOp::Fallback);
         assert!(matches!(*op.lhs, Expr::FnCall(FnCall { ref name, .. }) if name == "env"));
         assert!(matches!(*op.rhs, Expr::Literal(Literal::Int(3000))));
@@ -1469,20 +1705,32 @@ mod tests {
     #[test]
     fn test_namespace_ref() {
         let item = first_item("var x: int = global::port;");
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
-        let Some(Expr::NamespaceRef(nr)) = decl.value else { panic!("not ns ref") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        let Some(Expr::NamespaceRef(nr)) = decl.value else {
+            panic!("not ns ref")
+        };
         assert_eq!(nr.segments, vec!["global", "port"]);
     }
 
     #[test]
     fn test_interpolated_string_expr() {
         let item = first_item(r#"var url: str = "http://${global::host}";"#);
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
-        let Some(Expr::String(s)) = decl.value else { panic!("not string") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        let Some(Expr::String(s)) = decl.value else {
+            panic!("not string")
+        };
         assert_eq!(s.parts.len(), 3);
         assert!(matches!(&s.parts[0], StringPart::Literal(l) if l == "http://"));
-        let StringPart::Expr(e) = &s.parts[1] else { panic!("not expr part") };
-        let Expr::NamespaceRef(nr) = e.as_ref() else { panic!("not ns ref") };
+        let StringPart::Expr(e) = &s.parts[1] else {
+            panic!("not expr part")
+        };
+        let Expr::NamespaceRef(nr) = e.as_ref() else {
+            panic!("not ns ref")
+        };
         assert_eq!(nr.segments, vec!["global", "host"]);
         assert!(matches!(&s.parts[2], StringPart::Literal(l) if l.is_empty()));
     }
@@ -1490,8 +1738,12 @@ mod tests {
     #[test]
     fn test_env_fn_call() {
         let item = first_item(r#"var mode: str = env("APP_MODE");"#);
-        let TopLevelItem::Var(decl) = item else { panic!("not var") };
-        let Some(Expr::FnCall(fc)) = decl.value else { panic!("not fn call") };
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        let Some(Expr::FnCall(fc)) = decl.value else {
+            panic!("not fn call")
+        };
         assert_eq!(fc.name, "env");
         assert_eq!(fc.args.len(), 1);
         assert!(matches!(fc.args[0], Expr::String(_)));
@@ -1532,21 +1784,31 @@ mod tests {
         let src = r#"[MetaData]{ manual: section = { author: str = "occ"; }; };"#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let result = Parser::new(tokens).parse();
-        assert!(result.is_ok(), "section field should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "section field should parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn nested_section_twice_deep_parses() {
         let src = "[A]{ b: section = { c: section = { val: int = 1; }; }; };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(Parser::new(tokens).parse().is_ok(), "two-deep nesting should parse");
+        assert!(
+            Parser::new(tokens).parse().is_ok(),
+            "two-deep nesting should parse"
+        );
     }
 
     #[test]
     fn empty_nested_section_parses() {
         let src = "[A]{ inner: section = { }; };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(Parser::new(tokens).parse().is_ok(), "empty nested section should parse");
+        assert!(
+            Parser::new(tokens).parse().is_ok(),
+            "empty nested section should parse"
+        );
     }
 
     #[test]
@@ -1561,8 +1823,12 @@ mod tests {
     fn section_field_value_is_nested() {
         let src = r#"[A]{ inner: section = { key: str = "v"; }; };"#;
         let prog = parse_str(src);
-        let TopLevelItem::Section(decl) = &prog.items[0] else { panic!() };
-        let SectionItem::Field(f) = &decl.items[0] else { panic!() };
+        let TopLevelItem::Section(decl) = &prog.items[0] else {
+            panic!()
+        };
+        let SectionItem::Field(f) = &decl.items[0] else {
+            panic!()
+        };
         assert!(matches!(f.value, Some(FieldValue::Nested(_))));
     }
 

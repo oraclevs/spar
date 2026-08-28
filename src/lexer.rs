@@ -1,4 +1,4 @@
-use crate::error::{SparError, Span};
+use crate::error::{Span, SparError};
 use crate::token::{keyword_or_ident, SpannedToken, Token};
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,9 @@ impl<'a> Lexer<'a> {
 
     fn skip_line_comment(&mut self) {
         while let Some(b) = self.peek() {
-            if b == b'\n' { break; }
+            if b == b'\n' {
+                break;
+            }
             self.advance();
         }
     }
@@ -86,16 +88,29 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(());
                 }
-                _ => { self.advance(); }
+                _ => {
+                    self.advance();
+                }
             }
         }
     }
 
-    fn collect_block_comment(&mut self, text_start: usize, comment_line: u32, err_span_start: usize, err_line: u32, err_col: u32) -> Result<(), SparError> {
+    fn collect_block_comment(
+        &mut self,
+        text_start: usize,
+        comment_line: u32,
+        err_span_start: usize,
+        err_line: u32,
+        err_col: u32,
+    ) -> Result<(), SparError> {
         let is_trailing = self.last_token_line == comment_line;
         self.skip_block_comment(err_span_start, err_line, err_col)?;
         let text = self.source[text_start..self.pos].to_string();
-        self.comments.push(CommentTrivia { text, line: comment_line, is_trailing });
+        self.comments.push(CommentTrivia {
+            text,
+            line: comment_line,
+            is_trailing,
+        });
         Ok(())
     }
 
@@ -168,10 +183,22 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => {
                     self.advance(); // backslash
                     match self.peek() {
-                        Some(b'\\') => { self.advance(); fragment.push('\\'); }
-                        Some(b'"')  => { self.advance(); fragment.push('"'); }
-                        Some(b'n')  => { self.advance(); fragment.push('\n'); }
-                        Some(b't')  => { self.advance(); fragment.push('\t'); }
+                        Some(b'\\') => {
+                            self.advance();
+                            fragment.push('\\');
+                        }
+                        Some(b'"') => {
+                            self.advance();
+                            fragment.push('"');
+                        }
+                        Some(b'n') => {
+                            self.advance();
+                            fragment.push('\n');
+                        }
+                        Some(b't') => {
+                            self.advance();
+                            fragment.push('\t');
+                        }
                         Some(c) => {
                             self.advance();
                             fragment.push('\\');
@@ -215,14 +242,18 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'"') => {
                     return Err(SparError::LexError {
-                        message: "nested strings inside interpolation are not supported".to_string(),
+                        message: "nested strings inside interpolation are not supported"
+                            .to_string(),
                         span: Span::new(start, self.pos, line, col),
                     });
                 }
                 Some(b'{') => {
                     self.advance();
                     *brace_depth += 1;
-                    tokens.push(SpannedToken::new(Token::LBrace, self.span_at(start, line, col)));
+                    tokens.push(SpannedToken::new(
+                        Token::LBrace,
+                        self.span_at(start, line, col),
+                    ));
                 }
                 Some(b'}') => {
                     self.advance();
@@ -230,7 +261,10 @@ impl<'a> Lexer<'a> {
                     if *brace_depth == 0 {
                         return Ok(());
                     }
-                    tokens.push(SpannedToken::new(Token::RBrace, self.span_at(start, line, col)));
+                    tokens.push(SpannedToken::new(
+                        Token::RBrace,
+                        self.span_at(start, line, col),
+                    ));
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
                     self.advance();
@@ -260,32 +294,58 @@ impl<'a> Lexer<'a> {
         col: u32,
     ) -> Result<Option<SpannedToken>, SparError> {
         let tok = match c {
-            b'+' => { self.advance(); Token::Plus }
+            b'+' => {
+                self.advance();
+                Token::Plus
+            }
             b'-' => {
                 if self.peek_at(1) == Some(b'>') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::Arrow
                 } else {
                     self.advance();
                     Token::Minus
                 }
             }
-            b'*' => { self.advance(); Token::Star }
+            b'*' => {
+                self.advance();
+                Token::Star
+            }
             b'=' => {
                 if self.peek_at(1) == Some(b'=') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::EqEq
                 } else {
                     self.advance();
                     Token::Eq
                 }
             }
-            b';' => { self.advance(); Token::Semicolon }
-            b',' => { self.advance(); Token::Comma }
-            b'(' => { self.advance(); Token::LParen }
-            b')' => { self.advance(); Token::RParen }
-            b'[' => { self.advance(); Token::LBracket }
-            b']' => { self.advance(); Token::RBracket }
+            b';' => {
+                self.advance();
+                Token::Semicolon
+            }
+            b',' => {
+                self.advance();
+                Token::Comma
+            }
+            b'(' => {
+                self.advance();
+                Token::LParen
+            }
+            b')' => {
+                self.advance();
+                Token::RParen
+            }
+            b'[' => {
+                self.advance();
+                Token::LBracket
+            }
+            b']' => {
+                self.advance();
+                Token::RBracket
+            }
 
             b'?' => {
                 self.advance();
@@ -332,7 +392,8 @@ impl<'a> Lexer<'a> {
 
             b'!' => {
                 if self.peek_at(1) == Some(b'=') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::NotEq
                 } else {
                     self.advance();
@@ -341,7 +402,8 @@ impl<'a> Lexer<'a> {
             }
             b'<' => {
                 if self.peek_at(1) == Some(b'=') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::LtEq
                 } else {
                     self.advance();
@@ -350,7 +412,8 @@ impl<'a> Lexer<'a> {
             }
             b'>' => {
                 if self.peek_at(1) == Some(b'=') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::GtEq
                 } else {
                     self.advance();
@@ -359,7 +422,8 @@ impl<'a> Lexer<'a> {
             }
             b'&' => {
                 if self.peek_at(1) == Some(b'&') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::AndAnd
                 } else {
                     return Err(SparError::LexError {
@@ -370,7 +434,8 @@ impl<'a> Lexer<'a> {
             }
             b'|' => {
                 if self.peek_at(1) == Some(b'|') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Token::OrOr
                 } else {
                     return Err(SparError::LexError {
@@ -385,11 +450,12 @@ impl<'a> Lexer<'a> {
                 keyword_or_ident(s)
             }
 
-            b'0'..=b'9' => {
-                self.read_number(start, line, col)?
-            }
+            b'0'..=b'9' => self.read_number(start, line, col)?,
 
-            b'@' => { self.advance(); Token::At }
+            b'@' => {
+                self.advance();
+                Token::At
+            }
 
             other => {
                 self.advance();
@@ -436,16 +502,20 @@ impl<'a> Lexer<'a> {
                 }
             }
             let s = &self.source[num_start..self.pos];
-            s.parse::<f64>().map(Token::FloatLit).map_err(|_| SparError::LexError {
-                message: "invalid number literal".to_string(),
-                span: Span::new(start, self.pos, line, col),
-            })
+            s.parse::<f64>()
+                .map(Token::FloatLit)
+                .map_err(|_| SparError::LexError {
+                    message: "invalid number literal".to_string(),
+                    span: Span::new(start, self.pos, line, col),
+                })
         } else {
             let s = &self.source[num_start..self.pos];
-            s.parse::<i64>().map(Token::IntLit).map_err(|_| SparError::LexError {
-                message: "invalid number literal".to_string(),
-                span: Span::new(start, self.pos, line, col),
-            })
+            s.parse::<i64>()
+                .map(Token::IntLit)
+                .map_err(|_| SparError::LexError {
+                    message: "invalid number literal".to_string(),
+                    span: Span::new(start, self.pos, line, col),
+                })
         }
     }
 
@@ -453,7 +523,9 @@ impl<'a> Lexer<'a> {
         self.tokenize_inner()
     }
 
-    pub fn tokenize_with_comments(mut self) -> Result<(Vec<SpannedToken>, Vec<CommentTrivia>), SparError> {
+    pub fn tokenize_with_comments(
+        mut self,
+    ) -> Result<(Vec<SpannedToken>, Vec<CommentTrivia>), SparError> {
         let tokens = self.tokenize_inner()?;
         Ok((tokens, self.comments))
     }
@@ -482,12 +554,18 @@ impl<'a> Lexer<'a> {
                 }
                 b'{' => {
                     self.advance();
-                    tokens.push(SpannedToken::new(Token::LBrace, self.span_at(start, line, col)));
+                    tokens.push(SpannedToken::new(
+                        Token::LBrace,
+                        self.span_at(start, line, col),
+                    ));
                     self.last_token_line = line;
                 }
                 b'}' => {
                     self.advance();
-                    tokens.push(SpannedToken::new(Token::RBrace, self.span_at(start, line, col)));
+                    tokens.push(SpannedToken::new(
+                        Token::RBrace,
+                        self.span_at(start, line, col),
+                    ));
                     self.last_token_line = line;
                 }
                 _ => {
@@ -709,10 +787,7 @@ mod tests {
 
     #[test]
     fn test_section_keyword() {
-        assert_eq!(
-            lex("section"),
-            vec![Token::TypeSection, Token::Eof]
-        );
+        assert_eq!(lex("section"), vec![Token::TypeSection, Token::Eof]);
     }
 
     #[test]
@@ -733,8 +808,10 @@ mod tests {
 
     #[test]
     fn test_line_comment_collected_as_trivia() {
-        let (tokens, comments) = Lexer::new("var x: int = 1; // trailing\n// standalone\nvar y: int = 2;")
-            .tokenize_with_comments().expect("lex failed");
+        let (tokens, comments) =
+            Lexer::new("var x: int = 1; // trailing\n// standalone\nvar y: int = 2;")
+                .tokenize_with_comments()
+                .expect("lex failed");
         // tokens still work
         assert!(tokens.iter().any(|t| t.token == Token::Var));
         // two comments
@@ -743,7 +820,11 @@ mod tests {
         assert_eq!(comments[0].line, 1);
         assert!(!comments[1].is_trailing, "second should be standalone");
         assert_eq!(comments[1].line, 2);
-        assert!(comments[1].text.contains("standalone"), "text: {:?}", comments[1].text);
+        assert!(
+            comments[1].text.contains("standalone"),
+            "text: {:?}",
+            comments[1].text
+        );
     }
 
     #[test]
@@ -794,16 +875,16 @@ mod tests {
     #[test]
     fn lex_new_tokens() {
         let cases: &[(&str, Token)] = &[
-            ("->",  Token::Arrow),
-            ("==",  Token::EqEq),
-            ("!=",  Token::NotEq),
-            ("<=",  Token::LtEq),
-            (">=",  Token::GtEq),
-            ("&&",  Token::AndAnd),
-            ("||",  Token::OrOr),
-            ("!",   Token::Bang),
-            ("<",   Token::Lt),
-            (">",   Token::Gt),
+            ("->", Token::Arrow),
+            ("==", Token::EqEq),
+            ("!=", Token::NotEq),
+            ("<=", Token::LtEq),
+            (">=", Token::GtEq),
+            ("&&", Token::AndAnd),
+            ("||", Token::OrOr),
+            ("!", Token::Bang),
+            ("<", Token::Lt),
+            (">", Token::Gt),
         ];
         for (src, expected) in cases {
             let tokens = Lexer::new(src).tokenize().unwrap();
@@ -815,11 +896,11 @@ mod tests {
     fn lex_keywords_function_return_if_else_for_in() {
         let cases: &[(&str, Token)] = &[
             ("function", Token::KwFunction),
-            ("return",   Token::KwReturn),
-            ("if",       Token::KwIf),
-            ("else",     Token::KwElse),
-            ("for",      Token::KwFor),
-            ("in",       Token::KwIn),
+            ("return", Token::KwReturn),
+            ("if", Token::KwIf),
+            ("else", Token::KwElse),
+            ("for", Token::KwFor),
+            ("in", Token::KwIn),
         ];
         for (src, expected) in cases {
             let tokens = Lexer::new(src).tokenize().unwrap();

@@ -1261,6 +1261,14 @@ impl<'a> TypeChecker<'a> {
             if nr.segments == ["global"] {
                 return self.lookup_global_type(field);
             }
+            // base names a registered section directly (e.g. an imported
+            // `[Colors]{...}` spliced in as a local section) — resolve the
+            // field straight off that section rather than falling through
+            // to `infer_type`, which only knows about `SparType::Named`
+            // type instances, not sections.
+            if let Some(section) = self.symbols.lookup_section(&nr.segments) {
+                return section.fields.get(field).and_then(|f| f.ty.clone());
+            }
         }
         let base_ty = self.infer_type(base)?;
         match base_ty {
@@ -2611,6 +2619,24 @@ mod tests {
 
     fn has_type_error(src: &str, fragment: &str) -> bool {
         check_err(src).iter().any(|e| e.contains(fragment))
+    }
+
+    #[test]
+    fn test_section_field_as_call_argument_resolves_type() {
+        // Regression: `infer_field_access` used to only resolve a field's
+        // type off `self`, `global`, or a `SparType::Named` instance —
+        // a plain top-level section (e.g. one spliced in via a selective
+        // import) fell through to `None`, which `check_call`'s stricter
+        // "actual != expected" comparison then reported as `unknown`.
+        check_ok(
+            r##"
+            function greet(name: str) -> str {
+                return name;
+            }
+            [Colors]{ red: str = "#ff0000"; };
+            var msg: str = greet(name: Colors.red);
+        "##,
+        );
     }
 
     #[test]

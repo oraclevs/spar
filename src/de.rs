@@ -16,7 +16,7 @@ impl SparDeserError {
     pub fn messages(&self) -> Vec<String> {
         match self {
             SparDeserError::Pipeline(es) => es.iter().map(|e| e.to_string()).collect(),
-            SparDeserError::Serde(s)     => vec![s.clone()],
+            SparDeserError::Serde(s) => vec![s.clone()],
         }
     }
 }
@@ -31,7 +31,9 @@ impl std::fmt::Display for SparDeserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SparDeserError::Pipeline(es) => {
-                for e in es { writeln!(f, "{e}")?; }
+                for e in es {
+                    writeln!(f, "{e}")?;
+                }
                 Ok(())
             }
             SparDeserError::Serde(s) => write!(f, "deserialization error: {s}"),
@@ -44,27 +46,21 @@ impl std::error::Error for SparDeserError {}
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn from_str<T: serde::de::DeserializeOwned>(src: &str) -> Result<T, SparDeserError> {
-    use crate::{Lexer, Parser};
-    use crate::resolver::Resolver;
-    use crate::typechecker::TypeChecker;
-    use crate::evaluator::Evaluator;
-
-    let tokens  = Lexer::new(src).tokenize()
-                    .map_err(|e| SparDeserError::Pipeline(vec![e]))?;
-    let program = Parser::new(tokens).parse()
-                    .map_err(|e| SparDeserError::Pipeline(vec![e]))?;
-    let symbols = Resolver::new().resolve(&program, &[])
-                    .map_err(SparDeserError::Pipeline)?;
-    TypeChecker::check(&program, &symbols)
-                    .map_err(SparDeserError::Pipeline)?;
-    let result  = Evaluator::evaluate(&program, &symbols)
-                    .map_err(SparDeserError::Pipeline)?;
-    from_eval(&result)
+    let compilation = crate::Compiler::default().compile(src);
+    if !compilation.errors.is_empty() {
+        return Err(SparDeserError::Pipeline(compilation.errors));
+    }
+    from_eval(
+        compilation
+            .result
+            .as_ref()
+            .expect("successful compilation evaluates"),
+    )
 }
 
 pub fn from_eval<T: serde::de::DeserializeOwned>(result: &EvalResult) -> Result<T, SparDeserError> {
     T::deserialize(SparDeserializer {
-        globals:  &result.globals,
+        globals: &result.globals,
         sections: &result.sections,
     })
 }
@@ -72,7 +68,7 @@ pub fn from_eval<T: serde::de::DeserializeOwned>(result: &EvalResult) -> Result<
 // ── SparDeserializer (top-level) ────────────────────────────────────────────────
 
 struct SparDeserializer<'de> {
-    globals:  &'de HashMap<String, ConfigValue>,
+    globals: &'de HashMap<String, ConfigValue>,
     sections: &'de HashMap<Vec<String>, HashMap<String, ConfigValue>>,
 }
 
@@ -89,7 +85,7 @@ impl<'de> de::Deserializer<'de> for SparDeserializer<'de> {
 
     fn deserialize_struct<V: Visitor<'de>>(
         self,
-        _name:   &'static str,
+        _name: &'static str,
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, SparDeserError> {
@@ -124,7 +120,10 @@ impl<'de> de::Deserializer<'de> for StringDeserializer<'de> {
         visitor.visit_str(self.value)
     }
 
-    fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
+    fn deserialize_identifier<V: Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, SparDeserError> {
         visitor.visit_str(self.value)
     }
 
@@ -146,10 +145,10 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
         match self.value {
-            ConfigValue::Str(s)   => visitor.visit_str(s),
-            ConfigValue::Int(n)   => visitor.visit_i64(*n),
+            ConfigValue::Str(s) => visitor.visit_str(s),
+            ConfigValue::Int(n) => visitor.visit_i64(*n),
             ConfigValue::Float(f) => visitor.visit_f64(*f),
-            ConfigValue::Bool(b)  => visitor.visit_bool(*b),
+            ConfigValue::Bool(b) => visitor.visit_bool(*b),
             ConfigValue::List(vs) => visitor.visit_seq(ListSeqAccess { iter: vs.iter() }),
             ConfigValue::Section(map) => visitor.visit_map(SectionMapAccess {
                 iter: map.iter(),
@@ -197,8 +196,8 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
         match self.value {
             ConfigValue::Float(f) => visitor.visit_f64(*f),
-            ConfigValue::Int(n)   => visitor.visit_f64(*n as f64),
-            _                     => self.deserialize_any(visitor),
+            ConfigValue::Int(n) => visitor.visit_f64(*n as f64),
+            _ => self.deserialize_any(visitor),
         }
     }
 
@@ -252,14 +251,14 @@ impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
         visitor.visit_map(SectionMapAccess {
-            iter:       self.fields.iter(),
+            iter: self.fields.iter(),
             next_value: None,
         })
     }
 
     fn deserialize_struct<V: Visitor<'de>>(
         self,
-        _name:   &'static str,
+        _name: &'static str,
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, SparDeserError> {
@@ -286,12 +285,12 @@ enum RootEntry<'de> {
 
 struct RootMapAccess<'de> {
     entries: Vec<(&'de str, RootEntry<'de>)>,
-    index:   usize,
+    index: usize,
 }
 
 impl<'de> RootMapAccess<'de> {
     fn new(
-        globals:  &'de HashMap<String, ConfigValue>,
+        globals: &'de HashMap<String, ConfigValue>,
         sections: &'de HashMap<Vec<String>, HashMap<String, ConfigValue>>,
     ) -> Self {
         let mut entries: Vec<(&'de str, RootEntry<'de>)> = Vec::new();
@@ -322,7 +321,8 @@ impl<'de> MapAccess<'de> for RootMapAccess<'de> {
             return Ok(None);
         }
         let key = self.entries[self.index].0;
-        seed.deserialize(StringDeserializer { value: key }).map(Some)
+        seed.deserialize(StringDeserializer { value: key })
+            .map(Some)
     }
 
     fn next_value_seed<V: DeserializeSeed<'de>>(
@@ -332,7 +332,7 @@ impl<'de> MapAccess<'de> for RootMapAccess<'de> {
         let entry = &self.entries[self.index];
         self.index += 1;
         match &entry.1 {
-            RootEntry::Value(cv)    => seed.deserialize(ValueDeserializer { value: cv }),
+            RootEntry::Value(cv) => seed.deserialize(ValueDeserializer { value: cv }),
             RootEntry::Section(fds) => seed.deserialize(SectionDeserializer { fields: fds }),
         }
     }
@@ -341,7 +341,7 @@ impl<'de> MapAccess<'de> for RootMapAccess<'de> {
 // ── SectionMapAccess ──────────────────────────────────────────────────────────
 
 struct SectionMapAccess<'de> {
-    iter:       std::collections::hash_map::Iter<'de, String, ConfigValue>,
+    iter: std::collections::hash_map::Iter<'de, String, ConfigValue>,
     next_value: Option<&'de ConfigValue>,
 }
 
@@ -353,10 +353,11 @@ impl<'de> MapAccess<'de> for SectionMapAccess<'de> {
         seed: K,
     ) -> Result<Option<K::Value>, SparDeserError> {
         match self.iter.next() {
-            None         => Ok(None),
+            None => Ok(None),
             Some((k, v)) => {
                 self.next_value = Some(v);
-                seed.deserialize(StringDeserializer { value: k.as_str() }).map(Some)
+                seed.deserialize(StringDeserializer { value: k.as_str() })
+                    .map(Some)
             }
         }
     }
@@ -365,7 +366,10 @@ impl<'de> MapAccess<'de> for SectionMapAccess<'de> {
         &mut self,
         seed: V,
     ) -> Result<V::Value, SparDeserError> {
-        let val = self.next_value.take().expect("next_value_seed called before next_key_seed");
+        let val = self
+            .next_value
+            .take()
+            .expect("next_value_seed called before next_key_seed");
         seed.deserialize(ValueDeserializer { value: val })
     }
 }
@@ -384,7 +388,7 @@ impl<'de> SeqAccess<'de> for ListSeqAccess<'de> {
         seed: T,
     ) -> Result<Option<T::Value>, SparDeserError> {
         match self.iter.next() {
-            None    => Ok(None),
+            None => Ok(None),
             Some(v) => seed.deserialize(ValueDeserializer { value: v }).map(Some),
         }
     }
@@ -398,34 +402,60 @@ mod tests {
     use serde::Deserialize;
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct Full { port: i64, name: String, active: bool }
+    struct Full {
+        port: i64,
+        name: String,
+        active: bool,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct WithFloat { ratio: f64 }
+    struct WithFloat {
+        ratio: f64,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct WithIntList { ports: Vec<i64> }
+    struct WithIntList {
+        ports: Vec<i64>,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct WithStrList { names: Vec<String> }
+    struct WithStrList {
+        names: Vec<String>,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct WithSection { port: i64, #[serde(rename = "Database")] database: DbConfig }
+    struct WithSection {
+        port: i64,
+        #[serde(rename = "Database")]
+        database: DbConfig,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct DbConfig { host: String, pool: i64 }
+    struct DbConfig {
+        host: String,
+        pool: i64,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct WithOpt { required: String, maybe: Option<i64> }
+    struct WithOpt {
+        required: String,
+        maybe: Option<i64>,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct BoolField { flag: bool }
+    struct BoolField {
+        flag: bool,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct TimeoutField { timeout: i64 }
+    struct TimeoutField {
+        timeout: i64,
+    }
 
     #[derive(Deserialize, Debug, PartialEq)]
-    struct ModeField { mode: String }
+    struct ModeField {
+        mode: String,
+    }
 
     #[test]
     fn test_simple_struct() {
@@ -517,7 +547,9 @@ mod tests {
             warnings: vec![],
         };
         #[derive(Deserialize)]
-        struct P { port: i64 }
+        struct P {
+            port: i64,
+        }
         let p: P = from_eval(&result).unwrap();
         assert_eq!(p.port, 9000);
     }

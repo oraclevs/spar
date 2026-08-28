@@ -5,41 +5,33 @@
 //! CLI (`spar emit`, with imports) and `emit_to_json` (single-file, no imports)
 //! funnel through it so their output is identical.
 
-use std::collections::HashMap;
-
-use crate::evaluator::{ConfigValue, EvalResult, Evaluator};
-use crate::resolver::{GlobalEntry, Resolver, SymbolTable};
-use crate::typechecker::TypeChecker;
-use crate::{Lexer, Parser, SparError};
+use crate::evaluator::{ConfigValue, EvalResult};
+use crate::resolver::{GlobalEntry, SymbolTable};
+use crate::{CompileOptions, Compiler};
 
 /// Compile a single Spar source string to pretty-printed JSON, with no
 /// cross-file imports (the browser/playground has no filesystem). On failure
 /// returns one human-readable message per pipeline error.
 pub fn emit_to_json(src: &str) -> Result<String, Vec<String>> {
-    let tokens = Lexer::new(src).tokenize().map_err(|e| vec![e.to_string()])?;
-    let program = Parser::new(tokens).parse().map_err(|e| vec![e.to_string()])?;
-
-    if program.is_schema_file {
-        return Err(vec![
-            "this is a schema file and cannot be emitted — schema files declare shape only"
-                .to_string(),
-        ]);
+    let options = CompileOptions {
+        allow_schema_file: false,
+        ..CompileOptions::default()
+    };
+    let compilation = Compiler::new(options).compile(src);
+    if !compilation.errors.is_empty() {
+        return Err(compilation.errors.iter().map(ToString::to_string).collect());
     }
-
-    let no_imports = HashMap::new();
-    let symbols = Resolver::resolve_with_imports(&program, &no_imports).map_err(messages)?;
-
-    if let Err(errs) = TypeChecker::check(&program, &symbols) {
-        return Err(messages(errs));
-    }
-
-    let result = Evaluator::evaluate(&program, &symbols).map_err(messages)?;
-    let value = build_emit_json(&result, &symbols);
+    let value = build_emit_json(
+        compilation
+            .result
+            .as_ref()
+            .expect("successful compilation evaluates"),
+        compilation
+            .symbols
+            .as_ref()
+            .expect("successful compilation resolves"),
+    );
     Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()))
-}
-
-fn messages(errs: Vec<SparError>) -> Vec<String> {
-    errs.iter().map(|e| e.to_string()).collect()
 }
 
 /// Build the emitted JSON value: exported globals, then public top-level

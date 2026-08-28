@@ -1,0 +1,5 @@
+export var name: str = "spar";
+
+[Server]{
+    port: int = 8080;
+};

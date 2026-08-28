@@ -1,25 +1,27 @@
 pub mod ast;
+pub mod compiler;
 pub mod de;
-pub mod emit;
 pub mod depgraph;
+pub mod emit;
 pub mod error;
 pub mod evaluator;
+pub mod formatter;
 pub mod lexer;
 pub mod loader;
+pub mod naming;
 pub mod parser;
 pub mod renderer;
 pub mod resolver;
-pub mod naming;
-pub mod token;
-pub mod typechecker;
-pub mod formatter;
 #[cfg(test)]
 pub mod tests;
+pub mod token;
+pub mod typechecker;
 
 pub use ast::Program;
+pub use compiler::{Compilation, CompileOptions, Compiler};
 pub use de::{from_eval, from_str, SparDeserError};
 pub use emit::emit_to_json;
-pub use error::{SparError, Span};
+pub use error::{Span, SparError};
 pub use evaluator::{ConfigValue, EvalResult, Evaluator};
 pub use lexer::Lexer;
 pub use parser::Parser;

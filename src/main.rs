@@ -1,22 +1,14 @@
-use std::path::Path;
-use spar::{
-    evaluator::Evaluator,
-    loader::LoadedImport,
-    renderer::ErrorRenderer,
-    SparError, Lexer, Parser,
-    resolver::{Resolver, SymbolTable},
-    typechecker::TypeChecker,
-};
+use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match parse_args(&args) {
-        Cmd::Check(path)         => cmd_check(&path),
-        Cmd::Emit(path)          => cmd_emit(&path),
+        Cmd::Check(path) => cmd_check(&path),
+        Cmd::Emit(path) => cmd_emit(&path),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
-        Cmd::Help                => print_help(),
-        Cmd::Version             => println!("spar {}", env!("CARGO_PKG_VERSION")),
-        Cmd::BadArgs(msg)        => {
+        Cmd::Help => print_help(),
+        Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
+        Cmd::BadArgs(msg) => {
             eprintln!("error: {msg}\nRun `spar --help` for usage.");
             std::process::exit(1);
         }
@@ -39,21 +31,25 @@ fn parse_args(args: &[String]) -> Cmd {
     match args.get(1).map(String::as_str) {
         Some("check") => match args.get(2) {
             Some(p) => Cmd::Check(p.clone()),
-            None    => Cmd::BadArgs("`check` requires a file path".into()),
+            None => Cmd::BadArgs("`check` requires a file path".into()),
         },
         Some("emit") => match args.get(2) {
             Some(p) => Cmd::Emit(p.clone()),
-            None    => Cmd::BadArgs("`emit` requires a file path".into()),
+            None => Cmd::BadArgs("`emit` requires a file path".into()),
         },
-        Some("fmt") => {
-            match (args.get(2).map(String::as_str), args.get(3)) {
-                (Some("--check"), Some(p)) => Cmd::Fmt { path: p.clone(), check: true },
-                (Some(p), None) if p != "--check" => Cmd::Fmt { path: p.to_string(), check: false },
-                _ => Cmd::BadArgs("`fmt` requires a file path (optionally preceded by --check)".into()),
-            }
-        }
-        Some("--help")    | Some("-h") | None => Cmd::Help,
-        Some("--version") | Some("-V")        => Cmd::Version,
+        Some("fmt") => match (args.get(2).map(String::as_str), args.get(3)) {
+            (Some("--check"), Some(p)) => Cmd::Fmt {
+                path: p.clone(),
+                check: true,
+            },
+            (Some(p), None) if p != "--check" => Cmd::Fmt {
+                path: p.to_string(),
+                check: false,
+            },
+            _ => Cmd::BadArgs("`fmt` requires a file path (optionally preceded by --check)".into()),
+        },
+        Some("--help") | Some("-h") | None => Cmd::Help,
+        Some("--version") | Some("-V") => Cmd::Version,
         Some(other) => Cmd::BadArgs(format!("unknown command `{other}`")),
     }
 }
@@ -90,7 +86,9 @@ EXAMPLES:
 // ── Colour detection ──────────────────────────────────────────────────────────
 
 pub fn use_color() -> bool {
-    if std::env::var("NO_COLOR").is_ok() { return false; }
+    if std::env::var("NO_COLOR").is_ok() {
+        return false;
+    }
     !matches!(std::env::var("TERM").as_deref(), Ok("dumb"))
 }
 
@@ -99,79 +97,15 @@ pub fn use_color() -> bool {
 fn cmd_check(path: &str) {
     let src = read_file(path);
     let renderer = make_renderer(&src, path);
-    let mut all_errors: Vec<SparError> = Vec::new();
-
-    // Stage 1: Lex — single error
-    let tokens = match Lexer::new(&src).tokenize() {
-        Ok(t)  => t,
-        Err(e) => {
-            all_errors.push(e);
-            eprintln!("{}", renderer.render_all(&all_errors));
-            std::process::exit(1);
-        }
+    let options = CompileOptions {
+        evaluate: false,
+        ..CompileOptions::for_path(path)
     };
-
-    // Stage 2: Parse — single error
-    let mut program = match Parser::new(tokens).parse() {
-        Ok(p)  => p,
-        Err(e) => {
-            all_errors.push(e);
-            eprintln!("{}", renderer.render_all(&all_errors));
-            std::process::exit(1);
-        }
-    };
-
-    // Stage 2.4: Expand selective / import type / asPartOf imports into local scope
-    let base = Path::new(path).parent().unwrap_or(Path::new("."));
-    let mut expand_loader = spar::loader::ImportLoader::new(base);
-    if let Err(es) = spar::loader::expand_imports(&mut program, &mut expand_loader) {
-        all_errors.extend(es);
-        eprintln!("{}", renderer.render_all(&all_errors));
-        std::process::exit(1);
-    }
-
-    // Stage 2.5: Import loader — Vec<SparError>; exit before resolve if any file is missing
-    let mut loader = spar::loader::ImportLoader::new(base);
-    let imports: std::collections::HashMap<String, LoadedImport> =
-        match spar::loader::collect_imports(&program, &mut loader) {
-            Ok(i)   => i,
-            Err(es) => {
-                all_errors.extend(es);
-                eprintln!("{}", renderer.render_all(&all_errors));
-                std::process::exit(1);
-            }
-        };
-
-    // Stage 2.75: Schema validation — validate config against imported schema files
-    let schema_base = Path::new(path).parent().unwrap_or(Path::new("."));
-    let schema_bindings = match spar::loader::validate_schema_imports(&program, schema_base) {
-        Ok(b)   => b,
-        Err(es) => {
-            all_errors.extend(es);
-            eprintln!("{}", renderer.render_all(&all_errors));
-            std::process::exit(1);
-        }
-    };
-
-    // Stage 3: Resolve — Vec<SparError>
-    let symbols = match Resolver::resolve_with_imports(&program, &imports) {
-        Ok(s)   => s,
-        Err(es) => {
-            all_errors.extend(es);
-            eprintln!("{}", renderer.render_all(&all_errors));
-            std::process::exit(1);
-        }
-    };
-
-    // Stage 4: Type check — collect errors, continue to report all
-    if let Err(es) = TypeChecker::check_with_schema(&program, &symbols, schema_bindings) {
-        all_errors.extend(es);
-    }
-
-    if all_errors.is_empty() {
+    let compilation = Compiler::new(options).compile(&src);
+    if compilation.errors.is_empty() {
         println!("{path}: ok");
     } else {
-        eprintln!("{}", renderer.render_all(&all_errors));
+        eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
     }
 }
@@ -181,90 +115,27 @@ fn cmd_check(path: &str) {
 fn cmd_emit(path: &str) {
     let src = read_file(path);
     let renderer = make_renderer(&src, path);
-    let mut all_errors: Vec<SparError> = Vec::new();
-
-    // Stage 1: Lex — single error
-    let tokens = match Lexer::new(&src).tokenize() {
-        Ok(t)  => t,
-        Err(e) => { all_errors.push(e); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
+    let options = CompileOptions {
+        allow_schema_file: false,
+        ..CompileOptions::for_path(path)
     };
-
-    // Stage 2: Parse — single error
-    let mut program = match Parser::new(tokens).parse() {
-        Ok(p)  => p,
-        Err(e) => { all_errors.push(e); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
-    };
-
-    // Guard: schema files cannot be emitted
-    if program.is_schema_file {
-        let e = SparError::SchemaError {
-            message: format!(
-                "`{}` is a schema file and cannot be emitted — \
-                 schema files declare shape only; use `import schema` from a config file",
-                path
-            ),
-            span: spar::Span::new(0, 0, 1, 1),
-        };
-        all_errors.push(e);
-        eprintln!("{}", renderer.render_all(&all_errors));
+    let compilation = Compiler::new(options).compile(&src);
+    if !compilation.errors.is_empty() {
+        eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
     }
-
-    // Stage 2.4: Expand selective / import type / asPartOf imports into local scope
-    let base = Path::new(path).parent().unwrap_or(Path::new("."));
-    let mut expand_loader = spar::loader::ImportLoader::new(base);
-    if let Err(es) = spar::loader::expand_imports(&mut program, &mut expand_loader) {
-        all_errors.extend(es);
-        eprintln!("{}", renderer.render_all(&all_errors));
-        std::process::exit(1);
-    }
-
-    // Stage 2.5: Import loader — exit before resolve if any file is missing
-    let mut loader = spar::loader::ImportLoader::new(base);
-    let imports: std::collections::HashMap<String, LoadedImport> =
-        match spar::loader::collect_imports(&program, &mut loader) {
-            Ok(i)   => i,
-            Err(es) => {
-                all_errors.extend(es);
-                eprintln!("{}", renderer.render_all(&all_errors));
-                std::process::exit(1);
-            }
-        };
-
-    // Stage 2.75: Schema validation — validate config against imported schema files
-    let schema_base = Path::new(path).parent().unwrap_or(Path::new("."));
-    let schema_bindings = match spar::loader::validate_schema_imports(&program, schema_base) {
-        Ok(b)   => b,
-        Err(es) => { all_errors.extend(es); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
-    };
-
-    // Stage 3: Resolve — Vec<SparError>
-    let symbols = match Resolver::resolve_with_imports(&program, &imports) {
-        Ok(s)   => s,
-        Err(es) => { all_errors.extend(es); eprintln!("{}", renderer.render_all(&all_errors)); std::process::exit(1); }
-    };
-
-    // Stage 4: Type check — collect errors before deciding to proceed
-    if let Err(es) = TypeChecker::check_with_schema(&program, &symbols, schema_bindings) {
-        all_errors.extend(es);
-    }
-
-    if !all_errors.is_empty() {
-        eprintln!("{}", renderer.render_all(&all_errors));
-        std::process::exit(1);
-    }
-
-    // Stage 5: Evaluate — only reached if no prior errors
-    let result = match Evaluator::evaluate_with_imports_and_base(&program, &symbols, &imports, base) {
-        Ok(r)   => r,
-        Err(es) => { eprintln!("{}", renderer.render_all(&es)); std::process::exit(1); }
-    };
-
+    let result = compilation
+        .result
+        .as_ref()
+        .expect("successful compilation evaluates");
+    let symbols = compilation
+        .symbols
+        .as_ref()
+        .expect("successful compilation resolves");
     for w in &result.warnings {
         eprintln!("warning: {w}");
     }
-
-    println!("{}", emit_json(&result, &symbols));
+    println!("{}", emit_json(result, symbols));
 }
 
 // ── `fmt` command ─────────────────────────────────────────────────────────────
@@ -319,7 +190,7 @@ fn make_renderer<'a>(src: &'a str, path: &'a str) -> ErrorRenderer<'a> {
 
 // ── JSON emission ─────────────────────────────────────────────────────────────
 
-fn emit_json(result: &spar::evaluator::EvalResult, symbols: &SymbolTable) -> String {
+fn emit_json(result: &spar::evaluator::EvalResult, symbols: &spar::SymbolTable) -> String {
     let val = spar::emit::build_emit_json(result, symbols);
     serde_json::to_string_pretty(&val).unwrap_or_else(|_| "{}".to_string())
 }
@@ -336,8 +207,8 @@ mod tests {
         let r = spar::ErrorRenderer::with_color(src, "test.spar");
         let e = spar::SparError::ResolveError {
             message: "test".into(),
-            hint:    None,
-            span:    spar::Span::new(4, 8, 1, 5),
+            hint: None,
+            span: spar::Span::new(4, 8, 1, 5),
         };
         let out = r.render(&e);
         assert!(out.contains("\x1b["), "no ANSI codes in:\n{out}");
@@ -352,25 +223,40 @@ mod tests {
 
     #[test]
     fn parse_args_fmt_no_check() {
-        let args = vec!["spar".to_string(), "fmt".to_string(), "foo.spar".to_string()];
+        let args = vec![
+            "spar".to_string(),
+            "fmt".to_string(),
+            "foo.spar".to_string(),
+        ];
         match parse_args(&args) {
             Cmd::Fmt { path, check } => {
                 assert_eq!(path, "foo.spar");
                 assert!(!check);
             }
-            other => panic!("expected Cmd::Fmt, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Cmd::Fmt, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
     #[test]
     fn parse_args_fmt_with_check() {
-        let args = vec!["spar".to_string(), "fmt".to_string(), "--check".to_string(), "foo.spar".to_string()];
+        let args = vec![
+            "spar".to_string(),
+            "fmt".to_string(),
+            "--check".to_string(),
+            "foo.spar".to_string(),
+        ];
         match parse_args(&args) {
             Cmd::Fmt { path, check } => {
                 assert_eq!(path, "foo.spar");
                 assert!(check);
             }
-            other => panic!("expected Cmd::Fmt, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Cmd::Fmt, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -390,33 +276,38 @@ mod tests {
         let errs = spar::TypeChecker::check(&program, &symbols).unwrap_err();
         assert!(
             errs.len() >= 2,
-            "both type errors must be reported, got {} error(s): {:?}", errs.len(), errs
+            "both type errors must be reported, got {} error(s): {:?}",
+            errs.len(),
+            errs
         );
     }
 }
 
 #[cfg(test)]
 mod emit_tests {
-   
+
     use spar::emit::build_emit_json;
-use spar::{Lexer, Parser};
+    use spar::evaluator::Evaluator;
     use spar::resolver::Resolver;
     use spar::typechecker::TypeChecker;
-    use spar::evaluator::Evaluator;
+    use spar::{Lexer, Parser};
 
     fn emit_src(src: &str) -> serde_json::Value {
-        let tokens  = Lexer::new(src).tokenize().unwrap();
+        let tokens = Lexer::new(src).tokenize().unwrap();
         let program = Parser::new(tokens).parse().unwrap();
         let symbols = Resolver::new().resolve(&program, &[]).unwrap();
         TypeChecker::check(&program, &symbols).unwrap();
-        let result  = Evaluator::evaluate(&program, &symbols).unwrap();
+        let result = Evaluator::evaluate(&program, &symbols).unwrap();
         build_emit_json(&result, &symbols)
     }
 
     #[test]
     fn plain_var_not_in_emit_output() {
         let json = emit_src(r#"var secret: str = "hidden";"#);
-        assert!(json.get("secret").is_none(), "plain var must not appear in emit output");
+        assert!(
+            json.get("secret").is_none(),
+            "plain var must not appear in emit output"
+        );
     }
 
     #[test]
@@ -435,14 +326,17 @@ use spar::{Lexer, Parser};
     #[test]
     fn private_section_not_in_emit_output() {
         let json = emit_src("private [Defaults]{ timeout: int = 30; };");
-        assert!(json.get("Defaults").is_none(), "private section must not appear in emit");
+        assert!(
+            json.get("Defaults").is_none(),
+            "private section must not appear in emit"
+        );
     }
 
     #[test]
     fn private_section_still_resolvable_by_public_section() {
         let src = r#"
 private [Defaults]{ timeout: int = 30; };
-[Server]{ timeout: int = Defaults::timeout; };
+[Server]{ timeout: int = Defaults.timeout; };
 "#;
         let json = emit_src(src);
         assert!(json.get("Defaults").is_none());
@@ -458,7 +352,10 @@ private [Defaults]{ timeout: int = 30; };
 };
 "#;
         let json = emit_src(src);
-        assert!(json.get("manual").is_none(), "nested section must NOT appear at root");
+        assert!(
+            json.get("manual").is_none(),
+            "nested section must NOT appear at root"
+        );
         assert_eq!(json["MetaData"]["manual"]["author"], "occ");
     }
 
@@ -479,7 +376,7 @@ var options: [str] = ["one","two","three"];
 [Man]{ aster: int = 6; };
 [MetaData]{
     tool:    str = "stackforge";
-    version: int = Man::aster;
+    version: int = Man.aster;
     askter:  bool = false;
     manual: section = {
         main: str = "MainMan";
@@ -490,16 +387,19 @@ var options: [str] = ["one","two","three"];
 "#;
         let json = emit_src(src);
 
-        assert!(json.get("options").is_none(), "plain var 'options' must be hidden");
+        assert!(
+            json.get("options").is_none(),
+            "plain var 'options' must be hidden"
+        );
         assert_eq!(json["Man"]["aster"], 6);
-        assert_eq!(json["MetaData"]["tool"],   "stackforge");
+        assert_eq!(json["MetaData"]["tool"], "stackforge");
         assert_eq!(json["MetaData"]["version"], 6);
         assert_eq!(json["MetaData"]["askter"], false);
         assert_eq!(json["MetaData"]["manual"]["main"], "MainMan");
         assert_eq!(json["MetaData"]["manual"]["more"]["see"], 5);
         assert_eq!(
             json["MetaData"]["manual"]["options"],
-            serde_json::json!(["one","two","three"])
+            serde_json::json!(["one", "two", "three"])
         );
     }
 }

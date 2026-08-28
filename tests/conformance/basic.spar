@@ -1,0 +1,7 @@
+export var appName: str = "spar";
+var ports: [int] = [8080, 8081];
+
+[Server]{
+    name: str = global.appName;
+    port: int = ports[0];
+};

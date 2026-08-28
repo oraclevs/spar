@@ -1,0 +1,5 @@
+function enabled(port: int) -> bool {
+    return port >= 1024 && port < 65536;
+}
+
+export var isEnabled: bool = enabled(port: 8080);

@@ -25,15 +25,18 @@ Compiler::compile (src/compiler.rs)
   -> Resolver::resolve_with_imports (src/resolver.rs -> SymbolTable)
   -> loader::validate_schema_imports
   -> TypeChecker::check_with_schema (src/typechecker.rs)
-  -> Evaluator::evaluate_with_imports_and_base (src/evaluator.rs -> EvalResult)
+  -> Evaluator::evaluate_with_imports_and_base
+       (only when CompileOptions.evaluate and no prior errors; src/evaluator.rs -> EvalResult)
   -> emit::build_emit_json (src/emit.rs; only the `emit` CLI path)
 ```
 
 `Compiler` preserves the expanded `Program`, `SymbolTable`, imports,
 `EvalResult`, and every accumulated `SparError` in `Compilation`. Lexer and
 parser failures return immediately; resolver failures preserve the program;
-type-check and evaluation failures accumulate. `renderer.rs` renders those
-source-spanned errors. `de.rs` is a separate serde bridge over the same
+type-check errors accumulate. Evaluation runs only when
+`CompileOptions.evaluate` is true and every prior stage is error-free; any
+evaluation errors then accumulate in `Compilation`. `renderer.rs` renders
+those source-spanned errors. `de.rs` is a separate serde bridge over the same
 compiler/evaluation result.
 
 ## Approved insertion boundary

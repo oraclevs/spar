@@ -88,16 +88,16 @@ impl TaskSet {
     }
 
     pub fn default_task(&self) -> Result<&Task, RunnerError> {
-        let mut defaults = self.tasks.values().filter(|task| task.default);
-        let Some(task) = defaults.next() else {
+        let defaults: Vec<&Task> = self.tasks.values().filter(|task| task.default).collect();
+        let Some(task) = defaults.first() else {
             return Err(RunnerError::MissingDefaultTask);
         };
-        if let Some(other) = defaults.next() {
+        if defaults.len() > 1 {
             return Err(RunnerError::MultipleDefaultTasks {
-                names: vec![task.name.clone(), other.name.clone()],
+                names: defaults.iter().map(|task| task.name.clone()).collect(),
             });
         }
-        Ok(task)
+        Ok(*task)
     }
 
     pub fn get(&self, name: &str) -> Result<&Task, RunnerError> {
@@ -151,13 +151,16 @@ mod tests {
     fn multiple_default_tasks_fail() {
         let mut build = task("Build");
         build.default = true;
+        let mut deploy = task("Deploy");
+        deploy.default = true;
         let mut test = task("Test");
         test.default = true;
-        let tasks = TaskSet::new(vec![build, test]).unwrap();
+        let tasks = TaskSet::new(vec![build, deploy, test]).unwrap();
 
         assert!(matches!(
             tasks.default_task(),
-            Err(RunnerError::MultipleDefaultTasks { names }) if names == ["Build", "Test"]
+            Err(RunnerError::MultipleDefaultTasks { names })
+                if names == ["Build", "Deploy", "Test"]
         ));
     }
 

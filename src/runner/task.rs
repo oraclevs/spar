@@ -109,6 +109,14 @@ impl TaskSet {
         };
         Ok(&self.tasks[source_name])
     }
+
+    pub fn plan(&self, invocation: &TaskInvocation) -> Result<super::ExecutionPlan, RunnerError> {
+        super::graph::plan(self, invocation)
+    }
+
+    pub(super) fn source_task(&self, name: &str) -> Option<&Task> {
+        self.tasks.get(name)
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub mod naming;
 pub mod parser;
 pub mod renderer;
 pub mod resolver;
+pub mod runner;
 #[cfg(test)]
 pub mod tests;
 pub mod token;

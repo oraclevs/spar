@@ -1,5 +1,7 @@
 use std::fmt;
 
+use super::ScalarKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerError {
     DuplicateTaskName {
@@ -16,6 +18,24 @@ pub enum RunnerError {
     },
     UnknownTask {
         name: String,
+    },
+    MissingDependency {
+        task: String,
+        dependency: String,
+    },
+    DependencyCycle {
+        path: Vec<String>,
+    },
+    ArgumentCount {
+        task: String,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidArgument {
+        task: String,
+        parameter: String,
+        value: String,
+        kind: ScalarKind,
     },
 }
 
@@ -40,6 +60,32 @@ impl fmt::Display for RunnerError {
                 )
             }
             Self::UnknownTask { name } => write!(formatter, "unknown task: {name}"),
+            Self::MissingDependency { task, dependency } => {
+                write!(
+                    formatter,
+                    "task {task} depends on unknown task {dependency}"
+                )
+            }
+            Self::DependencyCycle { path } => {
+                write!(formatter, "task dependency cycle: {}", path.join(" -> "))
+            }
+            Self::ArgumentCount {
+                task,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "task {task} expects {expected} arguments but received {actual}"
+            ),
+            Self::InvalidArgument {
+                task,
+                parameter,
+                value,
+                kind,
+            } => write!(
+                formatter,
+                "task {task} argument {parameter} must be a {kind:?}, but received {value}"
+            ),
         }
     }
 }

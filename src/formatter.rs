@@ -447,7 +447,11 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
                 }
             }
         }
-        out.push_str(";\n");
+        if cmd.is_shebang {
+            out.push('\n');
+        } else {
+            out.push_str(";\n");
+        }
     }
     out.push_str(&body_indent);
     out.push_str("};\n");
@@ -1847,5 +1851,21 @@ function pick(flag: bool) -> int {
             "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n}\n";
         let formatted = fmt(src);
         assert!(formatted.contains("cargo build --workspace --release;"));
+    }
+
+    #[test]
+    fn shebang_task_script_round_trips_without_an_added_semicolon() {
+        let src = concat!(
+            "task [Script] {\n",
+            "    run {\n",
+            "        #!/usr/bin/env bash\n",
+            "        echo one\n",
+            "        if true; then echo two; fi\n",
+            "    };\n",
+            "}\n",
+        );
+        let formatted = fmt(src);
+        assert_eq!(formatted, src);
+        assert_eq!(fmt(&formatted), formatted);
     }
 }

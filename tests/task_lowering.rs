@@ -17,10 +17,10 @@ fn duplicate_task_names_produce_a_diagnostic() {
     let src = r#"
 task [Build] {
     run { echo first; };
-}
+};
 task [Build] {
     run { echo second; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -37,11 +37,11 @@ fn duplicate_default_tasks_produce_a_diagnostic() {
 task [Build] {
     default: true;
     run { echo build; };
-}
+};
 task [Test] {
     default: true;
     run { echo test; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -58,7 +58,7 @@ fn unknown_dependency_produces_a_diagnostic_before_running_anything() {
 task [Test] {
     dependsOn: [DoesNotExist];
     run { echo test; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -75,7 +75,7 @@ fn bad_metadata_type_produces_a_diagnostic() {
 task [Build] {
     default: "yes";
     run { echo build; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -91,7 +91,7 @@ fn non_scalar_parameter_produces_a_diagnostic() {
     let src = r#"
 task [Build](names: [str]) {
     run { echo build; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -107,7 +107,7 @@ fn task_local_unknown_name_in_run_body_produces_a_diagnostic() {
     let src = r#"
 task [Build] {
     run { echo ${nope}; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -120,7 +120,7 @@ export var suffix: str = "prod";
 
 task [Deploy](environment: str) {
     run { ./deploy.sh ${environment + suffix}; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(!compilation.errors.is_empty());
@@ -146,7 +146,7 @@ task [Deploy](environment: str) {
     run {
         cargo run -- --port ${port} --env ${environment};
     };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
@@ -181,7 +181,7 @@ task [Build] {
     run {
         cargo build;
     };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
@@ -193,11 +193,28 @@ task [Build] {
 }
 
 #[test]
+fn hash_escape_lowers_to_literal_shell_parameter_expansion() {
+    let src = r#"
+task [Build] {
+    run {
+        echo #{HOME:-x};
+    };
+};
+"#;
+    let compilation = compile(src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    let task = tasks.get("build").expect("Build task must be lowered");
+
+    assert_eq!(task.commands[0].render_unbound(), "echo ${HOME:-x}");
+}
+
+#[test]
 fn dependencies_and_env_and_cwd_lower_correctly() {
     let src = r#"
 task [Prepare] {
     run { echo prepare; };
-}
+};
 task [Build] {
     dependsOn: [Prepare];
     cwd: "./web";
@@ -205,7 +222,7 @@ task [Build] {
         RUST_LOG: "debug";
     };
     run { cargo build; };
-}
+};
 "#;
     let compilation = compile(src);
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
@@ -238,7 +255,7 @@ task [Deploy](environment: str = "staging", *extra: str) {
         #!/usr/bin/env bash
         echo ${environment} ${extra}
     };
-}
+};
 "#,
     );
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);

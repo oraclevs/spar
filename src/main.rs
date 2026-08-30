@@ -755,12 +755,12 @@ mod tests {
         let nested = directory.path().join("one").join("two");
         std::fs::create_dir_all(&nested).unwrap();
         let parent_file = directory.path().join("SparMake.spar");
-        std::fs::write(&parent_file, "task [Build] { run { true; }; }").unwrap();
+        std::fs::write(&parent_file, "task [Build] { run { true; }; };").unwrap();
 
         assert_eq!(discover_task_file(&nested).unwrap(), parent_file);
 
         let current_file = nested.join("SparMake.spar");
-        std::fs::write(&current_file, "task [Build] { run { true; }; }").unwrap();
+        std::fs::write(&current_file, "task [Build] { run { true; }; };").unwrap();
         assert_eq!(discover_task_file(&nested).unwrap(), current_file);
     }
 
@@ -948,7 +948,7 @@ private [Defaults]{ timeout: int = 30; };
     #[test]
     fn schema_file_is_rejected_by_parser_not_emit() {
         // The parser already sets is_schema_file=true; the emit path checks this.
-        let src = "@SchemaFile\nSchema [X]{ a: int; }\n";
+        let src = "@SchemaFile\nSchema [X]{ a: int; };\n";
         let tokens = spar::Lexer::new(src).tokenize().unwrap();
         let prog = spar::Parser::new(tokens).parse().unwrap();
         assert!(prog.is_schema_file, "schema file flag must be set");

@@ -4,7 +4,7 @@ task [Build] {
     run {
         echo "build";
     };
-}
+};
 
 task [Deploy] {
     default: true;
@@ -12,4 +12,4 @@ task [Deploy] {
     run {
         echo "deploy";
     };
-}
+};

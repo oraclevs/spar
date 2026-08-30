@@ -574,11 +574,13 @@ impl<'a> Lexer<'a> {
     /// Lexes the raw shell body of a `run { ... }` block: everything up to
     /// the matching `}` is copied verbatim as `ShellFragment` text, except
     /// `${expr}` islands (tokenized exactly like string interpolation via
-    /// `tokenize_interp`) and the `$${` escape, which drops one `$` and
-    /// treats the rest as literal shell text (so `$${HOME:-x}` produces the
-    /// shell text `${HOME:-x}`, not a Spar interpolation). Brace depth is
-    /// tracked over every literal `{`/`}` byte (including escaped ones) so
-    /// shell brace groups don't prematurely close the block.
+    /// `tokenize_interp`). A `#{` escape is kept verbatim in the shell
+    /// fragment while preventing its brace group from becoming a Spar
+    /// interpolation; `task_lowering` later turns it into literal `${` in
+    /// executable shell text. Keeping the source spelling here lets the
+    /// formatter round-trip it. Brace depth is tracked over every literal
+    /// `{`/`}` byte (including escaped ones) so shell brace groups don't
+    /// prematurely close the block.
     fn lex_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
         let mut fragment = String::new();
         let mut frag_start = self.pos;
@@ -594,11 +596,10 @@ impl<'a> Lexer<'a> {
                         span: Span::new(frag_start, self.pos, frag_line, frag_col),
                     });
                 }
-                Some(b'$') if self.peek_at(1) == Some(b'$') && self.peek_at(2) == Some(b'{') => {
-                    self.advance(); // first $
-                    self.advance(); // second $
+                Some(b'#') if self.peek_at(1) == Some(b'{') => {
+                    self.advance(); // #
                     self.advance(); // {
-                    fragment.push_str("${");
+                    fragment.push_str("#{");
                     depth += 1;
                 }
                 Some(b'$') if self.peek_at(1) == Some(b'{') => {
@@ -1095,7 +1096,7 @@ mod tests {
         let src = r#"run {
     echo "hello world" | grep hi > out.txt;
     if [ -f x ]; then { echo nested; }; fi;
-    cargo run -- --port ${port} $HOME $${HOME:-x};
+    cargo run -- --port ${port} $HOME #{HOME:-x};
 };"#;
         let tokens = lex(src);
 
@@ -1115,8 +1116,8 @@ mod tests {
         assert!(joined.contains(r#"echo "hello world" | grep hi > out.txt;"#));
         assert!(joined.contains("if [ -f x ]; then { echo nested; }; fi;"));
         assert!(joined.contains("$HOME"));
-        // `$${HOME:-x}` must lower to literal `${HOME:-x}` shell text, not interpolation.
-        assert!(joined.contains("${HOME:-x}"));
+        // Escapes stay verbatim at the lexer boundary; lowering owns their semantics.
+        assert!(joined.contains("#{HOME:-x}"));
 
         // `${port}` must have become a real interpolation island, not shell text.
         assert!(tokens.contains(&Token::InterpolStart));

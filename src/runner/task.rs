@@ -6,13 +6,13 @@ use super::RunnerError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub name: String,
+    pub source_line: Option<u32>,
     pub description: Option<String>,
     pub default: bool,
     pub quiet: bool,
     pub private: bool,
     pub group: Option<String>,
     pub confirm: Option<String>,
-    pub os: Vec<String>,
     pub dependencies: Vec<String>,
     pub parameters: Vec<TaskParameter>,
     pub environment: BTreeMap<String, String>,
@@ -199,13 +199,13 @@ mod tests {
     fn task(name: &str) -> Task {
         Task {
             name: name.to_owned(),
+            source_line: None,
             description: None,
             default: false,
             quiet: false,
             private: false,
             group: None,
             confirm: None,
-            os: Vec::new(),
             dependencies: Vec::new(),
             parameters: Vec::new(),
             environment: BTreeMap::new(),

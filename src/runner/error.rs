@@ -27,11 +27,6 @@ pub enum RunnerError {
     DependencyCycle {
         path: Vec<String>,
     },
-    UnsupportedOperatingSystem {
-        task: String,
-        actual: String,
-        allowed: Vec<String>,
-    },
     ArgumentCount {
         task: String,
         minimum: usize,
@@ -59,6 +54,11 @@ pub enum RunnerError {
     CommandFailed {
         task: String,
         command: String,
+        status: ExitStatus,
+    },
+    QuietCommandFailed {
+        task: String,
+        source_line: Option<u32>,
         status: ExitStatus,
     },
 }
@@ -93,15 +93,6 @@ impl fmt::Display for RunnerError {
             Self::DependencyCycle { path } => {
                 write!(formatter, "task dependency cycle: {}", path.join(" -> "))
             }
-            Self::UnsupportedOperatingSystem {
-                task,
-                actual,
-                allowed,
-            } => write!(
-                formatter,
-                "task {task} does not support operating system {actual}; allowed: {}",
-                allowed.join(", ")
-            ),
             Self::ArgumentCount {
                 task,
                 minimum,
@@ -150,6 +141,14 @@ impl fmt::Display for RunnerError {
                 formatter,
                 "task {task} command {command:?} failed with status {status}"
             ),
+            Self::QuietCommandFailed {
+                task,
+                source_line,
+                status,
+            } => match source_line {
+                Some(line) => write!(formatter, "task {task} at line {line} failed: {status}"),
+                None => write!(formatter, "task {task} failed: {status}"),
+            },
         }
     }
 }

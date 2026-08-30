@@ -140,6 +140,106 @@ fn failing_command_produces_nonzero_exit() {
     assert!(!output.status.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn quiet_failing_task_reports_source_location_without_dumping_script() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "quiet-failure.spar",
+        r#"
+
+task [QuietFailure] {
+    quiet: true;
+    run {
+        #!/bin/sh
+        # FULL_SCRIPT_SHOULD_NOT_APPEAR
+        printf 'short failure detail\n' >&2
+        exit 7
+    };
+};
+"#,
+    );
+
+    let output = spar(&["run", "quietfailure", "-f", file.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("short failure detail"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "error: task QuietFailure ({}:3) failed: exit status: 7",
+            file.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("FULL_SCRIPT_SHOULD_NOT_APPEAR"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_successful_task_does_not_echo_script() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "quiet-success.spar",
+        r#"task [QuietSuccess] {
+    quiet: true;
+    run {
+        #!/bin/sh
+        # QUIET_SUCCESS_SCRIPT_SHOULD_NOT_APPEAR
+        printf quiet-success-output
+    };
+};"#,
+    );
+
+    let output = spar(&["run", "quietsuccess", "-f", file.to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "quiet-success-output"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn non_quiet_failing_task_still_dumps_full_script() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "loud-failure.spar",
+        r#"task [LoudFailure] {
+    run {
+        #!/bin/sh
+        # LOUD_FAILURE_FULL_SCRIPT
+        exit 7
+    };
+};"#,
+    );
+
+    let output = spar(&["run", "loudfailure", "-f", file.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("LOUD_FAILURE_FULL_SCRIPT"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "error: task LoudFailure command \"#!/bin/sh\\n        # LOUD_FAILURE_FULL_SCRIPT\\n        exit 7\" failed with status exit status: 7"
+        ),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn dry_run_prints_commands_without_executing_them() {
     let temp = tempfile::tempdir().unwrap();
@@ -329,7 +429,6 @@ task [Deploy](environment: str = "staging", *extra: str) {
     private: true;
     group: "release";
     confirm: "Continue?";
-    os: ["linux", "macos", "windows"];
     dependsOn: [Build];
     cwd: "deploy";
     shell: ["bash", "-c"];
@@ -358,10 +457,6 @@ task [Build] { run { build; }; };
     assert_eq!(deploy["group"], "release");
     assert_eq!(deploy["private"], true);
     assert_eq!(deploy["confirm"], "Continue?");
-    assert_eq!(
-        deploy["os"],
-        serde_json::json!(["linux", "macos", "windows"])
-    );
     assert_eq!(deploy["dependencies"], serde_json::json!(["Build"]));
     assert_eq!(deploy["parameters"][0]["default"], "staging");
     assert_eq!(deploy["parameters"][1]["variadic"], true);

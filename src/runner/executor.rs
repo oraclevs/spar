@@ -137,6 +137,13 @@ fn execute_with_io(
                 })?;
             drop(script_file);
             if !status.success() {
+                if bound_task.task.quiet {
+                    return Err(RunnerError::QuietCommandFailed {
+                        task: bound_task.task.name.clone(),
+                        source_line: bound_task.task.source_line,
+                        status,
+                    });
+                }
                 return Err(RunnerError::CommandFailed {
                     task: bound_task.task.name.clone(),
                     command: script,
@@ -165,13 +172,13 @@ mod tests {
             tasks: vec![BoundTask {
                 task: Task {
                     name: "Build".to_owned(),
+                    source_line: None,
                     description: None,
                     default: false,
                     quiet: false,
                     private: false,
                     group: None,
                     confirm: None,
-                    os: Vec::new(),
                     dependencies: Vec::new(),
                     parameters: Vec::new(),
                     environment: BTreeMap::new(),

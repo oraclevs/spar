@@ -1093,9 +1093,6 @@ impl Resolver {
         if let Some(expr) = &decl.confirm {
             self.resolve_expr(expr);
         }
-        if let Some(expr) = &decl.os {
-            self.resolve_expr(expr);
-        }
         if let Some(expr) = &decl.cwd {
             self.resolve_expr(expr);
         }
@@ -1114,11 +1111,13 @@ impl Resolver {
         }
 
         let locals: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
-        for command in &decl.run {
-            for part in &command.parts {
-                if let ShellTemplatePart::Expr(expr) = part {
-                    if let Err(e) = self.resolve_expr_with_locals(expr, &locals) {
-                        self.errors.push(e);
+        for block in &decl.run_blocks {
+            for command in &block.commands {
+                for part in &command.parts {
+                    if let ShellTemplatePart::Expr(expr) = part {
+                        if let Err(e) = self.resolve_expr_with_locals(expr, &locals) {
+                            self.errors.push(e);
+                        }
                     }
                 }
             }

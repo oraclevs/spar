@@ -35,8 +35,14 @@ pub fn format_program_with_comments(
     let mut out = String::new();
     let mut cx = CommentCursor::new(comments);
 
-    if program.dotenv_load {
-        out.push_str("@DotenvLoad\n");
+    if let Some(path) = &program.load_env {
+        if path == ".env" {
+            out.push_str("@LoadEnv\n");
+        } else {
+            out.push_str("@LoadEnv(\"");
+            out.push_str(&escape_string_content(path));
+            out.push_str("\")\n");
+        }
     }
     if program.is_schema_file {
         out.push_str("@SchemaFile\n");
@@ -44,7 +50,7 @@ pub fn format_program_with_comments(
 
     for (i, item) in program.items.iter().enumerate() {
         let item_line = item_span_line(item);
-        if i > 0 || program.dotenv_load || program.is_schema_file {
+        if i > 0 || program.load_env.is_some() || program.is_schema_file {
             out.push('\n');
         }
         // Emit any standalone comments preceding this item (after the blank-line separator)
@@ -391,12 +397,6 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
         format_expr(confirm, 0, 1, config, out);
         out.push_str(";\n");
     }
-    if let Some(os) = &td.os {
-        out.push_str(&body_indent);
-        out.push_str("os: ");
-        format_expr(os, 0, 1, config, out);
-        out.push_str(";\n");
-    }
     if !td.depends_on.is_empty() {
         out.push_str(&body_indent);
         out.push_str("dependsOn: [");
@@ -435,29 +435,36 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
         out.push_str("};\n");
     }
 
-    out.push_str(&body_indent);
-    out.push_str("run {\n");
-    let run_indent = indent(2, config);
-    for cmd in &td.run {
-        out.push_str(&run_indent);
-        for part in &cmd.parts {
-            match part {
-                ShellTemplatePart::Literal(s) => out.push_str(s),
-                ShellTemplatePart::Expr(e) => {
-                    out.push_str("${");
-                    format_expr(e, 0, 2, config, out);
-                    out.push('}');
+    for block in &td.run_blocks {
+        out.push_str(&body_indent);
+        out.push_str("run");
+        if let Some(os) = &block.os {
+            out.push(' ');
+            out.push_str(os);
+        }
+        out.push_str(" {\n");
+        let run_indent = indent(2, config);
+        for cmd in &block.commands {
+            out.push_str(&run_indent);
+            for part in &cmd.parts {
+                match part {
+                    ShellTemplatePart::Literal(s) => out.push_str(s),
+                    ShellTemplatePart::Expr(e) => {
+                        out.push_str("${");
+                        format_expr(e, 0, 2, config, out);
+                        out.push('}');
+                    }
                 }
             }
+            if cmd.is_shebang {
+                out.push('\n');
+            } else {
+                out.push_str(";\n");
+            }
         }
-        if cmd.is_shebang {
-            out.push('\n');
-        } else {
-            out.push_str(";\n");
-        }
+        out.push_str(&body_indent);
+        out.push_str("};\n");
     }
-    out.push_str(&body_indent);
-    out.push_str("};\n");
 
     out.push_str("};\n");
 }
@@ -1564,7 +1571,7 @@ function pick(flag: bool) -> int {
         use crate::ast::*;
         let program = Program {
             is_schema_file: false,
-            dotenv_load: false,
+            load_env: None,
             items: vec![TopLevelItem::Import(ImportDecl {
                 path: "dir\\file.spar".to_string(), // stored with literal backslash
                 kind: ImportKind::Aliased(Some("x".to_string())),
@@ -1586,7 +1593,7 @@ function pick(flag: bool) -> int {
         // (the parser rejects "[A.B]" in source, but the AST can represent it)
         let program = Program {
             is_schema_file: false,
-            dotenv_load: false,
+            load_env: None,
             items: vec![TopLevelItem::Section(SectionDecl {
                 exported: false,
                 private: false,
@@ -1836,7 +1843,6 @@ function pick(flag: bool) -> int {
             "    private: true;\n",
             "    group: \"release\";\n",
             "    confirm: \"Really deploy?\";\n",
-            "    os: [\"linux\", \"macos\"];\n",
             "    dependsOn: [Build];\n",
             "    cwd: \"./web\";\n",
             "    shell: [\"bash\", \"-euo\", \"pipefail\", \"-c\"];\n",
@@ -1851,6 +1857,15 @@ function pick(flag: bool) -> int {
         let formatted = fmt(src);
         assert_eq!(formatted, src);
         assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn multiple_run_blocks_format_in_source_order_with_labels() {
+        let src = "task [T] {\n    run {\n        echo default;\n    };\n    run windows {\n        echo win;\n    };\n};\n";
+        let formatted = fmt(src);
+        assert_eq!(formatted, src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
     }
 
     #[test]
@@ -1898,11 +1913,20 @@ function pick(flag: bool) -> int {
     }
 
     #[test]
-    fn dotenv_load_pragma_formats_first() {
-        let src = "@DotenvLoad\ntask [Build] { run { echo build; }; };\n";
+    fn load_env_pragma_formats_first() {
+        let src = "@LoadEnv\ntask [Build] { run { echo build; }; };\n";
         assert_eq!(
             fmt(src),
-            "@DotenvLoad\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
+            "@LoadEnv\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
+        );
+    }
+
+    #[test]
+    fn load_env_pragma_formats_a_custom_path() {
+        let src = "@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };\n";
+        assert_eq!(
+            fmt(src),
+            "@LoadEnv(\".env.production\")\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
         );
     }
 }

@@ -81,16 +81,26 @@ impl Parser {
     }
 
     pub fn parse(mut self) -> Result<Program, SparError> {
-        let (is_schema_file, dotenv_load) = if self.at(&Token::At) {
+        let (is_schema_file, load_env) = if self.at(&Token::At) {
             self.advance(); // consume '@'
             let (name, name_span) = self.expect_ident()?;
             match name.as_str() {
-                "SchemaFile" => (true, false),
-                "DotenvLoad" => (false, true),
+                "SchemaFile" => (true, None),
+                "LoadEnv" => {
+                    let path = if self.at(&Token::LParen) {
+                        self.advance();
+                        let path = self.parse_load_env_path()?;
+                        self.expect(&Token::RParen)?;
+                        path
+                    } else {
+                        ".env".to_string()
+                    };
+                    (false, Some(path))
+                }
                 _ => {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "unknown file pragma `@{}`; only `@SchemaFile` or `@DotenvLoad` is supported",
+                            "unknown file pragma `@{}`; only `@SchemaFile` or `@LoadEnv` is supported",
                             name
                         ),
                         span: name_span,
@@ -98,7 +108,7 @@ impl Parser {
                 }
             }
         } else {
-            (false, false)
+            (false, None)
         };
 
         let mut items = Vec::new();
@@ -162,9 +172,40 @@ impl Parser {
 
         Ok(Program {
             is_schema_file,
-            dotenv_load,
+            load_env,
             items,
         })
+    }
+
+    fn parse_load_env_path(&mut self) -> Result<String, SparError> {
+        self.expect(&Token::StringStart)?;
+
+        let path = match self.peek() {
+            Token::StringFragment(_) => {
+                let st = self.advance().clone();
+                let Token::StringFragment(path) = st.token else {
+                    unreachable!()
+                };
+                path
+            }
+            Token::InterpolStart => {
+                return Err(self.error("@LoadEnv path cannot contain interpolation"));
+            }
+            Token::StringEnd => String::new(),
+            _ => {
+                return Err(self.error(format!(
+                    "expected string content, found {}",
+                    self.peek().human_name()
+                )))
+            }
+        };
+
+        if self.at(&Token::InterpolStart) {
+            return Err(self.error("@LoadEnv path cannot contain interpolation"));
+        }
+
+        self.expect(&Token::StringEnd)?;
+        Ok(path)
     }
 
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
@@ -225,8 +266,8 @@ impl Parser {
                 }
             }
             Token::At => Err(self.error(
-                "'@SchemaFile' pragma must be the first item in the file; \
-                 it cannot appear mid-file"
+                "'@SchemaFile' or '@LoadEnv' pragma must be the first item in the file; \
+                 pragmas cannot appear mid-file"
             )),
             _ => Err(self.error(format!(
                 "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'Schema', 'task', or '[' to start a declaration",
@@ -1548,13 +1589,12 @@ impl Parser {
         let mut private = None;
         let mut group = None;
         let mut confirm = None;
-        let mut os = None;
         let mut depends_on = Vec::new();
         let mut env = Vec::new();
         let mut cwd = None;
         let mut shell = None;
-        let mut run = Vec::new();
-        let mut saw_run = false;
+        let mut run_blocks: Vec<RunBlock> = Vec::new();
+        let mut seen_run_labels: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
 
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             let (field_name, field_span) = if self.at(&Token::Private) {
@@ -1566,14 +1606,28 @@ impl Parser {
             };
             match field_name.as_str() {
                 "run" => {
-                    if saw_run {
-                        return Err(SparError::ParseError {
-                            message: "task 'run' block may only appear once".to_string(),
-                            span: field_span,
-                        });
+                    let os_label = if let Token::Ident(label) = self.peek().clone() {
+                        self.advance();
+                        Some(label)
+                    } else {
+                        None
+                    };
+                    let os_span = os_label.as_ref().map(|_| field_span.clone());
+                    let run_start = field_span.clone();
+                    let commands = self.parse_run_block()?;
+                    if !seen_run_labels.insert(os_label.clone()) {
+                        let message = match &os_label {
+                            Some(label) => format!("task 'run {label}' block may only appear once"),
+                            None => "task can only have one default 'run {}' block".to_string(),
+                        };
+                        return Err(SparError::ParseError { message, span: run_start });
                     }
-                    run = self.parse_run_block()?;
-                    saw_run = true;
+                    run_blocks.push(RunBlock {
+                        os: os_label,
+                        os_span,
+                        commands,
+                        span: run_start,
+                    });
                 }
                 "description" => {
                     self.expect(&Token::Colon)?;
@@ -1603,11 +1657,6 @@ impl Parser {
                 "confirm" => {
                     self.expect(&Token::Colon)?;
                     confirm = Some(self.parse_expr()?);
-                    self.expect(&Token::Semicolon)?;
-                }
-                "os" => {
-                    self.expect(&Token::Colon)?;
-                    os = Some(self.parse_expr()?);
                     self.expect(&Token::Semicolon)?;
                 }
                 "cwd" => {
@@ -1660,7 +1709,7 @@ impl Parser {
                 other => {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'private', 'group', 'confirm', 'os', 'dependsOn', 'cwd', 'shell', 'env', or 'run'"
+                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'private', 'group', 'confirm', 'dependsOn', 'cwd', 'shell', 'env', or 'run'"
                         ),
                         span: field_span,
                     });
@@ -1670,9 +1719,9 @@ impl Parser {
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Semicolon)?;
 
-        if !saw_run {
+        if run_blocks.is_empty() {
             return Err(SparError::ParseError {
-                message: format!("task '{name}' must declare a 'run' block"),
+                message: format!("task '{name}' must declare at least one 'run' block"),
                 span,
             });
         }
@@ -1687,12 +1736,11 @@ impl Parser {
             private,
             group,
             confirm,
-            os,
             depends_on,
             env,
             cwd,
             shell,
-            run,
+            run_blocks,
             span,
         })
     }
@@ -2352,10 +2400,11 @@ function f(flag: bool) -> int {
         assert_eq!(task.name, "Build");
         assert!(task.params.is_empty());
         assert!(task.depends_on.is_empty());
-        assert_eq!(task.run.len(), 1);
-        assert!(!task.run[0].is_shebang);
+        assert_eq!(task.run_blocks.len(), 1);
+        assert_eq!(task.run_blocks[0].commands.len(), 1);
+        assert!(!task.run_blocks[0].commands[0].is_shebang);
         assert!(matches!(
-            &task.run[0].parts[..],
+            &task.run_blocks[0].commands[0].parts[..],
             [ShellTemplatePart::Literal(s)] if s.trim() == "cargo build"
         ));
     }
@@ -2399,9 +2448,9 @@ function f(flag: bool) -> int {
         assert_eq!(task.params.len(), 1);
         assert_eq!(task.params[0].name, "environment");
         assert_eq!(task.params[0].ty, SparType::Str);
-        assert_eq!(task.run.len(), 1);
+        assert_eq!(task.run_blocks[0].commands.len(), 1);
         assert!(matches!(
-            &task.run[0].parts[..],
+            &task.run_blocks[0].commands[0].parts[..],
             [ShellTemplatePart::Literal(_), ShellTemplatePart::Expr(_)]
         ));
     }
@@ -2470,7 +2519,6 @@ function f(flag: bool) -> int {
     private: true;
     group: "release";
     confirm: "Really deploy?";
-    os: ["linux", "macos"];
     shell: ["bash", "-euo", "pipefail", "-c"];
     run { ./deploy.sh; };
 };"#,
@@ -2481,7 +2529,6 @@ function f(flag: bool) -> int {
         ));
         assert!(task.group.is_some());
         assert!(task.confirm.is_some());
-        assert!(task.os.is_some());
         assert!(task.shell.is_some());
     }
 
@@ -2534,7 +2581,7 @@ function f(flag: bool) -> int {
     };
 };"#,
         );
-        assert_eq!(task.run.len(), 3);
+        assert_eq!(task.run_blocks[0].commands.len(), 3);
     }
 
     #[test]
@@ -2549,35 +2596,53 @@ function f(flag: bool) -> int {
     };
 };"#,
         );
-        assert_eq!(task.run.len(), 1);
-        assert!(task.run[0].is_shebang);
+        assert_eq!(task.run_blocks[0].commands.len(), 1);
+        assert!(task.run_blocks[0].commands[0].is_shebang);
         assert!(matches!(
-            &task.run[0].parts[..],
+            &task.run_blocks[0].commands[0].parts[..],
             [ShellTemplatePart::Literal(script)]
                 if script.contains("if true; then echo three; fi")
         ));
     }
 
     #[test]
-    fn dotenv_load_pragma_must_be_first() {
+    fn load_env_pragma_defaults_to_dotenv_and_must_be_first() {
         let program = Parser::new(
-            crate::lexer::Lexer::new("@DotenvLoad\ntask [Build] { run { echo build; }; };")
+            crate::lexer::Lexer::new("@LoadEnv\ntask [Build] { run { echo build; }; };")
                 .tokenize()
                 .unwrap(),
         )
         .parse()
-        .expect("@DotenvLoad must parse");
-        assert!(program.dotenv_load);
+        .expect("@LoadEnv must parse");
+        assert_eq!(program.load_env.as_deref(), Some(".env"));
         assert!(!program.is_schema_file);
         assert!(Parser::new(
             crate::lexer::Lexer::new(
-                "var name: str = \"spar\";\n@DotenvLoad\ntask [Build] { run { echo build; }; };",
+                "var name: str = \"spar\";\n@LoadEnv\ntask [Build] { run { echo build; }; };",
             )
             .tokenize()
             .unwrap(),
         )
         .parse()
         .is_err());
+    }
+
+    #[test]
+    fn load_env_pragma_accepts_a_custom_path() {
+        let program =
+            parse_str("@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };");
+        assert_eq!(program.load_env.as_deref(), Some(".env.production"));
+    }
+
+    #[test]
+    fn unknown_file_pragma_lists_supported_names() {
+        let message = parse_err("@Unknown\ntask [Build] { run { echo build; }; };");
+        assert!(
+            message.contains(
+                "unknown file pragma `@Unknown`; only `@SchemaFile` or `@LoadEnv` is supported"
+            ),
+            "got: {message}"
+        );
     }
 
     #[test]
@@ -2610,6 +2675,92 @@ function f(flag: bool) -> int {
     run { echo two; };
 };"#,
         );
-        assert!(msg.contains("only appear once"), "got: {msg}");
+        assert!(
+            msg.contains("only have one default") || msg.contains("only appear once"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn task_accepts_bare_and_labeled_run_blocks() {
+        let src = "task [T] {\n\
+            run {\n\
+                echo default;\n\
+            };\n\
+            run windows {\n\
+                echo win;\n\
+            };\n\
+            run linux {\n\
+                echo linux;\n\
+            };\n\
+        };";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let TopLevelItem::Task(task) = &program.items[0] else {
+            panic!("expected a task");
+        };
+        assert_eq!(task.run_blocks.len(), 3);
+        assert_eq!(task.run_blocks[0].os, None);
+        assert_eq!(task.run_blocks[1].os.as_deref(), Some("windows"));
+        assert_eq!(task.run_blocks[2].os.as_deref(), Some("linux"));
+    }
+
+    #[test]
+    fn task_rejects_duplicate_run_block_for_same_os() {
+        let src = "task [T] {\n\
+            run windows {\n\
+                echo a;\n\
+            };\n\
+            run windows {\n\
+                echo b;\n\
+            };\n\
+        };";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let err = crate::parser::Parser::new(tokens).parse().expect_err("must reject");
+        let message = format!("{err}");
+        assert!(message.contains("windows"), "{message}");
+    }
+
+    #[test]
+    fn task_rejects_two_default_run_blocks() {
+        let src = "task [T] {\n\
+            run {\n\
+                echo a;\n\
+            };\n\
+            run {\n\
+                echo b;\n\
+            };\n\
+        };";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let err = crate::parser::Parser::new(tokens).parse().expect_err("must reject");
+        let message = format!("{err}");
+        assert!(message.contains("default") || message.contains("once"), "{message}");
+    }
+
+    #[test]
+    fn task_requires_at_least_one_run_block() {
+        let src = "task [T] {\n\
+            description: \"no run at all\";\n\
+        };";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        assert!(crate::parser::Parser::new(tokens).parse().is_err());
+    }
+
+    #[test]
+    fn task_with_only_labeled_run_blocks_and_no_default_parses() {
+        let src = "task [T] {\n\
+            run windows {\n\
+                echo win;\n\
+            };\n\
+            run macos {\n\
+                echo mac;\n\
+            };\n\
+        };";
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let TopLevelItem::Task(task) = &program.items[0] else {
+            panic!("expected a task");
+        };
+        assert_eq!(task.run_blocks.len(), 2);
     }
 }

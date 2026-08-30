@@ -32,15 +32,6 @@ pub(super) fn plan(
         &mut stack,
         &mut ordered,
     )?;
-    for task in &ordered {
-        if !task.os.is_empty() && !task.os.iter().any(|os| os == std::env::consts::OS) {
-            return Err(RunnerError::UnsupportedOperatingSystem {
-                task: task.name.clone(),
-                actual: std::env::consts::OS.to_owned(),
-                allowed: task.os.clone(),
-            });
-        }
-    }
     let requested_values = bind(task_set, invocation)?.parameter_values;
 
     Ok(ExecutionPlan {
@@ -197,13 +188,13 @@ mod tests {
     fn task(name: &str, dependencies: &[&str]) -> Task {
         Task {
             name: name.to_owned(),
+            source_line: None,
             description: None,
             default: false,
             quiet: false,
             private: false,
             group: None,
             confirm: None,
-            os: Vec::new(),
             dependencies: dependencies.iter().map(|name| (*name).to_owned()).collect(),
             parameters: Vec::new(),
             environment: BTreeMap::new(),
@@ -362,13 +353,13 @@ mod tests {
     fn plan_converts_each_scalar_argument_to_a_rendered_value() {
         let tasks = TaskSet::new(vec![Task {
             name: "Deploy".to_owned(),
+            source_line: None,
             description: None,
             default: false,
             quiet: false,
             private: false,
             group: None,
             confirm: None,
-            os: Vec::new(),
             dependencies: Vec::new(),
             parameters: vec![
                 TaskParameter {
@@ -578,62 +569,6 @@ mod tests {
                 ("extra".to_owned(), BoundValue::Variadic(Vec::new())),
             ])
         );
-    }
-
-    #[test]
-    fn plan_rejects_a_requested_task_on_an_unsupported_operating_system() {
-        let mut deploy = task("Deploy", &[]);
-        let unsupported = ["linux", "macos", "windows"]
-            .into_iter()
-            .find(|candidate| *candidate != std::env::consts::OS)
-            .unwrap()
-            .to_owned();
-        deploy.os = vec![unsupported.clone()];
-        let tasks = TaskSet::new(vec![deploy]).unwrap();
-
-        let error = tasks
-            .plan(&TaskInvocation {
-                task: "deploy".to_owned(),
-                arguments: Vec::new(),
-            })
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            crate::runner::RunnerError::UnsupportedOperatingSystem {
-                task,
-                actual,
-                allowed,
-            } if task == "Deploy"
-                && actual == std::env::consts::OS
-                && allowed == [unsupported]
-        ));
-    }
-
-    #[test]
-    fn plan_rejects_an_unsupported_dependency_before_execution() {
-        let deploy = task("Deploy", &["Build"]);
-        let mut build = task("Build", &[]);
-        let unsupported = ["linux", "macos", "windows"]
-            .into_iter()
-            .find(|candidate| *candidate != std::env::consts::OS)
-            .unwrap()
-            .to_owned();
-        build.os = vec![unsupported];
-        let tasks = TaskSet::new(vec![deploy, build]).unwrap();
-
-        let error = tasks
-            .plan(&TaskInvocation {
-                task: "deploy".to_owned(),
-                arguments: Vec::new(),
-            })
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            crate::runner::RunnerError::UnsupportedOperatingSystem { task, .. }
-                if task == "Build"
-        ));
     }
 
     #[test]

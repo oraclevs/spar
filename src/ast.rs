@@ -3,7 +3,7 @@ use crate::error::Span;
 #[derive(Debug, Clone)]
 pub struct Program {
     pub is_schema_file: bool,
-    pub dotenv_load: bool,
+    pub load_env: Option<String>,
     pub items: Vec<TopLevelItem>,
 }
 
@@ -39,12 +39,11 @@ pub struct TaskDecl {
     pub private: Option<Expr>,
     pub group: Option<Expr>,
     pub confirm: Option<Expr>,
-    pub os: Option<Expr>,
     pub depends_on: Vec<TaskRef>,
     pub env: Vec<(String, Expr)>,
     pub cwd: Option<Expr>,
     pub shell: Option<Expr>,
-    pub run: Vec<ShellCommand>,
+    pub run_blocks: Vec<RunBlock>,
     pub span: Span,
 }
 
@@ -73,6 +72,20 @@ pub struct TaskRef {
 pub struct ShellCommand {
     pub parts: Vec<ShellTemplatePart>,
     pub is_shebang: bool,
+    pub span: Span,
+}
+
+/// One `run <label>? { ... }` clause inside a task. `os: None` is the bare
+/// default/fallback form (`run { ... }`) every task could already write;
+/// `os: Some("windows"|"linux"|"macos")` is an override selected by
+/// matching `std::env::consts::OS` at task-lowering time. A task may have
+/// at most one default block and at most one block per label — enforced
+/// by the parser, not here.
+#[derive(Debug, Clone)]
+pub struct RunBlock {
+    pub os: Option<String>,
+    pub os_span: Option<Span>,
+    pub commands: Vec<ShellCommand>,
     pub span: Span,
 }
 

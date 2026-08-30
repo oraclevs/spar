@@ -4,4 +4,4 @@ task [Build] {
     run {
         echo "build";
     };
-}
+};

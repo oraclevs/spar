@@ -4,4 +4,4 @@ task [Fails] {
     run {
         false;
     };
-}
+};

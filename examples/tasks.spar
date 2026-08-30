@@ -1,0 +1,36 @@
+// Task runner + ordinary configuration values living in the same file.
+// Run it with:
+//
+//   spar tasks examples/tasks.spar
+//   spar run   examples/tasks.spar
+//   spar run   examples/tasks.spar test --dry-run
+//   spar run   examples/tasks.spar dev
+export var appName: str = "demo";
+
+export var port: int = 8080;
+
+task [Hello] {
+    description: "Print application information";
+    default: true;
+    run {
+        echo "Running ${appName} on port ${port}";
+    };
+}
+
+task [Test] {
+    description: "Run tests";
+    run {
+        echo "testing ${appName}";
+    };
+}
+
+task [Dev] {
+    description: "Start development";
+    dependsOn: [Test];
+    env: {
+        APP_PORT: "${port}";
+    };
+    run {
+        echo "starting ${appName}";
+    };
+}

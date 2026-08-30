@@ -3,6 +3,7 @@ use crate::error::Span;
 #[derive(Debug, Clone)]
 pub struct Program {
     pub is_schema_file: bool,
+    pub dotenv_load: bool,
     pub items: Vec<TopLevelItem>,
 }
 

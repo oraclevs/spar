@@ -2,6 +2,7 @@ pub mod ast;
 pub mod compiler;
 pub mod de;
 pub mod depgraph;
+pub mod dotenv;
 pub mod emit;
 pub mod error;
 pub mod evaluator;

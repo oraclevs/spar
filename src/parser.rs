@@ -81,21 +81,24 @@ impl Parser {
     }
 
     pub fn parse(mut self) -> Result<Program, SparError> {
-        let is_schema_file = if self.at(&Token::At) {
+        let (is_schema_file, dotenv_load) = if self.at(&Token::At) {
             self.advance(); // consume '@'
             let (name, name_span) = self.expect_ident()?;
-            if name != "SchemaFile" {
-                return Err(SparError::ParseError {
-                    message: format!(
-                        "unknown file pragma `@{}`; only `@SchemaFile` is supported",
-                        name
-                    ),
-                    span: name_span,
-                });
+            match name.as_str() {
+                "SchemaFile" => (true, false),
+                "DotenvLoad" => (false, true),
+                _ => {
+                    return Err(SparError::ParseError {
+                        message: format!(
+                            "unknown file pragma `@{}`; only `@SchemaFile` or `@DotenvLoad` is supported",
+                            name
+                        ),
+                        span: name_span,
+                    });
+                }
             }
-            true
         } else {
-            false
+            (false, false)
         };
 
         let mut items = Vec::new();
@@ -159,6 +162,7 @@ impl Parser {
 
         Ok(Program {
             is_schema_file,
+            dotenv_load,
             items,
         })
     }
@@ -1500,7 +1504,9 @@ impl Parser {
                     None
                 };
                 if default.is_none() && saw_default && !variadic {
-                    return Err(self.error("a required task parameter cannot follow a parameter with a default"));
+                    return Err(self.error(
+                        "a required task parameter cannot follow a parameter with a default",
+                    ));
                 }
                 saw_default |= default.is_some();
                 saw_variadic = variadic;
@@ -1741,55 +1747,60 @@ impl Parser {
                 .collect();
             push_shell_command(&mut parts, &mut commands, &block_span, true);
         } else {
-        let mut current: Vec<ShellTemplatePart> = Vec::new();
-        let mut literal = String::new();
-        let mut in_single = false;
-        let mut in_double = false;
+            let mut current: Vec<ShellTemplatePart> = Vec::new();
+            let mut literal = String::new();
+            let mut in_single = false;
+            let mut in_double = false;
 
-        for part in raw {
-            match part {
-                RawPart::Expr(e) => {
-                    if !literal.is_empty() {
-                        current.push(ShellTemplatePart::Literal(std::mem::take(&mut literal)));
+            for part in raw {
+                match part {
+                    RawPart::Expr(e) => {
+                        if !literal.is_empty() {
+                            current.push(ShellTemplatePart::Literal(std::mem::take(&mut literal)));
+                        }
+                        current.push(ShellTemplatePart::Expr(e));
                     }
-                    current.push(ShellTemplatePart::Expr(e));
-                }
-                RawPart::Text(s) => {
-                    let mut chars = s.chars().peekable();
-                    while let Some(c) = chars.next() {
-                        match c {
-                            '\\' => {
-                                literal.push(c);
-                                if let Some(next) = chars.next() {
-                                    literal.push(next);
+                    RawPart::Text(s) => {
+                        let mut chars = s.chars().peekable();
+                        while let Some(c) = chars.next() {
+                            match c {
+                                '\\' => {
+                                    literal.push(c);
+                                    if let Some(next) = chars.next() {
+                                        literal.push(next);
+                                    }
                                 }
-                            }
-                            '\'' if !in_double => {
-                                in_single = !in_single;
-                                literal.push(c);
-                            }
-                            '"' if !in_single => {
-                                in_double = !in_double;
-                                literal.push(c);
-                            }
-                            ';' if !in_single && !in_double => {
-                                if !literal.is_empty() {
-                                    current.push(ShellTemplatePart::Literal(std::mem::take(
-                                        &mut literal,
-                                    )));
+                                '\'' if !in_double => {
+                                    in_single = !in_single;
+                                    literal.push(c);
                                 }
-                                push_shell_command(&mut current, &mut commands, &block_span, false);
+                                '"' if !in_single => {
+                                    in_double = !in_double;
+                                    literal.push(c);
+                                }
+                                ';' if !in_single && !in_double => {
+                                    if !literal.is_empty() {
+                                        current.push(ShellTemplatePart::Literal(std::mem::take(
+                                            &mut literal,
+                                        )));
+                                    }
+                                    push_shell_command(
+                                        &mut current,
+                                        &mut commands,
+                                        &block_span,
+                                        false,
+                                    );
+                                }
+                                _ => literal.push(c),
                             }
-                            _ => literal.push(c),
                         }
                     }
                 }
             }
-        }
-        if !literal.is_empty() {
-            current.push(ShellTemplatePart::Literal(literal));
-        }
-        push_shell_command(&mut current, &mut commands, &block_span, false);
+            if !literal.is_empty() {
+                current.push(ShellTemplatePart::Literal(literal));
+            }
+            push_shell_command(&mut current, &mut commands, &block_span, false);
         }
 
         if commands.is_empty() {
@@ -2377,9 +2388,11 @@ function f(flag: bool) -> int {
             "task [Deploy](*extra: str = \"x\") { run { echo hi; }; }",
             "task [Deploy](optional: str = \"x\", required: str) { run { echo hi; }; }",
         ] {
-            assert!(Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
-                .parse()
-                .is_err());
+            assert!(
+                Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
+                    .parse()
+                    .is_err()
+            );
         }
     }
 
@@ -2414,7 +2427,10 @@ function f(flag: bool) -> int {
     run { ./deploy.sh; };
 }"#,
         );
-        assert!(matches!(task.private, Some(Expr::Literal(Literal::Bool(true)))));
+        assert!(matches!(
+            task.private,
+            Some(Expr::Literal(Literal::Bool(true)))
+        ));
         assert!(task.group.is_some());
         assert!(task.confirm.is_some());
         assert!(task.os.is_some());
@@ -2492,6 +2508,28 @@ function f(flag: bool) -> int {
             [ShellTemplatePart::Literal(script)]
                 if script.contains("if true; then echo three; fi")
         ));
+    }
+
+    #[test]
+    fn dotenv_load_pragma_must_be_first() {
+        let program = Parser::new(
+            crate::lexer::Lexer::new("@DotenvLoad\ntask [Build] { run { echo build; }; }")
+                .tokenize()
+                .unwrap(),
+        )
+        .parse()
+        .expect("@DotenvLoad must parse");
+        assert!(program.dotenv_load);
+        assert!(!program.is_schema_file);
+        assert!(Parser::new(
+            crate::lexer::Lexer::new(
+                "var name: str = \"spar\";\n@DotenvLoad\ntask [Build] { run { echo build; }; }",
+            )
+            .tokenize()
+            .unwrap(),
+        )
+        .parse()
+        .is_err());
     }
 
     #[test]

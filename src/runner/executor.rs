@@ -1,7 +1,7 @@
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use super::{ExecutionPlan, RunnerError};
+use super::{ExecutionPlan, RunnerError, TaskCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -18,14 +18,48 @@ pub fn execute(
     plan: &ExecutionPlan,
     options: &ExecutionOptions,
 ) -> Result<ExecutionReport, RunnerError> {
-    execute_with_echo(plan, options, &mut std::io::stderr().lock())
+    execute_with_io(
+        plan,
+        options,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr().lock(),
+    )
 }
 
+#[cfg(test)]
 fn execute_with_echo(
     plan: &ExecutionPlan,
     options: &ExecutionOptions,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
+    execute_with_io(plan, options, &mut std::io::empty(), echo)
+}
+
+fn execute_with_io(
+    plan: &ExecutionPlan,
+    options: &ExecutionOptions,
+    input: &mut dyn BufRead,
+    echo: &mut dyn Write,
+) -> Result<ExecutionReport, RunnerError> {
+    if !options.dry_run {
+        for bound_task in &plan.tasks {
+            if let Some(message) = &bound_task.task.confirm {
+                let _ = write!(echo, "{message} [y/N] ");
+                let _ = echo.flush();
+                let mut response = String::new();
+                let accepted = input
+                    .read_line(&mut response)
+                    .is_ok_and(|read| read > 0)
+                    && matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+                if !accepted {
+                    return Err(RunnerError::Aborted {
+                        task: bound_task.task.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     let mut commands = Vec::new();
 
     for bound_task in &plan.tasks {
@@ -41,7 +75,50 @@ fn execute_with_echo(
                 continue;
             }
 
-            let mut child = super::shell::command(&script);
+            let mut script_file = None;
+            let mut child = match task_command {
+                TaskCommand::Shell(_) => {
+                    super::shell::command(&script, bound_task.task.shell.as_deref())
+                }
+                TaskCommand::Script(_) => {
+                    let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+                        RunnerError::CommandExecution {
+                            task: bound_task.task.name.clone(),
+                            command: script.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                    file.write_all(script.as_bytes()).and_then(|_| file.flush()).map_err(
+                        |error| RunnerError::CommandExecution {
+                            task: bound_task.task.name.clone(),
+                            command: script.clone(),
+                            message: error.to_string(),
+                        },
+                    )?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            file.path(),
+                            std::fs::Permissions::from_mode(0o700),
+                        )
+                        .map_err(|error| RunnerError::CommandExecution {
+                            task: bound_task.task.name.clone(),
+                            command: script.clone(),
+                            message: error.to_string(),
+                        })?;
+                    }
+                    let path = file.into_temp_path();
+                    let child = super::shell::script_command(&path, &script).map_err(
+                        |message| RunnerError::InvalidShebang {
+                            task: bound_task.task.name.clone(),
+                            message,
+                        },
+                    )?;
+                    script_file = Some(path);
+                    child
+                }
+            };
             super::environment::apply(&mut child, &bound_task.task.environment);
             if let Some(cwd) = &bound_task.task.cwd {
                 child.current_dir(if cwd.is_relative() {
@@ -57,6 +134,7 @@ fn execute_with_echo(
                     command: script.clone(),
                     message: error.to_string(),
                 })?;
+            drop(script_file);
             if !status.success() {
                 return Err(RunnerError::CommandFailed {
                     task: bound_task.task.name.clone(),
@@ -371,5 +449,115 @@ mod tests {
             format!("{normal_command}\n")
         );
         assert_eq!(report.commands, [normal_command, quiet_command]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_uses_its_shebang_and_ignores_the_task_shell_override() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("script-marker");
+        let script = format!(
+            "#!/bin/bash\nprintf -v value script\nprintf '%s' \"$value\" > '{}'\n",
+            marker.display()
+        );
+        let mut plan = plan("unused".to_owned());
+        plan.tasks[0].task.shell = Some(vec!["false".to_owned()]);
+        plan.tasks[0].task.commands = vec![TaskCommand::Script(CommandTemplate {
+            parts: vec![TemplatePart::Literal(script.clone())],
+        })];
+
+        let report = execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "script");
+        assert_eq!(report.commands, [script]);
+    }
+
+    #[test]
+    fn declining_confirmation_aborts_before_any_task_runs() {
+        let directory = tempdir().unwrap();
+        let dependency_marker = directory.path().join("dependency");
+        let requested_marker = directory.path().join("requested");
+        let mut execution_plan = plan(create_marker_command(&dependency_marker));
+        execution_plan.tasks[0].task.name = "Build".to_owned();
+        let mut requested = plan(create_marker_command(&requested_marker)).tasks.remove(0);
+        requested.task.name = "Deploy".to_owned();
+        requested.task.confirm = Some("Really deploy?".to_owned());
+        execution_plan.tasks.push(requested);
+        let mut input = std::io::Cursor::new(b"n\n".to_vec());
+        let mut output = Vec::new();
+
+        let error = super::execute_with_io(
+            &execution_plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::Aborted { task } if task == "Deploy"
+        ));
+        assert!(!dependency_marker.exists());
+        assert!(!requested_marker.exists());
+        assert_eq!(String::from_utf8(output).unwrap(), "Really deploy? [y/N] ");
+    }
+
+    #[test]
+    fn accepting_confirmation_runs_the_task() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("confirmed");
+        let mut execution_plan = plan(create_marker_command(&marker));
+        execution_plan.tasks[0].task.confirm = Some("Continue?".to_owned());
+        let mut input = std::io::Cursor::new(b"yes\n".to_vec());
+        let mut output = Vec::new();
+
+        super::execute_with_io(
+            &execution_plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(marker.exists());
+        assert!(String::from_utf8(output).unwrap().starts_with("Continue? [y/N] "));
+    }
+
+    #[test]
+    fn dry_run_does_not_prompt_for_confirmation() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("dry-confirmed");
+        let mut execution_plan = plan(create_marker_command(&marker));
+        execution_plan.tasks[0].task.confirm = Some("Continue?".to_owned());
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        super::execute_with_io(
+            &execution_plan,
+            &ExecutionOptions {
+                dry_run: true,
+                base_dir: directory.path().to_owned(),
+            },
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(!marker.exists());
+        assert!(!String::from_utf8(output).unwrap().contains("[y/N]"));
     }
 }

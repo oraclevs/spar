@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{RunnerError, ScalarKind, Task, TaskInvocation, TaskSet};
+use super::{BoundValue, RunnerError, ScalarKind, Task, TaskInvocation, TaskSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPlan {
@@ -10,7 +10,7 @@ pub struct ExecutionPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundTask {
     pub task: Task,
-    pub parameter_values: BTreeMap<String, String>,
+    pub parameter_values: BTreeMap<String, BoundValue>,
 }
 
 pub(super) fn plan(
@@ -52,7 +52,7 @@ pub(super) fn plan(
 fn bind_arguments(
     task: &Task,
     arguments: &[String],
-) -> Result<BTreeMap<String, String>, RunnerError> {
+) -> Result<BTreeMap<String, BoundValue>, RunnerError> {
     if task.parameters.len() != arguments.len() {
         return Err(RunnerError::ArgumentCount {
             task: task.name.clone(),
@@ -86,7 +86,7 @@ fn bind_arguments(
                 value: argument.clone(),
                 kind: parameter.kind,
             })?;
-            Ok((parameter.name.clone(), value))
+            Ok((parameter.name.clone(), BoundValue::Scalar(value)))
         })
         .collect()
 }
@@ -140,7 +140,7 @@ fn visit(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::runner::{ScalarKind, Task, TaskInvocation, TaskParameter, TaskSet};
+    use crate::runner::{BoundValue, ScalarKind, Task, TaskInvocation, TaskParameter, TaskSet};
 
     fn task(name: &str, dependencies: &[&str]) -> Task {
         Task {
@@ -148,10 +148,15 @@ mod tests {
             description: None,
             default: false,
             quiet: false,
+            private: false,
+            group: None,
+            confirm: None,
+            os: Vec::new(),
             dependencies: dependencies.iter().map(|name| (*name).to_owned()).collect(),
             parameters: Vec::new(),
             environment: BTreeMap::new(),
             cwd: None,
+            shell: None,
             commands: Vec::new(),
         }
     }
@@ -279,6 +284,8 @@ mod tests {
             TaskParameter {
                 name: "environment".to_owned(),
                 kind: ScalarKind::Str,
+                default: None,
+                variadic: false,
             },
         )])
         .unwrap();
@@ -292,7 +299,10 @@ mod tests {
 
         assert_eq!(
             plan.tasks[0].parameter_values,
-            BTreeMap::from([("environment".to_owned(), "staging".to_owned())])
+            BTreeMap::from([(
+                "environment".to_owned(),
+                BoundValue::Scalar("staging".to_owned())
+            )])
         );
     }
 
@@ -303,27 +313,40 @@ mod tests {
             description: None,
             default: false,
             quiet: false,
+            private: false,
+            group: None,
+            confirm: None,
+            os: Vec::new(),
             dependencies: Vec::new(),
             parameters: vec![
                 TaskParameter {
                     name: "environment".to_owned(),
                     kind: ScalarKind::Str,
+                    default: None,
+                    variadic: false,
                 },
                 TaskParameter {
                     name: "retries".to_owned(),
                     kind: ScalarKind::Int,
+                    default: None,
+                    variadic: false,
                 },
                 TaskParameter {
                     name: "ratio".to_owned(),
                     kind: ScalarKind::Float,
+                    default: None,
+                    variadic: false,
                 },
                 TaskParameter {
                     name: "dry_run".to_owned(),
                     kind: ScalarKind::Bool,
+                    default: None,
+                    variadic: false,
                 },
             ],
             environment: BTreeMap::new(),
             cwd: None,
+            shell: None,
             commands: Vec::new(),
         }])
         .unwrap();
@@ -343,10 +366,13 @@ mod tests {
         assert_eq!(
             plan.tasks[0].parameter_values,
             BTreeMap::from([
-                ("dry_run".to_owned(), "true".to_owned()),
-                ("environment".to_owned(), "staging".to_owned()),
-                ("ratio".to_owned(), "2.5".to_owned()),
-                ("retries".to_owned(), "42".to_owned()),
+                ("dry_run".to_owned(), BoundValue::Scalar("true".to_owned())),
+                (
+                    "environment".to_owned(),
+                    BoundValue::Scalar("staging".to_owned())
+                ),
+                ("ratio".to_owned(), BoundValue::Scalar("2.5".to_owned())),
+                ("retries".to_owned(), BoundValue::Scalar("42".to_owned())),
             ])
         );
     }
@@ -358,6 +384,8 @@ mod tests {
             TaskParameter {
                 name: "environment".to_owned(),
                 kind: ScalarKind::Str,
+                default: None,
+                variadic: false,
             },
         )])
         .unwrap();
@@ -386,6 +414,8 @@ mod tests {
             TaskParameter {
                 name: "retries".to_owned(),
                 kind: ScalarKind::Int,
+                default: None,
+                variadic: false,
             },
         )])
         .unwrap();
@@ -417,6 +447,8 @@ mod tests {
                 TaskParameter {
                     name: "environment".to_owned(),
                     kind: ScalarKind::Str,
+                    default: None,
+                    variadic: false,
                 },
             ),
         ])

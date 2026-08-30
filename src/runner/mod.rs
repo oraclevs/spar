@@ -9,6 +9,6 @@ pub use error::RunnerError;
 pub use executor::{execute, ExecutionOptions, ExecutionReport};
 pub use graph::{BoundTask, ExecutionPlan};
 pub use task::{
-    CommandTemplate, ScalarKind, Task, TaskCommand, TaskInvocation, TaskParameter, TaskSet,
-    TemplatePart,
+    BoundValue, CommandTemplate, ScalarKind, Task, TaskCommand, TaskInvocation, TaskParameter,
+    TaskSet, TemplatePart,
 };

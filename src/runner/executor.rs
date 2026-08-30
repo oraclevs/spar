@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use super::{ExecutionPlan, RunnerError, TemplatePart};
+use super::{ExecutionPlan, RunnerError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -30,17 +30,7 @@ fn execute_with_echo(
 
     for bound_task in &plan.tasks {
         for task_command in &bound_task.task.commands {
-            let mut script = String::new();
-            for part in &task_command.template.parts {
-                match part {
-                    TemplatePart::Literal(literal) => script.push_str(literal),
-                    TemplatePart::Parameter(name) => {
-                        if let Some(value) = bound_task.parameter_values.get(name) {
-                            script.push_str(value);
-                        }
-                    }
-                }
-            }
+            let script = task_command.render(&bound_task.parameter_values);
             commands.push(script.clone());
 
             if !bound_task.task.quiet {
@@ -99,15 +89,18 @@ mod tests {
                     description: None,
                     default: false,
                     quiet: false,
+                    private: false,
+                    group: None,
+                    confirm: None,
+                    os: Vec::new(),
                     dependencies: Vec::new(),
                     parameters: Vec::new(),
                     environment: BTreeMap::new(),
                     cwd: None,
-                    commands: vec![TaskCommand {
-                        template: CommandTemplate {
+                    shell: None,
+                    commands: vec![TaskCommand::Shell(CommandTemplate {
                             parts: vec![TemplatePart::Literal(command)],
-                        },
-                    }],
+                    })],
                 },
                 parameter_values: BTreeMap::new(),
             }],
@@ -201,11 +194,9 @@ mod tests {
         let first = append_command("first", &log);
         let second = append_command("second", &log);
         let mut plan = plan(first.clone());
-        plan.tasks[0].task.commands.push(TaskCommand {
-            template: CommandTemplate {
+        plan.tasks[0].task.commands.push(TaskCommand::Shell(CommandTemplate {
                 parts: vec![TemplatePart::Literal(second.clone())],
-            },
-        });
+        }));
 
         let report = execute(
             &plan,
@@ -250,7 +241,7 @@ mod tests {
         let mut plan = plan(FAILURE_COMMAND.to_owned());
         let mut dependent = plan.tasks[0].clone();
         dependent.task.name = "Deploy".to_owned();
-        dependent.task.commands[0].template.parts =
+        dependent.task.commands[0].template_mut().parts =
             vec![TemplatePart::Literal(create_marker_command(&marker))];
         plan.tasks.push(dependent);
 
@@ -329,7 +320,7 @@ mod tests {
         let mut plan = plan(dependency_command.clone());
         let mut requested = plan.tasks[0].clone();
         requested.task.name = "Deploy".to_owned();
-        requested.task.commands[0].template.parts =
+        requested.task.commands[0].template_mut().parts =
             vec![TemplatePart::Literal(requested_command.clone())];
         plan.tasks.push(requested);
 
@@ -358,7 +349,8 @@ mod tests {
         let mut quiet = plan.tasks[0].clone();
         quiet.task.name = "Quiet".to_owned();
         quiet.task.quiet = true;
-        quiet.task.commands[0].template.parts = vec![TemplatePart::Literal(quiet_command.clone())];
+        quiet.task.commands[0].template_mut().parts =
+            vec![TemplatePart::Literal(quiet_command.clone())];
         plan.tasks.push(quiet);
         let mut echo = Vec::new();
 

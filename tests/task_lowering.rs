@@ -155,7 +155,7 @@ task [Deploy](environment: str) {
     let task = tasks.get("deploy").expect("Deploy task must be lowered");
     assert!(task.default);
     assert_eq!(task.commands.len(), 1);
-    let parts = &task.commands[0].template.parts;
+    let parts = &task.commands[0].template().parts;
 
     let has_evaluated_port = parts
         .iter()

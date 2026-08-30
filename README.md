@@ -73,6 +73,7 @@ $ spar emit server.spar
   - [Cross-file imports](#cross-file-imports)
   - [Schema validation](#schema-validation)
 - [Rust Integration](#rust-integration)
+- [Task Runner](#task-runner)
 - [Installation](#installation)
 - [CLI Reference](#cli-reference)
 - [Editor Support](#editor-support)
@@ -498,6 +499,48 @@ let cfg: Config = spar::from_eval(&result)?;
 
 ---
 
+## Task Runner
+
+A `.spar` file can also declare command-runner tasks alongside its
+configuration values — dependencies, arguments, environment overrides,
+working directories, a default task, and a `--dry-run` preview:
+
+```spar
+export var appName: str = "demo";
+
+task [Test] {
+    description: "Run tests";
+    default: true;
+
+    run {
+        echo "testing ${appName}";
+    };
+}
+
+task [Deploy](environment: str) {
+    dependsOn: [Test];
+
+    run {
+        ./deploy.sh ${environment};
+    };
+}
+```
+
+```bash
+spar tasks server.spar
+spar run   server.spar
+spar run   server.spar deploy production
+spar run   server.spar test --dry-run
+```
+
+Tasks are not Make-style timestamp/file build targets — no incremental
+rebuilds, no input/output tracking, no caching. See
+[`docs/command-runner/tasks.md`](docs/command-runner/tasks.md) for the full
+reference and [`examples/tasks.spar`](examples/tasks.spar) for a runnable
+example.
+
+---
+
 ## Installation
 
 Spar is built with Rust. You need the Rust toolchain installed (`rustup.rs`).
@@ -534,6 +577,8 @@ COMMANDS:
     emit               Evaluate and emit config as JSON to stdout
     fmt                Format a .spar file in place
     fmt --check        Exit non-zero if the file is not already formatted
+    tasks              List declared tasks and their descriptions
+    run                Run a task (the default task if none is named)
 
 OPTIONS:
     -h, --help         Show this help message
@@ -560,6 +605,18 @@ spar fmt server.spar
 
 # Check formatting in CI
 spar fmt --check server.spar && echo "formatted"
+
+# List declared tasks
+spar tasks server.spar
+
+# Run the default task
+spar run server.spar
+
+# Run a specific task with an argument
+spar run server.spar deploy production
+
+# Preview commands without running them
+spar run server.spar test --dry-run
 ```
 
 ### Error output

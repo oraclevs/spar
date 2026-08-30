@@ -27,9 +27,15 @@ pub enum RunnerError {
     DependencyCycle {
         path: Vec<String>,
     },
+    UnsupportedOperatingSystem {
+        task: String,
+        actual: String,
+        allowed: Vec<String>,
+    },
     ArgumentCount {
         task: String,
-        expected: usize,
+        minimum: usize,
+        maximum: Option<usize>,
         actual: usize,
     },
     InvalidArgument {
@@ -80,14 +86,34 @@ impl fmt::Display for RunnerError {
             Self::DependencyCycle { path } => {
                 write!(formatter, "task dependency cycle: {}", path.join(" -> "))
             }
-            Self::ArgumentCount {
+            Self::UnsupportedOperatingSystem {
                 task,
-                expected,
                 actual,
+                allowed,
             } => write!(
                 formatter,
-                "task {task} expects {expected} arguments but received {actual}"
+                "task {task} does not support operating system {actual}; allowed: {}",
+                allowed.join(", ")
             ),
+            Self::ArgumentCount {
+                task,
+                minimum,
+                maximum,
+                actual,
+            } => match maximum {
+                Some(maximum) if minimum == maximum => write!(
+                    formatter,
+                    "task {task} expects {minimum} arguments but received {actual}"
+                ),
+                Some(maximum) => write!(
+                    formatter,
+                    "task {task} expects {minimum} to {maximum} arguments but received {actual}"
+                ),
+                None => write!(
+                    formatter,
+                    "task {task} expects at least {minimum} arguments but received {actual}"
+                ),
+            },
             Self::InvalidArgument {
                 task,
                 parameter,

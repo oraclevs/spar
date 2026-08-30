@@ -1,6 +1,6 @@
 use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
 use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -9,16 +9,22 @@ fn main() {
         Cmd::Check(path) => cmd_check(&path),
         Cmd::Emit(path) => cmd_emit(&path),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
-        Cmd::Tasks { path, all } => cmd_tasks(path, all),
+        Cmd::Tasks { path, global, all } => cmd_tasks(path, global, all),
         Cmd::Run {
             path,
+            global,
             task,
             args,
             dry_run,
             choose,
-        } => cmd_run(path, task, args, dry_run, choose),
-        Cmd::Show { path, task, args } => cmd_show(path, task, args),
-        Cmd::Dump { path } => cmd_dump(path),
+        } => cmd_run(path, global, task, args, dry_run, choose),
+        Cmd::Show {
+            path,
+            global,
+            task,
+            args,
+        } => cmd_show(path, global, task, args),
+        Cmd::Dump { path, global } => cmd_dump(path, global),
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -40,10 +46,12 @@ enum Cmd {
     },
     Tasks {
         path: Option<PathBuf>,
+        global: bool,
         all: bool,
     },
     Run {
         path: Option<PathBuf>,
+        global: bool,
         task: Option<String>,
         args: Vec<String>,
         dry_run: bool,
@@ -51,11 +59,13 @@ enum Cmd {
     },
     Show {
         path: Option<PathBuf>,
+        global: bool,
         task: String,
         args: Vec<String>,
     },
     Dump {
         path: Option<PathBuf>,
+        global: bool,
     },
     Help,
     Version,
@@ -93,7 +103,14 @@ fn parse_args(args: &[String]) -> Cmd {
     }
 }
 
-fn set_task_file(path: &mut Option<PathBuf>, value: Option<&String>) -> Result<(), String> {
+fn set_task_file(
+    path: &mut Option<PathBuf>,
+    global: bool,
+    value: Option<&String>,
+) -> Result<(), String> {
+    if global {
+        return Err("global flag and file flag may not be used together".to_owned());
+    }
     if path.is_some() {
         return Err("file flag may only be specified once".to_owned());
     }
@@ -102,17 +119,35 @@ fn set_task_file(path: &mut Option<PathBuf>, value: Option<&String>) -> Result<(
     Ok(())
 }
 
+fn set_global(global: &mut bool, path: &Option<PathBuf>) -> Result<(), String> {
+    if path.is_some() {
+        return Err("global flag and file flag may not be used together".to_owned());
+    }
+    if *global {
+        return Err("global flag may only be specified once".to_owned());
+    }
+    *global = true;
+    Ok(())
+}
+
 fn parse_tasks_args(args: &[String]) -> Cmd {
     let mut path = None;
+    let mut global = false;
     let mut all = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "-f" | "--file" => {
-                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                if let Err(message) = set_task_file(&mut path, global, args.get(index + 1)) {
                     return Cmd::BadArgs(message);
                 }
                 index += 2;
+            }
+            "-G" | "--global" => {
+                if let Err(message) = set_global(&mut global, &path) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 1;
             }
             "--all" => {
                 all = true;
@@ -121,11 +156,12 @@ fn parse_tasks_args(args: &[String]) -> Cmd {
             other => return Cmd::BadArgs(format!("unexpected argument for `tasks`: {other}")),
         }
     }
-    Cmd::Tasks { path, all }
+    Cmd::Tasks { path, global, all }
 }
 
 fn parse_run_args(args: &[String]) -> Cmd {
     let mut path = None;
+    let mut global = false;
     let mut dry_run = false;
     let mut choose = false;
     let mut positional = Vec::new();
@@ -133,10 +169,16 @@ fn parse_run_args(args: &[String]) -> Cmd {
     while index < args.len() {
         match args[index].as_str() {
             "-f" | "--file" => {
-                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                if let Err(message) = set_task_file(&mut path, global, args.get(index + 1)) {
                     return Cmd::BadArgs(message);
                 }
                 index += 2;
+            }
+            "-G" | "--global" => {
+                if let Err(message) = set_global(&mut global, &path) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 1;
             }
             "--dry-run" => {
                 dry_run = true;
@@ -161,6 +203,7 @@ fn parse_run_args(args: &[String]) -> Cmd {
     }
     Cmd::Run {
         path,
+        global,
         task,
         args: positional.into_iter().skip(1).collect(),
         dry_run,
@@ -170,15 +213,22 @@ fn parse_run_args(args: &[String]) -> Cmd {
 
 fn parse_show_args(args: &[String]) -> Cmd {
     let mut path = None;
+    let mut global = false;
     let mut positional = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "-f" | "--file" => {
-                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                if let Err(message) = set_task_file(&mut path, global, args.get(index + 1)) {
                     return Cmd::BadArgs(message);
                 }
                 index += 2;
+            }
+            "-G" | "--global" => {
+                if let Err(message) = set_global(&mut global, &path) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 1;
             }
             other if positional.is_empty() && other.starts_with('-') => {
                 return Cmd::BadArgs(format!("unknown option for `show`: {other}"));
@@ -194,6 +244,7 @@ fn parse_show_args(args: &[String]) -> Cmd {
     };
     Cmd::Show {
         path,
+        global,
         task,
         args: positional.into_iter().skip(1).collect(),
     }
@@ -201,19 +252,26 @@ fn parse_show_args(args: &[String]) -> Cmd {
 
 fn parse_dump_args(args: &[String]) -> Cmd {
     let mut path = None;
+    let mut global = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "-f" | "--file" => {
-                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                if let Err(message) = set_task_file(&mut path, global, args.get(index + 1)) {
                     return Cmd::BadArgs(message);
                 }
                 index += 2;
             }
+            "-G" | "--global" => {
+                if let Err(message) = set_global(&mut global, &path) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 1;
+            }
             other => return Cmd::BadArgs(format!("unexpected argument for `dump`: {other}")),
         }
     }
-    Cmd::Dump { path }
+    Cmd::Dump { path, global }
 }
 
 fn print_help() {
@@ -228,20 +286,22 @@ COMMANDS:
     emit          <file.spar>           Evaluate and print the config as JSON to stdout
     fmt           <file.spar>           Format a .spar file in place
     fmt --check   <file.spar>           Exit non-zero if file is not already formatted
-    tasks         [-f FILE] [--all]     List declared tasks
-    run           [task] [args...] [-f FILE] [--dry-run] [--choose]
+    tasks         [-f FILE | -G] [--all]
+                                        List declared tasks
+    run           [task] [args...] [-f FILE | -G] [--dry-run] [--choose]
                                         Run a task (default task if omitted)
-    show          <task> [args...] [-f FILE]
+    show          <task> [args...] [-f FILE | -G]
                                         Show one task's resolved commands
-    dump          [-f FILE]             Dump the lowered task catalog as JSON
+    dump          [-f FILE | -G]        Dump the lowered task catalog as JSON
 
 OPTIONS:
     -h, --help        Show this help
     -V, --version     Show version
     -f, --file FILE   Use FILE instead of discovering SparMake.spar
+    -G, --global      Use the global ~/.spar/SparMake.spar task file
 
 ENVIRONMENT:
-    NO_COLOR=1        Disable ANSI colour in error output
+    NO_COLOR=1        Disable ANSI colour output
 
 EXAMPLES:
     spar check server.spar
@@ -263,6 +323,10 @@ pub fn use_color() -> bool {
         return false;
     }
     !matches!(std::env::var("TERM").as_deref(), Ok("dumb"))
+}
+
+fn use_stdout_color() -> bool {
+    use_color() && std::io::stdout().is_terminal()
 }
 
 // ── `check` command ───────────────────────────────────────────────────────────
@@ -346,8 +410,8 @@ fn cmd_fmt(path: &str, check: bool) {
 
 // ── `tasks` command ───────────────────────────────────────────────────────────
 
-fn cmd_tasks(path: Option<PathBuf>, _all: bool) {
-    let path = resolve_task_path(path);
+fn cmd_tasks(path: Option<PathBuf>, global: bool, _all: bool) {
+    let path = resolve_task_path(path, global);
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
@@ -359,6 +423,7 @@ fn cmd_tasks(path: Option<PathBuf>, _all: bool) {
     print_task_list(
         compilation.tasks.as_ref(),
         _all,
+        use_stdout_color(),
         &mut std::io::stdout().lock(),
     );
 }
@@ -383,7 +448,12 @@ fn listed_tasks(tasks: &TaskSet, include_private: bool) -> Vec<&spar::runner::Ta
     tasks
 }
 
-fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut dyn Write) {
+fn print_task_list(
+    tasks: Option<&TaskSet>,
+    include_private: bool,
+    color: bool,
+    output: &mut dyn Write,
+) {
     let _ = writeln!(output, "Available tasks:\n");
     let Some(tasks) = tasks else {
         let _ = writeln!(output, "  (none)");
@@ -402,7 +472,11 @@ fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut 
             if current_group.is_some() {
                 let _ = writeln!(output);
             }
-            let _ = writeln!(output, "{}:", group.unwrap_or("Ungrouped"));
+            if color {
+                let _ = writeln!(output, "\x1b[1;33m{}\x1b[0m:", group.unwrap_or("Ungrouped"));
+            } else {
+                let _ = writeln!(output, "{}:", group.unwrap_or("Ungrouped"));
+            }
             current_group = Some(group);
         }
         let name = task.name.to_lowercase();
@@ -411,7 +485,16 @@ fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut 
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            let _ = writeln!(output, "  {name:width$}   {description}");
+            if color {
+                let _ = writeln!(
+                    output,
+                    "  \x1b[1;32m{name:width$}\x1b[0m   \x1b[37m{description}\x1b[0m"
+                );
+            } else {
+                let _ = writeln!(output, "  {name:width$}   {description}");
+            }
+        } else if color {
+            let _ = writeln!(output, "  \x1b[1;32m{name}\x1b[0m");
         } else {
             let _ = writeln!(output, "  {name}");
         }
@@ -422,12 +505,13 @@ fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut 
 
 fn cmd_run(
     path: Option<PathBuf>,
+    global: bool,
     task: Option<String>,
     args: Vec<String>,
     dry_run: bool,
     choose: bool,
 ) {
-    let path = resolve_task_path(path);
+    let path = resolve_task_path(path, global);
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
@@ -465,7 +549,12 @@ fn cmd_run(
         Err(e) => {
             eprintln!("error: {e}");
             if matches!(e, RunnerError::MissingDefaultTask) {
-                print_task_list(Some(tasks), false, &mut std::io::stdout().lock());
+                print_task_list(
+                    Some(tasks),
+                    false,
+                    use_stdout_color(),
+                    &mut std::io::stdout().lock(),
+                );
             }
             std::process::exit(1);
         }
@@ -485,7 +574,17 @@ fn cmd_run(
 
     let exec_options = ExecutionOptions { dry_run, base_dir };
     if let Err(e) = spar::runner::execute(&plan, &exec_options) {
-        eprintln!("error: {e}");
+        match e {
+            RunnerError::QuietCommandFailed {
+                task,
+                source_line: Some(line),
+                status,
+            } => eprintln!(
+                "error: task {task} ({}:{line}) failed: {status}",
+                path.display()
+            ),
+            error => eprintln!("error: {error}"),
+        }
         std::process::exit(1);
     }
 }
@@ -528,8 +627,8 @@ fn choose_task(tasks: &TaskSet) -> Result<String, String> {
         .ok_or_else(|| format!("invalid task choice: {selection}"))
 }
 
-fn cmd_show(path: Option<PathBuf>, task: String, args: Vec<String>) {
-    let path = resolve_task_path(path);
+fn cmd_show(path: Option<PathBuf>, global: bool, task: String, args: Vec<String>) {
+    let path = resolve_task_path(path, global);
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
@@ -551,13 +650,23 @@ fn cmd_show(path: Option<PathBuf>, task: String, args: Vec<String>) {
             eprintln!("error: {error}");
             std::process::exit(1);
         });
+    let color = use_stdout_color();
+    let mut output = std::io::stdout().lock();
     for command in &bound.task.commands {
-        println!("{}", command.render(&bound.parameter_values));
+        print_resolved_command(&command.render(&bound.parameter_values), color, &mut output);
     }
 }
 
-fn cmd_dump(path: Option<PathBuf>) {
-    let path = resolve_task_path(path);
+fn print_resolved_command(command: &str, color: bool, output: &mut dyn Write) {
+    if color {
+        let _ = writeln!(output, "\x1b[1;36m{command}\x1b[0m");
+    } else {
+        let _ = writeln!(output, "{command}");
+    }
+}
+
+fn cmd_dump(path: Option<PathBuf>, global: bool) {
+    let path = resolve_task_path(path, global);
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
@@ -618,7 +727,6 @@ fn task_json(task: &spar::runner::Task) -> serde_json::Value {
         "group": task.group,
         "private": task.private,
         "confirm": task.confirm,
-        "os": task.os,
         "dependencies": task.dependencies,
         "parameters": parameters,
         "environment": task.environment,
@@ -643,17 +751,44 @@ fn discover_task_file(start: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn resolve_task_path(path: Option<PathBuf>) -> PathBuf {
-    match path {
-        Some(path) => path,
+fn global_task_file(home: &Path) -> Result<PathBuf, String> {
+    let path = home.join(".spar").join("SparMake.spar");
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "global task file not found: {} — create it first",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "cannot determine home directory: HOME is not set".to_owned())
+}
+
+#[cfg(windows)]
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .map_err(|_| "cannot determine home directory: USERPROFILE is not set".to_owned())
+}
+
+fn resolve_task_path(path: Option<PathBuf>, global: bool) -> PathBuf {
+    let resolved = match path {
+        Some(path) => Ok(path),
+        None if global => home_dir().and_then(|home| global_task_file(&home)),
         None => std::env::current_dir()
             .map_err(|error| format!("cannot read current directory: {error}"))
-            .and_then(|directory| discover_task_file(&directory))
-            .unwrap_or_else(|message| {
-                eprintln!("error: {message}");
-                std::process::exit(1);
-            }),
-    }
+            .and_then(|directory| discover_task_file(&directory)),
+    };
+    resolved.unwrap_or_else(|message| {
+        eprintln!("error: {message}");
+        std::process::exit(1);
+    })
 }
 
 fn read_file(path: &str) -> String {
@@ -664,7 +799,7 @@ fn read_file(path: &str) -> String {
 }
 
 fn make_renderer<'a>(src: &'a str, path: &'a str) -> ErrorRenderer<'a> {
-    if use_color() {
+    if use_color() && std::io::stderr().is_terminal() {
         ErrorRenderer::with_color(src, path)
     } else {
         ErrorRenderer::new(src, path)
@@ -765,6 +900,82 @@ mod tests {
     }
 
     #[test]
+    fn global_task_file_resolves_below_the_given_home_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let spar_directory = home.path().join(".spar");
+        std::fs::create_dir(&spar_directory).unwrap();
+        let task_file = spar_directory.join("SparMake.spar");
+        std::fs::write(&task_file, "task [Build] { run { true; }; };").unwrap();
+
+        assert_eq!(global_task_file(home.path()).unwrap(), task_file);
+    }
+
+    #[test]
+    fn missing_global_task_file_has_an_actionable_error() {
+        let home = tempfile::tempdir().unwrap();
+
+        let error = global_task_file(home.path()).unwrap_err();
+
+        assert!(error.contains("global task file not found"), "{error}");
+        assert!(error.contains(".spar/SparMake.spar"), "{error}");
+        assert!(error.contains("create it first"), "{error}");
+    }
+
+    #[test]
+    fn task_list_colors_groups_names_and_descriptions_when_enabled() {
+        let source = r#"
+task [Build] { description: "Compile"; run { true; }; };
+task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
+"#;
+        let compilation = Compiler::new(CompileOptions::for_path("Tasks.spar")).compile(source);
+        assert!(compilation.errors.is_empty());
+        let mut output = Vec::new();
+
+        print_task_list(compilation.tasks.as_ref(), false, true, &mut output);
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\x1b[1;33mUngrouped\x1b[0m:"), "{output:?}");
+        assert!(output.contains("\x1b[1;32mbuild \x1b[0m"), "{output:?}");
+        assert!(output.contains("\x1b[37mCompile\x1b[0m"), "{output:?}");
+        assert!(output.contains("\x1b[1;33mrelease\x1b[0m:"), "{output:?}");
+    }
+
+    #[test]
+    fn task_list_plain_output_remains_byte_for_byte_unchanged() {
+        let source = r#"
+task [Build] { description: "Compile"; run { true; }; };
+task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
+"#;
+        let compilation = Compiler::new(CompileOptions::for_path("Tasks.spar")).compile(source);
+        assert!(compilation.errors.is_empty());
+        let mut output = Vec::new();
+
+        print_task_list(compilation.tasks.as_ref(), false, false, &mut output);
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Available tasks:\n\nUngrouped:\n  build    Compile\n\nrelease:\n  deploy   Ship it\n"
+        );
+    }
+
+    #[test]
+    fn resolved_command_output_has_explicit_colored_and_plain_modes() {
+        let mut colored = Vec::new();
+        print_resolved_command("echo deploy-production", true, &mut colored);
+        assert_eq!(
+            String::from_utf8(colored).unwrap(),
+            "\x1b[1;36mecho deploy-production\x1b[0m\n"
+        );
+
+        let mut plain = Vec::new();
+        print_resolved_command("echo deploy-production", false, &mut plain);
+        assert_eq!(
+            String::from_utf8(plain).unwrap(),
+            "echo deploy-production\n"
+        );
+    }
+
+    #[test]
     fn parse_args_tasks_accepts_optional_file_and_all_flag() {
         let args = vec![
             "spar".to_owned(),
@@ -775,12 +986,48 @@ mod tests {
         ];
 
         match parse_args(&args) {
-            Cmd::Tasks { path, all } => {
+            Cmd::Tasks { path, all, .. } => {
                 assert_eq!(path, Some(PathBuf::from("Tasks.spar")));
                 assert!(all);
             }
             other => panic!("expected tasks command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_args_task_commands_accept_global_and_reject_file_with_global() {
+        let tasks = vec!["spar".to_owned(), "tasks".to_owned(), "-G".to_owned()];
+        assert!(matches!(
+            parse_args(&tasks),
+            Cmd::Tasks { global: true, .. }
+        ));
+
+        let run = vec!["spar".to_owned(), "run".to_owned(), "--global".to_owned()];
+        assert!(matches!(parse_args(&run), Cmd::Run { global: true, .. }));
+
+        let show = vec![
+            "spar".to_owned(),
+            "show".to_owned(),
+            "deploy".to_owned(),
+            "-G".to_owned(),
+        ];
+        assert!(matches!(parse_args(&show), Cmd::Show { global: true, .. }));
+
+        let dump = vec!["spar".to_owned(), "dump".to_owned(), "--global".to_owned()];
+        assert!(matches!(parse_args(&dump), Cmd::Dump { global: true, .. }));
+
+        let conflicting = vec![
+            "spar".to_owned(),
+            "tasks".to_owned(),
+            "-G".to_owned(),
+            "-f".to_owned(),
+            "Tasks.spar".to_owned(),
+        ];
+        assert!(matches!(
+            parse_args(&conflicting),
+            Cmd::BadArgs(message)
+                if message == "global flag and file flag may not be used together"
+        ));
     }
 
     #[test]
@@ -803,6 +1050,7 @@ mod tests {
                 args,
                 dry_run,
                 choose,
+                ..
             } => {
                 assert_eq!(path, Some(PathBuf::from("Tasks.spar")));
                 assert_eq!(task.as_deref(), Some("deploy"));
@@ -839,7 +1087,7 @@ mod tests {
         ));
 
         let dump = vec!["spar".to_owned(), "dump".to_owned()];
-        assert!(matches!(parse_args(&dump), Cmd::Dump { path: None }));
+        assert!(matches!(parse_args(&dump), Cmd::Dump { path: None, .. }));
     }
 
     #[test]

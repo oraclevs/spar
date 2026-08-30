@@ -2112,9 +2112,6 @@ impl<'a> TypeChecker<'a> {
         if let Some(expr) = &decl.confirm {
             self.check_task_scalar_field(expr, "confirm", &SparType::Str, &decl.span);
         }
-        if let Some(expr) = &decl.os {
-            self.check_task_string_list_field(expr, "os", &decl.span);
-        }
         if let Some(expr) = &decl.cwd {
             self.check_task_scalar_field(expr, "cwd", &SparType::Str, &decl.span);
         }
@@ -2130,25 +2127,27 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| (p.name.clone(), p.ty.clone()))
             .collect();
-        for command in &decl.run {
-            for part in &command.parts {
-                if let ShellTemplatePart::Expr(expr) = part {
-                    if let Err(e) = self.check_expr_with_locals(expr, &local_types) {
-                        self.errors.push(e);
-                        continue;
-                    }
-                    match self.infer_type_with_locals(expr, &local_types) {
-                        Some(SparType::Str | SparType::Int | SparType::Float | SparType::Bool) => {}
-                        Some(other) => self.push_type_error(
-                            format!(
-                                "task 'run' interpolation must be a scalar value (str, int, float, or bool), \
-                                 found {}",
-                                display_type(&other)
+        for block in &decl.run_blocks {
+            for command in &block.commands {
+                for part in &command.parts {
+                    if let ShellTemplatePart::Expr(expr) = part {
+                        if let Err(e) = self.check_expr_with_locals(expr, &local_types) {
+                            self.errors.push(e);
+                            continue;
+                        }
+                        match self.infer_type_with_locals(expr, &local_types) {
+                            Some(SparType::Str | SparType::Int | SparType::Float | SparType::Bool) => {}
+                            Some(other) => self.push_type_error(
+                                format!(
+                                    "task 'run' interpolation must be a scalar value (str, int, float, or bool), \
+                                     found {}",
+                                    display_type(&other)
+                                ),
+                                None,
+                                command.span.clone(),
                             ),
-                            None,
-                            command.span.clone(),
-                        ),
-                        None => {} // unresolvable type — a more specific error was already reported
+                            None => {} // unresolvable type — a more specific error was already reported
+                        }
                     }
                 }
             }
@@ -2860,11 +2859,6 @@ mod tests {
             (
                 "task [Deploy] { group: 1; run { echo deploy; }; };",
                 "group",
-            ),
-            ("task [Deploy] { os: []; run { echo deploy; }; };", "os"),
-            (
-                "task [Deploy] { os: [\"linux\", 1]; run { echo deploy; }; };",
-                "os",
             ),
             (
                 "task [Deploy] { shell: []; run { echo deploy; }; };",

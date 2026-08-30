@@ -126,11 +126,6 @@ fn lower_one_task(
         .confirm
         .as_ref()
         .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors));
-    let os = decl
-        .os
-        .as_ref()
-        .and_then(|e| eval_string_list(program, symbols, eval_result, e, &mut errors))
-        .unwrap_or_default();
     let shell = decl
         .shell
         .as_ref()
@@ -141,8 +136,8 @@ fn lower_one_task(
         .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors))
         .map(PathBuf::from);
 
-    let mut environment = if program.dotenv_load {
-        match crate::dotenv::load(&base_dir.join(".env")) {
+    let mut environment = if let Some(path) = &program.load_env {
+        match crate::dotenv::load(&base_dir.join(path)) {
             Ok(values) => values
                 .into_iter()
                 .filter(|(key, _)| std::env::var_os(key).is_none())
@@ -176,43 +171,69 @@ fn lower_one_task(
         })
         .collect();
 
+    let current_os = std::env::consts::OS;
+    let selected_block = decl
+        .run_blocks
+        .iter()
+        .find(|block| block.os.as_deref() == Some(current_os))
+        .or_else(|| decl.run_blocks.iter().find(|block| block.os.is_none()));
+
     let mut commands: Vec<TaskCommand> = Vec::new();
-    for command in &decl.run {
-        let mut parts: Vec<TemplatePart> = Vec::new();
-        for part in &command.parts {
-            match part {
-                ShellTemplatePart::Literal(s) => {
-                    parts.push(TemplatePart::Literal(s.replace("#{", "${")))
-                }
-                ShellTemplatePart::Expr(expr) => match bare_param_ref(expr, &param_names) {
-                    Some(name) => parts.push(TemplatePart::Parameter(name)),
-                    None => {
-                        if expr_mentions_any(expr, &param_names) {
-                            errors.push(SparError::EvalError {
-                                message: format!(
-                                    "task '{}': a '${{...}}' interpolation cannot combine a task \
-                                     parameter with other values — reference the parameter alone \
-                                     (e.g. '${{{}}}'), or use a literal / global value instead",
-                                    decl.name,
-                                    param_names.iter().next().cloned().unwrap_or_default()
-                                ),
-                                span: command.span.clone(),
-                            });
-                            continue;
+    match selected_block {
+        Some(block) => {
+            for command in &block.commands {
+                let mut parts: Vec<TemplatePart> = Vec::new();
+                for part in &command.parts {
+                    match part {
+                        ShellTemplatePart::Literal(s) => {
+                            parts.push(TemplatePart::Literal(s.replace("#{", "${")))
                         }
-                        match eval_any(program, symbols, eval_result, expr) {
-                            Ok(v) => parts.push(TemplatePart::Literal(v.coerce_to_str())),
-                            Err(e) => errors.push(e),
-                        }
+                        ShellTemplatePart::Expr(expr) => match bare_param_ref(expr, &param_names) {
+                            Some(name) => parts.push(TemplatePart::Parameter(name)),
+                            None => {
+                                if expr_mentions_any(expr, &param_names) {
+                                    errors.push(SparError::EvalError {
+                                        message: format!(
+                                            "task '{}': a '${{...}}' interpolation cannot combine a task \
+                                             parameter with other values — reference the parameter alone \
+                                             (e.g. '${{{}}}'), or use a literal / global value instead",
+                                            decl.name,
+                                            param_names.iter().next().cloned().unwrap_or_default()
+                                        ),
+                                        span: command.span.clone(),
+                                    });
+                                    continue;
+                                }
+                                match eval_any(program, symbols, eval_result, expr) {
+                                    Ok(v) => parts.push(TemplatePart::Literal(v.coerce_to_str())),
+                                    Err(e) => errors.push(e),
+                                }
+                            }
+                        },
                     }
-                },
+                }
+                commands.push(if command.is_shebang {
+                    TaskCommand::Script(CommandTemplate { parts })
+                } else {
+                    TaskCommand::Shell(CommandTemplate { parts })
+                });
             }
         }
-        commands.push(if command.is_shebang {
-            TaskCommand::Script(CommandTemplate { parts })
-        } else {
-            TaskCommand::Shell(CommandTemplate { parts })
-        });
+        None => {
+            let labels: Vec<&str> = decl
+                .run_blocks
+                .iter()
+                .filter_map(|block| block.os.as_deref())
+                .collect();
+            errors.push(SparError::EvalError {
+                message: format!(
+                    "task '{}' has no run block for `{current_os}` (defined: {}) and no default 'run {{}}' block",
+                    decl.name,
+                    labels.join(", ")
+                ),
+                span: decl.span.clone(),
+            });
+        }
     }
 
     if !errors.is_empty() {
@@ -221,13 +242,13 @@ fn lower_one_task(
 
     Ok(Task {
         name: decl.name.clone(),
+        source_line: Some(decl.span.line),
         description,
         default,
         quiet,
         private,
         group,
         confirm,
-        os,
         dependencies: decl.depends_on.iter().map(|d| d.name.clone()).collect(),
         parameters,
         environment,

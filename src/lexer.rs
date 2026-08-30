@@ -539,16 +539,27 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Called right after an `Ident("run")` token has been pushed. If the
-    /// next significant character is `{`, this is a task's `run { ... }`
-    /// block: consume the brace and lex its body as raw shell text instead
-    /// of ordinary Spar tokens. Otherwise leaves the position untouched —
-    /// `run` was just a normal identifier (e.g. a field named `run`
-    /// elsewhere is impossible in the grammar since no other construct
-    /// places `Ident` immediately before `{` with nothing between them, but
-    /// this keeps the check honest rather than assuming).
+    /// Called right after an `Ident("run")` token has been pushed. Scans
+    /// ahead (without committing) for an optional bare-identifier OS label
+    /// followed by `{` — `run { ... }` (bare/default) or
+    /// `run windows { ... }` (labeled). If neither shape is found at this
+    /// position, the position is left untouched and `run`/the tentative
+    /// label lex as ordinary tokens on the next loop iterations — this
+    /// keeps the check honest rather than assuming `run` always opens a
+    /// block.
     fn maybe_enter_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
         let mut offset = 0usize;
+        while matches!(
+            self.peek_at(offset),
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            offset += 1;
+        }
+        let label_start = offset;
+        while matches!(self.peek_at(offset), Some(b) if b.is_ascii_alphanumeric() || b == b'_') {
+            offset += 1;
+        }
+        let label_end = offset;
         while matches!(
             self.peek_at(offset),
             Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
@@ -558,12 +569,29 @@ impl<'a> Lexer<'a> {
         if self.peek_at(offset) != Some(b'{') {
             return Ok(());
         }
-        for _ in 0..=offset {
+
+        for _ in 0..label_start {
             self.advance();
         }
-        let brace_pos = self.pos - 1;
-        let brace_line = self.line;
-        let brace_col = self.col;
+        if label_end > label_start {
+            let label_pos = self.pos;
+            let (label_line, label_col) = (self.line, self.col);
+            let label_text = self.source[self.pos..self.pos + (label_end - label_start)].to_string();
+            for _ in label_start..label_end {
+                self.advance();
+            }
+            tokens.push(SpannedToken::new(
+                Token::Ident(label_text),
+                self.span_at(label_pos, label_line, label_col),
+            ));
+        }
+        for _ in label_end..offset {
+            self.advance();
+        }
+
+        let brace_pos = self.pos;
+        let (brace_line, brace_col) = (self.line, self.col);
+        self.advance(); // consume '{'
         tokens.push(SpannedToken::new(
             Token::RunStart,
             self.span_at(brace_pos, brace_line, brace_col),

@@ -1,5 +1,7 @@
 use spar::runner::TemplatePart;
 use spar::{CompileOptions, Compiler};
+use std::fs;
+use tempfile::tempdir;
 
 fn compile(src: &str) -> spar::Compilation {
     Compiler::new(CompileOptions::default()).compile(src)
@@ -234,6 +236,60 @@ task [Build] {
 }
 
 #[test]
+fn bare_load_env_loads_dotenv_from_the_base_directory() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join(".env"),
+        "SPAR_TEST_BARE_LOAD_ENV=bare\n",
+    )
+    .unwrap();
+    let compilation = Compiler::new(CompileOptions {
+        base_dir: directory.path().to_path_buf(),
+        ..CompileOptions::default()
+    })
+    .compile("@LoadEnv\ntask [Build] { run { echo build; }; };");
+
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    assert_eq!(
+        tasks
+            .get("build")
+            .unwrap()
+            .environment
+            .get("SPAR_TEST_BARE_LOAD_ENV")
+            .map(String::as_str),
+        Some("bare")
+    );
+}
+
+#[test]
+fn load_env_custom_path_is_resolved_from_the_base_directory() {
+    let directory = tempdir().unwrap();
+    fs::write(
+        directory.path().join(".env.production"),
+        "SPAR_TEST_CUSTOM_LOAD_ENV=production\n",
+    )
+    .unwrap();
+    let compilation = Compiler::new(CompileOptions {
+        base_dir: directory.path().to_path_buf(),
+        ..CompileOptions::default()
+    })
+    .compile("@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };");
+
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    assert_eq!(
+        tasks
+            .get("build")
+            .unwrap()
+            .environment
+            .get("SPAR_TEST_CUSTOM_LOAD_ENV")
+            .map(String::as_str),
+        Some("production")
+    );
+}
+
+#[test]
 fn program_with_no_tasks_lowers_to_no_task_set() {
     let src = "export var port: int = 8080;\n";
     let compilation = compile(src);
@@ -249,7 +305,6 @@ task [Deploy](environment: str = "staging", *extra: str) {
     private: true;
     group: "release";
     confirm: "Really deploy?";
-    os: ["linux", "macos"];
     shell: ["bash", "-c"];
     run {
         #!/usr/bin/env bash
@@ -264,7 +319,6 @@ task [Deploy](environment: str = "staging", *extra: str) {
     assert!(task.private);
     assert_eq!(task.group.as_deref(), Some("release"));
     assert_eq!(task.confirm.as_deref(), Some("Really deploy?"));
-    assert_eq!(task.os, ["linux", "macos"]);
     assert_eq!(
         task.shell.as_deref(),
         Some(["bash".to_string(), "-c".to_string()].as_slice())
@@ -275,4 +329,82 @@ task [Deploy](environment: str = "staging", *extra: str) {
         task.commands[0],
         spar::runner::TaskCommand::Script(_)
     ));
+}
+
+#[test]
+fn run_block_matching_current_os_is_selected_over_default() {
+    let os = std::env::consts::OS;
+    let src = format!(
+        r#"
+task [T] {{
+    run {{
+        echo default;
+    }};
+    run {os} {{
+        echo current-os;
+    }};
+}};
+"#
+    );
+    let compilation = compile(&src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    let task = tasks.get("t").expect("T task must be lowered");
+    assert_eq!(task.commands.len(), 1);
+    assert_eq!(task.commands[0].render_unbound(), "echo current-os");
+}
+
+#[test]
+fn default_run_block_is_selected_when_no_os_specific_block_matches() {
+    let other_os = ["windows", "linux", "macos"]
+        .into_iter()
+        .find(|candidate| *candidate != std::env::consts::OS)
+        .unwrap();
+    let src = format!(
+        r#"
+task [T] {{
+    run {{
+        echo default;
+    }};
+    run {other_os} {{
+        echo other;
+    }};
+}};
+"#
+    );
+    let compilation = compile(&src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    let task = tasks.get("t").expect("T task must be lowered");
+    assert_eq!(task.commands.len(), 1);
+    assert_eq!(task.commands[0].render_unbound(), "echo default");
+}
+
+#[test]
+fn missing_run_block_for_current_os_with_no_default_is_a_clear_lowering_error() {
+    let other_oses: Vec<&str> = ["windows", "linux", "macos"]
+        .into_iter()
+        .filter(|candidate| *candidate != std::env::consts::OS)
+        .collect();
+    let src = format!(
+        r#"
+task [T] {{
+    run {} {{
+        echo one;
+    }};
+    run {} {{
+        echo two;
+    }};
+}};
+"#,
+        other_oses[0], other_oses[1]
+    );
+    let compilation = compile(&src);
+    assert!(!compilation.errors.is_empty());
+    assert!(
+        errors_contain(&compilation, std::env::consts::OS)
+            && errors_contain(&compilation, "default"),
+        "{:?}",
+        compilation.errors
+    );
 }

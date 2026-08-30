@@ -1,5 +1,6 @@
 use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
 use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
+use std::path::{Path, PathBuf};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -7,13 +8,24 @@ fn main() {
         Cmd::Check(path) => cmd_check(&path),
         Cmd::Emit(path) => cmd_emit(&path),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
-        Cmd::Tasks(path) => cmd_tasks(&path),
+        Cmd::Tasks { path, all } => cmd_tasks(path, all),
         Cmd::Run {
             path,
             task,
             args,
             dry_run,
-        } => cmd_run(&path, task, args, dry_run),
+            choose,
+        } => cmd_run(path, task, args, dry_run, choose),
+        Cmd::Show { path, task, args } => {
+            let _ = (path, task, args);
+            eprintln!("error: command is not implemented");
+            std::process::exit(1);
+        }
+        Cmd::Dump { path } => {
+            let _ = path;
+            eprintln!("error: command is not implemented");
+            std::process::exit(1);
+        }
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -33,12 +45,24 @@ enum Cmd {
         path: String,
         check: bool,
     },
-    Tasks(String),
+    Tasks {
+        path: Option<PathBuf>,
+        all: bool,
+    },
     Run {
-        path: String,
+        path: Option<PathBuf>,
         task: Option<String>,
         args: Vec<String>,
         dry_run: bool,
+        choose: bool,
+    },
+    Show {
+        path: Option<PathBuf>,
+        task: String,
+        args: Vec<String>,
+    },
+    Dump {
+        path: Option<PathBuf>,
     },
     Help,
     Version,
@@ -66,37 +90,137 @@ fn parse_args(args: &[String]) -> Cmd {
             },
             _ => Cmd::BadArgs("`fmt` requires a file path (optionally preceded by --check)".into()),
         },
-        Some("tasks") => match args.get(2) {
-            Some(p) => Cmd::Tasks(p.clone()),
-            None => Cmd::BadArgs("`tasks` requires a file path".into()),
-        },
-        Some("run") => match args.get(2) {
-            Some(p) => {
-                let mut dry_run = false;
-                let mut rest: Vec<String> = Vec::new();
-                for arg in &args[3..] {
-                    if arg == "--dry-run" {
-                        dry_run = true;
-                    } else {
-                        rest.push(arg.clone());
-                    }
-                }
-                let mut rest = rest.into_iter();
-                let task = rest.next();
-                let args = rest.collect();
-                Cmd::Run {
-                    path: p.clone(),
-                    task,
-                    args,
-                    dry_run,
-                }
-            }
-            None => Cmd::BadArgs("`run` requires a file path".into()),
-        },
+        Some("tasks") => parse_tasks_args(&args[2..]),
+        Some("run") => parse_run_args(&args[2..]),
+        Some("show") => parse_show_args(&args[2..]),
+        Some("dump") => parse_dump_args(&args[2..]),
         Some("--help") | Some("-h") | None => Cmd::Help,
         Some("--version") | Some("-V") => Cmd::Version,
         Some(other) => Cmd::BadArgs(format!("unknown command `{other}`")),
     }
+}
+
+fn set_task_file(path: &mut Option<PathBuf>, value: Option<&String>) -> Result<(), String> {
+    if path.is_some() {
+        return Err("file flag may only be specified once".to_owned());
+    }
+    let value = value.ok_or_else(|| "`-f`/`--file` requires a path".to_owned())?;
+    *path = Some(PathBuf::from(value));
+    Ok(())
+}
+
+fn parse_tasks_args(args: &[String]) -> Cmd {
+    let mut path = None;
+    let mut all = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-f" | "--file" => {
+                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 2;
+            }
+            "--all" => {
+                all = true;
+                index += 1;
+            }
+            other => return Cmd::BadArgs(format!("unexpected argument for `tasks`: {other}")),
+        }
+    }
+    Cmd::Tasks { path, all }
+}
+
+fn parse_run_args(args: &[String]) -> Cmd {
+    let mut path = None;
+    let mut dry_run = false;
+    let mut choose = false;
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-f" | "--file" => {
+                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--choose" => {
+                choose = true;
+                index += 1;
+            }
+            other if positional.is_empty() && other.starts_with('-') => {
+                return Cmd::BadArgs(format!("unknown option for `run`: {other}"));
+            }
+            other => {
+                positional.push(other.to_owned());
+                index += 1;
+            }
+        }
+    }
+    let task = positional.first().cloned();
+    if choose && task.is_some() {
+        return Cmd::BadArgs("`--choose` cannot be used with an explicit task".to_owned());
+    }
+    Cmd::Run {
+        path,
+        task,
+        args: positional.into_iter().skip(1).collect(),
+        dry_run,
+        choose,
+    }
+}
+
+fn parse_show_args(args: &[String]) -> Cmd {
+    let mut path = None;
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-f" | "--file" => {
+                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 2;
+            }
+            other if positional.is_empty() && other.starts_with('-') => {
+                return Cmd::BadArgs(format!("unknown option for `show`: {other}"));
+            }
+            other => {
+                positional.push(other.to_owned());
+                index += 1;
+            }
+        }
+    }
+    let Some(task) = positional.first().cloned() else {
+        return Cmd::BadArgs("`show` requires a task name".to_owned());
+    };
+    Cmd::Show {
+        path,
+        task,
+        args: positional.into_iter().skip(1).collect(),
+    }
+}
+
+fn parse_dump_args(args: &[String]) -> Cmd {
+    let mut path = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-f" | "--file" => {
+                if let Err(message) = set_task_file(&mut path, args.get(index + 1)) {
+                    return Cmd::BadArgs(message);
+                }
+                index += 2;
+            }
+            other => return Cmd::BadArgs(format!("unexpected argument for `dump`: {other}")),
+        }
+    }
+    Cmd::Dump { path }
 }
 
 fn print_help() {
@@ -104,20 +228,24 @@ fn print_help() {
         "spar — configuration language v{ver}
 
 USAGE:
-    spar <COMMAND> <FILE>
+    spar <COMMAND> [OPTIONS]
 
 COMMANDS:
     check         <file.spar>           Validate a .spar file — runs lex, parse, resolve, and type check
     emit          <file.spar>           Evaluate and print the config as JSON to stdout
     fmt           <file.spar>           Format a .spar file in place
     fmt --check   <file.spar>           Exit non-zero if file is not already formatted
-    tasks         <file.spar>           List declared tasks and their descriptions
-    run           <file.spar> [task] [args...] [--dry-run]
-                                         Run a task (the default task if none is named)
+    tasks         [-f FILE] [--all]     List declared tasks
+    run           [task] [args...] [-f FILE] [--dry-run] [--choose]
+                                        Run a task (default task if omitted)
+    show          <task> [args...] [-f FILE]
+                                        Show one task's resolved commands
+    dump          [-f FILE]             Dump the lowered task catalog as JSON
 
 OPTIONS:
     -h, --help        Show this help
     -V, --version     Show version
+    -f, --file FILE   Use FILE instead of discovering SparMake.spar
 
 ENVIRONMENT:
     NO_COLOR=1        Disable ANSI colour in error output
@@ -127,10 +255,10 @@ EXAMPLES:
     spar emit  server.spar > config.json
     spar fmt   server.spar
     spar fmt --check server.spar
-    spar tasks server.spar
-    spar run   server.spar
-    spar run   server.spar deploy production
-    spar run   server.spar test --dry-run",
+    spar tasks -f server.spar
+    spar run -f server.spar
+    spar run deploy production -f server.spar
+    spar run test --dry-run -f server.spar",
         ver = env!("CARGO_PKG_VERSION")
     );
 }
@@ -225,10 +353,12 @@ fn cmd_fmt(path: &str, check: bool) {
 
 // ── `tasks` command ───────────────────────────────────────────────────────────
 
-fn cmd_tasks(path: &str) {
-    let src = read_file(path);
-    let renderer = make_renderer(&src, path);
-    let compilation = Compiler::new(CompileOptions::for_path(path)).compile(&src);
+fn cmd_tasks(path: Option<PathBuf>, _all: bool) {
+    let path = resolve_task_path(path);
+    let path_text = path.to_string_lossy();
+    let src = read_file(&path_text);
+    let renderer = make_renderer(&src, &path_text);
+    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
@@ -267,10 +397,18 @@ fn print_task_list(tasks: Option<&TaskSet>) {
 
 // ── `run` command ─────────────────────────────────────────────────────────────
 
-fn cmd_run(path: &str, task: Option<String>, args: Vec<String>, dry_run: bool) {
-    let src = read_file(path);
-    let renderer = make_renderer(&src, path);
-    let options = CompileOptions::for_path(path);
+fn cmd_run(
+    path: Option<PathBuf>,
+    task: Option<String>,
+    args: Vec<String>,
+    dry_run: bool,
+    _choose: bool,
+) {
+    let path = resolve_task_path(path);
+    let path_text = path.to_string_lossy();
+    let src = read_file(&path_text);
+    let renderer = make_renderer(&src, &path_text);
+    let options = CompileOptions::for_path(&path);
     let base_dir = options.base_dir.clone();
     let compilation = Compiler::new(options).compile(&src);
     if !compilation.errors.is_empty() {
@@ -279,7 +417,7 @@ fn cmd_run(path: &str, task: Option<String>, args: Vec<String>, dry_run: bool) {
     }
 
     let Some(tasks) = compilation.tasks.as_ref() else {
-        eprintln!("error: {path} declares no tasks");
+        eprintln!("error: {} declares no tasks", path.display());
         std::process::exit(1);
     };
 
@@ -318,6 +456,32 @@ fn cmd_run(path: &str, task: Option<String>, args: Vec<String>, dry_run: bool) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn discover_task_file(start: &Path) -> Result<PathBuf, String> {
+    for directory in start.ancestors() {
+        let candidate = directory.join("SparMake.spar");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "could not find SparMake.spar in `{}` or any parent directory",
+        start.display()
+    ))
+}
+
+fn resolve_task_path(path: Option<PathBuf>) -> PathBuf {
+    match path {
+        Some(path) => path,
+        None => std::env::current_dir()
+            .map_err(|error| format!("cannot read current directory: {error}"))
+            .and_then(|directory| discover_task_file(&directory))
+            .unwrap_or_else(|message| {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }),
+    }
+}
 
 fn read_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -409,6 +573,109 @@ mod tests {
     #[test]
     fn parse_args_fmt_missing_path_is_bad_args() {
         let args = vec!["spar".to_string(), "fmt".to_string()];
+        assert!(matches!(parse_args(&args), Cmd::BadArgs(_)));
+    }
+
+    #[test]
+    fn discover_task_file_searches_current_directory_then_parents() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("one").join("two");
+        std::fs::create_dir_all(&nested).unwrap();
+        let parent_file = directory.path().join("SparMake.spar");
+        std::fs::write(&parent_file, "task [Build] { run { true; }; }").unwrap();
+
+        assert_eq!(discover_task_file(&nested).unwrap(), parent_file);
+
+        let current_file = nested.join("SparMake.spar");
+        std::fs::write(&current_file, "task [Build] { run { true; }; }").unwrap();
+        assert_eq!(discover_task_file(&nested).unwrap(), current_file);
+    }
+
+    #[test]
+    fn parse_args_tasks_accepts_optional_file_and_all_flag() {
+        let args = vec![
+            "spar".to_owned(),
+            "tasks".to_owned(),
+            "--all".to_owned(),
+            "-f".to_owned(),
+            "Tasks.spar".to_owned(),
+        ];
+
+        match parse_args(&args) {
+            Cmd::Tasks { path, all } => {
+                assert_eq!(path, Some(PathBuf::from("Tasks.spar")));
+                assert!(all);
+            }
+            other => panic!("expected tasks command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_run_keeps_dash_prefixed_task_arguments() {
+        let args = vec![
+            "spar".to_owned(),
+            "run".to_owned(),
+            "deploy".to_owned(),
+            "production".to_owned(),
+            "--force".to_owned(),
+            "--dry-run".to_owned(),
+            "--file".to_owned(),
+            "Tasks.spar".to_owned(),
+        ];
+
+        match parse_args(&args) {
+            Cmd::Run {
+                path,
+                task,
+                args,
+                dry_run,
+                choose,
+            } => {
+                assert_eq!(path, Some(PathBuf::from("Tasks.spar")));
+                assert_eq!(task.as_deref(), Some("deploy"));
+                assert_eq!(args, ["production", "--force"]);
+                assert!(dry_run);
+                assert!(!choose);
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_supports_choose_show_and_dump() {
+        let choose = vec!["spar".to_owned(), "run".to_owned(), "--choose".to_owned()];
+        assert!(matches!(
+            parse_args(&choose),
+            Cmd::Run {
+                task: None,
+                choose: true,
+                ..
+            }
+        ));
+
+        let show = vec![
+            "spar".to_owned(),
+            "show".to_owned(),
+            "deploy".to_owned(),
+            "production".to_owned(),
+        ];
+        assert!(matches!(
+            parse_args(&show),
+            Cmd::Show { task, args, .. }
+                if task == "deploy" && args == ["production"]
+        ));
+
+        let dump = vec!["spar".to_owned(), "dump".to_owned()];
+        assert!(matches!(parse_args(&dump), Cmd::Dump { path: None }));
+    }
+
+    #[test]
+    fn parse_args_rejects_old_bare_file_for_tasks() {
+        let args = vec![
+            "spar".to_owned(),
+            "tasks".to_owned(),
+            "old-style.spar".to_owned(),
+        ];
         assert!(matches!(parse_args(&args), Cmd::BadArgs(_)));
     }
 

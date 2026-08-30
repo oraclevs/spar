@@ -1,4 +1,5 @@
 use std::fmt;
+use std::process::ExitStatus;
 
 use super::ScalarKind;
 
@@ -36,6 +37,16 @@ pub enum RunnerError {
         parameter: String,
         value: String,
         kind: ScalarKind,
+    },
+    CommandExecution {
+        task: String,
+        command: String,
+        message: String,
+    },
+    CommandFailed {
+        task: String,
+        command: String,
+        status: ExitStatus,
     },
 }
 
@@ -85,6 +96,22 @@ impl fmt::Display for RunnerError {
             } => write!(
                 formatter,
                 "task {task} argument {parameter} must be a {kind:?}, but received {value}"
+            ),
+            Self::CommandExecution {
+                task,
+                command,
+                message,
+            } => write!(
+                formatter,
+                "failed to execute task {task} command {command:?}: {message}"
+            ),
+            Self::CommandFailed {
+                task,
+                command,
+                status,
+            } => write!(
+                formatter,
+                "task {task} command {command:?} failed with status {status}"
             ),
         }
     }

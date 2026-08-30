@@ -31,6 +31,15 @@ fn typecheck_function_arg_type_mismatch() {
 }
 
 #[test]
+fn typecheck_function_parameter_default_type_mismatch() {
+    let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
+    assert!(
+        error.contains("parameter 'name' default") && error.contains("str"),
+        "{error}"
+    );
+}
+
+#[test]
 fn typecheck_function_return_type_mismatch() {
     let src = r#"function f(x: str) -> int { return x; };"#;
     let err = check_err(src);

@@ -24,6 +24,25 @@ fn eval_function_returning_str() {
 }
 
 #[test]
+fn eval_function_parameter_default_and_explicit_override() {
+    let src = r#"
+        var defaultName: str = "world";
+        function greet(name: str = defaultName) -> str { return name; };
+        var implicit: str = greet();
+        var explicit: str = greet(name: "Spar");
+    "#;
+    let result = eval_src(src);
+    assert_eq!(
+        result.globals["implicit"],
+        crate::evaluator::ConfigValue::Str("world".into())
+    );
+    assert_eq!(
+        result.globals["explicit"],
+        crate::evaluator::ConfigValue::Str("Spar".into())
+    );
+}
+
+#[test]
 fn eval_function_returning_section() {
     let src = r#"
         function makeConf(host: str) -> section { return { host: str = host; }; };
@@ -622,6 +641,21 @@ fn eval_function_group_call_with_args() {
 }
 
 #[test]
+fn eval_function_group_call_with_defaulted_arg() {
+    let src = r#"
+        functionGroup Math {
+            function double(n: int = 21) -> int { return n + n; }
+        };
+        var result: int = Math::double();
+    "#;
+    let result = eval_src(src);
+    assert_eq!(
+        result.globals["result"],
+        crate::evaluator::ConfigValue::Int(42)
+    );
+}
+
+#[test]
 fn eval_function_group_design_doc_example() {
     // Verbatim from docs/superpowers/specs/2026-08-26-functiongroup-and-named-field-access-design.md, Part A.
     let src = r#"
@@ -678,6 +712,48 @@ fn eval_cross_file_function_group_call() {
     let symbols =
         crate::resolver::Resolver::resolve_with_imports(&program, &loaded).expect("resolve failed");
 
+    let result = crate::evaluator::Evaluator::evaluate_with_imports_and_base(
+        &program,
+        &symbols,
+        &loaded,
+        dir.path(),
+    )
+    .expect("eval failed");
+
+    assert_eq!(
+        result.globals["result"],
+        crate::evaluator::ConfigValue::Int(7)
+    );
+}
+
+#[test]
+fn eval_cross_file_function_group_call_with_defaulted_arg() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("shared.spar"),
+        r#"
+            var defaultValue: int = 7;
+            functionGroup EdgeInsect {
+                function only(value: int = defaultValue) -> int { return value; }
+            };
+        "#,
+    )
+    .unwrap();
+
+    let src = r#"
+        import "shared.spar" as shared;
+        var result: int = shared::EdgeInsect::only();
+    "#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let mut loader = crate::loader::ImportLoader::new(dir.path());
+    let loaded =
+        crate::loader::collect_imports(&program, &mut loader).expect("import must succeed");
+    let symbols =
+        crate::resolver::Resolver::resolve_with_imports(&program, &loaded).expect("resolve failed");
     let result = crate::evaluator::Evaluator::evaluate_with_imports_and_base(
         &program,
         &symbols,

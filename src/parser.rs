@@ -1331,14 +1331,28 @@ impl Parser {
         let (name, name_span) = self.expect_ident()?;
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
+        let mut saw_default = false;
         while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
             let param_span = self.peek_span();
             let (param_name, _) = self.expect_ident()?;
             self.expect(&Token::Colon)?;
             let ty = self.parse_type()?;
+            let default = if self.at(&Token::Eq) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            if default.is_none() && saw_default {
+                return Err(self.error(
+                    "a required function parameter cannot follow a parameter with a default",
+                ));
+            }
+            saw_default |= default.is_some();
             params.push(Param {
                 name: param_name,
                 ty,
+                default,
                 span: param_span,
             });
             if self.at(&Token::Comma) {

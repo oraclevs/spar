@@ -425,6 +425,7 @@ pub struct FunctionGroupDecl {
 pub struct Param {
     pub name: String,
     pub ty: SparType,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 

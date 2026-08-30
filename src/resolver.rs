@@ -99,6 +99,7 @@ pub struct ImportEntry {
 #[derive(Debug, Clone)]
 pub struct FunctionEntry {
     pub params: Vec<(String, SparType)>,
+    pub default_params: HashSet<String>,
     pub ret: SparType,
     pub span: Span,
     pub closure_deps: HashSet<DeclId>,
@@ -538,6 +539,12 @@ impl Resolver {
         }
         FunctionEntry {
             params,
+            default_params: decl
+                .params
+                .iter()
+                .filter(|param| param.default.is_some())
+                .map(|param| param.name.clone())
+                .collect(),
             ret: decl.ret.clone(),
             span: decl.name_span.clone(),
             closure_deps: HashSet::new(), // computed in Pass 3
@@ -995,6 +1002,12 @@ impl Resolver {
         let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         let mut local_names = param_names.clone();
 
+        for param in &f.params {
+            if let Some(default) = &param.default {
+                self.resolve_expr(default);
+            }
+        }
+
         self.resolve_func_stmts(&f.body.stmts, &mut local_names);
 
         if !stmts_always_return(&f.body.stmts) {
@@ -1013,6 +1026,11 @@ impl Resolver {
         self.check_unreachable(&stmts);
 
         let mut deps: HashSet<DeclId> = HashSet::new();
+        for param in &f.params {
+            if let Some(default) = &param.default {
+                self.collect_closure_deps_expr(default, &HashSet::new(), &mut deps);
+            }
+        }
         self.collect_closure_deps_stmts(&f.body.stmts, &param_names, &mut deps);
         deps
     }
@@ -1361,7 +1379,10 @@ impl Resolver {
                             }
                             let missing: Vec<_> = param_names
                                 .iter()
-                                .filter(|p| !seen.contains(p.as_str()))
+                                .filter(|p| {
+                                    !seen.contains(p.as_str())
+                                        && !entry.default_params.contains(p.as_str())
+                                })
                                 .collect();
                             if !missing.is_empty() {
                                 self.push_error(
@@ -1918,7 +1939,10 @@ impl Resolver {
                         }
                         let missing: Vec<_> = param_names
                             .iter()
-                            .filter(|p| !seen.contains(p.as_str()))
+                            .filter(|p| {
+                                !seen.contains(p.as_str())
+                                    && !entry.default_params.contains(p.as_str())
+                            })
                             .collect();
                         if !missing.is_empty() {
                             return Err(SparError::ResolveError {

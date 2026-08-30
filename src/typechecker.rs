@@ -2227,6 +2227,32 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_function_decl(&mut self, f: &FunctionDecl) {
+        for param in &f.params {
+            let Some(default) = &param.default else {
+                continue;
+            };
+            if let Err(error) = self.check_expr_with_locals(default, &HashMap::new()) {
+                self.errors.push(error);
+                continue;
+            }
+            let actual = self.infer_type(default);
+            if actual.as_ref() != Some(&param.ty) {
+                self.push_type_error(
+                    format!(
+                        "parameter '{}' default must be a {}, found {}",
+                        param.name,
+                        display_type(&param.ty),
+                        actual
+                            .as_ref()
+                            .map(display_type)
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ),
+                    None,
+                    param.span.clone(),
+                );
+            }
+        }
+
         let mut local_types: HashMap<String, SparType> = f
             .params
             .iter()

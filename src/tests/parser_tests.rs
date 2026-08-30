@@ -31,6 +31,29 @@ fn parse_function_decl_str_return() {
 }
 
 #[test]
+fn parse_function_parameter_default() {
+    let prog = parse_ok(r#"function greet(name: str = "world") -> str { return name; };"#);
+    let crate::ast::TopLevelItem::Function(function) = &prog.items[0] else {
+        panic!("expected Function");
+    };
+    assert!(matches!(
+        &function.params[0].default,
+        Some(crate::ast::Expr::String(string))
+            if matches!(&string.parts[..], [crate::ast::StringPart::Literal(value)] if value == "world")
+    ));
+}
+
+#[test]
+fn rejects_required_function_parameter_after_defaulted_parameter() {
+    let error =
+        parse_err(r#"function greet(prefix: str = "hello", name: str) -> str { return name; };"#);
+    assert!(
+        error.contains("a required function parameter cannot follow a parameter with a default"),
+        "{error}"
+    );
+}
+
+#[test]
 fn parse_function_decl_section_return() {
     let src = r#"
         function makeServer(host: str, port: int) -> section {

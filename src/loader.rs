@@ -1707,6 +1707,7 @@ mod tests {
         // the type here stands in for one that arrived via `import type`.
         let mut program = Program {
             is_schema_file: true,
+            dotenv_load: false,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "PostgresType".into(),
@@ -1771,6 +1772,7 @@ mod tests {
     fn expand_schema_from_expands_named_type_reference_recursively() {
         let mut program = Program {
             is_schema_file: true,
+            dotenv_load: false,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "Border".into(),
@@ -1836,6 +1838,7 @@ mod tests {
     fn expand_schema_from_errors_on_undeclared_type() {
         let mut program = Program {
             is_schema_file: true,
+            dotenv_load: false,
             items: vec![TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
                 name: "Postgres".into(),
                 source_type: "NoSuchType".into(),

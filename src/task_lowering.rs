@@ -17,7 +17,7 @@
 //! the wrong thing.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ast::{Expr, Program, ShellTemplatePart, SparType, StringPart, TaskDecl, TopLevelItem};
 use crate::error::{Span, SparError};
@@ -37,6 +37,7 @@ pub fn lower_tasks(
     program: &Program,
     symbols: &SymbolTable,
     eval_result: &EvalResult,
+    base_dir: &Path,
 ) -> Result<Option<TaskSet>, Vec<SparError>> {
     let decls: Vec<&TaskDecl> = program
         .items
@@ -55,7 +56,7 @@ pub fn lower_tasks(
     let mut tasks: Vec<Task> = Vec::new();
 
     for decl in &decls {
-        match lower_one_task(decl, program, symbols, eval_result) {
+        match lower_one_task(decl, program, symbols, eval_result, base_dir) {
             Ok(task) => tasks.push(task),
             Err(mut errs) => errors.append(&mut errs),
         }
@@ -94,6 +95,7 @@ fn lower_one_task(
     program: &Program,
     symbols: &SymbolTable,
     eval_result: &EvalResult,
+    base_dir: &Path,
 ) -> Result<Task, Vec<SparError>> {
     let mut errors: Vec<SparError> = Vec::new();
 
@@ -111,13 +113,48 @@ fn lower_one_task(
         .as_ref()
         .and_then(|e| eval_bool(program, symbols, eval_result, e, &mut errors))
         .unwrap_or(false);
+    let private = decl
+        .private
+        .as_ref()
+        .and_then(|e| eval_bool(program, symbols, eval_result, e, &mut errors))
+        .unwrap_or(false);
+    let group = decl
+        .group
+        .as_ref()
+        .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors));
+    let confirm = decl
+        .confirm
+        .as_ref()
+        .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors));
+    let os = decl
+        .os
+        .as_ref()
+        .and_then(|e| eval_string_list(program, symbols, eval_result, e, &mut errors))
+        .unwrap_or_default();
+    let shell = decl
+        .shell
+        .as_ref()
+        .and_then(|e| eval_string_list(program, symbols, eval_result, e, &mut errors));
     let cwd = decl
         .cwd
         .as_ref()
         .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors))
         .map(PathBuf::from);
 
-    let mut environment: BTreeMap<String, String> = BTreeMap::new();
+    let mut environment = if program.dotenv_load {
+        match crate::dotenv::load(&base_dir.join(".env")) {
+            Ok(values) => values
+                .into_iter()
+                .filter(|(key, _)| std::env::var_os(key).is_none())
+                .collect(),
+            Err(error) => {
+                errors.push(error);
+                BTreeMap::new()
+            }
+        }
+    } else {
+        BTreeMap::new()
+    };
     for (key, value_expr) in &decl.env {
         if let Some(v) = eval_str(program, symbols, eval_result, value_expr, &mut errors) {
             environment.insert(key.clone(), v);
@@ -131,8 +168,11 @@ fn lower_one_task(
         .map(|p| TaskParameter {
             name: p.name.clone(),
             kind: scalar_kind(&p.ty),
-            default: None,
-            variadic: false,
+            default: p
+                .default
+                .as_ref()
+                .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors)),
+            variadic: p.variadic,
         })
         .collect();
 
@@ -166,7 +206,11 @@ fn lower_one_task(
                 },
             }
         }
-        commands.push(TaskCommand::Shell(CommandTemplate { parts }));
+        commands.push(if command.is_shebang {
+            TaskCommand::Script(CommandTemplate { parts })
+        } else {
+            TaskCommand::Shell(CommandTemplate { parts })
+        });
     }
 
     if !errors.is_empty() {
@@ -178,15 +222,15 @@ fn lower_one_task(
         description,
         default,
         quiet,
-        private: false,
-        group: None,
-        confirm: None,
-        os: Vec::new(),
+        private,
+        group,
+        confirm,
+        os,
         dependencies: decl.depends_on.iter().map(|d| d.name.clone()).collect(),
         parameters,
         environment,
         cwd,
-        shell: None,
+        shell,
         commands,
     })
 }
@@ -293,6 +337,28 @@ fn eval_bool(
         Ok(_) => None, // the typechecker already guarantees `bool` here
         Err(e) => {
             errors.push(e);
+            None
+        }
+    }
+}
+
+fn eval_string_list(
+    program: &Program,
+    symbols: &SymbolTable,
+    result: &EvalResult,
+    expr: &Expr,
+    errors: &mut Vec<SparError>,
+) -> Option<Vec<String>> {
+    match eval_any(program, symbols, result, expr) {
+        Ok(ConfigValue::List(values)) => Some(
+            values
+                .into_iter()
+                .map(|value| value.coerce_to_str())
+                .collect(),
+        ),
+        Ok(_) => None,
+        Err(error) => {
+            errors.push(error);
             None
         }
     }

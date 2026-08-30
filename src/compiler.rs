@@ -161,7 +161,12 @@ impl Compiler {
                 &self.options.base_dir,
             ) {
                 Ok(result) => {
-                    match crate::task_lowering::lower_tasks(&program, &symbols, &result) {
+                    match crate::task_lowering::lower_tasks(
+                        &program,
+                        &symbols,
+                        &result,
+                        &self.options.base_dir,
+                    ) {
                         Ok(tasks) => compilation.tasks = tasks,
                         Err(errors) => compilation.errors.extend(errors),
                     }

@@ -223,3 +223,39 @@ fn program_with_no_tasks_lowers_to_no_task_set() {
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
     assert!(compilation.tasks.is_none());
 }
+
+#[test]
+fn lowers_v2_metadata_defaults_and_shebang_commands() {
+    let compilation = compile(
+        r#"
+task [Deploy](environment: str = "staging", *extra: str) {
+    private: true;
+    group: "release";
+    confirm: "Really deploy?";
+    os: ["linux", "macos"];
+    shell: ["bash", "-c"];
+    run {
+        #!/usr/bin/env bash
+        echo ${environment} ${extra}
+    };
+}
+"#,
+    );
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.unwrap();
+    let task = tasks.get("deploy").unwrap();
+    assert!(task.private);
+    assert_eq!(task.group.as_deref(), Some("release"));
+    assert_eq!(task.confirm.as_deref(), Some("Really deploy?"));
+    assert_eq!(task.os, ["linux", "macos"]);
+    assert_eq!(
+        task.shell.as_deref(),
+        Some(["bash".to_string(), "-c".to_string()].as_slice())
+    );
+    assert_eq!(task.parameters[0].default.as_deref(), Some("staging"));
+    assert!(task.parameters[1].variadic);
+    assert!(matches!(
+        task.commands[0],
+        spar::runner::TaskCommand::Script(_)
+    ));
+}

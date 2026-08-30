@@ -35,13 +35,16 @@ pub fn format_program_with_comments(
     let mut out = String::new();
     let mut cx = CommentCursor::new(comments);
 
+    if program.dotenv_load {
+        out.push_str("@DotenvLoad\n");
+    }
     if program.is_schema_file {
         out.push_str("@SchemaFile\n");
     }
 
     for (i, item) in program.items.iter().enumerate() {
         let item_line = item_span_line(item);
-        if i > 0 || program.is_schema_file {
+        if i > 0 || program.dotenv_load || program.is_schema_file {
             out.push('\n');
         }
         // Emit any standalone comments preceding this item (after the blank-line separator)
@@ -1560,6 +1563,7 @@ function pick(flag: bool) -> int {
         use crate::ast::*;
         let program = Program {
             is_schema_file: false,
+            dotenv_load: false,
             items: vec![TopLevelItem::Import(ImportDecl {
                 path: "dir\\file.spar".to_string(), // stored with literal backslash
                 kind: ImportKind::Aliased(Some("x".to_string())),
@@ -1581,6 +1585,7 @@ function pick(flag: bool) -> int {
         // (the parser rejects "[A.B]" in source, but the AST can represent it)
         let program = Program {
             is_schema_file: false,
+            dotenv_load: false,
             items: vec![TopLevelItem::Section(SectionDecl {
                 exported: false,
                 private: false,
@@ -1867,5 +1872,14 @@ function pick(flag: bool) -> int {
         let formatted = fmt(src);
         assert_eq!(formatted, src);
         assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn dotenv_load_pragma_formats_first() {
+        let src = "@DotenvLoad\ntask [Build] { run { echo build; }; }\n";
+        assert_eq!(
+            fmt(src),
+            "@DotenvLoad\n\ntask [Build] {\n    run {\n        echo build;\n    };\n}\n"
+        );
     }
 }

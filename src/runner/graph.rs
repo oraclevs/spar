@@ -32,7 +32,16 @@ pub(super) fn plan(
         &mut stack,
         &mut ordered,
     )?;
-    let requested_values = bind_arguments(&requested_task, &invocation.arguments)?;
+    for task in &ordered {
+        if !task.os.is_empty() && !task.os.iter().any(|os| os == std::env::consts::OS) {
+            return Err(RunnerError::UnsupportedOperatingSystem {
+                task: task.name.clone(),
+                actual: std::env::consts::OS.to_owned(),
+                allowed: task.os.clone(),
+            });
+        }
+    }
+    let requested_values = bind(task_set, invocation)?.parameter_values;
 
     Ok(ExecutionPlan {
         tasks: ordered
@@ -49,46 +58,92 @@ pub(super) fn plan(
     })
 }
 
+pub(super) fn bind(
+    task_set: &TaskSet,
+    invocation: &TaskInvocation,
+) -> Result<BoundTask, RunnerError> {
+    let task = task_set.get(&invocation.task)?.clone();
+    let parameter_values = bind_arguments(&task, &invocation.arguments)?;
+    Ok(BoundTask {
+        task,
+        parameter_values,
+    })
+}
+
 fn bind_arguments(
     task: &Task,
     arguments: &[String],
 ) -> Result<BTreeMap<String, BoundValue>, RunnerError> {
-    if task.parameters.len() != arguments.len() {
+    let minimum = task
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.default.is_none() && !parameter.variadic)
+        .count();
+    let maximum = if task.parameters.iter().any(|parameter| parameter.variadic) {
+        None
+    } else {
+        Some(task.parameters.len())
+    };
+    if arguments.len() < minimum || maximum.is_some_and(|maximum| arguments.len() > maximum) {
         return Err(RunnerError::ArgumentCount {
             task: task.name.clone(),
-            expected: task.parameters.len(),
+            minimum,
+            maximum,
             actual: arguments.len(),
         });
     }
 
-    task.parameters
-        .iter()
-        .zip(arguments)
-        .map(|(parameter, argument)| {
-            let value = match parameter.kind {
-                ScalarKind::Str => Ok(argument.clone()),
-                ScalarKind::Int => argument
-                    .parse::<i64>()
-                    .map(|value| value.to_string())
-                    .map_err(|_| ()),
-                ScalarKind::Float => argument
-                    .parse::<f64>()
-                    .map(|value| value.to_string())
-                    .map_err(|_| ()),
-                ScalarKind::Bool => argument
-                    .parse::<bool>()
-                    .map(|value| value.to_string())
-                    .map_err(|_| ()),
-            }
-            .map_err(|_| RunnerError::InvalidArgument {
-                task: task.name.clone(),
-                parameter: parameter.name.clone(),
-                value: argument.clone(),
-                kind: parameter.kind,
-            })?;
-            Ok((parameter.name.clone(), BoundValue::Scalar(value)))
-        })
-        .collect()
+    let mut values = BTreeMap::new();
+    let mut arguments = arguments.iter();
+    for parameter in &task.parameters {
+        if parameter.variadic {
+            let remaining = arguments
+                .by_ref()
+                .map(|argument| parse_argument(task, parameter, argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            values.insert(parameter.name.clone(), BoundValue::Variadic(remaining));
+        } else if let Some(argument) = arguments.next() {
+            values.insert(
+                parameter.name.clone(),
+                BoundValue::Scalar(parse_argument(task, parameter, argument)?),
+            );
+        } else if let Some(default) = &parameter.default {
+            values.insert(
+                parameter.name.clone(),
+                BoundValue::Scalar(default.clone()),
+            );
+        }
+    }
+    Ok(values)
+}
+
+fn parse_argument(
+    task: &Task,
+    parameter: &super::TaskParameter,
+    argument: &str,
+) -> Result<String, RunnerError> {
+    let value = match parameter.kind {
+        ScalarKind::Str => Ok(argument.to_owned()),
+        ScalarKind::Int => argument
+            .parse::<i64>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        ScalarKind::Float => argument
+            .parse::<f64>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+        ScalarKind::Bool => argument
+            .parse::<bool>()
+            .map(|value| value.to_string())
+            .map_err(|_| ()),
+    }
+    .map_err(|_| RunnerError::InvalidArgument {
+        task: task.name.clone(),
+        parameter: parameter.name.clone(),
+        value: argument.to_owned(),
+        kind: parameter.kind,
+    })?;
+    Ok(value)
 }
 
 fn visit(
@@ -401,7 +456,8 @@ mod tests {
             error,
             crate::runner::RunnerError::ArgumentCount {
                 task,
-                expected: 1,
+                minimum: 1,
+                maximum: Some(1),
                 actual: 0,
             } if task == "Deploy"
         ));
@@ -463,5 +519,150 @@ mod tests {
 
         assert!(plan.tasks[0].parameter_values.is_empty());
         assert_eq!(plan.tasks[0].task.name, "Configure");
+    }
+
+    #[test]
+    fn binding_uses_defaults_and_collects_variadic_arguments() {
+        let mut deploy = task("Deploy", &[]);
+        deploy.parameters = vec![
+            TaskParameter {
+                name: "environment".to_owned(),
+                kind: ScalarKind::Str,
+                default: Some("staging".to_owned()),
+                variadic: false,
+            },
+            TaskParameter {
+                name: "extra".to_owned(),
+                kind: ScalarKind::Str,
+                default: None,
+                variadic: true,
+            },
+        ];
+        let tasks = TaskSet::new(vec![deploy]).unwrap();
+
+        let bound = tasks
+            .bind(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: vec!["production".to_owned(), "--force".to_owned(), "blue".to_owned()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            bound.parameter_values,
+            BTreeMap::from([
+                (
+                    "environment".to_owned(),
+                    BoundValue::Scalar("production".to_owned()),
+                ),
+                (
+                    "extra".to_owned(),
+                    BoundValue::Variadic(vec!["--force".to_owned(), "blue".to_owned()]),
+                ),
+            ])
+        );
+
+        let defaulted = tasks
+            .bind(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            defaulted.parameter_values,
+            BTreeMap::from([
+                (
+                    "environment".to_owned(),
+                    BoundValue::Scalar("staging".to_owned()),
+                ),
+                ("extra".to_owned(), BoundValue::Variadic(Vec::new())),
+            ])
+        );
+    }
+
+    #[test]
+    fn plan_rejects_a_requested_task_on_an_unsupported_operating_system() {
+        let mut deploy = task("Deploy", &[]);
+        let unsupported = ["linux", "macos", "windows"]
+            .into_iter()
+            .find(|candidate| *candidate != std::env::consts::OS)
+            .unwrap()
+            .to_owned();
+        deploy.os = vec![unsupported.clone()];
+        let tasks = TaskSet::new(vec![deploy]).unwrap();
+
+        let error = tasks
+            .plan(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::UnsupportedOperatingSystem {
+                task,
+                actual,
+                allowed,
+            } if task == "Deploy"
+                && actual == std::env::consts::OS
+                && allowed == [unsupported]
+        ));
+    }
+
+    #[test]
+    fn plan_rejects_an_unsupported_dependency_before_execution() {
+        let deploy = task("Deploy", &["Build"]);
+        let mut build = task("Build", &[]);
+        let unsupported = ["linux", "macos", "windows"]
+            .into_iter()
+            .find(|candidate| *candidate != std::env::consts::OS)
+            .unwrap()
+            .to_owned();
+        build.os = vec![unsupported];
+        let tasks = TaskSet::new(vec![deploy, build]).unwrap();
+
+        let error = tasks
+            .plan(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::UnsupportedOperatingSystem { task, .. }
+                if task == "Build"
+        ));
+    }
+
+    #[test]
+    fn non_variadic_binding_rejects_more_than_the_maximum() {
+        let tasks = TaskSet::new(vec![task_with_parameter(
+            "Deploy",
+            TaskParameter {
+                name: "environment".to_owned(),
+                kind: ScalarKind::Str,
+                default: Some("staging".to_owned()),
+                variadic: false,
+            },
+        )])
+        .unwrap();
+
+        let error = tasks
+            .bind(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: vec!["production".to_owned(), "extra".to_owned()],
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::ArgumentCount {
+                minimum: 0,
+                maximum: Some(1),
+                actual: 2,
+                ..
+            }
+        ));
     }
 }

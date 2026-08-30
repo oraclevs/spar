@@ -177,6 +177,10 @@ impl TaskSet {
         super::graph::plan(self, invocation)
     }
 
+    pub fn bind(&self, invocation: &TaskInvocation) -> Result<super::BoundTask, RunnerError> {
+        super::graph::bind(self, invocation)
+    }
+
     pub(super) fn source_task(&self, name: &str) -> Option<&Task> {
         self.tasks.get(name)
     }

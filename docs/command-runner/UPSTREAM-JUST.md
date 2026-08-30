@@ -32,5 +32,19 @@ child. The relevant source units and deliberate exclusions are recorded in
 No Just source is copied or linked. Spar reimplements the approved V1 behavior
 against its own parser-independent runner IR. Just's parser/compiler, recipe
 AST, evaluator, module/import system, settings, formatter, CLI, caches,
-dotenv handling, aliases, Make-like target behavior, and completion machinery
-are outside the extraction boundary.
+aliases, Make-like target behavior, and completion machinery are outside the
+extraction boundary.
+
+## V2 extraction (2026-08-30)
+
+Same donor, same commit, same license — no re-audit of upstream was needed.
+V2 is a user-approved scope expansion revisiting a few V1 DISCARD decisions:
+shebang/script recipe execution, `.env` loading, and justfile-style file
+discovery are now ADAPTed (in each case as a small, independent
+reimplementation, not vendored Just source), alongside REIMPLEMENTed
+default/variadic task parameters and Spar-native (non-bracket) task
+attributes. See the "V2 additions" section of
+[just-extraction-map.md](just-extraction-map.md) for the per-unit reasoning.
+`fzf`/external-chooser integration was deliberately NOT adopted — `--choose`
+is a minimal built-in picker instead, to avoid an external binary
+dependency.

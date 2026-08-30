@@ -44,6 +44,13 @@ pub enum RunnerError {
         value: String,
         kind: ScalarKind,
     },
+    InvalidShebang {
+        task: String,
+        message: String,
+    },
+    Aborted {
+        task: String,
+    },
     CommandExecution {
         task: String,
         command: String,
@@ -123,6 +130,10 @@ impl fmt::Display for RunnerError {
                 formatter,
                 "task {task} argument {parameter} must be a {kind:?}, but received {value}"
             ),
+            Self::InvalidShebang { task, message } => {
+                write!(formatter, "task {task} has an invalid shebang: {message}")
+            }
+            Self::Aborted { task } => write!(formatter, "task {task} aborted"),
             Self::CommandExecution {
                 task,
                 command,

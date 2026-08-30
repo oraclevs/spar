@@ -335,9 +335,16 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
             if i > 0 {
                 out.push_str(", ");
             }
+            if p.variadic {
+                out.push('*');
+            }
             out.push_str(&p.name);
             out.push_str(": ");
             out.push_str(&format_type(&p.ty));
+            if let Some(default) = &p.default {
+                out.push_str(" = ");
+                format_expr(default, 0, 0, config, out);
+            }
         }
         out.push(')');
     }
@@ -363,6 +370,30 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
         format_expr(quiet, 0, 1, config, out);
         out.push_str(";\n");
     }
+    if let Some(private) = &td.private {
+        out.push_str(&body_indent);
+        out.push_str("private: ");
+        format_expr(private, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(group) = &td.group {
+        out.push_str(&body_indent);
+        out.push_str("group: ");
+        format_expr(group, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(confirm) = &td.confirm {
+        out.push_str(&body_indent);
+        out.push_str("confirm: ");
+        format_expr(confirm, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(os) = &td.os {
+        out.push_str(&body_indent);
+        out.push_str("os: ");
+        format_expr(os, 0, 1, config, out);
+        out.push_str(";\n");
+    }
     if !td.depends_on.is_empty() {
         out.push_str(&body_indent);
         out.push_str("dependsOn: [");
@@ -378,6 +409,12 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
         out.push_str(&body_indent);
         out.push_str("cwd: ");
         format_expr(cwd, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(shell) = &td.shell {
+        out.push_str(&body_indent);
+        out.push_str("shell: ");
+        format_expr(shell, 0, 1, config, out);
         out.push_str(";\n");
     }
     if !td.env.is_empty() {
@@ -1775,6 +1812,33 @@ function pick(flag: bool) -> int {
         assert_eq!(formatted, src);
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn task_v2_metadata_and_parameters_format_in_stable_order() {
+        let src = concat!(
+            "task [Deploy](environment: str = \"staging\", *extra: str) {\n",
+            "    description: \"Deploy the app\";\n",
+            "    default: true;\n",
+            "    quiet: true;\n",
+            "    private: true;\n",
+            "    group: \"release\";\n",
+            "    confirm: \"Really deploy?\";\n",
+            "    os: [\"linux\", \"macos\"];\n",
+            "    dependsOn: [Build];\n",
+            "    cwd: \"./web\";\n",
+            "    shell: [\"bash\", \"-euo\", \"pipefail\", \"-c\"];\n",
+            "    env: {\n",
+            "        RUST_LOG: \"debug\";\n",
+            "    };\n",
+            "    run {\n",
+            "        ./deploy.sh ${environment} ${extra};\n",
+            "    };\n",
+            "}\n",
+        );
+        let formatted = fmt(src);
+        assert_eq!(formatted, src);
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]

@@ -1474,14 +1474,41 @@ impl Parser {
         let params = if self.at(&Token::LParen) {
             self.advance();
             let mut params = Vec::new();
+            let mut saw_default = false;
+            let mut saw_variadic = false;
             while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+                if saw_variadic {
+                    return Err(self.error("a variadic task parameter must be last"));
+                }
                 let param_span = self.peek_span();
+                let variadic = if self.at(&Token::Star) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let (param_name, _) = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_type()?;
-                params.push(Param {
+                let default = if self.at(&Token::Eq) {
+                    if variadic {
+                        return Err(self.error("a variadic task parameter cannot have a default"));
+                    }
+                    self.advance();
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                if default.is_none() && saw_default && !variadic {
+                    return Err(self.error("a required task parameter cannot follow a parameter with a default"));
+                }
+                saw_default |= default.is_some();
+                saw_variadic = variadic;
+                params.push(TaskParam {
                     name: param_name,
                     ty,
+                    default,
+                    variadic,
                     span: param_span,
                 });
                 if self.at(&Token::Comma) {
@@ -1499,14 +1526,25 @@ impl Parser {
         let mut description = None;
         let mut default = None;
         let mut quiet = None;
+        let mut private = None;
+        let mut group = None;
+        let mut confirm = None;
+        let mut os = None;
         let mut depends_on = Vec::new();
         let mut env = Vec::new();
         let mut cwd = None;
+        let mut shell = None;
         let mut run = Vec::new();
         let mut saw_run = false;
 
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            let (field_name, field_span) = self.expect_ident()?;
+            let (field_name, field_span) = if self.at(&Token::Private) {
+                let field_span = self.peek_span();
+                self.advance();
+                ("private".to_string(), field_span)
+            } else {
+                self.expect_ident()?
+            };
             match field_name.as_str() {
                 "run" => {
                     if saw_run {
@@ -1533,9 +1571,34 @@ impl Parser {
                     quiet = Some(self.parse_expr()?);
                     self.expect(&Token::Semicolon)?;
                 }
+                "private" => {
+                    self.expect(&Token::Colon)?;
+                    private = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "group" => {
+                    self.expect(&Token::Colon)?;
+                    group = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "confirm" => {
+                    self.expect(&Token::Colon)?;
+                    confirm = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "os" => {
+                    self.expect(&Token::Colon)?;
+                    os = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
                 "cwd" => {
                     self.expect(&Token::Colon)?;
                     cwd = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "shell" => {
+                    self.expect(&Token::Colon)?;
+                    shell = Some(self.parse_expr()?);
                     self.expect(&Token::Semicolon)?;
                 }
                 "dependsOn" => {
@@ -1578,7 +1641,7 @@ impl Parser {
                 other => {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'dependsOn', 'env', 'cwd', or 'run'"
+                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'private', 'group', 'confirm', 'os', 'dependsOn', 'cwd', 'shell', 'env', or 'run'"
                         ),
                         span: field_span,
                     });
@@ -1601,9 +1664,14 @@ impl Parser {
             description,
             default,
             quiet,
+            private,
+            group,
+            confirm,
+            os,
             depends_on,
             env,
             cwd,
+            shell,
             run,
             span,
         })
@@ -2257,6 +2325,42 @@ function f(flag: bool) -> int {
     }
 
     #[test]
+    fn task_parameters_support_defaults_and_a_final_variadic() {
+        let task = task_decl(
+            r#"task [Deploy](environment: str = "staging", *extra: str) {
+    run { echo ${environment} ${extra}; };
+}"#,
+        );
+        assert_eq!(task.params.len(), 2);
+        assert_eq!(task.params[0].name, "environment");
+        assert_eq!(task.params[0].ty, SparType::Str);
+        assert!(matches!(
+            task.params[0].default,
+            Some(Expr::String(ref string))
+                if matches!(&string.parts[..], [StringPart::Literal(value)] if value == "staging")
+        ));
+        assert!(!task.params[0].variadic);
+        assert_eq!(task.params[1].name, "extra");
+        assert_eq!(task.params[1].ty, SparType::Str);
+        assert!(task.params[1].default.is_none());
+        assert!(task.params[1].variadic);
+    }
+
+    #[test]
+    fn task_parameters_reject_invalid_default_and_variadic_ordering() {
+        for src in [
+            "task [Deploy](*first: str, *second: str) { run { echo hi; }; }",
+            "task [Deploy](*extra: str, environment: str) { run { echo hi; }; }",
+            "task [Deploy](*extra: str = \"x\") { run { echo hi; }; }",
+            "task [Deploy](optional: str = \"x\", required: str) { run { echo hi; }; }",
+        ] {
+            assert!(Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
+                .parse()
+                .is_err());
+        }
+    }
+
+    #[test]
     fn task_env_parses() {
         let task = task_decl(
             r#"task [Server] {
@@ -2273,6 +2377,25 @@ function f(flag: bool) -> int {
         assert_eq!(task.env.len(), 2);
         assert_eq!(task.env[0].0, "RUST_LOG");
         assert_eq!(task.env[1].0, "PORT");
+    }
+
+    #[test]
+    fn task_v2_metadata_fields_parse() {
+        let task = task_decl(
+            r#"task [Deploy] {
+    private: true;
+    group: "release";
+    confirm: "Really deploy?";
+    os: ["linux", "macos"];
+    shell: ["bash", "-euo", "pipefail", "-c"];
+    run { ./deploy.sh; };
+}"#,
+        );
+        assert!(matches!(task.private, Some(Expr::Literal(Literal::Bool(true)))));
+        assert!(task.group.is_some());
+        assert!(task.confirm.is_some());
+        assert!(task.os.is_some());
+        assert!(task.shell.is_some());
     }
 
     #[test]

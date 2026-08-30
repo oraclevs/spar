@@ -71,6 +71,7 @@ pub struct TaskRef {
 #[derive(Debug, Clone)]
 pub struct ShellCommand {
     pub parts: Vec<ShellTemplatePart>,
+    pub is_shebang: bool,
     pub span: Span,
 }
 

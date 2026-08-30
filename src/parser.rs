@@ -1721,7 +1721,26 @@ impl Parser {
         }
         self.expect(&Token::Semicolon)?;
 
+        let mut leading_literal = String::new();
+        for part in &raw {
+            match part {
+                RawPart::Text(text) => leading_literal.push_str(text),
+                RawPart::Expr(_) => break,
+            }
+        }
+        let is_shebang = leading_literal.trim_start().starts_with("#!");
+
         let mut commands: Vec<ShellCommand> = Vec::new();
+        if is_shebang {
+            let mut parts = raw
+                .into_iter()
+                .map(|part| match part {
+                    RawPart::Text(text) => ShellTemplatePart::Literal(text),
+                    RawPart::Expr(expr) => ShellTemplatePart::Expr(expr),
+                })
+                .collect();
+            push_shell_command(&mut parts, &mut commands, &block_span, true);
+        } else {
         let mut current: Vec<ShellTemplatePart> = Vec::new();
         let mut literal = String::new();
         let mut in_single = false;
@@ -1759,7 +1778,7 @@ impl Parser {
                                         &mut literal,
                                     )));
                                 }
-                                push_shell_command(&mut current, &mut commands, &block_span);
+                                push_shell_command(&mut current, &mut commands, &block_span, false);
                             }
                             _ => literal.push(c),
                         }
@@ -1770,7 +1789,8 @@ impl Parser {
         if !literal.is_empty() {
             current.push(ShellTemplatePart::Literal(literal));
         }
-        push_shell_command(&mut current, &mut commands, &block_span);
+        push_shell_command(&mut current, &mut commands, &block_span, false);
+        }
 
         if commands.is_empty() {
             return Err(SparError::ParseError {
@@ -1789,6 +1809,7 @@ fn push_shell_command(
     parts: &mut Vec<ShellTemplatePart>,
     commands: &mut Vec<ShellCommand>,
     span: &Span,
+    is_shebang: bool,
 ) {
     if let Some(ShellTemplatePart::Literal(s)) = parts.first_mut() {
         *s = s.trim_start().to_string();
@@ -1800,6 +1821,7 @@ fn push_shell_command(
     if !parts.is_empty() {
         commands.push(ShellCommand {
             parts: std::mem::take(parts),
+            is_shebang,
             span: span.clone(),
         });
     } else {
@@ -2279,6 +2301,7 @@ function f(flag: bool) -> int {
         assert!(task.params.is_empty());
         assert!(task.depends_on.is_empty());
         assert_eq!(task.run.len(), 1);
+        assert!(!task.run[0].is_shebang);
         assert!(matches!(
             &task.run[0].parts[..],
             [ShellTemplatePart::Literal(s)] if s.trim() == "cargo build"
@@ -2448,6 +2471,27 @@ function f(flag: bool) -> int {
 }"#,
         );
         assert_eq!(task.run.len(), 3);
+    }
+
+    #[test]
+    fn shebang_run_block_is_one_verbatim_command() {
+        let task = task_decl(
+            r#"task [Script] {
+    run {
+        #!/usr/bin/env bash
+        echo one
+        echo two
+        if true; then echo three; fi
+    };
+}"#,
+        );
+        assert_eq!(task.run.len(), 1);
+        assert!(task.run[0].is_shebang);
+        assert!(matches!(
+            &task.run[0].parts[..],
+            [ShellTemplatePart::Literal(script)]
+                if script.contains("if true; then echo three; fi")
+        ));
     }
 
     #[test]

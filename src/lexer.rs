@@ -51,6 +51,22 @@ impl<'a> Lexer<'a> {
         Some(b)
     }
 
+    /// Consumes and returns the full UTF-8 character starting at the
+    /// current position (which is always on a char boundary — every path
+    /// through the lexer consumes either a full multi-byte character via
+    /// this method or a single-byte ASCII character, never a partial
+    /// sequence). Advancing byte-by-byte keeps `pos`/`line`/`col`
+    /// bookkeeping identical to the single-byte-at-a-time path; only the
+    /// decoded value differs from a raw `byte as char` cast, which is
+    /// wrong for any byte >= 0x80.
+    fn advance_char(&mut self) -> Option<char> {
+        let ch = self.source[self.pos..].chars().next()?;
+        for _ in 0..ch.len_utf8() {
+            self.advance();
+        }
+        Some(ch)
+    }
+
     fn span_at(&self, start: usize, start_line: u32, start_col: u32) -> Span {
         Span::new(start, self.pos, start_line, start_col)
     }
@@ -199,10 +215,11 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             fragment.push('\t');
                         }
-                        Some(c) => {
-                            self.advance();
+                        Some(_) => {
                             fragment.push('\\');
-                            fragment.push(c as char);
+                            if let Some(ch) = self.advance_char() {
+                                fragment.push(ch);
+                            }
                         }
                         None => {
                             return Err(SparError::LexError {
@@ -212,9 +229,10 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                Some(c) => {
-                    self.advance();
-                    fragment.push(c as char);
+                Some(_) => {
+                    if let Some(ch) = self.advance_char() {
+                        fragment.push(ch);
+                    }
                 }
             }
         }
@@ -457,10 +475,12 @@ impl<'a> Lexer<'a> {
                 Token::At
             }
 
-            other => {
-                self.advance();
+            _ => {
+                let ch = self
+                    .advance_char()
+                    .expect("byte was peeked, char must decode");
                 return Err(SparError::LexError {
-                    message: format!("unexpected character '{}'", other as char),
+                    message: format!("unexpected character '{ch}'"),
                     span: Span::new(start, self.pos, line, col),
                 });
             }
@@ -621,9 +641,10 @@ impl<'a> Lexer<'a> {
                     }
                     fragment.push('}');
                 }
-                Some(c) => {
-                    self.advance();
-                    fragment.push(c as char);
+                Some(_) => {
+                    if let Some(ch) = self.advance_char() {
+                        fragment.push(ch);
+                    }
                 }
             }
         }
@@ -712,6 +733,28 @@ mod tests {
             .into_iter()
             .map(|st| st.token)
             .collect()
+    }
+
+    #[test]
+    fn multibyte_utf8_in_string_literal_decodes_correctly() {
+        // Regression: the string-fragment scanner used to cast raw u8
+        // bytes to char one at a time, which mis-decodes any multi-byte
+        // UTF-8 sequence (an em-dash, an accented letter, ...) into
+        // several garbage Latin-1-ish characters instead of the one real
+        // character.
+        let tokens = lex(r#""café — naïve""#);
+        assert_eq!(tokens[1], Token::StringFragment("café — naïve".into()));
+    }
+
+    #[test]
+    fn multibyte_utf8_in_run_block_decodes_correctly() {
+        let tokens = lex("task [X] { run { echo café; }; }");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, Token::ShellFragment(s) if s.contains("café"))),
+            "expected a ShellFragment containing 'café', got: {tokens:?}"
+        );
     }
 
     #[test]

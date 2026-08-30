@@ -108,10 +108,7 @@ fn bind_arguments(
                 BoundValue::Scalar(parse_argument(task, parameter, argument)?),
             );
         } else if let Some(default) = &parameter.default {
-            values.insert(
-                parameter.name.clone(),
-                BoundValue::Scalar(default.clone()),
-            );
+            values.insert(parameter.name.clone(), BoundValue::Scalar(default.clone()));
         }
     }
     Ok(values)
@@ -543,7 +540,11 @@ mod tests {
         let bound = tasks
             .bind(&TaskInvocation {
                 task: "deploy".to_owned(),
-                arguments: vec!["production".to_owned(), "--force".to_owned(), "blue".to_owned()],
+                arguments: vec![
+                    "production".to_owned(),
+                    "--force".to_owned(),
+                    "blue".to_owned(),
+                ],
             })
             .unwrap();
 

@@ -47,9 +47,7 @@ fn execute_with_io(
                 let _ = write!(echo, "{message} [y/N] ");
                 let _ = echo.flush();
                 let mut response = String::new();
-                let accepted = input
-                    .read_line(&mut response)
-                    .is_ok_and(|read| read > 0)
+                let accepted = input.read_line(&mut response).is_ok_and(|read| read > 0)
                     && matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes");
                 if !accepted {
                     return Err(RunnerError::Aborted {
@@ -88,13 +86,13 @@ fn execute_with_io(
                             message: error.to_string(),
                         }
                     })?;
-                    file.write_all(script.as_bytes()).and_then(|_| file.flush()).map_err(
-                        |error| RunnerError::CommandExecution {
+                    file.write_all(script.as_bytes())
+                        .and_then(|_| file.flush())
+                        .map_err(|error| RunnerError::CommandExecution {
                             task: bound_task.task.name.clone(),
                             command: script.clone(),
                             message: error.to_string(),
-                        },
-                    )?;
+                        })?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
@@ -102,19 +100,22 @@ fn execute_with_io(
                             file.path(),
                             std::fs::Permissions::from_mode(0o700),
                         )
-                        .map_err(|error| RunnerError::CommandExecution {
-                            task: bound_task.task.name.clone(),
-                            command: script.clone(),
-                            message: error.to_string(),
+                        .map_err(|error| {
+                            RunnerError::CommandExecution {
+                                task: bound_task.task.name.clone(),
+                                command: script.clone(),
+                                message: error.to_string(),
+                            }
                         })?;
                     }
                     let path = file.into_temp_path();
-                    let child = super::shell::script_command(&path, &script).map_err(
-                        |message| RunnerError::InvalidShebang {
-                            task: bound_task.task.name.clone(),
-                            message,
-                        },
-                    )?;
+                    let child =
+                        super::shell::script_command(&path, &script).map_err(|message| {
+                            RunnerError::InvalidShebang {
+                                task: bound_task.task.name.clone(),
+                                message,
+                            }
+                        })?;
                     script_file = Some(path);
                     child
                 }
@@ -177,7 +178,7 @@ mod tests {
                     cwd: None,
                     shell: None,
                     commands: vec![TaskCommand::Shell(CommandTemplate {
-                            parts: vec![TemplatePart::Literal(command)],
+                        parts: vec![TemplatePart::Literal(command)],
                     })],
                 },
                 parameter_values: BTreeMap::new(),
@@ -272,9 +273,12 @@ mod tests {
         let first = append_command("first", &log);
         let second = append_command("second", &log);
         let mut plan = plan(first.clone());
-        plan.tasks[0].task.commands.push(TaskCommand::Shell(CommandTemplate {
+        plan.tasks[0]
+            .task
+            .commands
+            .push(TaskCommand::Shell(CommandTemplate {
                 parts: vec![TemplatePart::Literal(second.clone())],
-        }));
+            }));
 
         let report = execute(
             &plan,
@@ -486,7 +490,9 @@ mod tests {
         let requested_marker = directory.path().join("requested");
         let mut execution_plan = plan(create_marker_command(&dependency_marker));
         execution_plan.tasks[0].task.name = "Build".to_owned();
-        let mut requested = plan(create_marker_command(&requested_marker)).tasks.remove(0);
+        let mut requested = plan(create_marker_command(&requested_marker))
+            .tasks
+            .remove(0);
         requested.task.name = "Deploy".to_owned();
         requested.task.confirm = Some("Really deploy?".to_owned());
         execution_plan.tasks.push(requested);
@@ -534,7 +540,9 @@ mod tests {
         .unwrap();
 
         assert!(marker.exists());
-        assert!(String::from_utf8(output).unwrap().starts_with("Continue? [y/N] "));
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .starts_with("Continue? [y/N] "));
     }
 
     #[test]

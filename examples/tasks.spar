@@ -26,6 +26,7 @@ task [Test] {
 
 task [Dev] {
     description: "Start development";
+    quiet: true;
     dependsOn: [Test];
     env: {
         APP_PORT: "${port}";

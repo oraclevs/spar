@@ -394,11 +394,7 @@ fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut 
         let _ = writeln!(output, "  (none)");
         return;
     }
-    let width = rows
-        .iter()
-        .map(|task| task.name.len())
-        .max()
-        .unwrap_or(0);
+    let width = rows.iter().map(|task| task.name.len()).max().unwrap_or(0);
     let mut current_group: Option<Option<&str>> = None;
     for task in rows {
         let group = task.group.as_deref();
@@ -410,7 +406,11 @@ fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut 
             current_group = Some(group);
         }
         let name = task.name.to_lowercase();
-        if let Some(description) = task.description.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(description) = task
+            .description
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
             let _ = writeln!(output, "  {name:width$}   {description}");
         } else {
             let _ = writeln!(output, "  {name}");

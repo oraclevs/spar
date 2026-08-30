@@ -2196,7 +2196,10 @@ impl<'a> TypeChecker<'a> {
                 );
                 return;
             }
-            if items.iter().all(|item| self.infer_type(item) == Some(SparType::Str)) {
+            if items
+                .iter()
+                .all(|item| self.infer_type(item) == Some(SparType::Str))
+            {
                 return;
             }
             self.push_type_error(
@@ -2854,14 +2857,8 @@ mod tests {
                 r#"task [Deploy] { private: "yes"; run { echo deploy; }; }"#,
                 "private",
             ),
-            (
-                "task [Deploy] { group: 1; run { echo deploy; }; }",
-                "group",
-            ),
-            (
-                "task [Deploy] { os: []; run { echo deploy; }; }",
-                "os",
-            ),
+            ("task [Deploy] { group: 1; run { echo deploy; }; }", "group"),
+            ("task [Deploy] { os: []; run { echo deploy; }; }", "os"),
             (
                 "task [Deploy] { os: [\"linux\", 1]; run { echo deploy; }; }",
                 "os",
@@ -2875,7 +2872,10 @@ mod tests {
                 "shell",
             ),
         ] {
-            assert!(has_type_error(src, field), "expected type error for {field}: {src}");
+            assert!(
+                has_type_error(src, field),
+                "expected type error for {field}: {src}"
+            );
         }
     }
 

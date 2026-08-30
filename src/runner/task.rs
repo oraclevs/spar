@@ -299,10 +299,7 @@ mod tests {
             ],
         };
         let values = BTreeMap::from([
-            (
-                "environment".into(),
-                BoundValue::Scalar("staging".into()),
-            ),
+            ("environment".into(), BoundValue::Scalar("staging".into())),
             (
                 "extra".into(),
                 BoundValue::Variadic(vec!["--force".into(), "blue".into()]),
@@ -310,9 +307,6 @@ mod tests {
         ]);
 
         assert_eq!(template.render(&values), "deploy staging --force blue");
-        assert_eq!(
-            template.render_unbound(),
-            "deploy ${environment} ${extra}"
-        );
+        assert_eq!(template.render_unbound(), "deploy ${environment} ${extra}");
     }
 }

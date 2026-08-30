@@ -1717,7 +1717,11 @@ impl Parser {
 /// Trims leading/trailing whitespace-only literal parts and, if anything
 /// meaningful remains, appends one `ShellCommand` built from `parts` (which
 /// is left empty for the caller to reuse).
-fn push_shell_command(parts: &mut Vec<ShellTemplatePart>, commands: &mut Vec<ShellCommand>, span: &Span) {
+fn push_shell_command(
+    parts: &mut Vec<ShellTemplatePart>,
+    commands: &mut Vec<ShellCommand>,
+    span: &Span,
+) {
     if let Some(ShellTemplatePart::Literal(s)) = parts.first_mut() {
         *s = s.trim_start().to_string();
     }
@@ -2225,7 +2229,10 @@ function f(flag: bool) -> int {
 }"#,
         );
         assert_eq!(
-            task.depends_on.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            task.depends_on
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
             ["Build", "Lint"]
         );
     }

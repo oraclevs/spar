@@ -1779,7 +1779,8 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn task_shell_body_content_stays_stable_through_formatting() {
-        let src = "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n}\n";
+        let src =
+            "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n}\n";
         let formatted = fmt(src);
         assert!(formatted.contains("cargo build --workspace --release;"));
     }

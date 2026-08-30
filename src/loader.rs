@@ -1137,8 +1137,8 @@ mod tests {
         fs::write(
             dir.path().join("shared.spar"),
             r#"
-                functionGroup EdgeInsect { function only() -> int { return 1; } }
-                private functionGroup Hidden { function f() -> int { return 1; } }
+                functionGroup EdgeInsect { function only() -> int { return 1; } };
+                private functionGroup Hidden { function f() -> int { return 1; } };
             "#,
         )
         .unwrap();
@@ -1157,7 +1157,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("shared.spar"),
-            "export type [PostgresType]{ image: str; }\ntype [Internal]{ a: int; }\n",
+            "export type [PostgresType]{ image: str; };\ntype [Internal]{ a: int; };\n",
         )
         .unwrap();
         let src = r#"import "shared.spar" as shared;"#;
@@ -1183,7 +1183,7 @@ mod tests {
         // Schema declares only [Server]
         fs::write(
             dir.path().join("schema.spar"),
-            concat!("@SchemaFile\n", "Schema [Server]{ port: int; }\n",),
+            concat!("@SchemaFile\n", "Schema [Server]{ port: int; };\n",),
         )
         .unwrap();
 
@@ -1252,8 +1252,8 @@ mod tests {
             concat!(
                 "export var version: str = \"1.0\";\n",
                 "export [Server]{ port: int = 8080; };\n",
-                "function greet() -> str { return \"hi\"; }\n",
-                "export type [PostgresType]{ image: str; }\n",
+                "function greet() -> str { return \"hi\"; };\n",
+                "export type [PostgresType]{ image: str; };\n",
             ),
         )
         .unwrap();
@@ -1377,7 +1377,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("shared.spar"),
-            "export type [PostgresType]{ image: str; }\n",
+            "export type [PostgresType]{ image: str; };\n",
         )
         .unwrap();
         let src = r#"import { PostgresType as PgType } from "shared.spar";"#;
@@ -1530,8 +1530,8 @@ mod tests {
         fs::write(
             dir.path().join("types.spar"),
             concat!(
-                "export type [Libs]{ dependencies?: [str]; }\n",
-                "export type [FlutterType]{ projectName: str; packages?: Libs; }\n",
+                "export type [Libs]{ dependencies?: [str]; };\n",
+                "export type [FlutterType]{ projectName: str; packages?: Libs; };\n",
             ),
         )
         .unwrap();
@@ -1585,7 +1585,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("shared.spar"),
-            "functionGroup EdgeInsect { function only() -> int { return 1; } }\n",
+            "functionGroup EdgeInsect { function only() -> int { return 1; } };\n",
         )
         .unwrap();
         let src = r#"import { EdgeInsect } from "shared.spar";"#;
@@ -1614,7 +1614,7 @@ mod tests {
             dir.path().join("types.spar"),
             concat!(
                 "export enum RestartPolicy { Always, Never };\n",
-                "export type [Container]{ name: str; restart: RestartPolicy; }\n",
+                "export type [Container]{ name: str; restart: RestartPolicy; };\n",
             ),
         )
         .unwrap();
@@ -1642,7 +1642,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; }\n",
+            "export type [PostgresType]{ image: str; };\n",
         )
         .unwrap();
         fs::write(
@@ -1650,7 +1650,7 @@ mod tests {
             concat!(
                 "@SchemaFile\n",
                 "import type { PostgresType } from \"types.spar\";\n",
-                "Schema [Postgres]{ image: str; }\n",
+                "Schema [Postgres]{ image: str; };\n",
             ),
         )
         .unwrap();
@@ -1680,7 +1680,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
-            "@SchemaFile\nSchema [Container]{ x?: str; }\n",
+            "@SchemaFile\nSchema [Container]{ x?: str; };\n",
         )
         .unwrap();
         let src = concat!(
@@ -1858,7 +1858,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; }\n",
+            "export type [PostgresType]{ image: str; };\n",
         )
         .unwrap();
         fs::write(
@@ -1887,7 +1887,7 @@ mod tests {
             dir.path().join("types.spar"),
             concat!(
                 "export enum RestartPolicy { Always, Never };\n",
-                "export type [ServiceType]{ image: str; restart: RestartPolicy; }\n",
+                "export type [ServiceType]{ image: str; restart: RestartPolicy; };\n",
             ),
         )
         .unwrap();
@@ -1916,7 +1916,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; port: int; }\n",
+            "export type [PostgresType]{ image: str; port: int; };\n",
         )
         .unwrap();
         fs::write(

@@ -19,7 +19,7 @@ fn resolve_err(src: &str) -> String {
 
 #[test]
 fn named_type_on_var_resolves_when_type_exists() {
-    let src = "type [Leaf]{ name: str; }\nvar someExpr: str = \"a\";\nvar x: Leaf = someExpr;\n";
+    let src = "type [Leaf]{ name: str; };\nvar someExpr: str = \"a\";\nvar x: Leaf = someExpr;\n";
     resolve_ok(src); // panics (test fails) if the declared type doesn't resolve
 }
 
@@ -45,7 +45,7 @@ fn named_type_on_list_var_errors_when_type_missing() {
 
 #[test]
 fn named_type_on_function_param_and_return_errors_when_type_missing() {
-    let src = "function f(l: Ghost) -> Ghost { return l; }\n";
+    let src = "function f(l: Ghost) -> Ghost { return l; };\n";
     let errs = resolve_err(src);
     assert!(
         errs.contains("undefined type") && errs.contains("Ghost"),
@@ -65,7 +65,7 @@ fn named_type_on_section_field_errors_when_type_missing() {
 
 #[test]
 fn resolver_registers_function() {
-    let src = r#"function greet(name: str) -> str { return name; }"#;
+    let src = r#"function greet(name: str) -> str { return name; };"#;
     let sym = resolve_ok(src);
     assert!(sym.functions.contains_key("greet"));
     let f = &sym.functions["greet"];
@@ -76,8 +76,8 @@ fn resolver_registers_function() {
 #[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"
-        function f(x: str) -> str { return x; }
-        function f(y: int) -> int { return y; }
+        function f(x: str) -> str { return x; };
+        function f(y: int) -> int { return y; };
     "#;
     let err = resolve_err(src);
     assert!(err.contains("already defined") || err.contains("duplicate"));
@@ -93,7 +93,7 @@ fn resolver_call_unknown_function_error() {
 #[test]
 fn resolver_call_wrong_arg_name_error() {
     let src = r#"
-        function greet(name: str) -> str { return name; }
+        function greet(name: str) -> str { return name; };
         var x: str = greet(wrong: "hi");
     "#;
     let err = resolve_err(src);
@@ -108,7 +108,7 @@ fn resolver_var_in_only_one_branch_not_in_outer_scope() {
         function f(x: bool) -> str {
             if x { var a: str = "yes"; } else { var b: str = "no"; }
             return a;
-        }
+        };
     "#;
     let err = resolve_err(src);
     assert!(!err.is_empty(), "expected a resolve error but got none");
@@ -116,7 +116,7 @@ fn resolver_var_in_only_one_branch_not_in_outer_scope() {
 
 #[test]
 fn resolver_section_param_rejected() {
-    let src = r#"function f(x: section) -> str { return "hi"; }"#;
+    let src = r#"function f(x: section) -> str { return "hi"; };"#;
     let err = resolve_err(src);
     assert!(err.contains("section") || err.contains("param"));
 }
@@ -125,7 +125,7 @@ fn resolver_section_param_rejected() {
 fn resolver_closure_deps_captured() {
     let src = r#"
         var appName: str = "keel";
-        function greet(prefix: str) -> str { return appName; }
+        function greet(prefix: str) -> str { return appName; };
     "#;
     let sym = resolve_ok(src);
     let f = &sym.functions["greet"];
@@ -139,14 +139,14 @@ fn resolver_closure_deps_captured() {
 
 #[test]
 fn private_function_registered_with_is_private_flag() {
-    let src = r#"private function helper(x: int) -> int { return x; }"#;
+    let src = r#"private function helper(x: int) -> int { return x; };"#;
     let sym = resolve_ok(src);
     assert!(sym.functions["helper"].is_private);
 }
 
 #[test]
 fn public_function_registered_as_not_private() {
-    let src = r#"function helper(x: int) -> int { return x; }"#;
+    let src = r#"function helper(x: int) -> int { return x; };"#;
     let sym = resolve_ok(src);
     assert!(!sym.functions["helper"].is_private);
 }
@@ -154,7 +154,7 @@ fn public_function_registered_as_not_private() {
 #[test]
 fn private_function_usable_within_same_file() {
     let src = r#"
-        private function helper(x: int) -> int { return x; }
+        private function helper(x: int) -> int { return x; };
         var doubled: int = helper(x: 5);
     "#;
     assert!(resolve_ok(src).globals.contains_key("doubled"));
@@ -165,7 +165,7 @@ fn for_loop_alone_does_not_satisfy_exhaustiveness() {
     let src = r#"
         function f(nums: [int]) -> int {
             for n in nums { return n; }
-        }
+        };
     "#;
     let err = resolve_err(src);
     assert!(err.contains("return") || err.contains("path") || err.contains("exhaustive"));
@@ -177,7 +177,7 @@ fn for_loop_with_fallback_return_is_exhaustive() {
         function f(nums: [int]) -> int {
             for n in nums { return n; }
             return 0;
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -188,7 +188,7 @@ fn for_loop_var_in_scope_inside_body() {
         function f(nums: [int]) -> int {
             for n in nums { return n; }
             return 0;
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -199,7 +199,7 @@ fn for_loop_var_not_in_scope_after_loop() {
         function f(nums: [int]) -> int {
             for n in nums { var x: int = n; }
             return n;
-        }
+        };
     "#;
     let err = resolve_err(src);
     assert!(!err.is_empty());
@@ -246,7 +246,7 @@ Schema [MainRoute]{
         port?: int;
         enabled?: bool;
     };
-}
+};
 "#;
     let config_src = r#"import schema "SCHEMA_PATH";
 
@@ -265,7 +265,7 @@ Schema [MainRoute]{
 
 #[test]
 fn missing_required_field_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -278,7 +278,7 @@ fn missing_required_field_is_schema_error() {
 
 #[test]
 fn missing_optional_field_is_fine() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b?: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b?: str; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
     assert!(
@@ -290,7 +290,7 @@ fn missing_optional_field_is_fine() {
 
 #[test]
 fn extra_field_not_in_schema_is_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; extra: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -303,7 +303,7 @@ fn extra_field_not_in_schema_is_error() {
 
 #[test]
 fn wrong_type_on_present_field_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: bool; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: bool; };\n";
     // config declares `a` as `int` instead of `bool`
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
@@ -328,7 +328,7 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     let mut schema_file = NamedTempFile::new().unwrap();
     write!(
         schema_file,
-        "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }}\n"
+        "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }};\n"
     )
     .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
@@ -366,7 +366,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     let mut schema_file = NamedTempFile::new().unwrap();
     write!(
         schema_file,
-        "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }}\n"
+        "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }};\n"
     )
     .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
@@ -394,7 +394,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
 
 #[test]
 fn missing_required_section_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n"; // [Y] not [X]
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -407,12 +407,12 @@ fn missing_required_section_is_schema_error() {
 
 #[test]
 fn missing_optional_section_is_fine() {
-    let _schema_src = "@SchemaFile\nSchema? [X]{ a: int; }\n";
+    let _schema_src = "@SchemaFile\nSchema? [X]{ a: int; };\n";
     // config has no [X] section at all
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n";
     // [inference] This will also fail on extra-section check since [Y] isn't in schema.
     // To isolate this test, schema must declare [Y] too.
-    let schema_src2 = "@SchemaFile\nSchema? [X]{ a: int; }\nSchema [Y]{ z: int; }\n";
+    let schema_src2 = "@SchemaFile\nSchema? [X]{ a: int; };\nSchema [Y]{ z: int; };\n";
     let result = schema_validate(schema_src2, config_src);
     assert!(
         result.is_ok(),
@@ -424,7 +424,7 @@ fn missing_optional_section_is_fine() {
 #[test]
 fn config_section_with_no_schema_entry_is_error() {
     // symmetric strictness: config declares a section the schema never mentions
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
     let config_src =
         "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
@@ -444,7 +444,7 @@ Schema [X]{
         host: str;
         port?: int;
     };
-}
+};
 "#;
     // config's x section omits required `host`
     let config_src = r#"import schema "SCHEMA_PATH";
@@ -489,11 +489,11 @@ fn two_schema_imports_each_owning_one_section_passes() {
 
     // Schema A declares [A]
     let mut schema_a = NamedTempFile::new().unwrap();
-    write!(schema_a, "@SchemaFile\nSchema [A]{{ x: int; }}\n").unwrap();
+    write!(schema_a, "@SchemaFile\nSchema [A]{{ x: int; }};\n").unwrap();
 
     // Schema B declares [B]
     let mut schema_b = NamedTempFile::new().unwrap();
-    write!(schema_b, "@SchemaFile\nSchema [B]{{ y: str; }}\n").unwrap();
+    write!(schema_b, "@SchemaFile\nSchema [B]{{ y: str; }};\n").unwrap();
 
     let path_a = schema_a.path().to_str().unwrap().to_string();
     let path_b = schema_b.path().to_str().unwrap().to_string();
@@ -523,7 +523,7 @@ fn two_schema_imports_each_owning_one_section_passes() {
 #[test]
 fn section_with_spread_skips_field_validation() {
     // Schema requires both `a` and `b`
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; }\n";
+    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; };\n";
     // Config only has `a` explicitly; `b` is expected to come from the spread
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ ...Defaults; a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
@@ -562,10 +562,10 @@ fn resolver_registers_type_with_named_field_reference() {
     let src = r#"
         type [Border]{
             width?: int;
-        }
+        };
         type [Decoration]{
             border?: Border;
-        }
+        };
     "#;
     let sym = resolve_ok(src);
     assert!(sym.types.contains_key("Border"));
@@ -575,8 +575,8 @@ fn resolver_registers_type_with_named_field_reference() {
 #[test]
 fn resolver_rejects_duplicate_type() {
     let src = r#"
-        type [Border]{ width?: int; }
-        type [Border]{ width?: int; }
+        type [Border]{ width?: int; };
+        type [Border]{ width?: int; };
     "#;
     let err = resolve_err(src);
     assert!(err.contains("already defined"), "got: {err}");
@@ -584,7 +584,7 @@ fn resolver_rejects_duplicate_type() {
 
 #[test]
 fn resolver_rejects_type_named_schema() {
-    let src = r#"type [Schema]{ a: int; }"#;
+    let src = r#"type [Schema]{ a: int; };"#;
     let err = resolve_err(src);
     assert!(
         err.contains("reserved") || err.contains("Schema"),
@@ -594,7 +594,7 @@ fn resolver_rejects_type_named_schema() {
 
 #[test]
 fn resolver_rejects_non_pascal_case_type_name() {
-    let src = r#"type [border]{ width?: int; }"#;
+    let src = r#"type [border]{ width?: int; };"#;
     let err = resolve_err(src);
     assert!(err.contains("PascalCase"), "got: {err}");
 }
@@ -604,7 +604,7 @@ fn resolver_rejects_undefined_named_type_reference() {
     let src = r#"
         type [Decoration]{
             border?: NoSuchType;
-        }
+        };
     "#;
     let err = resolve_err(src);
     assert!(
@@ -632,7 +632,7 @@ fn resolver_accepts_known_type_binding() {
     let src = r#"
         type [PostgresType]{
             image: str;
-        }
+        };
         [Postgres] -> PostgresType {
             image: str = "postgres:16";
         };
@@ -646,7 +646,7 @@ fn imported_type_selectively_can_bind_a_section() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("types.spar"),
-        "export type [PostgresType]{ image: str; }\n",
+        "export type [PostgresType]{ image: str; };\n",
     )
     .unwrap();
     let src = concat!(
@@ -672,13 +672,14 @@ fn imported_type_selectively_can_bind_a_section() {
 fn object_literal_resolves_inner_namespace_ref() {
     // resolve_ok's own `.unwrap()` panics with the error detail if this
     // fails to resolve — that panic-on-Err IS the test's failure mode.
-    let src = "var host: str = \"h\";\ntype [Leaf]{ name: str; }\nvar x: Leaf = { name: host; };\n";
+    let src =
+        "var host: str = \"h\";\ntype [Leaf]{ name: str; };\nvar x: Leaf = { name: host; };\n";
     resolve_ok(src);
 }
 
 #[test]
 fn object_literal_errors_on_undefined_inner_reference() {
-    let src = "type [Leaf]{ name: str; }\nvar x: Leaf = { name: ghost; };\n";
+    let src = "type [Leaf]{ name: str; };\nvar x: Leaf = { name: ghost; };\n";
     let errs = resolve_err(src);
     assert!(errs.contains("ghost"), "got: {errs}");
 }
@@ -704,13 +705,13 @@ fn enum_non_pascal_case_name_errors() {
 
 #[test]
 fn enum_and_type_name_collision_errors() {
-    let errs = resolve_err("type [Devices]{ x: str; }\nenum Devices { Ios };\n");
+    let errs = resolve_err("type [Devices]{ x: str; };\nenum Devices { Ios };\n");
     assert!(errs.contains("already declared as a type"), "got: {errs}");
 }
 
 #[test]
 fn type_and_enum_name_collision_errors_reverse_order() {
-    let errs = resolve_err("enum Devices { Ios };\ntype [Devices]{ x: str; }\n");
+    let errs = resolve_err("enum Devices { Ios };\ntype [Devices]{ x: str; };\n");
     assert!(errs.contains("already declared as an enum"), "got: {errs}");
 }
 
@@ -734,7 +735,7 @@ fn enum_variant_ref_resolves_inside_function_body() {
         "enum Devices { Ios, Android };\n",
         "function f() -> Devices {\n",
         "    return Devices::Android;\n",
-        "}\n",
+        "};\n",
     ));
 }
 
@@ -743,7 +744,7 @@ fn enum_variant_ref_resolves_inside_function_body() {
 #[test]
 fn named_field_access_on_global_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         var person: Human = { name: "Mike"; age: 5; };
         var pname: str = person.name;
     "#;
@@ -753,11 +754,11 @@ fn named_field_access_on_global_var_resolves() {
 #[test]
 fn named_field_access_on_function_local_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function greet(h: Human) -> str {
             var local: Human = h;
             return local.name;
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -765,14 +766,14 @@ fn named_field_access_on_function_local_var_resolves() {
 #[test]
 fn named_field_access_on_loop_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
                 return 0;
             }
             return 0;
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -785,7 +786,7 @@ fn function_group_registers_its_functions() {
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
             private function semantic(hor: float, vet: float) -> int { return 2; }
-        }
+        };
     "#;
     let table = resolve_ok(src);
     let group = table
@@ -801,8 +802,8 @@ fn function_group_registers_its_functions() {
 #[test]
 fn function_group_duplicate_name_errors() {
     let src = r#"
-        functionGroup EdgeInsect { function only() -> int { return 1; } }
-        functionGroup EdgeInsect { function other() -> int { return 2; } }
+        functionGroup EdgeInsect { function only() -> int { return 1; } };
+        functionGroup EdgeInsect { function other() -> int { return 2; } };
     "#;
     let errs = resolve_err(src);
     assert!(
@@ -817,7 +818,7 @@ fn function_group_duplicate_inner_function_errors() {
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
             function only() -> int { return 2; }
-        }
+        };
     "#;
     let errs = resolve_err(src);
     assert!(
@@ -828,7 +829,7 @@ fn function_group_duplicate_inner_function_errors() {
 
 #[test]
 fn function_group_name_must_be_pascal_case() {
-    let src = r#"functionGroup edgeInsect { function only() -> int { return 1; } }"#;
+    let src = r#"functionGroup edgeInsect { function only() -> int { return 1; } };"#;
     let errs = resolve_err(src);
     assert!(errs.contains("PascalCase"), "got: {errs}");
 }
@@ -838,7 +839,7 @@ fn function_group_missing_return_on_all_paths_errors() {
     let src = r#"
         functionGroup EdgeInsect {
             function bad() -> int { }
-        }
+        };
     "#;
     let errs = resolve_err(src);
     assert!(
@@ -854,7 +855,7 @@ fn function_group_call_resolves() {
     let src = r#"
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
-        }
+        };
         var x: int = EdgeInsect::only();
     "#;
     resolve_ok(src);
@@ -865,7 +866,7 @@ fn function_group_call_undefined_function_errors() {
     let src = r#"
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
-        }
+        };
         var x: int = EdgeInsect::missing();
     "#;
     let errs = resolve_err(src);
@@ -880,10 +881,10 @@ fn function_group_call_from_function_body_resolves() {
     let src = r#"
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
-        }
+        };
         function useIt() -> int {
             return EdgeInsect::only();
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -894,7 +895,7 @@ fn function_group_name_colliding_with_import_alias_errors() {
         import "does_not_matter.spar" as EdgeInsect;
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
-        }
+        };
     "#;
     let errs = resolve_err(src);
     assert!(
@@ -909,7 +910,7 @@ fn function_group_name_colliding_with_import_alias_errors() {
 fn type_field_referencing_enum_resolves() {
     let src = r#"
         enum Protocol { Http, Https };
-        type [Port]{ protocol?: Protocol; }
+        type [Port]{ protocol?: Protocol; };
     "#;
     resolve_ok(src);
 }
@@ -928,7 +929,7 @@ fn dot_field_access_on_section_resolves() {
 #[test]
 fn dot_field_access_on_global_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         var person: Human = { name: "Mike"; age: 5; };
         var pname: str = person.name;
     "#;
@@ -938,14 +939,14 @@ fn dot_field_access_on_global_var_resolves() {
 #[test]
 fn dot_field_access_on_loop_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
                 return 0;
             }
             return 0;
-        }
+        };
     "#;
     resolve_ok(src);
 }
@@ -953,7 +954,7 @@ fn dot_field_access_on_loop_var_resolves() {
 #[test]
 fn dot_field_access_after_index_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var pname: str = people[0].name;
     "#;
@@ -985,7 +986,7 @@ fn global_dot_field_access_resolves() {
         function f() -> int {
             var port: int = 1;
             return global.port;
-        }
+        };
     "#;
     resolve_ok(src);
 }

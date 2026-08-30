@@ -13,7 +13,7 @@ fn eval_src(src: &str) -> crate::evaluator::EvalResult {
 #[test]
 fn eval_function_returning_str() {
     let src = r#"
-        function greet(name: str) -> str { return name; }
+        function greet(name: str) -> str { return name; };
         var result: str = greet(name: "world");
     "#;
     let r = eval_src(src);
@@ -26,7 +26,7 @@ fn eval_function_returning_str() {
 #[test]
 fn eval_function_returning_section() {
     let src = r#"
-        function makeConf(host: str) -> section { return { host: str = host; }; }
+        function makeConf(host: str) -> section { return { host: str = host; }; };
         [Server]{
             server: section = makeConf(host: "localhost");
         };
@@ -81,7 +81,7 @@ fn eval_function_with_if_else() {
         function choose(flag: bool) -> str {
             if flag { var r: str = "yes"; } else { var r: str = "no"; }
             return r;
-        }
+        };
         var result: str = choose(flag: true);
     "#;
     let r = eval_src(src);
@@ -97,7 +97,7 @@ fn eval_function_with_local_var() {
         function double(x: int) -> int {
             var twice: int = x + x;
             return twice;
-        }
+        };
         var result: int = double(x: 5);
     "#;
     let r = eval_src(src);
@@ -107,7 +107,7 @@ fn eval_function_with_local_var() {
 #[test]
 fn eval_recursive_function_depth_limit() {
     let src = r#"
-        function inf(n: int) -> int { return inf(n: n); }
+        function inf(n: int) -> int { return inf(n: n); };
         var x: int = inf(n: 0);
     "#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -123,10 +123,10 @@ fn eval_recursive_function_depth_limit() {
 
 #[test]
 fn arithmetic_precedence() {
-    let _src = r#"function f() -> int { return 2 + 3 * 4; } var n: int = f(n: 0);"#;
+    let _src = r#"function f() -> int { return 2 + 3 * 4; }; var n: int = f(n: 0);"#;
     // Can't call f() at global scope with named args; test via section field instead
     let src = r#"
-        function mul(a: int, b: int) -> int { return a * b; }
+        function mul(a: int, b: int) -> int { return a * b; };
         var n: int = 2 + mul(a: 3, b: 4);
     "#;
     let r = eval_src(src);
@@ -135,28 +135,28 @@ fn arithmetic_precedence() {
 
 #[test]
 fn integer_division_truncates() {
-    let src = r#"function f(a: int, b: int) -> int { return a / b; } var n: int = f(a: 7, b: 2);"#;
+    let src = r#"function f(a: int, b: int) -> int { return a / b; }; var n: int = f(a: 7, b: 2);"#;
     let r = eval_src(src);
     assert_eq!(r.globals["n"], crate::evaluator::ConfigValue::Int(3));
 }
 
 #[test]
 fn unary_neg_int() {
-    let src = r#"function neg(x: int) -> int { return 0 - x; } var n: int = neg(x: 5);"#;
+    let src = r#"function neg(x: int) -> int { return 0 - x; }; var n: int = neg(x: 5);"#;
     let r = eval_src(src);
     assert_eq!(r.globals["n"], crate::evaluator::ConfigValue::Int(-5));
 }
 
 #[test]
 fn conversion_float_to_int() {
-    let src = r#"function f(x: float) -> int { return int(x); } var n: int = f(x: 7.9);"#;
+    let src = r#"function f(x: float) -> int { return int(x); }; var n: int = f(x: 7.9);"#;
     let r = eval_src(src);
     assert_eq!(r.globals["n"], crate::evaluator::ConfigValue::Int(7));
 }
 
 #[test]
 fn conversion_int_to_str() {
-    let src = r#"function f(x: int) -> str { return str(x); } var s: str = f(x: 42);"#;
+    let src = r#"function f(x: int) -> str { return str(x); }; var s: str = f(x: 42);"#;
     let r = eval_src(src);
     assert_eq!(
         r.globals["s"],
@@ -177,7 +177,7 @@ fn list_index_basic() {
 #[test]
 fn spread_function_call() {
     let src = r#"
-        function defaults() -> section { return { tier: str = "free"; }; }
+        function defaults() -> section { return { tier: str = "free"; }; };
         [App]{ ...defaults(); limit: int = 500; };
     "#;
     let r = eval_src(src);
@@ -194,7 +194,7 @@ fn spread_function_call() {
 #[test]
 fn spread_explicit_overrides() {
     let src = r#"
-        function defaults() -> section { return { env: str = "dev"; }; }
+        function defaults() -> section { return { env: str = "dev"; }; };
         [App]{ ...defaults(); env: str = "prod"; };
     "#;
     let r = eval_src(src);
@@ -250,7 +250,7 @@ fn for_loop_early_return_finds_first_match() {
                 if doubled > 10 { return doubled; }
             }
             return -1;
-        }
+        };
         var result: int = firstBigDouble(nums: [1, 8, 2]);
     "#;
     let r = eval_src(src);
@@ -264,7 +264,7 @@ fn for_loop_no_match_falls_through_to_next_stmt() {
         function f(nums: [int]) -> str {
             for n in nums { if n < -999 { return "found"; } }
             return "not found";
-        }
+        };
         var result: str = f(nums: [1, 2, 3]);
     "#;
     let r = eval_src(src);
@@ -282,7 +282,7 @@ fn for_loop_return_propagates_out() {
                 if n < 0 { return "found a negative"; }
             }
             return "all non-negative";
-        }
+        };
         var a: str = summarize(nums: [4, 9, -2, 7]);
         var b: str = summarize(nums: [1, 2, 3]);
     "#;
@@ -305,7 +305,7 @@ fn bool_type_in_return_section_evaluates() {
                 return { error: bool = true; message: str = "bad"; };
             }
             return { error: bool = false; version: str = "ok"; };
-        }
+        };
         [Release]{ ...builderFunc(major: 2); };
     "#;
     let r = eval_src(src);
@@ -320,7 +320,7 @@ fn bool_type_in_return_section_evaluates() {
 #[test]
 fn private_function_callable_within_same_file() {
     let src = r#"
-        private function double(x: int) -> int { return x * 2; }
+        private function double(x: int) -> int { return x * 2; };
         var result: int = double(x: 5);
     "#;
     let r = eval_src(src);
@@ -433,8 +433,8 @@ fn eval_self_reference_direct_child_field() {
 #[test]
 fn eval_spread_inside_nested_field_body() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; }
-        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [EnvironmentType]{ nodeEnv: str; port: str; };
+        type [ServiceType]{ image: str; environment: EnvironmentType; };
         [ProductionEnvironment] -> EnvironmentType {
             nodeEnv: "production";
             port: "3000";
@@ -469,8 +469,8 @@ fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
     // order and flakes across runs. Run enough iterations that a flake
     // would show.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; }
-        type [ServiceType]{ image: str; environment: EnvironmentType; }
+        type [EnvironmentType]{ nodeEnv: str; port: str; };
+        type [ServiceType]{ image: str; environment: EnvironmentType; };
         [ProductionEnvironment] -> EnvironmentType {
             nodeEnv: "production";
             port: "3000";
@@ -502,7 +502,7 @@ fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
 
 #[test]
 fn object_literal_evaluates_to_section_config_value() {
-    let src = "type [Leaf]{ name: str; }\nvar x: Leaf = { name: \"a\"; };\n";
+    let src = "type [Leaf]{ name: str; };\nvar x: Leaf = { name: \"a\"; };\n";
     let r = eval_src(src);
     let crate::evaluator::ConfigValue::Section(map) = &r.globals["x"] else {
         panic!("expected ConfigValue::Section, got {:?}", r.globals["x"])
@@ -512,7 +512,8 @@ fn object_literal_evaluates_to_section_config_value() {
 
 #[test]
 fn list_of_object_literals_evaluates_to_list_of_section_config_values() {
-    let src = "type [Leaf]{ name: str; }\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n";
+    let src =
+        "type [Leaf]{ name: str; };\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n";
     let r = eval_src(src);
     let crate::evaluator::ConfigValue::List(items) = &r.globals["xs"] else {
         panic!("expected ConfigValue::List, got {:?}", r.globals["xs"])
@@ -540,13 +541,13 @@ fn enum_variant_evaluates_to_bare_string() {
 #[test]
 fn eval_named_field_access_on_loop_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function looper(people: [Human]) -> str {
             for person in people {
                 return person.name;
             }
             return "none";
-        }
+        };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var result: str = looper(people: people);
     "#;
@@ -560,7 +561,7 @@ fn eval_named_field_access_on_loop_var() {
 #[test]
 fn eval_named_field_access_on_global_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         var person: Human = { name: "Mike"; age: 5; };
         var pname: str = person.name;
     "#;
@@ -577,7 +578,7 @@ fn eval_original_bug_report_repro() {
     // (docs/superpowers/specs/2026-08-26-functiongroup-and-named-field-access-design.md,
     // Part B), minus the unrelated `print` builtin finding.
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
 
         function looper(people: [Human]) -> int {
             for person in people {
@@ -587,7 +588,7 @@ fn eval_original_bug_report_repro() {
                 return 0;
             }
             return 0;
-        }
+        };
 
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var result: int = looper(people: people);
@@ -601,7 +602,7 @@ fn eval_function_group_call() {
     let src = r#"
         functionGroup EdgeInsect {
             function only() -> int { return 5; }
-        }
+        };
         var result: int = EdgeInsect::only();
     "#;
     let r = eval_src(src);
@@ -613,7 +614,7 @@ fn eval_function_group_call_with_args() {
     let src = r#"
         functionGroup Math {
             function double(n: int) -> int { return n + n; }
-        }
+        };
         var result: int = Math::double(n: 21);
     "#;
     let r = eval_src(src);
@@ -627,7 +628,7 @@ fn eval_function_group_design_doc_example() {
         private functionGroup EdgeInsect {
             function only() -> [int] { return [1, 2, 3, 5]; }
             private function semantic(hor: float, vet: float) -> [int] { return [1, 2, 3, 5]; }
-        }
+        };
 
         [MainCont]{
             padding: [int] = EdgeInsect::only();
@@ -655,10 +656,10 @@ fn eval_cross_file_function_group_call() {
         r#"
             functionGroup EdgeInsect {
                 function only() -> int { return 7; }
-            }
+            };
             private functionGroup Hidden {
                 function f() -> int { return 1; }
-            }
+            };
         "#,
     )
     .unwrap();
@@ -702,7 +703,7 @@ fn eval_cross_file_private_function_group_not_exported() {
         r#"
             private functionGroup Hidden {
                 function f() -> int { return 1; }
-            }
+            };
         "#,
     )
     .unwrap();
@@ -728,13 +729,13 @@ fn eval_cross_file_private_function_group_not_exported() {
 #[test]
 fn eval_dot_field_access_on_loop_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function looper(people: [Human]) -> str {
             for person in people {
                 return person.name;
             }
             return "none";
-        }
+        };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var result: str = looper(people: people);
     "#;
@@ -748,7 +749,7 @@ fn eval_dot_field_access_on_loop_var() {
 #[test]
 fn eval_dot_field_access_after_index() {
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var result: str = people[0].name;
     "#;
@@ -781,7 +782,7 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
     // new dot syntax — confirms the whole pipeline still produces the
     // same result under the new grammar.
     let src = r#"
-        type [Human]{ name: str; age: int; }
+        type [Human]{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" {
@@ -790,7 +791,7 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
                 return 0;
             }
             return 0;
-        }
+        };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var result: int = looper(people: people);
     "#;

@@ -556,7 +556,7 @@ impl Resolver {
         if !naming::is_pascal_case(&decl.name) {
             self.push_error_hint(
                 format!(
-                    "functionGroup name '{}' must be PascalCase (start with an uppercase letter, no underscores)",
+                    "functionGroup name '{};' must be PascalCase (start with an uppercase letter, no underscores)",
                     decl.name
                 ),
                 Some(naming::pascal_case_hint(&decl.name)),
@@ -2653,7 +2653,7 @@ private [Defaults]{ timeout: int = 30; };
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("base.spar"),
-            r#"function main() -> int { return 42; }"#,
+            r#"function main() -> int { return 42; };"#,
         )
         .unwrap();
 
@@ -2675,7 +2675,7 @@ private [Defaults]{ timeout: int = 30; };
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("base.spar"),
-            r#"function main() -> int { return 42; }"#,
+            r#"function main() -> int { return 42; };"#,
         )
         .unwrap();
 
@@ -2699,7 +2699,7 @@ private [Defaults]{ timeout: int = 30; };
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("base.spar"),
-            r#"private function secret() -> int { return 1; }"#,
+            r#"private function secret() -> int { return 1; };"#,
         )
         .unwrap();
 
@@ -2790,7 +2790,7 @@ function classify(score: int) -> str {
     if score >= 90 { return "A"; }
     if score >= 80 { return "B"; }
     return "C";
-}
+};
 "#;
         resolve_ok(src);
     }
@@ -2801,7 +2801,7 @@ function classify(score: int) -> str {
 function classify(score: int) -> str {
     if score >= 90 { return "A"; }
     if score >= 80 { return "B"; }
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
@@ -2820,7 +2820,7 @@ function classify(score: int) -> str {
         let src = r#"
 function pick(debug: bool) -> int {
     if debug { return 9000; } else { return 8080; }
-}
+};
 "#;
         resolve_ok(src);
     }
@@ -2835,7 +2835,7 @@ function f(useDefault: bool) -> str {
         var computed: str = "computed-value";
     }
     return computed;
-}
+};
 "#;
         resolve_ok(src);
     }
@@ -2847,7 +2847,7 @@ function f(debug: bool) -> int {
     if debug { return 1; } else { return 2; }
     var dead: int = 5;
     return dead;
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
@@ -2869,7 +2869,7 @@ function f(flag: bool) -> int {
         var unused: int = 1;
     }
     return 0;
-}
+};
 "#;
         resolve_ok(src);
     }
@@ -2882,7 +2882,7 @@ function f(flag: bool) -> int {
         var x: int = 1;
     }
     return x;
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
         let program = crate::parser::Parser::new(tokens).parse().expect("parse");
@@ -2902,7 +2902,7 @@ function f(a: bool, b: bool) -> int {
         var x: int = 3;
     }
     return x;
-}
+};
 "#;
         resolve_ok(src);
     }
@@ -2915,7 +2915,7 @@ function f(a: bool, b: bool) -> int {
             function f(x: str) -> str {
                 var appName: str = "local";
                 return appName;
-            }
+            };
         "#;
         let sym = resolve_ok(src);
         let f = &sym.functions["f"];

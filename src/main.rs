@@ -1,5 +1,6 @@
 use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
 use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -16,16 +17,8 @@ fn main() {
             dry_run,
             choose,
         } => cmd_run(path, task, args, dry_run, choose),
-        Cmd::Show { path, task, args } => {
-            let _ = (path, task, args);
-            eprintln!("error: command is not implemented");
-            std::process::exit(1);
-        }
-        Cmd::Dump { path } => {
-            let _ = path;
-            eprintln!("error: command is not implemented");
-            std::process::exit(1);
-        }
+        Cmd::Show { path, task, args } => cmd_show(path, task, args),
+        Cmd::Dump { path } => cmd_dump(path),
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -363,34 +356,64 @@ fn cmd_tasks(path: Option<PathBuf>, _all: bool) {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
     }
-    print_task_list(compilation.tasks.as_ref());
+    print_task_list(
+        compilation.tasks.as_ref(),
+        _all,
+        &mut std::io::stdout().lock(),
+    );
 }
 
-fn print_task_list(tasks: Option<&TaskSet>) {
-    println!("Available tasks:\n");
+fn listed_tasks(tasks: &TaskSet, include_private: bool) -> Vec<&spar::runner::Task> {
+    let mut tasks: Vec<_> = tasks
+        .iter()
+        .filter(|task| include_private || !task.private)
+        .collect();
+    tasks.sort_by(|left, right| {
+        (
+            left.group.is_some(),
+            left.group.as_deref().unwrap_or(""),
+            left.name.as_str(),
+        )
+            .cmp(&(
+                right.group.is_some(),
+                right.group.as_deref().unwrap_or(""),
+                right.name.as_str(),
+            ))
+    });
+    tasks
+}
+
+fn print_task_list(tasks: Option<&TaskSet>, include_private: bool, output: &mut dyn Write) {
+    let _ = writeln!(output, "Available tasks:\n");
     let Some(tasks) = tasks else {
-        println!("  (none)");
+        let _ = writeln!(output, "  (none)");
         return;
     };
-    let rows: Vec<(String, String)> = tasks
-        .iter()
-        .map(|t| {
-            (
-                t.name.to_lowercase(),
-                t.description.clone().unwrap_or_default(),
-            )
-        })
-        .collect();
+    let rows = listed_tasks(tasks, include_private);
     if rows.is_empty() {
-        println!("  (none)");
+        let _ = writeln!(output, "  (none)");
         return;
     }
-    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
-    for (name, description) in rows {
-        if description.is_empty() {
-            println!("  {name}");
+    let width = rows
+        .iter()
+        .map(|task| task.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut current_group: Option<Option<&str>> = None;
+    for task in rows {
+        let group = task.group.as_deref();
+        if current_group != Some(group) {
+            if current_group.is_some() {
+                let _ = writeln!(output);
+            }
+            let _ = writeln!(output, "{}:", group.unwrap_or("Ungrouped"));
+            current_group = Some(group);
+        }
+        let name = task.name.to_lowercase();
+        if let Some(description) = task.description.as_deref().filter(|value| !value.is_empty()) {
+            let _ = writeln!(output, "  {name:width$}   {description}");
         } else {
-            println!("  {name:width$}   {description}");
+            let _ = writeln!(output, "  {name}");
         }
     }
 }
@@ -402,7 +425,7 @@ fn cmd_run(
     task: Option<String>,
     args: Vec<String>,
     dry_run: bool,
-    _choose: bool,
+    choose: bool,
 ) {
     let path = resolve_task_path(path);
     let path_text = path.to_string_lossy();
@@ -421,6 +444,18 @@ fn cmd_run(
         std::process::exit(1);
     };
 
+    let task = if choose {
+        match choose_task(tasks) {
+            Ok(task) => Some(task),
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        task
+    };
+
     let requested = match &task {
         Some(name) => tasks.get(name),
         None => tasks.default_task(),
@@ -430,7 +465,7 @@ fn cmd_run(
         Err(e) => {
             eprintln!("error: {e}");
             if matches!(e, RunnerError::MissingDefaultTask) {
-                print_task_list(Some(tasks));
+                print_task_list(Some(tasks), false, &mut std::io::stdout().lock());
             }
             std::process::exit(1);
         }
@@ -453,6 +488,144 @@ fn cmd_run(
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn choose_task(tasks: &TaskSet) -> Result<String, String> {
+    let tasks = listed_tasks(tasks, false);
+    if tasks.is_empty() {
+        return Err("no runnable tasks are available".to_owned());
+    }
+
+    let mut output = std::io::stderr().lock();
+    let mut current_group: Option<Option<&str>> = None;
+    for (index, task) in tasks.iter().enumerate() {
+        let group = task.group.as_deref();
+        if current_group != Some(group) {
+            let _ = writeln!(output, "{}:", group.unwrap_or("Ungrouped"));
+            current_group = Some(group);
+        }
+        let _ = writeln!(output, "  {}. {}", index + 1, task.name.to_lowercase());
+    }
+    let _ = write!(output, "Choose a task: ");
+    let _ = output.flush();
+
+    let mut selection = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut selection)
+        .map_err(|error| format!("could not read task choice: {error}"))?;
+    let selection = selection.trim();
+    if let Ok(number) = selection.parse::<usize>() {
+        return tasks
+            .get(number.saturating_sub(1))
+            .map(|task| task.name.clone())
+            .ok_or_else(|| format!("invalid task choice: {selection}"));
+    }
+    tasks
+        .iter()
+        .find(|task| task.name.eq_ignore_ascii_case(selection))
+        .map(|task| task.name.clone())
+        .ok_or_else(|| format!("invalid task choice: {selection}"))
+}
+
+fn cmd_show(path: Option<PathBuf>, task: String, args: Vec<String>) {
+    let path = resolve_task_path(path);
+    let path_text = path.to_string_lossy();
+    let src = read_file(&path_text);
+    let renderer = make_renderer(&src, &path_text);
+    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
+    if !compilation.errors.is_empty() {
+        eprintln!("{}", renderer.render_all(&compilation.errors));
+        std::process::exit(1);
+    }
+    let Some(tasks) = compilation.tasks.as_ref() else {
+        eprintln!("error: {} declares no tasks", path.display());
+        std::process::exit(1);
+    };
+    let bound = tasks
+        .bind(&TaskInvocation {
+            task,
+            arguments: args,
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        });
+    for command in &bound.task.commands {
+        println!("{}", command.render(&bound.parameter_values));
+    }
+}
+
+fn cmd_dump(path: Option<PathBuf>) {
+    let path = resolve_task_path(path);
+    let path_text = path.to_string_lossy();
+    let src = read_file(&path_text);
+    let renderer = make_renderer(&src, &path_text);
+    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
+    if !compilation.errors.is_empty() {
+        eprintln!("{}", renderer.render_all(&compilation.errors));
+        std::process::exit(1);
+    }
+    let tasks = compilation
+        .tasks
+        .as_ref()
+        .map(|tasks| tasks.iter().map(task_json).collect::<Vec<_>>())
+        .unwrap_or_default();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "tasks": tasks })).unwrap()
+    );
+}
+
+fn task_json(task: &spar::runner::Task) -> serde_json::Value {
+    let parameters: Vec<_> = task
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let kind = match parameter.kind {
+                spar::runner::ScalarKind::Str => "str",
+                spar::runner::ScalarKind::Int => "int",
+                spar::runner::ScalarKind::Float => "float",
+                spar::runner::ScalarKind::Bool => "bool",
+            };
+            serde_json::json!({
+                "name": parameter.name,
+                "type": kind,
+                "default": parameter.default,
+                "variadic": parameter.variadic,
+            })
+        })
+        .collect();
+    let commands: Vec<_> = task
+        .commands
+        .iter()
+        .map(|command| {
+            let kind = match command {
+                spar::runner::TaskCommand::Shell(_) => "shell",
+                spar::runner::TaskCommand::Script(_) => "script",
+            };
+            serde_json::json!({
+                "kind": kind,
+                "template": command.render_unbound(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "name": task.name,
+        "description": task.description,
+        "default": task.default,
+        "quiet": task.quiet,
+        "group": task.group,
+        "private": task.private,
+        "confirm": task.confirm,
+        "os": task.os,
+        "dependencies": task.dependencies,
+        "parameters": parameters,
+        "environment": task.environment,
+        "cwd": task.cwd.as_ref().map(|path| path.display().to_string()),
+        "shell": task.shell,
+        "commands": commands,
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

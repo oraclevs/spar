@@ -1,0 +1,27 @@
+export var appName: str = "demo";
+
+task [Build] {
+    description: "Build the project";
+    default: true;
+
+    run {
+        echo "build ${appName}";
+    };
+}
+
+task [Test] {
+    description: "Run the test suite";
+    dependsOn: [Build];
+
+    run {
+        echo "test";
+    };
+}
+
+task [Deploy](environment: str) {
+    description: "Deploy to an environment";
+
+    run {
+        echo "deploy ${environment}";
+    };
+}

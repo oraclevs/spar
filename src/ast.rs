@@ -3,6 +3,7 @@ use crate::error::Span;
 #[derive(Debug, Clone)]
 pub struct Program {
     pub is_schema_file: bool,
+    pub dotenv_load: bool,
     pub items: Vec<TopLevelItem>,
 }
 
@@ -18,6 +19,72 @@ pub enum TopLevelItem {
     SchemaFrom(SchemaFromDecl),
     Enum(EnumDecl),
     FunctionGroup(FunctionGroupDecl),
+    Task(Box<TaskDecl>),
+}
+
+/// A `task [Name](params) { ... }` declaration. Metadata fields
+/// (`description`, `default`, `quiet`, `cwd`, `env`) are ordinary Spar
+/// expressions, evaluated by `task_lowering` the same way any other Spar
+/// value is. `depends_on` holds bare task-name references — tasks live in
+/// their own namespace, not the general expression/symbol namespace, so
+/// they are captured as plain names rather than `NamespaceRef`s.
+#[derive(Debug, Clone)]
+pub struct TaskDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<TaskParam>,
+    pub description: Option<Expr>,
+    pub default: Option<Expr>,
+    pub quiet: Option<Expr>,
+    pub private: Option<Expr>,
+    pub group: Option<Expr>,
+    pub confirm: Option<Expr>,
+    pub os: Option<Expr>,
+    pub depends_on: Vec<TaskRef>,
+    pub env: Vec<(String, Expr)>,
+    pub cwd: Option<Expr>,
+    pub shell: Option<Expr>,
+    pub run: Vec<ShellCommand>,
+    pub span: Span,
+}
+
+/// A task parameter carries task-runner-specific call-site behaviour.
+/// Function parameters deliberately remain the simpler `Param` shape.
+#[derive(Debug, Clone)]
+pub struct TaskParam {
+    pub name: String,
+    pub ty: SparType,
+    pub default: Option<Expr>,
+    pub variadic: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskRef {
+    pub name: String,
+    pub span: Span,
+}
+
+/// One shell invocation inside a `run { ... }` block — the raw text between
+/// two top-level (not inside a shell quote) `;` separators, split at parse
+/// time so the runner can echo/fail commands individually and preserve
+/// declaration order (see `runner::TaskCommand`).
+#[derive(Debug, Clone)]
+pub struct ShellCommand {
+    pub parts: Vec<ShellTemplatePart>,
+    pub is_shebang: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellTemplatePart {
+    /// Raw shell text, copied verbatim (quotes, pipes, redirects, braces).
+    Literal(String),
+    /// A `${expr}` interpolation island — an ordinary Spar expression parsed
+    /// with the normal expression grammar. May be a bare identifier naming a
+    /// task parameter (left as a neutral slot by `task_lowering`) or any
+    /// other Spar expression (pre-evaluated by `task_lowering`).
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone)]

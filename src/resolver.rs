@@ -127,6 +127,14 @@ pub struct EnumEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct TaskEntry {
+    pub params: Vec<(String, SparType)>,
+    pub depends_on: Vec<String>,
+    pub span: Span,
+    pub name_span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct SymbolTable {
     pub globals: HashMap<String, GlobalEntry>,
     pub sections: HashMap<Vec<String>, SectionEntry>,
@@ -135,9 +143,13 @@ pub struct SymbolTable {
     pub types: HashMap<String, TypeEntry>,
     pub enums: HashMap<String, EnumEntry>,
     pub function_groups: HashMap<String, FunctionGroupEntry>,
+    pub tasks: HashMap<String, TaskEntry>,
 }
 
 impl SymbolTable {
+    pub fn lookup_task(&self, name: &str) -> Option<&TaskEntry> {
+        self.tasks.get(name)
+    }
     pub fn lookup_global(&self, name: &str) -> Option<&GlobalEntry> {
         self.globals.get(name)
     }
@@ -214,6 +226,7 @@ pub struct Resolver {
     types: HashMap<String, TypeEntry>,
     enums: HashMap<String, EnumEntry>,
     function_groups: HashMap<String, FunctionGroupEntry>,
+    tasks: HashMap<String, TaskEntry>,
     loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
     errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
@@ -229,6 +242,7 @@ impl Resolver {
             types: HashMap::new(),
             enums: HashMap::new(),
             function_groups: HashMap::new(),
+            tasks: HashMap::new(),
             loaded_exports: HashMap::new(),
             errors: Vec::new(),
             current_section: None,
@@ -244,6 +258,7 @@ impl Resolver {
             types: HashMap::new(),
             enums: HashMap::new(),
             function_groups: HashMap::new(),
+            tasks: HashMap::new(),
             loaded_exports: exports,
             errors: Vec::new(),
             current_section: None,
@@ -281,6 +296,7 @@ impl Resolver {
                 types: self.types,
                 enums: self.enums,
                 function_groups: self.function_groups,
+                tasks: self.tasks,
             })
         } else {
             Err(self.errors)
@@ -311,6 +327,7 @@ impl Resolver {
                 types: r.types,
                 enums: r.enums,
                 function_groups: r.function_groups,
+                tasks: r.tasks,
             })
         } else {
             Err(r.errors)
@@ -368,6 +385,7 @@ impl Resolver {
                 TopLevelItem::Enum(decl) => self.register_enum(decl),
                 TopLevelItem::FunctionGroup(decl) => self.register_function_group(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
+                TopLevelItem::Task(decl) => self.register_task(decl),
             }
         }
     }
@@ -568,6 +586,41 @@ impl Resolver {
                 is_private: decl.is_private,
                 functions,
                 span: decl.span.clone(),
+            },
+        );
+    }
+
+    fn register_task(&mut self, decl: &TaskDecl) {
+        if self.tasks.contains_key(&decl.name) {
+            self.push_error(
+                format!("task '{}' is already defined", decl.name),
+                decl.name_span.clone(),
+            );
+            return;
+        }
+        if !naming::is_pascal_case(&decl.name) {
+            self.push_error_hint(
+                format!(
+                    "task name '{}' must be PascalCase (start with an uppercase letter, no underscores)",
+                    decl.name
+                ),
+                Some(naming::pascal_case_hint(&decl.name)),
+                decl.name_span.clone(),
+            );
+        }
+        let params = decl
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.ty.clone()))
+            .collect();
+        let depends_on = decl.depends_on.iter().map(|d| d.name.clone()).collect();
+        self.tasks.insert(
+            decl.name.clone(),
+            TaskEntry {
+                params,
+                depends_on,
+                span: decl.span.clone(),
+                name_span: decl.name_span.clone(),
             },
         );
     }
@@ -901,6 +954,7 @@ impl Resolver {
                     }
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
+                TopLevelItem::Task(decl) => self.resolve_task(decl),
             }
         }
     }
@@ -993,6 +1047,79 @@ impl Resolver {
                     let body = body.clone();
                     self.check_unreachable(&body);
                     // A for-loop never sets terminated — iterable may be empty.
+                }
+            }
+        }
+    }
+
+    /// Resolves a task's expressions. Metadata fields (`description`,
+    /// `default`, `quiet`, `cwd`, `env` values) may only reference ordinary
+    /// global/section names — they're pre-evaluated by `task_lowering`
+    /// before any task runs, so a task parameter (whose value isn't known
+    /// until the CLI binds it) can't appear there. Only the `run` block's
+    /// `${...}` interpolations may reference task parameters, via the same
+    /// locals-aware resolution function bodies use.
+    fn resolve_task(&mut self, decl: &TaskDecl) {
+        for dep in &decl.depends_on {
+            if !self.tasks.contains_key(&dep.name) {
+                let candidates: Vec<String> = self.tasks.keys().cloned().collect();
+                let hint = suggest(&dep.name, candidates.iter().map(|s| s.as_str()));
+                self.push_error_hint(
+                    format!(
+                        "task '{}' depends on unknown task '{}'",
+                        decl.name, dep.name
+                    ),
+                    hint,
+                    dep.span.clone(),
+                );
+            }
+        }
+
+        if let Some(expr) = &decl.description {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.default {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.quiet {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.private {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.group {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.confirm {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.os {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.cwd {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.shell {
+            self.resolve_expr(expr);
+        }
+        for (_, value) in &decl.env {
+            self.resolve_expr(value);
+        }
+
+        for param in &decl.params {
+            self.check_named_type_exists(&param.ty, &param.span);
+            if let Some(default) = &param.default {
+                self.resolve_expr(default);
+            }
+        }
+
+        let locals: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+        for command in &decl.run {
+            for part in &command.parts {
+                if let ShellTemplatePart::Expr(expr) = part {
+                    if let Err(e) = self.resolve_expr_with_locals(expr, &locals) {
+                        self.errors.push(e);
+                    }
                 }
             }
         }

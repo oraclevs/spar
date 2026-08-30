@@ -141,6 +141,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
+                TopLevelItem::Task(decl) => self.check_task(decl),
             }
         }
     }
@@ -2062,6 +2063,170 @@ impl<'a> TypeChecker<'a> {
 
     // ── Function declaration type checking ────────────────────────────────────
 
+    /// Task parameters must be scalar (no `list`/`section` — a shell
+    /// argument is always a single string on the command line), metadata
+    /// fields must type as their expected scalar (`description`/`cwd`/
+    /// env values as `str`, `default`/`quiet` as `bool`), and every `run`
+    /// block interpolation must type as *some* scalar — `task_lowering`
+    /// (Task 6's later half) is what rejects a scalar expression that
+    /// illegally mixes a task parameter with other values, since that's a
+    /// lowering-representability concern, not a type concern.
+    fn check_task(&mut self, decl: &TaskDecl) {
+        for param in &decl.params {
+            if matches!(param.ty, SparType::Section | SparType::List(_)) {
+                self.push_type_error(
+                    format!(
+                        "task parameter '{}': type must be 'str', 'int', 'float', or 'bool' — \
+                         task arguments come from the command line as single scalar values",
+                        param.name
+                    ),
+                    None,
+                    param.span.clone(),
+                );
+            }
+            if let Some(default) = &param.default {
+                self.check_task_scalar_field(
+                    default,
+                    &format!("parameter '{}' default", param.name),
+                    &param.ty,
+                    &param.span,
+                );
+            }
+        }
+
+        if let Some(expr) = &decl.description {
+            self.check_task_scalar_field(expr, "description", &SparType::Str, &decl.span);
+        }
+        if let Some(expr) = &decl.default {
+            self.check_task_scalar_field(expr, "default", &SparType::Bool, &decl.span);
+        }
+        if let Some(expr) = &decl.quiet {
+            self.check_task_scalar_field(expr, "quiet", &SparType::Bool, &decl.span);
+        }
+        if let Some(expr) = &decl.private {
+            self.check_task_scalar_field(expr, "private", &SparType::Bool, &decl.span);
+        }
+        if let Some(expr) = &decl.group {
+            self.check_task_scalar_field(expr, "group", &SparType::Str, &decl.span);
+        }
+        if let Some(expr) = &decl.confirm {
+            self.check_task_scalar_field(expr, "confirm", &SparType::Str, &decl.span);
+        }
+        if let Some(expr) = &decl.os {
+            self.check_task_string_list_field(expr, "os", &decl.span);
+        }
+        if let Some(expr) = &decl.cwd {
+            self.check_task_scalar_field(expr, "cwd", &SparType::Str, &decl.span);
+        }
+        if let Some(expr) = &decl.shell {
+            self.check_task_string_list_field(expr, "shell", &decl.span);
+        }
+        for (key, value) in &decl.env {
+            self.check_task_scalar_field(value, &format!("env.{key}"), &SparType::Str, &decl.span);
+        }
+
+        let local_types: HashMap<String, SparType> = decl
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.ty.clone()))
+            .collect();
+        for command in &decl.run {
+            for part in &command.parts {
+                if let ShellTemplatePart::Expr(expr) = part {
+                    if let Err(e) = self.check_expr_with_locals(expr, &local_types) {
+                        self.errors.push(e);
+                        continue;
+                    }
+                    match self.infer_type_with_locals(expr, &local_types) {
+                        Some(SparType::Str | SparType::Int | SparType::Float | SparType::Bool) => {}
+                        Some(other) => self.push_type_error(
+                            format!(
+                                "task 'run' interpolation must be a scalar value (str, int, float, or bool), \
+                                 found {}",
+                                display_type(&other)
+                            ),
+                            None,
+                            command.span.clone(),
+                        ),
+                        None => {} // unresolvable type — a more specific error was already reported
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_task_scalar_field(
+        &mut self,
+        expr: &Expr,
+        label: &str,
+        expected: &SparType,
+        span: &Span,
+    ) {
+        if let Err(e) = self.check_expr_with_locals(expr, &HashMap::new()) {
+            self.errors.push(e);
+            return;
+        }
+        match self.infer_type(expr) {
+            Some(actual) if &actual == expected => {}
+            Some(actual) => self.push_type_error(
+                format!(
+                    "task '{}' must be a {}, found {}",
+                    label,
+                    display_type(expected),
+                    display_type(&actual)
+                ),
+                None,
+                span.clone(),
+            ),
+            None => {} // unresolvable — a more specific error was already reported
+        }
+    }
+
+    fn check_task_string_list_field(&mut self, expr: &Expr, label: &str, span: &Span) {
+        if let Err(e) = self.check_expr_with_locals(expr, &HashMap::new()) {
+            self.errors.push(e);
+            return;
+        }
+        if let Expr::List(items, _) = expr {
+            if items.is_empty() {
+                self.push_type_error(
+                    format!("task '{label}' must be a non-empty [str]"),
+                    None,
+                    span.clone(),
+                );
+                return;
+            }
+            if items
+                .iter()
+                .all(|item| self.infer_type(item) == Some(SparType::Str))
+            {
+                return;
+            }
+            self.push_type_error(
+                format!("task '{label}' must be a non-empty [str]"),
+                None,
+                span.clone(),
+            );
+            return;
+        }
+        match self.infer_type(expr) {
+            Some(SparType::List(inner)) if *inner == SparType::Str => {}
+            Some(actual) => self.push_type_error(
+                format!(
+                    "task '{label}' must be a non-empty [str], found {}",
+                    display_type(&actual)
+                ),
+                None,
+                span.clone(),
+            ),
+            None => self.push_type_error(
+                format!("task '{label}' must be a non-empty [str]"),
+                None,
+                span.clone(),
+            ),
+        }
+    }
+
     fn check_function_decl(&mut self, f: &FunctionDecl) {
         let mut local_types: HashMap<String, SparType> = f
             .params
@@ -2686,6 +2851,35 @@ mod tests {
     }
 
     #[test]
+    fn task_v2_metadata_types_are_checked() {
+        for (src, field) in [
+            (
+                r#"task [Deploy] { private: "yes"; run { echo deploy; }; }"#,
+                "private",
+            ),
+            ("task [Deploy] { group: 1; run { echo deploy; }; }", "group"),
+            ("task [Deploy] { os: []; run { echo deploy; }; }", "os"),
+            (
+                "task [Deploy] { os: [\"linux\", 1]; run { echo deploy; }; }",
+                "os",
+            ),
+            (
+                "task [Deploy] { shell: []; run { echo deploy; }; }",
+                "shell",
+            ),
+            (
+                "task [Deploy] { shell: [1]; run { echo deploy; }; }",
+                "shell",
+            ),
+        ] {
+            assert!(
+                has_type_error(src, field),
+                "expected type error for {field}: {src}"
+            );
+        }
+    }
+
+    #[test]
     fn test_valid_arithmetic() {
         check_ok("var total: int = 30 * 3;");
     }
@@ -2837,6 +3031,7 @@ mod tests {
                         types: Default::default(),
                         enums: Default::default(),
                         function_groups: Default::default(),
+                        tasks: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -2863,6 +3058,7 @@ mod tests {
                         types: Default::default(),
                         enums: Default::default(),
                         function_groups: Default::default(),
+                        tasks: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(

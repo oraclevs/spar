@@ -34,18 +34,18 @@ task [Build] {
     run {
         cargo build --port ${port};
     };
-}
+};
 
 task [Deploy](environment: str) {
     dependsOn: [Build];
     run {
         ./deploy.sh ${environment};
     };
-}
+};
 ```
 
 `run` bodies are raw shell, not Spar statements. `${expr}` evaluates through
-Spar. `$NAME` remains shell expansion. `$${...}` emits literal `${...}` for
+Spar. `$NAME` remains shell expansion. `#{...}` emits literal `${...}` for
 advanced shell parameter expansion. A run block executes as one shell script,
 so quoting, pipes, redirects, loops, and shell state survive between lines.
 

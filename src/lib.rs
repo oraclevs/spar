@@ -2,6 +2,7 @@ pub mod ast;
 pub mod compiler;
 pub mod de;
 pub mod depgraph;
+pub mod dotenv;
 pub mod emit;
 pub mod error;
 pub mod evaluator;
@@ -12,6 +13,8 @@ pub mod naming;
 pub mod parser;
 pub mod renderer;
 pub mod resolver;
+pub mod runner;
+pub mod task_lowering;
 #[cfg(test)]
 pub mod tests;
 pub mod token;

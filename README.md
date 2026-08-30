@@ -73,6 +73,7 @@ $ spar emit server.spar
   - [Cross-file imports](#cross-file-imports)
   - [Schema validation](#schema-validation)
 - [Rust Integration](#rust-integration)
+- [Task Runner](#task-runner)
 - [Installation](#installation)
 - [CLI Reference](#cli-reference)
 - [Editor Support](#editor-support)
@@ -498,6 +499,54 @@ let cfg: Config = spar::from_eval(&result)?;
 
 ---
 
+## Task Runner
+
+A `.spar` file can also declare command-runner tasks alongside its
+configuration values — dependencies, arguments, environment overrides,
+working directories, a default task, and a `--dry-run` preview:
+
+```spar
+export var appName: str = "demo";
+
+task [Test] {
+    description: "Run tests";
+    default: true;
+
+    run {
+        echo "testing ${appName}";
+    };
+}
+
+task [Deploy](environment: str) {
+    dependsOn: [Test];
+
+    run {
+        ./deploy.sh ${environment};
+    };
+}
+```
+
+```bash
+spar tasks -f server.spar
+spar run   -f server.spar
+spar run   deploy production -f server.spar
+spar run   test --dry-run -f server.spar
+```
+
+With no `-f`/`--file`, `spar tasks`/`spar run`/`spar show`/`spar dump`
+search the current directory and its parents for `SparMake.spar`.
+
+Tasks also support default/variadic parameters, `private`/`group`/
+`confirm`/`os` attributes, shebang script recipes, `.env` loading via
+`@DotenvLoad`, per-task shell overrides, and an interactive `--choose`
+picker. Tasks are not Make-style timestamp/file build targets — no
+incremental rebuilds, no input/output tracking, no caching. See
+[`docs/command-runner/tasks.md`](docs/command-runner/tasks.md) for the full
+reference and [`examples/tasks.spar`](examples/tasks.spar) for a runnable
+example.
+
+---
+
 ## Installation
 
 Spar is built with Rust. You need the Rust toolchain installed (`rustup.rs`).
@@ -527,13 +576,19 @@ spar --version
 
 ```
 USAGE:
-    spar <COMMAND> <FILE>
+    spar <COMMAND> [OPTIONS]
 
 COMMANDS:
-    check              Validate — lex, parse, resolve, and type-check
-    emit               Evaluate and emit config as JSON to stdout
-    fmt                Format a .spar file in place
-    fmt --check        Exit non-zero if the file is not already formatted
+    check         <file.spar>           Validate — lex, parse, resolve, and type-check
+    emit          <file.spar>           Evaluate and emit config as JSON to stdout
+    fmt           <file.spar>           Format a .spar file in place
+    fmt --check   <file.spar>           Exit non-zero if the file is not already formatted
+    tasks         [-f FILE] [--all]     List declared tasks (grouped; private hidden unless --all)
+    run           [task] [args...] [-f FILE] [--dry-run] [--choose]
+                                         Run a task (the default task if none is named)
+    show          <task> [args...] [-f FILE]
+                                         Print one task's resolved commands without running it
+    dump          [-f FILE]             Print the whole task catalog as JSON
 
 OPTIONS:
     -h, --help         Show this help message
@@ -542,6 +597,10 @@ OPTIONS:
 ENVIRONMENT:
     NO_COLOR=1         Disable ANSI colour in error output
 ```
+
+`tasks`/`run`/`show`/`dump` take the file via `-f`/`--file`; without it,
+`spar` searches for `SparMake.spar` in the current directory and its
+parents. `check`/`emit`/`fmt` always take an explicit file positional.
 
 ### Examples
 
@@ -560,6 +619,25 @@ spar fmt server.spar
 
 # Check formatting in CI
 spar fmt --check server.spar && echo "formatted"
+
+# List declared tasks (grouped, private hidden)
+spar tasks -f server.spar
+
+# Run the default task
+spar run -f server.spar
+
+# Run a specific task with an argument
+spar run deploy production -f server.spar
+
+# Preview commands without running them
+spar run test --dry-run -f server.spar
+
+# Pick a task interactively
+spar run --choose -f server.spar
+
+# Inspect one task, or dump the whole catalog as JSON
+spar show deploy production -f server.spar
+spar dump -f server.spar
 ```
 
 ### Error output

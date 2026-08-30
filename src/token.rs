@@ -85,6 +85,12 @@ pub enum Token {
     LBrace,
     RBrace,
 
+    // Raw shell body of a task's `run { ... }` block. Emitted only when the
+    // lexer sees `run` immediately followed by `{` (see `Lexer::maybe_enter_run_body`).
+    RunStart,
+    ShellFragment(String),
+    RunEnd,
+
     Eof,
 }
 
@@ -164,6 +170,9 @@ impl Token {
             Token::InterpolEnd => "'}'",
             Token::IntLit(_) => "integer literal",
             Token::FloatLit(_) => "float literal",
+            Token::RunStart => "'{'",
+            Token::ShellFragment(_) => "shell text",
+            Token::RunEnd => "end of run block",
             Token::Eof => "end of file",
         }
     }

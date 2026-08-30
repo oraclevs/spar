@@ -519,6 +519,116 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Called right after an `Ident("run")` token has been pushed. If the
+    /// next significant character is `{`, this is a task's `run { ... }`
+    /// block: consume the brace and lex its body as raw shell text instead
+    /// of ordinary Spar tokens. Otherwise leaves the position untouched —
+    /// `run` was just a normal identifier (e.g. a field named `run`
+    /// elsewhere is impossible in the grammar since no other construct
+    /// places `Ident` immediately before `{` with nothing between them, but
+    /// this keeps the check honest rather than assuming).
+    fn maybe_enter_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let mut offset = 0usize;
+        while matches!(
+            self.peek_at(offset),
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            offset += 1;
+        }
+        if self.peek_at(offset) != Some(b'{') {
+            return Ok(());
+        }
+        for _ in 0..=offset {
+            self.advance();
+        }
+        let brace_pos = self.pos - 1;
+        let brace_line = self.line;
+        let brace_col = self.col;
+        tokens.push(SpannedToken::new(
+            Token::RunStart,
+            self.span_at(brace_pos, brace_line, brace_col),
+        ));
+        self.lex_run_body(tokens)
+    }
+
+    /// Lexes the raw shell body of a `run { ... }` block: everything up to
+    /// the matching `}` is copied verbatim as `ShellFragment` text, except
+    /// `${expr}` islands (tokenized exactly like string interpolation via
+    /// `tokenize_interp`) and the `$${` escape, which drops one `$` and
+    /// treats the rest as literal shell text (so `$${HOME:-x}` produces the
+    /// shell text `${HOME:-x}`, not a Spar interpolation). Brace depth is
+    /// tracked over every literal `{`/`}` byte (including escaped ones) so
+    /// shell brace groups don't prematurely close the block.
+    fn lex_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let mut fragment = String::new();
+        let mut frag_start = self.pos;
+        let mut frag_line = self.line;
+        let mut frag_col = self.col;
+        let mut depth: u32 = 1;
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(SparError::LexError {
+                        message: "unterminated run block — expected '}'".to_string(),
+                        span: Span::new(frag_start, self.pos, frag_line, frag_col),
+                    });
+                }
+                Some(b'$') if self.peek_at(1) == Some(b'$') && self.peek_at(2) == Some(b'{') => {
+                    self.advance(); // first $
+                    self.advance(); // second $
+                    self.advance(); // {
+                    fragment.push_str("${");
+                    depth += 1;
+                }
+                Some(b'$') if self.peek_at(1) == Some(b'{') => {
+                    tokens.push(SpannedToken::new(
+                        Token::ShellFragment(std::mem::take(&mut fragment)),
+                        Span::new(frag_start, self.pos, frag_line, frag_col),
+                    ));
+                    self.advance(); // $
+                    self.advance(); // {
+                    let interp_span = Span::new(self.pos - 2, self.pos, self.line, self.col);
+                    tokens.push(SpannedToken::new(Token::InterpolStart, interp_span));
+                    let mut brace_depth: u32 = 1;
+                    self.tokenize_interp(tokens, &mut brace_depth)?;
+                    tokens.push(SpannedToken::new(
+                        Token::InterpolEnd,
+                        Span::new(self.pos, self.pos, self.line, self.col),
+                    ));
+                    frag_start = self.pos;
+                    frag_line = self.line;
+                    frag_col = self.col;
+                }
+                Some(b'{') => {
+                    self.advance();
+                    fragment.push('{');
+                    depth += 1;
+                }
+                Some(b'}') => {
+                    self.advance();
+                    depth -= 1;
+                    if depth == 0 {
+                        tokens.push(SpannedToken::new(
+                            Token::ShellFragment(std::mem::take(&mut fragment)),
+                            Span::new(frag_start, self.pos - 1, frag_line, frag_col),
+                        ));
+                        tokens.push(SpannedToken::new(
+                            Token::RunEnd,
+                            self.span_at(self.pos - 1, self.line, self.col),
+                        ));
+                        return Ok(());
+                    }
+                    fragment.push('}');
+                }
+                Some(c) => {
+                    self.advance();
+                    fragment.push(c as char);
+                }
+            }
+        }
+    }
+
     pub fn tokenize(mut self) -> Result<Vec<SpannedToken>, SparError> {
         self.tokenize_inner()
     }
@@ -571,7 +681,11 @@ impl<'a> Lexer<'a> {
                 _ => {
                     if let Some(t) = self.lex_single_token(c, start, line, col)? {
                         self.last_token_line = line;
+                        let is_run = matches!(&t.token, Token::Ident(s) if s == "run");
                         tokens.push(t);
+                        if is_run {
+                            self.maybe_enter_run_body(&mut tokens)?;
+                        }
                     }
                 }
             }
@@ -931,5 +1045,91 @@ mod tests {
         let tokens = Lexer::new("@SchemaFile").tokenize().unwrap();
         assert_eq!(tokens[0].token, Token::At);
         assert_eq!(tokens[1].token, Token::Ident("SchemaFile".to_string()));
+    }
+
+    #[test]
+    fn run_block_preserves_quotes_pipes_redirects_braces_and_interpolation() {
+        let src = r#"run {
+    echo "hello world" | grep hi > out.txt;
+    if [ -f x ]; then { echo nested; }; fi;
+    cargo run -- --port ${port} $HOME $${HOME:-x};
+};"#;
+        let tokens = lex(src);
+
+        assert_eq!(tokens[0], Token::Ident("run".into()));
+        assert_eq!(tokens[1], Token::RunStart);
+        assert_eq!(tokens.last(), Some(&Token::Eof));
+        assert!(tokens.contains(&Token::RunEnd));
+
+        let fragments: Vec<&str> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                Token::ShellFragment(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        let joined = fragments.join("");
+        assert!(joined.contains(r#"echo "hello world" | grep hi > out.txt;"#));
+        assert!(joined.contains("if [ -f x ]; then { echo nested; }; fi;"));
+        assert!(joined.contains("$HOME"));
+        // `$${HOME:-x}` must lower to literal `${HOME:-x}` shell text, not interpolation.
+        assert!(joined.contains("${HOME:-x}"));
+
+        // `${port}` must have become a real interpolation island, not shell text.
+        assert!(tokens.contains(&Token::InterpolStart));
+        assert!(tokens.contains(&Token::Ident("port".into())));
+        assert!(!joined.contains("${port}"));
+    }
+
+    #[test]
+    fn run_block_does_not_swallow_the_rest_of_the_file() {
+        let tokens = lex("run { echo hi; }; var x: int = 1;");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("run".into()),
+                Token::RunStart,
+                Token::ShellFragment(" echo hi; ".into()),
+                Token::RunEnd,
+                Token::Semicolon,
+                Token::Var,
+                Token::Ident("x".into()),
+                Token::Colon,
+                Token::TypeInt,
+                Token::Eq,
+                Token::IntLit(1),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_run_identifier_without_brace_is_not_special_cased() {
+        // `run` used as an ordinary identifier (no `{` immediately after) must
+        // lex like any other identifier — the raw-mode heuristic only fires
+        // on `run` directly followed by `{`.
+        let tokens = lex("var run: int = 1;");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Var,
+                Token::Ident("run".into()),
+                Token::Colon,
+                Token::TypeInt,
+                Token::Eq,
+                Token::IntLit(1),
+                Token::Semicolon,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn unterminated_run_block_is_a_lex_error() {
+        let result = Lexer::new("run { echo hi;").tokenize();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unterminated run block"), "got: {msg}");
     }
 }

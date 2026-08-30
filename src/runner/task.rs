@@ -9,16 +9,22 @@ pub struct Task {
     pub description: Option<String>,
     pub default: bool,
     pub quiet: bool,
+    pub private: bool,
+    pub group: Option<String>,
+    pub confirm: Option<String>,
+    pub os: Vec<String>,
     pub dependencies: Vec<String>,
     pub parameters: Vec<TaskParameter>,
     pub environment: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
+    pub shell: Option<Vec<String>>,
     pub commands: Vec<TaskCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskCommand {
-    pub template: CommandTemplate,
+pub enum TaskCommand {
+    Shell(CommandTemplate),
+    Script(CommandTemplate),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +36,61 @@ pub struct CommandTemplate {
 pub enum TemplatePart {
     Literal(String),
     Parameter(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundValue {
+    Scalar(String),
+    Variadic(Vec<String>),
+}
+
+impl CommandTemplate {
+    pub fn render(&self, values: &BTreeMap<String, BoundValue>) -> String {
+        self.parts
+            .iter()
+            .map(|part| match part {
+                TemplatePart::Literal(literal) => literal.clone(),
+                TemplatePart::Parameter(name) => match values.get(name) {
+                    Some(BoundValue::Scalar(value)) => value.clone(),
+                    Some(BoundValue::Variadic(values)) => values.join(" "),
+                    None => String::new(),
+                },
+            })
+            .collect()
+    }
+
+    pub fn render_unbound(&self) -> String {
+        self.parts
+            .iter()
+            .map(|part| match part {
+                TemplatePart::Literal(literal) => literal.clone(),
+                TemplatePart::Parameter(name) => format!("${{{name}}}"),
+            })
+            .collect()
+    }
+}
+
+impl TaskCommand {
+    pub fn template(&self) -> &CommandTemplate {
+        match self {
+            Self::Shell(template) | Self::Script(template) => template,
+        }
+    }
+
+    pub fn render(&self, values: &BTreeMap<String, BoundValue>) -> String {
+        self.template().render(values)
+    }
+
+    pub fn render_unbound(&self) -> String {
+        self.template().render_unbound()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn template_mut(&mut self) -> &mut CommandTemplate {
+        match self {
+            Self::Shell(template) | Self::Script(template) => template,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +105,8 @@ pub enum ScalarKind {
 pub struct TaskParameter {
     pub name: String,
     pub kind: ScalarKind,
+    pub default: Option<String>,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,10 +198,15 @@ mod tests {
             description: None,
             default: false,
             quiet: false,
+            private: false,
+            group: None,
+            confirm: None,
+            os: Vec::new(),
             dependencies: Vec::new(),
             parameters: Vec::new(),
             environment: BTreeMap::new(),
             cwd: None,
+            shell: None,
             commands: Vec::new(),
         }
     }
@@ -214,5 +282,33 @@ mod tests {
 
         let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Build", "Deploy", "Test"]);
+    }
+
+    #[test]
+    fn renders_scalar_and_variadic_values() {
+        let template = CommandTemplate {
+            parts: vec![
+                TemplatePart::Literal("deploy ".into()),
+                TemplatePart::Parameter("environment".into()),
+                TemplatePart::Literal(" ".into()),
+                TemplatePart::Parameter("extra".into()),
+            ],
+        };
+        let values = BTreeMap::from([
+            (
+                "environment".into(),
+                BoundValue::Scalar("staging".into()),
+            ),
+            (
+                "extra".into(),
+                BoundValue::Variadic(vec!["--force".into(), "blue".into()]),
+            ),
+        ]);
+
+        assert_eq!(template.render(&values), "deploy staging --force blue");
+        assert_eq!(
+            template.render_unbound(),
+            "deploy ${environment} ${extra}"
+        );
     }
 }

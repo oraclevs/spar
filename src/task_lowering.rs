@@ -131,6 +131,8 @@ fn lower_one_task(
         .map(|p| TaskParameter {
             name: p.name.clone(),
             kind: scalar_kind(&p.ty),
+            default: None,
+            variadic: false,
         })
         .collect();
 
@@ -164,9 +166,7 @@ fn lower_one_task(
                 },
             }
         }
-        commands.push(TaskCommand {
-            template: CommandTemplate { parts },
-        });
+        commands.push(TaskCommand::Shell(CommandTemplate { parts }));
     }
 
     if !errors.is_empty() {
@@ -178,10 +178,15 @@ fn lower_one_task(
         description,
         default,
         quiet,
+        private: false,
+        group: None,
+        confirm: None,
+        os: Vec::new(),
         dependencies: decl.depends_on.iter().map(|d| d.name.clone()).collect(),
         parameters,
         environment,
         cwd,
+        shell: None,
         commands,
     })
 }

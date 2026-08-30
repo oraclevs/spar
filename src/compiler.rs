@@ -8,6 +8,7 @@ use crate::error::SparError;
 use crate::evaluator::{EvalResult, Evaluator};
 use crate::loader::{self, ImportLoader, LoadedImport};
 use crate::resolver::{Resolver, SymbolTable};
+use crate::runner::TaskSet;
 use crate::typechecker::TypeChecker;
 use crate::{Lexer, Parser};
 
@@ -48,6 +49,11 @@ pub struct Compilation {
     pub symbols: Option<SymbolTable>,
     pub imports: HashMap<String, LoadedImport>,
     pub result: Option<EvalResult>,
+    /// The program's lowered task catalog, if it declares any `task [...]`
+    /// items. Only ever `Some` once every other stage — lex through
+    /// evaluate — has succeeded; task declarations never appear in
+    /// `result`/emitted JSON.
+    pub tasks: Option<TaskSet>,
     pub errors: Vec<SparError>,
 }
 
@@ -85,6 +91,7 @@ impl Compiler {
             symbols: None,
             imports: HashMap::new(),
             result: None,
+            tasks: None,
             errors: Vec::new(),
         };
 
@@ -153,7 +160,13 @@ impl Compiler {
                 &compilation.imports,
                 &self.options.base_dir,
             ) {
-                Ok(result) => compilation.result = Some(result),
+                Ok(result) => {
+                    match crate::task_lowering::lower_tasks(&program, &symbols, &result) {
+                        Ok(tasks) => compilation.tasks = tasks,
+                        Err(errors) => compilation.errors.extend(errors),
+                    }
+                    compilation.result = Some(result);
+                }
                 Err(errors) => compilation.errors.extend(errors),
             }
         }

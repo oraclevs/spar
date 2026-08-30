@@ -529,7 +529,10 @@ impl<'a> Lexer<'a> {
     /// this keeps the check honest rather than assuming).
     fn maybe_enter_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
         let mut offset = 0usize;
-        while matches!(self.peek_at(offset), Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')) {
+        while matches!(
+            self.peek_at(offset),
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
             offset += 1;
         }
         if self.peek_at(offset) != Some(b'{') {

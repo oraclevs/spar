@@ -1,0 +1,383 @@
+use std::io::Write;
+use std::path::PathBuf;
+
+use super::{ExecutionPlan, RunnerError, TemplatePart};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionOptions {
+    pub dry_run: bool,
+    pub base_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionReport {
+    pub commands: Vec<String>,
+}
+
+pub fn execute(
+    plan: &ExecutionPlan,
+    options: &ExecutionOptions,
+) -> Result<ExecutionReport, RunnerError> {
+    execute_with_echo(plan, options, &mut std::io::stderr().lock())
+}
+
+fn execute_with_echo(
+    plan: &ExecutionPlan,
+    options: &ExecutionOptions,
+    echo: &mut dyn Write,
+) -> Result<ExecutionReport, RunnerError> {
+    let mut commands = Vec::new();
+
+    for bound_task in &plan.tasks {
+        for task_command in &bound_task.task.commands {
+            let mut script = String::new();
+            for part in &task_command.template.parts {
+                match part {
+                    TemplatePart::Literal(literal) => script.push_str(literal),
+                    TemplatePart::Parameter(name) => {
+                        if let Some(value) = bound_task.parameter_values.get(name) {
+                            script.push_str(value);
+                        }
+                    }
+                }
+            }
+            commands.push(script.clone());
+
+            if !bound_task.task.quiet {
+                let _ = writeln!(echo, "{script}");
+            }
+
+            if options.dry_run {
+                continue;
+            }
+
+            let mut child = super::shell::command(&script);
+            super::environment::apply(&mut child, &bound_task.task.environment);
+            if let Some(cwd) = &bound_task.task.cwd {
+                child.current_dir(if cwd.is_relative() {
+                    options.base_dir.join(cwd)
+                } else {
+                    cwd.clone()
+                });
+            }
+            let status = child
+                .status()
+                .map_err(|error| RunnerError::CommandExecution {
+                    task: bound_task.task.name.clone(),
+                    command: script.clone(),
+                    message: error.to_string(),
+                })?;
+            if !status.success() {
+                return Err(RunnerError::CommandFailed {
+                    task: bound_task.task.name.clone(),
+                    command: script,
+                    status,
+                });
+            }
+        }
+    }
+
+    Ok(ExecutionReport { commands })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::runner::{
+        execute, BoundTask, CommandTemplate, ExecutionOptions, ExecutionPlan, Task, TaskCommand,
+        TemplatePart,
+    };
+
+    fn plan(command: String) -> ExecutionPlan {
+        ExecutionPlan {
+            tasks: vec![BoundTask {
+                task: Task {
+                    name: "Build".to_owned(),
+                    description: None,
+                    default: false,
+                    quiet: false,
+                    dependencies: Vec::new(),
+                    parameters: Vec::new(),
+                    environment: BTreeMap::new(),
+                    cwd: None,
+                    commands: vec![TaskCommand {
+                        template: CommandTemplate {
+                            parts: vec![TemplatePart::Literal(command)],
+                        },
+                    }],
+                },
+                parameter_values: BTreeMap::new(),
+            }],
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_marker_command(path: &std::path::Path) -> String {
+        format!("printf marker > '{}'", path.display())
+    }
+
+    #[cfg(windows)]
+    fn create_marker_command(path: &std::path::Path) -> String {
+        format!("type nul > \"{}\"", path.display())
+    }
+
+    #[cfg(unix)]
+    fn append_command(value: &str, path: &std::path::Path) -> String {
+        format!("printf {value} >> '{}'", path.display())
+    }
+
+    #[cfg(windows)]
+    fn append_command(value: &str, path: &std::path::Path) -> String {
+        format!("<nul set /p ={value} >> \"{}\"", path.display())
+    }
+
+    #[cfg(unix)]
+    const FAILURE_COMMAND: &str = "exit 7";
+
+    #[cfg(windows)]
+    const FAILURE_COMMAND: &str = "exit /B 7";
+
+    #[cfg(unix)]
+    fn write_environment_command(path: &std::path::Path) -> String {
+        format!(
+            "printf '%s|%s' \"$SPAR_RUNNER_INHERITED\" \"$SPAR_RUNNER_OVERRIDE\" > '{}'",
+            path.display()
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_working_directory_command(path: &std::path::Path) -> String {
+        format!("pwd > '{}'", path.display())
+    }
+
+    #[cfg(windows)]
+    fn write_working_directory_command(path: &std::path::Path) -> String {
+        format!("cd > \"{}\"", path.display())
+    }
+
+    #[cfg(unix)]
+    fn noisy_marker_command(path: &std::path::Path) -> String {
+        format!("printf child-output; printf marker > '{}'", path.display())
+    }
+
+    #[cfg(windows)]
+    fn noisy_marker_command(path: &std::path::Path) -> String {
+        format!("echo child-output & type nul > \"{}\"", path.display())
+    }
+
+    #[cfg(windows)]
+    fn write_environment_command(path: &std::path::Path) -> String {
+        format!(
+            "<nul set /p =%SPAR_RUNNER_INHERITED%^|%SPAR_RUNNER_OVERRIDE% > \"{}\"",
+            path.display()
+        )
+    }
+
+    #[test]
+    fn executes_a_direct_ir_shell_command() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("marker");
+
+        let report = execute(
+            &plan(create_marker_command(&marker)),
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert!(marker.exists());
+        assert_eq!(report.commands, [create_marker_command(&marker)]);
+    }
+
+    #[test]
+    fn executes_commands_in_declaration_order() {
+        let directory = tempdir().unwrap();
+        let log = directory.path().join("order");
+        let first = append_command("first", &log);
+        let second = append_command("second", &log);
+        let mut plan = plan(first.clone());
+        plan.tasks[0].task.commands.push(TaskCommand {
+            template: CommandTemplate {
+                parts: vec![TemplatePart::Literal(second.clone())],
+            },
+        });
+
+        let report = execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "firstsecond");
+        assert_eq!(report.commands, [first, second]);
+    }
+
+    #[test]
+    fn reports_a_command_failure_with_its_context_and_status() {
+        let directory = tempdir().unwrap();
+
+        let error = execute(
+            &plan(FAILURE_COMMAND.to_owned()),
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::CommandFailed {
+                task,
+                command,
+                status,
+            } if task == "Build" && command == FAILURE_COMMAND && status.code() == Some(7)
+        ));
+    }
+
+    #[test]
+    fn suppresses_dependents_after_a_command_failure() {
+        let directory = tempdir().unwrap();
+        let marker = directory.path().join("dependent");
+        let mut plan = plan(FAILURE_COMMAND.to_owned());
+        let mut dependent = plan.tasks[0].clone();
+        dependent.task.name = "Deploy".to_owned();
+        dependent.task.commands[0].template.parts =
+            vec![TemplatePart::Literal(create_marker_command(&marker))];
+        plan.tasks.push(dependent);
+
+        let result = execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn inherits_parent_environment_and_applies_task_overrides() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("environment");
+        std::env::set_var("SPAR_RUNNER_INHERITED", "from-parent");
+        std::env::set_var("SPAR_RUNNER_OVERRIDE", "from-parent");
+        let mut plan = plan(write_environment_command(&output));
+        plan.tasks[0]
+            .task
+            .environment
+            .insert("SPAR_RUNNER_OVERRIDE".to_owned(), "from-task".to_owned());
+
+        execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "from-parent|from-task"
+        );
+        std::env::remove_var("SPAR_RUNNER_INHERITED");
+        std::env::remove_var("SPAR_RUNNER_OVERRIDE");
+    }
+
+    #[test]
+    fn resolves_relative_task_cwd_against_base_dir() {
+        let directory = tempdir().unwrap();
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let output = directory.path().join("cwd");
+        let mut plan = plan(write_working_directory_command(&output));
+        plan.tasks[0].task.cwd = Some("nested".into());
+
+        execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap().trim(),
+            nested.display().to_string()
+        );
+    }
+
+    #[test]
+    fn dry_run_spawns_nothing_and_reports_commands_in_plan_order() {
+        let directory = tempdir().unwrap();
+        let dependency_marker = directory.path().join("dependency");
+        let requested_marker = directory.path().join("requested");
+        let dependency_command = create_marker_command(&dependency_marker);
+        let requested_command = create_marker_command(&requested_marker);
+        let mut plan = plan(dependency_command.clone());
+        let mut requested = plan.tasks[0].clone();
+        requested.task.name = "Deploy".to_owned();
+        requested.task.commands[0].template.parts =
+            vec![TemplatePart::Literal(requested_command.clone())];
+        plan.tasks.push(requested);
+
+        let report = execute(
+            &plan,
+            &ExecutionOptions {
+                dry_run: true,
+                base_dir: directory.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert!(!dependency_marker.exists());
+        assert!(!requested_marker.exists());
+        assert_eq!(report.commands, [dependency_command, requested_command]);
+    }
+
+    #[test]
+    fn quiet_hides_command_echo_without_suppressing_child_output() {
+        let directory = tempdir().unwrap();
+        let normal_marker = directory.path().join("normal");
+        let quiet_marker = directory.path().join("quiet");
+        let normal_command = noisy_marker_command(&normal_marker);
+        let quiet_command = noisy_marker_command(&quiet_marker);
+        let mut plan = plan(normal_command.clone());
+        let mut quiet = plan.tasks[0].clone();
+        quiet.task.name = "Quiet".to_owned();
+        quiet.task.quiet = true;
+        quiet.task.commands[0].template.parts = vec![TemplatePart::Literal(quiet_command.clone())];
+        plan.tasks.push(quiet);
+        let mut echo = Vec::new();
+
+        let report = super::execute_with_echo(
+            &plan,
+            &ExecutionOptions {
+                dry_run: false,
+                base_dir: directory.path().to_owned(),
+            },
+            &mut echo,
+        )
+        .unwrap();
+
+        assert!(normal_marker.exists());
+        assert!(quiet_marker.exists());
+        assert_eq!(
+            String::from_utf8(echo).unwrap(),
+            format!("{normal_command}\n")
+        );
+        assert_eq!(report.commands, [normal_command, quiet_command]);
+    }
+}

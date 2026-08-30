@@ -1,3 +1,4 @@
+use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
 use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
 
 fn main() {
@@ -6,6 +7,13 @@ fn main() {
         Cmd::Check(path) => cmd_check(&path),
         Cmd::Emit(path) => cmd_emit(&path),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
+        Cmd::Tasks(path) => cmd_tasks(&path),
+        Cmd::Run {
+            path,
+            task,
+            args,
+            dry_run,
+        } => cmd_run(&path, task, args, dry_run),
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -21,7 +29,17 @@ fn main() {
 enum Cmd {
     Check(String),
     Emit(String),
-    Fmt { path: String, check: bool },
+    Fmt {
+        path: String,
+        check: bool,
+    },
+    Tasks(String),
+    Run {
+        path: String,
+        task: Option<String>,
+        args: Vec<String>,
+        dry_run: bool,
+    },
     Help,
     Version,
     BadArgs(String),
@@ -48,6 +66,33 @@ fn parse_args(args: &[String]) -> Cmd {
             },
             _ => Cmd::BadArgs("`fmt` requires a file path (optionally preceded by --check)".into()),
         },
+        Some("tasks") => match args.get(2) {
+            Some(p) => Cmd::Tasks(p.clone()),
+            None => Cmd::BadArgs("`tasks` requires a file path".into()),
+        },
+        Some("run") => match args.get(2) {
+            Some(p) => {
+                let mut dry_run = false;
+                let mut rest: Vec<String> = Vec::new();
+                for arg in &args[3..] {
+                    if arg == "--dry-run" {
+                        dry_run = true;
+                    } else {
+                        rest.push(arg.clone());
+                    }
+                }
+                let mut rest = rest.into_iter();
+                let task = rest.next();
+                let args = rest.collect();
+                Cmd::Run {
+                    path: p.clone(),
+                    task,
+                    args,
+                    dry_run,
+                }
+            }
+            None => Cmd::BadArgs("`run` requires a file path".into()),
+        },
         Some("--help") | Some("-h") | None => Cmd::Help,
         Some("--version") | Some("-V") => Cmd::Version,
         Some(other) => Cmd::BadArgs(format!("unknown command `{other}`")),
@@ -66,6 +111,9 @@ COMMANDS:
     emit          <file.spar>           Evaluate and print the config as JSON to stdout
     fmt           <file.spar>           Format a .spar file in place
     fmt --check   <file.spar>           Exit non-zero if file is not already formatted
+    tasks         <file.spar>           List declared tasks and their descriptions
+    run           <file.spar> [task] [args...] [--dry-run]
+                                         Run a task (the default task if none is named)
 
 OPTIONS:
     -h, --help        Show this help
@@ -78,7 +126,11 @@ EXAMPLES:
     spar check server.spar
     spar emit  server.spar > config.json
     spar fmt   server.spar
-    spar fmt --check server.spar",
+    spar fmt --check server.spar
+    spar tasks server.spar
+    spar run   server.spar
+    spar run   server.spar deploy production
+    spar run   server.spar test --dry-run",
         ver = env!("CARGO_PKG_VERSION")
     );
 }
@@ -168,6 +220,100 @@ fn cmd_fmt(path: &str, check: bool) {
                 std::process::exit(1);
             });
         }
+    }
+}
+
+// ── `tasks` command ───────────────────────────────────────────────────────────
+
+fn cmd_tasks(path: &str) {
+    let src = read_file(path);
+    let renderer = make_renderer(&src, path);
+    let compilation = Compiler::new(CompileOptions::for_path(path)).compile(&src);
+    if !compilation.errors.is_empty() {
+        eprintln!("{}", renderer.render_all(&compilation.errors));
+        std::process::exit(1);
+    }
+    print_task_list(compilation.tasks.as_ref());
+}
+
+fn print_task_list(tasks: Option<&TaskSet>) {
+    println!("Available tasks:\n");
+    let Some(tasks) = tasks else {
+        println!("  (none)");
+        return;
+    };
+    let rows: Vec<(String, String)> = tasks
+        .iter()
+        .map(|t| {
+            (
+                t.name.to_lowercase(),
+                t.description.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    if rows.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    for (name, description) in rows {
+        if description.is_empty() {
+            println!("  {name}");
+        } else {
+            println!("  {name:width$}   {description}");
+        }
+    }
+}
+
+// ── `run` command ─────────────────────────────────────────────────────────────
+
+fn cmd_run(path: &str, task: Option<String>, args: Vec<String>, dry_run: bool) {
+    let src = read_file(path);
+    let renderer = make_renderer(&src, path);
+    let options = CompileOptions::for_path(path);
+    let base_dir = options.base_dir.clone();
+    let compilation = Compiler::new(options).compile(&src);
+    if !compilation.errors.is_empty() {
+        eprintln!("{}", renderer.render_all(&compilation.errors));
+        std::process::exit(1);
+    }
+
+    let Some(tasks) = compilation.tasks.as_ref() else {
+        eprintln!("error: {path} declares no tasks");
+        std::process::exit(1);
+    };
+
+    let requested = match &task {
+        Some(name) => tasks.get(name),
+        None => tasks.default_task(),
+    };
+    let requested_name = match requested {
+        Ok(t) => t.name.clone(),
+        Err(e) => {
+            eprintln!("error: {e}");
+            if matches!(e, RunnerError::MissingDefaultTask) {
+                print_task_list(Some(tasks));
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let invocation = TaskInvocation {
+        task: requested_name,
+        arguments: args,
+    };
+    let plan = match tasks.plan(&invocation) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let exec_options = ExecutionOptions { dry_run, base_dir };
+    if let Err(e) = spar::runner::execute(&plan, &exec_options) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }
 

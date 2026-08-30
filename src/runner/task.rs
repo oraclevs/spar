@@ -117,6 +117,11 @@ impl TaskSet {
     pub(super) fn source_task(&self, name: &str) -> Option<&Task> {
         self.tasks.get(name)
     }
+
+    /// Every declared task, ordered by its declared (PascalCase) name.
+    pub fn iter(&self) -> impl Iterator<Item = &Task> {
+        self.tasks.values()
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +206,13 @@ mod tests {
         let tasks = TaskSet::new(vec![task("Build")]).unwrap();
 
         assert_eq!(tasks.get("BUILD").unwrap().name, "Build");
+    }
+
+    #[test]
+    fn iter_yields_every_task_in_name_order() {
+        let tasks = TaskSet::new(vec![task("Test"), task("Build"), task("Deploy")]).unwrap();
+
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Build", "Deploy", "Test"]);
     }
 }

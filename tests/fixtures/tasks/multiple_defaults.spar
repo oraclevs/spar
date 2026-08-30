@@ -1,0 +1,15 @@
+task [Build] {
+    default: true;
+
+    run {
+        echo "build";
+    };
+}
+
+task [Deploy] {
+    default: true;
+
+    run {
+        echo "deploy";
+    };
+}

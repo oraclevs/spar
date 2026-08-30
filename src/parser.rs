@@ -1606,13 +1606,13 @@ impl Parser {
             };
             match field_name.as_str() {
                 "run" => {
-                    let os_label = if let Token::Ident(label) = self.peek().clone() {
+                    let (os_label, os_span) = if let Token::Ident(label) = self.peek().clone() {
+                        let label_span = self.peek_span();
                         self.advance();
-                        Some(label)
+                        (Some(label), Some(label_span))
                     } else {
-                        None
+                        (None, None)
                     };
-                    let os_span = os_label.as_ref().map(|_| field_span.clone());
                     let run_start = field_span.clone();
                     let commands = self.parse_run_block()?;
                     if !seen_run_labels.insert(os_label.clone()) {
@@ -2703,6 +2703,16 @@ function f(flag: bool) -> int {
         assert_eq!(task.run_blocks[0].os, None);
         assert_eq!(task.run_blocks[1].os.as_deref(), Some("windows"));
         assert_eq!(task.run_blocks[2].os.as_deref(), Some("linux"));
+        assert_eq!(task.run_blocks[0].os_span, None);
+        let windows_span = task.run_blocks[1]
+            .os_span
+            .as_ref()
+            .expect("labeled block must carry a span for its label");
+        let windows_text = &src[windows_span.start..windows_span.end];
+        assert_eq!(
+            windows_text, "windows",
+            "os_span must point at the label token itself, not the 'run' keyword"
+        );
     }
 
     #[test]

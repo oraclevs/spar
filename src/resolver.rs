@@ -1084,11 +1084,33 @@ impl Resolver {
         if let Some(expr) = &decl.quiet {
             self.resolve_expr(expr);
         }
+        if let Some(expr) = &decl.private {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.group {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.confirm {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.os {
+            self.resolve_expr(expr);
+        }
         if let Some(expr) = &decl.cwd {
+            self.resolve_expr(expr);
+        }
+        if let Some(expr) = &decl.shell {
             self.resolve_expr(expr);
         }
         for (_, value) in &decl.env {
             self.resolve_expr(value);
+        }
+
+        for param in &decl.params {
+            self.check_named_type_exists(&param.ty, &param.span);
+            if let Some(default) = &param.default {
+                self.resolve_expr(default);
+            }
         }
 
         let locals: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();

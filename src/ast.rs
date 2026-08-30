@@ -31,14 +31,30 @@ pub enum TopLevelItem {
 pub struct TaskDecl {
     pub name: String,
     pub name_span: Span,
-    pub params: Vec<Param>,
+    pub params: Vec<TaskParam>,
     pub description: Option<Expr>,
     pub default: Option<Expr>,
     pub quiet: Option<Expr>,
+    pub private: Option<Expr>,
+    pub group: Option<Expr>,
+    pub confirm: Option<Expr>,
+    pub os: Option<Expr>,
     pub depends_on: Vec<TaskRef>,
     pub env: Vec<(String, Expr)>,
     pub cwd: Option<Expr>,
+    pub shell: Option<Expr>,
     pub run: Vec<ShellCommand>,
+    pub span: Span,
+}
+
+/// A task parameter carries task-runner-specific call-site behaviour.
+/// Function parameters deliberately remain the simpler `Param` shape.
+#[derive(Debug, Clone)]
+pub struct TaskParam {
+    pub name: String,
+    pub ty: SparType,
+    pub default: Option<Expr>,
+    pub variadic: bool,
     pub span: Span,
 }
 

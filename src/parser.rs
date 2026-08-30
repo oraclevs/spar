@@ -123,6 +123,7 @@ impl Parser {
                         TopLevelItem::Enum(d) => d.span.clone(),
                         TopLevelItem::FunctionGroup(d) => d.span.clone(),
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
+                        TopLevelItem::Task(d) => d.span.clone(),
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
                     return Err(SparError::ParseError {
@@ -174,6 +175,7 @@ impl Parser {
             Token::Ident(s) if s == "functionGroup" => Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(false)?)),
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
+            Token::Ident(s) if s == "task" => Ok(TopLevelItem::Task(Box::new(self.parse_task_decl()?))),
             Token::Export => {
                 self.advance();
                 match self.peek() {
@@ -219,7 +221,7 @@ impl Parser {
                  it cannot appear mid-file"
             )),
             _ => Err(self.error(format!(
-                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'Schema', or '[' to start a declaration",
+                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'Schema', 'task', or '[' to start a declaration",
                 self.peek().human_name()
             ))),
         }
@@ -1461,6 +1463,276 @@ impl Parser {
             span,
         })
     }
+
+    fn parse_task_decl(&mut self) -> Result<TaskDecl, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume the 'task' ident
+        self.expect(&Token::LBracket)?;
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&Token::RBracket)?;
+
+        let params = if self.at(&Token::LParen) {
+            self.advance();
+            let mut params = Vec::new();
+            while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+                let param_span = self.peek_span();
+                let (param_name, _) = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+                let ty = self.parse_type()?;
+                params.push(Param {
+                    name: param_name,
+                    ty,
+                    span: param_span,
+                });
+                if self.at(&Token::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect(&Token::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+
+        self.expect(&Token::LBrace)?;
+
+        let mut description = None;
+        let mut default = None;
+        let mut quiet = None;
+        let mut depends_on = Vec::new();
+        let mut env = Vec::new();
+        let mut cwd = None;
+        let mut run = Vec::new();
+        let mut saw_run = false;
+
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            let (field_name, field_span) = self.expect_ident()?;
+            match field_name.as_str() {
+                "run" => {
+                    if saw_run {
+                        return Err(SparError::ParseError {
+                            message: "task 'run' block may only appear once".to_string(),
+                            span: field_span,
+                        });
+                    }
+                    run = self.parse_run_block()?;
+                    saw_run = true;
+                }
+                "description" => {
+                    self.expect(&Token::Colon)?;
+                    description = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "default" => {
+                    self.expect(&Token::Colon)?;
+                    default = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "quiet" => {
+                    self.expect(&Token::Colon)?;
+                    quiet = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "cwd" => {
+                    self.expect(&Token::Colon)?;
+                    cwd = Some(self.parse_expr()?);
+                    self.expect(&Token::Semicolon)?;
+                }
+                "dependsOn" => {
+                    self.expect(&Token::Colon)?;
+                    self.expect(&Token::LBracket)?;
+                    if !self.at(&Token::RBracket) {
+                        let (dep_name, dep_span) = self.expect_ident()?;
+                        depends_on.push(TaskRef {
+                            name: dep_name,
+                            span: dep_span,
+                        });
+                        while self.at(&Token::Comma) {
+                            self.advance();
+                            if self.at(&Token::RBracket) {
+                                break;
+                            }
+                            let (dep_name, dep_span) = self.expect_ident()?;
+                            depends_on.push(TaskRef {
+                                name: dep_name,
+                                span: dep_span,
+                            });
+                        }
+                    }
+                    self.expect(&Token::RBracket)?;
+                    self.expect(&Token::Semicolon)?;
+                }
+                "env" => {
+                    self.expect(&Token::Colon)?;
+                    self.expect(&Token::LBrace)?;
+                    while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                        let (key, _) = self.expect_ident()?;
+                        self.expect(&Token::Colon)?;
+                        let value = self.parse_expr()?;
+                        self.expect(&Token::Semicolon)?;
+                        env.push((key, value));
+                    }
+                    self.expect(&Token::RBrace)?;
+                    self.expect(&Token::Semicolon)?;
+                }
+                other => {
+                    return Err(SparError::ParseError {
+                        message: format!(
+                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'dependsOn', 'env', 'cwd', or 'run'"
+                        ),
+                        span: field_span,
+                    });
+                }
+            }
+        }
+        self.expect(&Token::RBrace)?;
+
+        if !saw_run {
+            return Err(SparError::ParseError {
+                message: format!("task '{name}' must declare a 'run' block"),
+                span,
+            });
+        }
+
+        Ok(TaskDecl {
+            name,
+            name_span,
+            params,
+            description,
+            default,
+            quiet,
+            depends_on,
+            env,
+            cwd,
+            run,
+            span,
+        })
+    }
+
+    /// Parses a task's `run { ... };` body. The lexer has already turned the
+    /// opening `{` into `RunStart` and will terminate the body with
+    /// `RunEnd`; between those, `ShellFragment` text and `${expr}`
+    /// interpolation islands (`InterpolStart`/`InterpolEnd`, same tokens
+    /// string interpolation uses) alternate. This function splits the
+    /// flattened part sequence into one `ShellCommand` per top-level `;`
+    /// (i.e. a `;` that isn't inside a single- or double-quoted shell
+    /// string) — mirroring how each line of a Just recipe is one shell
+    /// invocation, echoed and failure-checked independently.
+    fn parse_run_block(&mut self) -> Result<Vec<ShellCommand>, SparError> {
+        self.expect(&Token::RunStart)?;
+        let block_span = self.peek_span();
+
+        enum RawPart {
+            Text(String),
+            Expr(Expr),
+        }
+        let mut raw: Vec<RawPart> = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Token::ShellFragment(s) => {
+                    self.advance();
+                    raw.push(RawPart::Text(s));
+                }
+                Token::InterpolStart => {
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    self.expect(&Token::InterpolEnd)?;
+                    raw.push(RawPart::Expr(expr));
+                }
+                Token::RunEnd => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    return Err(self.error(format!(
+                        "unexpected {} inside run block",
+                        self.peek().human_name()
+                    )))
+                }
+            }
+        }
+        self.expect(&Token::Semicolon)?;
+
+        let mut commands: Vec<ShellCommand> = Vec::new();
+        let mut current: Vec<ShellTemplatePart> = Vec::new();
+        let mut literal = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+
+        for part in raw {
+            match part {
+                RawPart::Expr(e) => {
+                    if !literal.is_empty() {
+                        current.push(ShellTemplatePart::Literal(std::mem::take(&mut literal)));
+                    }
+                    current.push(ShellTemplatePart::Expr(e));
+                }
+                RawPart::Text(s) => {
+                    let mut chars = s.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '\\' => {
+                                literal.push(c);
+                                if let Some(next) = chars.next() {
+                                    literal.push(next);
+                                }
+                            }
+                            '\'' if !in_double => {
+                                in_single = !in_single;
+                                literal.push(c);
+                            }
+                            '"' if !in_single => {
+                                in_double = !in_double;
+                                literal.push(c);
+                            }
+                            ';' if !in_single && !in_double => {
+                                if !literal.is_empty() {
+                                    current.push(ShellTemplatePart::Literal(std::mem::take(
+                                        &mut literal,
+                                    )));
+                                }
+                                push_shell_command(&mut current, &mut commands, &block_span);
+                            }
+                            _ => literal.push(c),
+                        }
+                    }
+                }
+            }
+        }
+        if !literal.is_empty() {
+            current.push(ShellTemplatePart::Literal(literal));
+        }
+        push_shell_command(&mut current, &mut commands, &block_span);
+
+        if commands.is_empty() {
+            return Err(SparError::ParseError {
+                message: "task 'run' block must contain at least one command".to_string(),
+                span: block_span,
+            });
+        }
+        Ok(commands)
+    }
+}
+
+/// Trims leading/trailing whitespace-only literal parts and, if anything
+/// meaningful remains, appends one `ShellCommand` built from `parts` (which
+/// is left empty for the caller to reuse).
+fn push_shell_command(parts: &mut Vec<ShellTemplatePart>, commands: &mut Vec<ShellCommand>, span: &Span) {
+    if let Some(ShellTemplatePart::Literal(s)) = parts.first_mut() {
+        *s = s.trim_start().to_string();
+    }
+    if let Some(ShellTemplatePart::Literal(s)) = parts.last_mut() {
+        *s = s.trim_end().to_string();
+    }
+    parts.retain(|p| !matches!(p, ShellTemplatePart::Literal(s) if s.is_empty()));
+    if !parts.is_empty() {
+        commands.push(ShellCommand {
+            parts: std::mem::take(parts),
+            span: span.clone(),
+        });
+    } else {
+        parts.clear();
+    }
 }
 
 #[cfg(test)]
@@ -1913,5 +2185,171 @@ function f(flag: bool) -> int {
             msg.contains("variable") || msg.contains("export var"),
             "error message must explain 'private var' is invalid, got: {msg}"
         );
+    }
+
+    fn task_decl(src: &str) -> TaskDecl {
+        match first_item(src) {
+            TopLevelItem::Task(t) => *t,
+            other => panic!("expected a task declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn minimal_task_parses() {
+        let task = task_decl(
+            r#"task [Build] {
+    run {
+        cargo build;
+    };
+}"#,
+        );
+        assert_eq!(task.name, "Build");
+        assert!(task.params.is_empty());
+        assert!(task.depends_on.is_empty());
+        assert_eq!(task.run.len(), 1);
+        assert!(matches!(
+            &task.run[0].parts[..],
+            [ShellTemplatePart::Literal(s)] if s.trim() == "cargo build"
+        ));
+    }
+
+    #[test]
+    fn task_dependencies_parse() {
+        let task = task_decl(
+            r#"task [Test] {
+    dependsOn: [Build, Lint];
+
+    run {
+        cargo test;
+    };
+}"#,
+        );
+        assert_eq!(
+            task.depends_on.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["Build", "Lint"]
+        );
+    }
+
+    #[test]
+    fn task_parameters_parse() {
+        let task = task_decl(
+            r#"task [Deploy](environment: str) {
+    run {
+        ./deploy.sh ${environment};
+    };
+}"#,
+        );
+        assert_eq!(task.params.len(), 1);
+        assert_eq!(task.params[0].name, "environment");
+        assert_eq!(task.params[0].ty, SparType::Str);
+        assert_eq!(task.run.len(), 1);
+        assert!(matches!(
+            &task.run[0].parts[..],
+            [ShellTemplatePart::Literal(_), ShellTemplatePart::Expr(_)]
+        ));
+    }
+
+    #[test]
+    fn task_env_parses() {
+        let task = task_decl(
+            r#"task [Server] {
+    env: {
+        RUST_LOG: "debug";
+        PORT: "8080";
+    };
+
+    run {
+        cargo run;
+    };
+}"#,
+        );
+        assert_eq!(task.env.len(), 2);
+        assert_eq!(task.env[0].0, "RUST_LOG");
+        assert_eq!(task.env[1].0, "PORT");
+    }
+
+    #[test]
+    fn task_cwd_parses() {
+        let task = task_decl(
+            r#"task [Web] {
+    cwd: "./web";
+
+    run {
+        npm run dev;
+    };
+}"#,
+        );
+        assert!(task.cwd.is_some());
+    }
+
+    #[test]
+    fn task_description_default_quiet_parse() {
+        let task = task_decl(
+            r#"task [Test] {
+    description: "Run the complete test suite";
+    default: true;
+    quiet: true;
+
+    run {
+        cargo test;
+    };
+}"#,
+        );
+        assert!(task.description.is_some());
+        assert!(matches!(
+            task.default,
+            Some(Expr::Literal(Literal::Bool(true)))
+        ));
+        assert!(matches!(
+            task.quiet,
+            Some(Expr::Literal(Literal::Bool(true)))
+        ));
+    }
+
+    #[test]
+    fn multiple_run_commands_split_in_declaration_order() {
+        let task = task_decl(
+            r#"task [Example] {
+    run {
+        echo "hello world";
+        cargo test --workspace;
+        npm run build;
+    };
+}"#,
+        );
+        assert_eq!(task.run.len(), 3);
+    }
+
+    #[test]
+    fn task_missing_run_block_is_a_parse_error() {
+        let msg = parse_err("task [Build] {\n}");
+        assert!(msg.contains("run"), "got: {msg}");
+    }
+
+    #[test]
+    fn task_unknown_field_is_a_parse_error() {
+        let msg = parse_err(
+            r#"task [Build] {
+    bogus: true;
+    run { echo hi; };
+}"#,
+        );
+        assert!(msg.contains("unknown task field"), "got: {msg}");
+    }
+
+    #[test]
+    fn task_missing_task_name_brackets_is_a_parse_error() {
+        assert!(parse_err("task Build { run { echo hi; }; }").contains("'['"));
+    }
+
+    #[test]
+    fn task_duplicate_run_block_is_a_parse_error() {
+        let msg = parse_err(
+            r#"task [Build] {
+    run { echo one; };
+    run { echo two; };
+}"#,
+        );
+        assert!(msg.contains("only appear once"), "got: {msg}");
     }
 }

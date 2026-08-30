@@ -115,6 +115,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Enum(d) => d.span.line,
         TopLevelItem::FunctionGroup(d) => d.span.line,
         TopLevelItem::SchemaFrom(d) => d.span.line,
+        TopLevelItem::Task(d) => d.span.line,
     }
 }
 
@@ -319,7 +320,102 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str(&sf.source_type);
             out.push_str("];\n");
         }
+
+        TopLevelItem::Task(td) => format_task_decl(td, config, out),
     }
+}
+
+fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
+    out.push_str("task [");
+    out.push_str(&td.name);
+    out.push(']');
+    if !td.params.is_empty() {
+        out.push('(');
+        for (i, p) in td.params.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&p.name);
+            out.push_str(": ");
+            out.push_str(&format_type(&p.ty));
+        }
+        out.push(')');
+    }
+    out.push_str(" {\n");
+
+    let body_indent = indent(1, config);
+
+    if let Some(desc) = &td.description {
+        out.push_str(&body_indent);
+        out.push_str("description: ");
+        format_expr(desc, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(default) = &td.default {
+        out.push_str(&body_indent);
+        out.push_str("default: ");
+        format_expr(default, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if let Some(quiet) = &td.quiet {
+        out.push_str(&body_indent);
+        out.push_str("quiet: ");
+        format_expr(quiet, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if !td.depends_on.is_empty() {
+        out.push_str(&body_indent);
+        out.push_str("dependsOn: [");
+        for (i, dep) in td.depends_on.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&dep.name);
+        }
+        out.push_str("];\n");
+    }
+    if let Some(cwd) = &td.cwd {
+        out.push_str(&body_indent);
+        out.push_str("cwd: ");
+        format_expr(cwd, 0, 1, config, out);
+        out.push_str(";\n");
+    }
+    if !td.env.is_empty() {
+        out.push_str(&body_indent);
+        out.push_str("env: {\n");
+        let env_indent = indent(2, config);
+        for (key, value) in &td.env {
+            out.push_str(&env_indent);
+            out.push_str(key);
+            out.push_str(": ");
+            format_expr(value, 0, 2, config, out);
+            out.push_str(";\n");
+        }
+        out.push_str(&body_indent);
+        out.push_str("};\n");
+    }
+
+    out.push_str(&body_indent);
+    out.push_str("run {\n");
+    let run_indent = indent(2, config);
+    for cmd in &td.run {
+        out.push_str(&run_indent);
+        for part in &cmd.parts {
+            match part {
+                ShellTemplatePart::Literal(s) => out.push_str(s),
+                ShellTemplatePart::Expr(e) => {
+                    out.push_str("${");
+                    format_expr(e, 0, 2, config, out);
+                    out.push('}');
+                }
+            }
+        }
+        out.push_str(";\n");
+    }
+    out.push_str(&body_indent);
+    out.push_str("};\n");
+
+    out.push_str("}\n");
 }
 
 fn format_import_items(items: &[ImportItem], out: &mut String) {
@@ -1646,5 +1742,45 @@ function pick(flag: bool) -> int {
     fn format_dot_chain_after_index() {
         let src = "var x: str = people[0].name;\n";
         assert_eq!(fmt(src).trim(), "var x: str = people[0].name;");
+    }
+
+    #[test]
+    fn minimal_task_round_trips_and_is_idempotent() {
+        let src = "task [Build] {\n    run {\n        cargo build;\n    };\n}\n";
+        let formatted = fmt(src);
+        assert_eq!(formatted, src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn task_with_all_fields_round_trips_and_is_idempotent() {
+        let src = concat!(
+            "task [Deploy](environment: str) {\n",
+            "    description: \"Deploy the app\";\n",
+            "    default: true;\n",
+            "    quiet: true;\n",
+            "    dependsOn: [Build, Test];\n",
+            "    cwd: \"./web\";\n",
+            "    env: {\n",
+            "        RUST_LOG: \"debug\";\n",
+            "    };\n",
+            "    run {\n",
+            "        echo \"hi\";\n",
+            "        ./deploy.sh ${environment};\n",
+            "    };\n",
+            "}\n",
+        );
+        let formatted = fmt(src);
+        assert_eq!(formatted, src);
+        let reformatted = fmt(&formatted);
+        assert_eq!(formatted, reformatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn task_shell_body_content_stays_stable_through_formatting() {
+        let src = "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n}\n";
+        let formatted = fmt(src);
+        assert!(formatted.contains("cargo build --workspace --release;"));
     }
 }

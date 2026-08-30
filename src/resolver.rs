@@ -368,6 +368,7 @@ impl Resolver {
                 TopLevelItem::Enum(decl) => self.register_enum(decl),
                 TopLevelItem::FunctionGroup(decl) => self.register_function_group(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
+                TopLevelItem::Task(_) => {} // wired up in Task 6 (resolution/lowering)
             }
         }
     }
@@ -901,6 +902,7 @@ impl Resolver {
                     }
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
+                TopLevelItem::Task(_) => {} // wired up in Task 6 (resolution/lowering)
             }
         }
     }

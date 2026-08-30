@@ -141,6 +141,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
+                TopLevelItem::Task(_) => {} // wired up in Task 6 (resolution/lowering)
             }
         }
     }

@@ -1360,13 +1360,10 @@ impl Evaluator {
                     let imp_sym = crate::resolver::Resolver::new()
                         .resolve(&imp_prog, &[])
                         .unwrap_or_else(|_| self.symbols.clone());
-                    let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
-                    for arg in args {
-                        let val = self.eval_expr(&arg.value, caller_scope)?;
-                        local_scope.insert(arg.param_name.clone(), val);
-                    }
+                    let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.call_depth = self.call_depth;
+                    sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub
                         .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                         .unwrap_or(ConfigValue::Int(0));
@@ -1395,11 +1392,8 @@ impl Evaluator {
                 None
             });
             if let Some(fd) = group_call {
-                let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
-                for arg in args {
-                    let val = self.eval_expr(&arg.value, caller_scope)?;
-                    local_scope.insert(arg.param_name.clone(), val);
-                }
+                let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+                self.eval_default_args(&fd, &mut local_scope)?;
                 let result = self
                     .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                     .unwrap_or(ConfigValue::Int(0));
@@ -1421,13 +1415,10 @@ impl Evaluator {
                     let imp_sym = crate::resolver::Resolver::new()
                         .resolve(&imp_prog, &[])
                         .unwrap_or_else(|_| self.symbols.clone());
-                    let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
-                    for arg in args {
-                        let val = self.eval_expr(&arg.value, caller_scope)?;
-                        local_scope.insert(arg.param_name.clone(), val);
-                    }
+                    let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     let mut sub = Evaluator::new(imp_sym, imp_prog);
                     sub.call_depth = self.call_depth;
+                    sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub
                         .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
                         .unwrap_or(ConfigValue::Int(0));
@@ -1457,11 +1448,8 @@ impl Evaluator {
             })
             .unwrap(); // resolver ensures function exists
 
-        let mut local_scope: HashMap<String, ConfigValue> = HashMap::new();
-        for arg in args {
-            let val = self.eval_expr(&arg.value, caller_scope)?;
-            local_scope.insert(arg.param_name.clone(), val);
-        }
+        let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+        self.eval_default_args(&func_decl, &mut local_scope)?;
 
         let result = self
             .eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
@@ -1469,6 +1457,36 @@ impl Evaluator {
 
         self.call_depth -= 1;
         Ok(result)
+    }
+
+    fn eval_explicit_args(
+        &mut self,
+        args: &[CallArg],
+        caller_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<HashMap<String, ConfigValue>, EvalErr> {
+        let mut local_scope = HashMap::new();
+        for arg in args {
+            let value = self.eval_expr(&arg.value, caller_scope)?;
+            local_scope.insert(arg.param_name.clone(), value);
+        }
+        Ok(local_scope)
+    }
+
+    fn eval_default_args(
+        &mut self,
+        function: &FunctionDecl,
+        local_scope: &mut HashMap<String, ConfigValue>,
+    ) -> Result<(), EvalErr> {
+        for param in &function.params {
+            if local_scope.contains_key(&param.name) {
+                continue;
+            }
+            if let Some(default) = &param.default {
+                let value = self.eval_expr(default, &HashMap::new())?;
+                local_scope.insert(param.name.clone(), value);
+            }
+        }
+        Ok(())
     }
 
     fn eval_func_stmts(

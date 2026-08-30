@@ -233,6 +233,10 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str(&p.name);
                 out.push_str(": ");
                 out.push_str(&format_type(&p.ty));
+                if let Some(default) = &p.default {
+                    out.push_str(" = ");
+                    format_expr(default, 0, 0, config, out);
+                }
             }
             out.push_str(") -> ");
             out.push_str(&format_type(&fd.ret));
@@ -308,6 +312,10 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                     out.push_str(&p.name);
                     out.push_str(": ");
                     out.push_str(&format_type(&p.ty));
+                    if let Some(default) = &p.default {
+                        out.push_str(" = ");
+                        format_expr(default, 0, 0, config, out);
+                    }
                 }
                 out.push_str(") -> ");
                 out.push_str(&format_type(&f.ret));
@@ -1358,6 +1366,17 @@ mod tests {
         assert!(out.contains("    return x;"));
         assert!(out.contains("};"));
         assert_eq!(fmt(&out), out);
+    }
+
+    #[test]
+    fn function_parameter_default_round_trips() {
+        let src = r#"function greet(name: str = "world") -> str { return name; };"#;
+        let formatted = fmt(src);
+        assert!(
+            formatted.contains(r#"function greet(name: str = "world") -> str {"#),
+            "{formatted}"
+        );
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]

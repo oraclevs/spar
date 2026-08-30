@@ -286,7 +286,7 @@ function clamp(value: int, lo: int, hi: int) -> int {
     if value < lo { return lo; }
     if value > hi { return hi; }
     return value;
-}
+};
 
 var workers: int = clamp(value: 32, lo: 1, hi: 16);
 
@@ -306,7 +306,7 @@ function service(name: str, port: int) -> section {
         port:    int = port;
         restart: str = "unless-stopped";
     };
-}
+};
 
 [Frontend] {
     ...service(name: "web", port: 3000);
@@ -515,7 +515,7 @@ task [Test] {
     run {
         echo "testing ${appName}";
     };
-}
+};
 
 task [Deploy](environment: str) {
     dependsOn: [Test];
@@ -523,7 +523,7 @@ task [Deploy](environment: str) {
     run {
         ./deploy.sh ${environment};
     };
-}
+};
 ```
 
 ```bash

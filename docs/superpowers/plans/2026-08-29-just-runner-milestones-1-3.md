@@ -171,7 +171,7 @@ task [Hello] {
     run {
         echo hello;
     };
-}
+};
 ```
 
 Assert one task named `Hello`, one command, and one literal part `echo hello`. Add malformed cases for missing `run`, missing command semicolon, and empty task name.
@@ -233,14 +233,14 @@ git commit -m "feat: parse Spar task run blocks"
 Add an end-to-end test that parses and runs:
 
 ```spar
-task [Hello] { run { echo hello > hello.txt; }; }
+task [Hello] { run { echo hello > hello.txt; }; };
 ```
 
 Assert `hello.txt == "hello\n"`. Add an interpolation test:
 
 ```spar
 var greeting: str = "hello";
-task [Hello] { run { echo ${greeting} > hello.txt; }; }
+task [Hello] { run { echo ${greeting} > hello.txt; }; };
 ```
 
 Assert the same result. Add unknown-task and non-scalar interpolation error tests.

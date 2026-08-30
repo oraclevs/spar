@@ -129,7 +129,7 @@
       os: ["linux", "macos"];
       shell: ["bash", "-euo", "pipefail", "-c"];
       run { ./deploy.sh; };
-  }
+  };
   ```
 
   Add type tests rejecting `private: "yes"`, `group: 1`, empty/wrong-element `os`, and empty/non-string `shell`.

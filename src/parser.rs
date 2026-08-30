@@ -142,7 +142,7 @@ impl Parser {
                 if let TopLevelItem::SchemaSection(s) = item {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "`Schema [{}]{{...}}` declares a schema, but this file is not a schema file — \
+                            "`Schema [{}]{{...}};` declares a schema, but this file is not a schema file — \
                              add `@SchemaFile` at the top of this file if it is intended to declare schema shapes",
                             s.name
                         ),
@@ -173,7 +173,9 @@ impl Parser {
             Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
             Token::LBracket   => self.parse_section(false, false),
-            Token::KwFunction => Ok(TopLevelItem::Function(self.parse_function_decl(false)?)),
+            Token::KwFunction => Ok(TopLevelItem::Function(
+                self.parse_top_level_function_decl(false)?,
+            )),
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
             Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
             Token::Ident(s) if s == "functionGroup" => Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(false)?)),
@@ -207,7 +209,9 @@ impl Parser {
                         Ok(item)
                     }
                     Token::KwFunction => {
-                        Ok(TopLevelItem::Function(self.parse_function_decl(true)?))
+                        Ok(TopLevelItem::Function(
+                            self.parse_top_level_function_decl(true)?,
+                        ))
                     }
                     Token::Ident(s) if s == "functionGroup" => {
                         Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(true)?))
@@ -603,7 +607,7 @@ impl Parser {
             fields.push(self.parse_schema_field()?);
         }
         self.expect(&Token::RBrace)?;
-        // Schema sections do NOT have a trailing semicolon
+        self.expect(&Token::Semicolon)?;
         Ok(SchemaSectionDecl {
             name,
             marker: SchemaMarker { optional },
@@ -722,8 +726,7 @@ impl Parser {
             fields.push(self.parse_type_field()?);
         }
         self.expect(&Token::RBrace)?;
-        // Type declarations do NOT have a trailing semicolon (same as
-        // function and schema-section declarations).
+        self.expect(&Token::Semicolon)?;
         Ok(TypeDecl {
             name,
             name_span,
@@ -1331,6 +1334,15 @@ impl Parser {
         })
     }
 
+    fn parse_top_level_function_decl(
+        &mut self,
+        is_private: bool,
+    ) -> Result<FunctionDecl, SparError> {
+        let decl = self.parse_function_decl(is_private)?;
+        self.expect(&Token::Semicolon)?;
+        Ok(decl)
+    }
+
     fn parse_function_group_decl(
         &mut self,
         is_private: bool,
@@ -1349,6 +1361,7 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
         Ok(FunctionGroupDecl {
             is_private,
             name,
@@ -1655,6 +1668,7 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
 
         if !saw_run {
             return Err(SparError::ParseError {
@@ -2146,6 +2160,33 @@ mod tests {
     }
 
     #[test]
+    fn top_level_type_requires_trailing_semicolon() {
+        assert!(parse_err("type [User]{ name: str; }").contains("expected ';'"));
+        parse_str("type [User]{ name: str; };");
+    }
+
+    #[test]
+    fn top_level_schema_requires_trailing_semicolon() {
+        let missing = "@SchemaFile\nSchema [Server]{ port: int; }";
+        assert!(parse_err(missing).contains("expected ';'"));
+        parse_str("@SchemaFile\nSchema [Server]{ port: int; };");
+    }
+
+    #[test]
+    fn top_level_function_requires_trailing_semicolon() {
+        let missing = "function answer() -> int { return 42; }";
+        assert!(parse_err(missing).contains("expected ';'"));
+        parse_str("function answer() -> int { return 42; };");
+    }
+
+    #[test]
+    fn top_level_function_group_requires_trailing_semicolon() {
+        let body = "functionGroup Math { function answer() -> int { return 42; } }";
+        assert!(parse_err(body).contains("expected ';'"));
+        parse_str(&format!("{body};"));
+    }
+
+    #[test]
     fn test_full_program_multiple_decls() {
         let src = r#"
             import "base.spar";
@@ -2222,7 +2263,7 @@ mod tests {
 function f(score: int) -> str {
     if score >= 90 { return "A"; }
     return "C";
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
@@ -2233,7 +2274,7 @@ function f(score: int) -> str {
         let src = r#"
 function f(debug: bool) -> int {
     if debug { return 1; } else { return 2; }
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
@@ -2247,7 +2288,7 @@ function f(debug: bool) -> section {
         return { mode: str = str(true); };
     }
     return { mode: str = str(false); };
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
@@ -2260,7 +2301,7 @@ function f(a: int) -> int {
     var x: int = a;
     var y: int = x;
     return y;
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
@@ -2272,7 +2313,7 @@ function f(a: int) -> int {
 function f(flag: bool) -> int {
     if flag { var x: int = 1; }
     return 0;
-}
+};
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
@@ -2306,7 +2347,7 @@ function f(flag: bool) -> int {
     run {
         cargo build;
     };
-}"#,
+};"#,
         );
         assert_eq!(task.name, "Build");
         assert!(task.params.is_empty());
@@ -2320,6 +2361,13 @@ function f(flag: bool) -> int {
     }
 
     #[test]
+    fn top_level_task_requires_trailing_semicolon() {
+        let missing = "task [Build] { run { true; }; }";
+        assert!(parse_err(missing).contains("expected ';'"));
+        parse_str("task [Build] { run { true; }; };");
+    }
+
+    #[test]
     fn task_dependencies_parse() {
         let task = task_decl(
             r#"task [Test] {
@@ -2328,7 +2376,7 @@ function f(flag: bool) -> int {
     run {
         cargo test;
     };
-}"#,
+};"#,
         );
         assert_eq!(
             task.depends_on
@@ -2346,7 +2394,7 @@ function f(flag: bool) -> int {
     run {
         ./deploy.sh ${environment};
     };
-}"#,
+};"#,
         );
         assert_eq!(task.params.len(), 1);
         assert_eq!(task.params[0].name, "environment");
@@ -2363,7 +2411,7 @@ function f(flag: bool) -> int {
         let task = task_decl(
             r#"task [Deploy](environment: str = "staging", *extra: str) {
     run { echo ${environment} ${extra}; };
-}"#,
+};"#,
         );
         assert_eq!(task.params.len(), 2);
         assert_eq!(task.params[0].name, "environment");
@@ -2386,7 +2434,7 @@ function f(flag: bool) -> int {
             "task [Deploy](*first: str, *second: str) { run { echo hi; }; }",
             "task [Deploy](*extra: str, environment: str) { run { echo hi; }; }",
             "task [Deploy](*extra: str = \"x\") { run { echo hi; }; }",
-            "task [Deploy](optional: str = \"x\", required: str) { run { echo hi; }; }",
+            "task [Deploy](optional: str = \"x\", required: str) { run { echo hi; }; };",
         ] {
             assert!(
                 Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
@@ -2408,7 +2456,7 @@ function f(flag: bool) -> int {
     run {
         cargo run;
     };
-}"#,
+};"#,
         );
         assert_eq!(task.env.len(), 2);
         assert_eq!(task.env[0].0, "RUST_LOG");
@@ -2425,7 +2473,7 @@ function f(flag: bool) -> int {
     os: ["linux", "macos"];
     shell: ["bash", "-euo", "pipefail", "-c"];
     run { ./deploy.sh; };
-}"#,
+};"#,
         );
         assert!(matches!(
             task.private,
@@ -2446,7 +2494,7 @@ function f(flag: bool) -> int {
     run {
         npm run dev;
     };
-}"#,
+};"#,
         );
         assert!(task.cwd.is_some());
     }
@@ -2462,7 +2510,7 @@ function f(flag: bool) -> int {
     run {
         cargo test;
     };
-}"#,
+};"#,
         );
         assert!(task.description.is_some());
         assert!(matches!(
@@ -2484,7 +2532,7 @@ function f(flag: bool) -> int {
         cargo test --workspace;
         npm run build;
     };
-}"#,
+};"#,
         );
         assert_eq!(task.run.len(), 3);
     }
@@ -2499,7 +2547,7 @@ function f(flag: bool) -> int {
         echo two
         if true; then echo three; fi
     };
-}"#,
+};"#,
         );
         assert_eq!(task.run.len(), 1);
         assert!(task.run[0].is_shebang);
@@ -2513,7 +2561,7 @@ function f(flag: bool) -> int {
     #[test]
     fn dotenv_load_pragma_must_be_first() {
         let program = Parser::new(
-            crate::lexer::Lexer::new("@DotenvLoad\ntask [Build] { run { echo build; }; }")
+            crate::lexer::Lexer::new("@DotenvLoad\ntask [Build] { run { echo build; }; };")
                 .tokenize()
                 .unwrap(),
         )
@@ -2523,7 +2571,7 @@ function f(flag: bool) -> int {
         assert!(!program.is_schema_file);
         assert!(Parser::new(
             crate::lexer::Lexer::new(
-                "var name: str = \"spar\";\n@DotenvLoad\ntask [Build] { run { echo build; }; }",
+                "var name: str = \"spar\";\n@DotenvLoad\ntask [Build] { run { echo build; }; };",
             )
             .tokenize()
             .unwrap(),
@@ -2534,7 +2582,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_missing_run_block_is_a_parse_error() {
-        let msg = parse_err("task [Build] {\n}");
+        let msg = parse_err("task [Build] {\n};");
         assert!(msg.contains("run"), "got: {msg}");
     }
 
@@ -2544,7 +2592,7 @@ function f(flag: bool) -> int {
             r#"task [Build] {
     bogus: true;
     run { echo hi; };
-}"#,
+};"#,
         );
         assert!(msg.contains("unknown task field"), "got: {msg}");
     }
@@ -2560,7 +2608,7 @@ function f(flag: bool) -> int {
             r#"task [Build] {
     run { echo one; };
     run { echo two; };
-}"#,
+};"#,
         );
         assert!(msg.contains("only appear once"), "got: {msg}");
     }

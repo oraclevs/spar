@@ -15,14 +15,14 @@ task [Hello] {
     run {
         echo "Running ${appName} on port ${port}";
     };
-}
+};
 
 task [Test] {
     description: "Run tests";
     run {
         echo "testing ${appName}";
     };
-}
+};
 
 task [Dev] {
     description: "Start development";
@@ -34,4 +34,4 @@ task [Dev] {
     run {
         echo "starting ${appName}";
     };
-}
+};

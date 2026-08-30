@@ -7,7 +7,7 @@ task [Build] {
     run {
         echo "build ${appName}";
     };
-}
+};
 
 task [Test] {
     description: "Run the test suite";
@@ -16,7 +16,7 @@ task [Test] {
     run {
         echo "test";
     };
-}
+};
 
 task [Deploy](environment: str) {
     description: "Deploy to an environment";
@@ -24,4 +24,4 @@ task [Deploy](environment: str) {
     run {
         echo "deploy ${environment}";
     };
-}
+};

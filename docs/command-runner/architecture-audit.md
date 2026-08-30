@@ -61,7 +61,7 @@ appear in emitted JSON.
 
 - The Spar lexer enters raw shell mode only for `run { ... }` in a `task`;
   `${expr}` returns temporarily to Spar expressions, `$NAME` remains shell
-  syntax, and `$${...}` lowers to literal `${...}`.
+  syntax, and `#{...}` lowers to literal `${...}`.
 - Graph validation is Spar-owned: validate all requested tasks and their
   dependencies before spawning, depth-first order dependencies first, report
   explicit cycles, and execute a shared dependency once per invocation.

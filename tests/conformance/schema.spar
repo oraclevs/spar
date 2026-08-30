@@ -3,4 +3,4 @@
 Schema [Server]{
     host: str;
     port?: int;
-}
+};

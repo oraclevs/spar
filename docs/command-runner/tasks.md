@@ -14,7 +14,7 @@ task [Build] {
     run {
         cargo build;
     };
-}
+};
 ```
 
 A task's name follows the same `[PascalCase]` convention as a section. `spar
@@ -26,18 +26,23 @@ quotes, pipes, redirects, and multiple commands separated by `;` are all
 preserved verbatim and handed to the platform shell one command at a time, in
 declaration order.
 
+`${expr}` interpolates a Spar value, while bare shell variables such as
+`$HOME` remain untouched. Write `#{...}` when the shell itself must receive a
+literal `${...}` parameter expansion; for example, `#{HOME:-/tmp}` is executed
+as `${HOME:-/tmp}`.
+
 ## Dependencies
 
 ```spar
 task [Build] {
     run { cargo build; };
-}
+};
 
 task [Test] {
     dependsOn: [Build];
 
     run { cargo test; };
-}
+};
 ```
 
 `spar run test` resolves `Test`'s dependencies before running `Test` itself.
@@ -61,7 +66,7 @@ task [Deploy](environment: str) {
     run {
         ./deploy.sh ${environment};
     };
-}
+};
 ```
 
 ```bash
@@ -83,7 +88,7 @@ task [Deploy](environment: str = "staging", *extra: str) {
     run {
         ./deploy.sh ${environment} ${extra};
     };
-}
+};
 ```
 
 - `name: type = <expr>` gives a parameter a default the caller may omit —
@@ -108,7 +113,7 @@ task [Server] {
     run {
         cargo run;
     };
-}
+};
 ```
 
 Declared environment variables overlay the process's inherited environment
@@ -146,7 +151,7 @@ task [Web] {
     run {
         npm run dev;
     };
-}
+};
 ```
 
 A relative `cwd` resolves against the directory containing the `.spar` file
@@ -162,7 +167,7 @@ task [Deploy] {
     os: ["linux", "macos"];
 
     run { ./deploy.sh; };
-}
+};
 ```
 
 - `private: bool` — hidden from `spar tasks` unless `--all` is passed;
@@ -187,7 +192,7 @@ task [Web] {
     shell: ["bash", "-euo", "pipefail", "-c"];
 
     run { npm run dev; };
-}
+};
 ```
 
 Overrides the default shell (`sh -cu` on Unix, `cmd /S /C` on Windows) used
@@ -203,7 +208,7 @@ task [Script] {
         set -euo pipefail
         echo "one interpreter, one script"
     };
-}
+};
 ```
 
 If a `run { ... }` block's first line starts with `#!`, the whole block is
@@ -223,7 +228,7 @@ task [Test] {
     run {
         cargo test;
     };
-}
+};
 ```
 
 Exactly one task may set `default: true;`. `spar run` with no task name

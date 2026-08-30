@@ -64,7 +64,7 @@ task [Deploy] {
     os: ["linux", "macos"];
 
     run { ./deploy.sh; };
-}
+};
 ```
 
 - `private: bool` (default `false`) — hidden from `spar tasks` unless
@@ -87,7 +87,7 @@ task [Deploy] {
 ```spar
 task [Deploy](environment: str = "staging", *extra: str) {
     run { ./deploy.sh ${environment} ${extra}; };
-}
+};
 ```
 
 - Default value: `name: type = <expr>`. The expr is pre-evaluated the same
@@ -168,7 +168,7 @@ task [Web] {
     shell: ["bash", "-euo", "pipefail", "-c"];
 
     run { npm run dev; };
-}
+};
 ```
 
 Overrides the fixed default (`sh -cu` unix / `cmd /S /C` windows) for that

@@ -117,7 +117,7 @@
 - Produces: `TopLevelItem::Task(TaskDecl)` with metadata expressions, typed `Param`s, dependencies, and `ShellTemplatePart::{Literal, Expr}`.
 - Raw shell text must retain quotes, redirects, pipes, line breaks, semicolons, and braces.
 
-- [ ] Write a lexer test for a raw `run` block containing quotes, `|`, `>`, loop braces, `${port}`, `$HOME`, and `$${HOME:-x}`; observe RED.
+- [ ] Write a lexer test for a raw `run` block containing quotes, `|`, `>`, loop braces, `${port}`, `$HOME`, and `#{HOME:-x}`; observe RED.
 - [ ] Implement task-scoped raw-run lexer state and interpolation tokenization without changing ordinary `run` identifiers.
 - [ ] Write parser RED tests for minimal task, dependencies, parameters, env, cwd, description/default/quiet, and malformed declarations.
 - [ ] Implement `parse_task_decl` and task-specific field parsing; do not parse shell fragments as statements.
@@ -146,7 +146,7 @@
 - [ ] Type-check metadata and interpolation through existing `SparType`; reject lists/sections as task parameters.
 - [ ] Write import RED tests for selective and `asPartOf` public task behavior, then extend loader match arms without importing Just module semantics.
 - [ ] Write the critical RED integration test where a normal Spar value and task argument both reach a command template.
-- [ ] Implement lowering: pre-evaluate ordinary Spar expressions, preserve neutral parameter slots, escape `$${` to literal `${`, and reject unsupported parameter-dependent compound expressions with a precise diagnostic if the existing evaluator cannot represent them safely.
+- [ ] Implement lowering: pre-evaluate ordinary Spar expressions, preserve neutral parameter slots, escape `#{` to literal `${`, and reject unsupported parameter-dependent compound expressions with a precise diagnostic if the existing evaluator cannot represent them safely.
 - [ ] Extend `Compilation` with lowered tasks only when normal compilation succeeds; do not add tasks to emitted JSON.
 - [ ] Run focused compiler tests and full `cargo test`.
 - [ ] Commit as `feat: lower Spar tasks into runner IR`.

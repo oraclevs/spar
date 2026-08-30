@@ -181,7 +181,9 @@ fn lower_one_task(
         let mut parts: Vec<TemplatePart> = Vec::new();
         for part in &command.parts {
             match part {
-                ShellTemplatePart::Literal(s) => parts.push(TemplatePart::Literal(s.clone())),
+                ShellTemplatePart::Literal(s) => {
+                    parts.push(TemplatePart::Literal(s.replace("#{", "${")))
+                }
                 ShellTemplatePart::Expr(expr) => match bare_param_ref(expr, &param_names) {
                     Some(name) => parts.push(TemplatePart::Parameter(name)),
                     None => {

@@ -16,7 +16,7 @@ fn parse_function_decl_str_return() {
     let src = r#"
         function greet(name: str) -> str {
             return name;
-        }
+        };
     "#;
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 1);
@@ -35,7 +35,7 @@ fn parse_function_decl_section_return() {
     let src = r#"
         function makeServer(host: str, port: int) -> section {
             return { host: str = host; port: int = port; };
-        }
+        };
     "#;
     let prog = parse_ok(src);
     match &prog.items[0] {
@@ -134,7 +134,7 @@ fn parse_bare_if_without_else_is_valid() {
         function f(x: int) -> int {
             if x > 0 { var r: int = x; }
             return x;
-        }
+        };
     "#;
     let prog = parse_ok(src);
     match &prog.items[0] {
@@ -157,7 +157,7 @@ fn parse_if_else() {
         function f(x: bool) -> str {
             if x { var r: str = "yes"; } else { var r: str = "no"; }
             return r;
-        }
+        };
     "#;
     let prog = parse_ok(src);
     match &prog.items[0] {
@@ -190,7 +190,7 @@ fn bool_type_in_return_section_parses() {
                 return { error: bool = true; message: str = "bad"; };
             }
             return { error: bool = false; };
-        }
+        };
     "#;
     assert!(
         parse_ok_result(src).is_ok(),
@@ -200,7 +200,7 @@ fn bool_type_in_return_section_parses() {
 
 #[test]
 fn bool_builtin_call_in_expression_position_still_works() {
-    let src = r#"function f(s: str) -> bool { return bool(s); }"#;
+    let src = r#"function f(s: str) -> bool { return bool(s); };"#;
     assert!(parse_ok_result(src).is_ok());
 }
 
@@ -211,7 +211,7 @@ fn int_float_str_bool_as_types_in_all_positions() {
         var b: float = 1.0;
         var c: str = "x";
         var d: bool = true;
-        function f(x: float, y: bool) -> str { return str(x); }
+        function f(x: float, y: bool) -> str { return str(x); };
         [S]{ n: int = 0; flag: bool = false; };
     "#;
     assert!(parse_ok_result(src).is_ok());
@@ -219,7 +219,7 @@ fn int_float_str_bool_as_types_in_all_positions() {
 
 #[test]
 fn private_function_parses() {
-    let src = r#"private function helper(x: int) -> int { return x; }"#;
+    let src = r#"private function helper(x: int) -> int { return x; };"#;
     assert!(parse_ok_result(src).is_ok());
 }
 
@@ -237,7 +237,7 @@ fn for_loop_statement_parses() {
                 if n > 0 { return n; }
             }
             return 0;
-        }
+        };
     "#;
     let prog = parse_ok_result(src).expect("for-loop must parse");
     let crate::ast::TopLevelItem::Function(f) = &prog.items[0] else {
@@ -256,7 +256,7 @@ fn nested_for_loops_parse() {
                 }
             }
             return 0;
-        }
+        };
     "#;
     assert!(parse_ok_result(src).is_ok());
 }
@@ -269,7 +269,7 @@ fn comprehension_expression_still_parses() {
 
 #[test]
 fn parses_schema_file_pragma() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert!(prog.is_schema_file, "is_schema_file must be true");
@@ -277,7 +277,7 @@ fn parses_schema_file_pragma() {
 
 #[test]
 fn parses_required_schema_section() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 1);
@@ -297,7 +297,7 @@ fn parses_required_schema_section() {
 
 #[test]
 fn parses_optional_schema_section() {
-    let src = "@SchemaFile\nSchema? [Y]{ b: str; }";
+    let src = "@SchemaFile\nSchema? [Y]{ b: str; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -310,7 +310,7 @@ fn parses_optional_schema_section() {
 
 #[test]
 fn parses_optional_schema_field() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; b?: str; }";
+    let src = "@SchemaFile\nSchema [X]{ a: int; b?: str; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -327,7 +327,7 @@ fn parses_nested_section_schema_field() {
     let src = r#"@SchemaFile
 Schema [X]{
     x: section = { host: str; port?: int; };
-}"#;
+};"#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -392,7 +392,7 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
     let src = r#"
         function f(a: int, b: int) -> bool {
             return a < b;
-        }
+        };
     "#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     assert!(crate::parser::Parser::new(tokens).parse().is_ok());
@@ -401,7 +401,7 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
 #[test]
 fn schema_section_without_pragma_is_parse_error() {
     // A Schema declaration outside a @SchemaFile is an error.
-    let src = "Schema [X]{ a: int; }";
+    let src = "Schema [X]{ a: int; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let result = crate::parser::Parser::new(tokens).parse();
     assert!(
@@ -415,14 +415,14 @@ fn parse_type_decl_with_named_and_nested_fields() {
     let src = r#"
         type [Border]{
             width?: int;
-        }
+        };
         export type [Decoration]{
             color?: str;
             border?: Border;
             boxShadow: section = {
                 blurRadius: int;
             };
-        }
+        };
     "#;
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 2);
@@ -456,7 +456,7 @@ fn parse_section_with_type_binding() {
     let src = r#"
         type [PostgresType]{
             image: str;
-        }
+        };
         [Postgres] -> PostgresType {
             image: str = "postgres:16";
         };
@@ -476,7 +476,7 @@ fn parse_schema_decl_still_requires_schema_file() {
     // Unchanged behavior: a Schema declaration outside @SchemaFile is
     // still rejected, by the SAME check that already exists — this just
     // confirms the keyword-prefix migration didn't disturb it.
-    let src = r#"Schema [X]{ a: int; }"#;
+    let src = r#"Schema [X]{ a: int; };"#;
     let err = parse_err(src);
     assert!(
         err.contains("not a schema file") || err.contains("@SchemaFile"),
@@ -634,7 +634,7 @@ fn parse_schema_file_allows_import_type() {
     let src = concat!(
         "@SchemaFile\n",
         "import type { PostgresType } from \"types.spar\";\n",
-        "Schema [Postgres]{ image: str; }\n",
+        "Schema [Postgres]{ image: str; };\n",
     );
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 2);
@@ -754,7 +754,7 @@ fn parse_var_decl_with_list_of_named_type() {
 
 #[test]
 fn parse_function_param_and_return_with_named_type() {
-    let src = "function f(l: Leaf) -> Leaf { return l; }";
+    let src = "function f(l: Leaf) -> Leaf { return l; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
     let crate::ast::TopLevelItem::Function(f) = &program.items[0] else {
@@ -907,7 +907,7 @@ fn parse_function_group_decl() {
     let src = r#"
         functionGroup EdgeInsect {
             function only() -> int { return 1; }
-        }
+        };
     "#;
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 1);
@@ -928,7 +928,7 @@ fn parse_private_function_group_with_private_inner_function() {
         private functionGroup EdgeInsect {
             function only() -> int { return 1; }
             private function semantic(hor: float, vet: float) -> int { return 2; }
-        }
+        };
     "#;
     let prog = parse_ok(src);
     match &prog.items[0] {
@@ -948,8 +948,8 @@ fn parse_function_group_rejects_nested_function_group() {
         functionGroup Outer {
             functionGroup Inner {
                 function f() -> int { return 1; }
-            }
-        }
+            };
+        };
     "#;
     parse_err(src);
 }

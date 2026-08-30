@@ -232,7 +232,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str(&format_type(&fd.ret));
             out.push_str(" {\n");
             format_func_stmts(&fd.body.stmts, 1, config, out);
-            out.push_str("}\n");
+            out.push_str("};\n");
         }
 
         TopLevelItem::SchemaSection(sd) => {
@@ -246,7 +246,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             for field in &sd.fields {
                 format_schema_field(field, 1, config, out);
             }
-            out.push_str("}\n");
+            out.push_str("};\n");
         }
 
         TopLevelItem::Type(td) => {
@@ -259,7 +259,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             for field in &td.fields {
                 format_type_field(field, 1, config, out);
             }
-            out.push_str("}\n");
+            out.push_str("};\n");
         }
 
         TopLevelItem::Enum(ed) => {
@@ -309,7 +309,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 format_func_stmts(&f.body.stmts, 2, config, out);
                 out.push_str("    }\n");
             }
-            out.push_str("}\n");
+            out.push_str("};\n");
         }
 
         TopLevelItem::SchemaFrom(sf) => {
@@ -459,7 +459,7 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
     out.push_str(&body_indent);
     out.push_str("};\n");
 
-    out.push_str("}\n");
+    out.push_str("};\n");
 }
 
 fn format_import_items(items: &[ImportItem], out: &mut String) {
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn format_function_group_decl_round_trips() {
-        let src = "private functionGroup EdgeInsect {\n    function only() -> int {\n        return 1;\n    }\n}\n";
+        let src = "private functionGroup EdgeInsect {\n    function only() -> int {\n        return 1;\n    }\n};\n";
         let formatted = fmt(src);
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
@@ -1345,23 +1345,24 @@ mod tests {
 
     #[test]
     fn function_decl_formatted() {
-        let src = "function f(x: int) -> int { return x; }";
+        let src = "function f(x: int) -> int { return x; };";
         let out = fmt(src);
         assert!(out.contains("function f(x: int) -> int {"));
         assert!(out.contains("    return x;"));
-        assert!(out.contains("}"));
+        assert!(out.contains("};"));
+        assert_eq!(fmt(&out), out);
     }
 
     #[test]
     fn private_function_has_private_prefix() {
-        let src = "private function f(x: int) -> int { return x; }";
+        let src = "private function f(x: int) -> int { return x; };";
         let out = fmt(src);
         assert!(out.trim_start().starts_with("private function f"));
     }
 
     #[test]
     fn function_if_else_formatted() {
-        let src = "function f(x: bool) -> int { if x { return 1; } else { return 0; } }";
+        let src = "function f(x: bool) -> int { if x { return 1; } else { return 0; } };";
         let out = fmt(src);
         assert!(out.contains("    if x {"));
         assert!(out.contains("        return 1;"));
@@ -1372,7 +1373,7 @@ mod tests {
 
     #[test]
     fn function_for_loop_formatted() {
-        let src = "function f(xs: [int]) -> int { for x in xs { return x; } return 0; }";
+        let src = "function f(xs: [int]) -> int { for x in xs { return x; } return 0; };";
         let out = fmt(src);
         assert!(out.contains("    for x in xs {"));
         assert!(out.contains("        return x;"));
@@ -1381,7 +1382,7 @@ mod tests {
 
     #[test]
     fn function_section_return_formatted() {
-        let src = "function f(x: int) -> section { return { v: int = x; }; }";
+        let src = "function f(x: int) -> section { return { v: int = x; }; };";
         let out = fmt(src);
         assert!(out.contains("    return {"));
         assert!(out.contains("        v: int = x;"));
@@ -1502,7 +1503,7 @@ function pick(flag: bool) -> int {
     } else {
         return 0;
     }
-}
+};
 "#;
         let once = format_source(src).unwrap();
         let twice = format_source(&once).unwrap();
@@ -1604,7 +1605,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_schema_file_with_pragma() {
-        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.starts_with("@SchemaFile\n"),
@@ -1616,6 +1617,7 @@ function pick(flag: bool) -> int {
             "must contain schema section header: {}",
             formatted
         );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]
@@ -1658,7 +1660,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_schema_file_optional_section() {
-        let src = "@SchemaFile\nSchema? [Y]{\n    b: str;\n}\n";
+        let src = "@SchemaFile\nSchema? [Y]{\n    b: str;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("Schema? [Y]{"),
@@ -1669,7 +1671,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_schema_field_required_and_optional() {
-        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n    b?: str;\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n    b?: str;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("    a: int;"),
@@ -1692,7 +1694,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_nested_section_schema_field() {
-        let src = "@SchemaFile\nSchema [X]{\n    x: section = { host: str; };\n}\n";
+        let src = "@SchemaFile\nSchema [X]{\n    x: section = { host: str; };\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("x: section = {"),
@@ -1708,7 +1710,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_type_decl_round_trip() {
-        let src = "type [Border]{\n    width?: int;\n}\n";
+        let src = "type [Border]{\n    width?: int;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("type [Border]{"),
@@ -1720,11 +1722,12 @@ function pick(flag: bool) -> int {
             "must contain the optional field: {}",
             formatted
         );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]
     fn formats_export_type_and_named_field_round_trip() {
-        let src = "type [Border]{\n    width?: int;\n}\nexport type [Decoration]{\n    border?: Border;\n}\n";
+        let src = "type [Border]{\n    width?: int;\n};\nexport type [Decoration]{\n    border?: Border;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("export type [Decoration]{"),
@@ -1740,7 +1743,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn formats_type_binding_on_section_round_trip() {
-        let src = "type [PostgresType]{\n    image: str;\n}\n[Postgres] -> PostgresType {\n    image: str = \"postgres:16\";\n};\n";
+        let src = "type [PostgresType]{\n    image: str;\n};\n[Postgres] -> PostgresType {\n    image: str = \"postgres:16\";\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("[Postgres] -> PostgresType {"),
@@ -1792,7 +1795,7 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn minimal_task_round_trips_and_is_idempotent() {
-        let src = "task [Build] {\n    run {\n        cargo build;\n    };\n}\n";
+        let src = "task [Build] {\n    run {\n        cargo build;\n    };\n};\n";
         let formatted = fmt(src);
         assert_eq!(formatted, src);
         let reformatted = fmt(&formatted);
@@ -1815,7 +1818,7 @@ function pick(flag: bool) -> int {
             "        echo \"hi\";\n",
             "        ./deploy.sh ${environment};\n",
             "    };\n",
-            "}\n",
+            "};\n",
         );
         let formatted = fmt(src);
         assert_eq!(formatted, src);
@@ -1843,7 +1846,7 @@ function pick(flag: bool) -> int {
             "    run {\n",
             "        ./deploy.sh ${environment} ${extra};\n",
             "    };\n",
-            "}\n",
+            "};\n",
         );
         let formatted = fmt(src);
         assert_eq!(formatted, src);
@@ -1853,9 +1856,29 @@ function pick(flag: bool) -> int {
     #[test]
     fn task_shell_body_content_stays_stable_through_formatting() {
         let src =
-            "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n}\n";
+            "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n};\n";
         let formatted = fmt(src);
         assert!(formatted.contains("cargo build --workspace --release;"));
+    }
+
+    #[test]
+    fn task_hash_escape_round_trips_and_reparses() {
+        let src = concat!(
+            "task [Build] {\n",
+            "    run {\n",
+            "        echo #{HOME:-x};\n",
+            "    };\n",
+            "};\n",
+        );
+        let formatted = fmt(src);
+        assert!(formatted.contains("#{HOME:-x}"), "got: {formatted}");
+        assert!(!formatted.contains("${HOME:-x}"), "got: {formatted}");
+
+        let tokens = Lexer::new(&formatted).tokenize().unwrap();
+        Parser::new(tokens)
+            .parse()
+            .expect("formatted hash escape must still parse");
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]
@@ -1867,7 +1890,7 @@ function pick(flag: bool) -> int {
             "        echo one\n",
             "        if true; then echo two; fi\n",
             "    };\n",
-            "}\n",
+            "};\n",
         );
         let formatted = fmt(src);
         assert_eq!(formatted, src);
@@ -1876,10 +1899,10 @@ function pick(flag: bool) -> int {
 
     #[test]
     fn dotenv_load_pragma_formats_first() {
-        let src = "@DotenvLoad\ntask [Build] { run { echo build; }; }\n";
+        let src = "@DotenvLoad\ntask [Build] { run { echo build; }; };\n";
         assert_eq!(
             fmt(src),
-            "@DotenvLoad\n\ntask [Build] {\n    run {\n        echo build;\n    };\n}\n"
+            "@DotenvLoad\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
         );
     }
 }

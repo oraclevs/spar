@@ -2797,7 +2797,7 @@ mod tests {
             r##"
             function greet(name: str) -> str {
                 return name;
-            }
+            };
             [Colors]{ red: str = "#ff0000"; };
             var msg: str = greet(name: Colors.red);
         "##,
@@ -2854,21 +2854,24 @@ mod tests {
     fn task_v2_metadata_types_are_checked() {
         for (src, field) in [
             (
-                r#"task [Deploy] { private: "yes"; run { echo deploy; }; }"#,
+                r#"task [Deploy] { private: "yes"; run { echo deploy; }; };"#,
                 "private",
             ),
-            ("task [Deploy] { group: 1; run { echo deploy; }; }", "group"),
-            ("task [Deploy] { os: []; run { echo deploy; }; }", "os"),
             (
-                "task [Deploy] { os: [\"linux\", 1]; run { echo deploy; }; }",
+                "task [Deploy] { group: 1; run { echo deploy; }; };",
+                "group",
+            ),
+            ("task [Deploy] { os: []; run { echo deploy; }; };", "os"),
+            (
+                "task [Deploy] { os: [\"linux\", 1]; run { echo deploy; }; };",
                 "os",
             ),
             (
-                "task [Deploy] { shell: []; run { echo deploy; }; }",
+                "task [Deploy] { shell: []; run { echo deploy; }; };",
                 "shell",
             ),
             (
-                "task [Deploy] { shell: [1]; run { echo deploy; }; }",
+                "task [Deploy] { shell: [1]; run { echo deploy; }; };",
                 "shell",
             ),
         ] {
@@ -3073,11 +3076,11 @@ mod tests {
     fn typecheck_function_body_call_arg_type_mismatch() {
         // Wrong arg type inside a function body must be caught
         let src = r#"
-            function double(x: int) -> int { return x; }
+            function double(x: int) -> int { return x; };
             function caller(s: str) -> int {
                 var result: int = double(x: s);
                 return result;
-            }
+            };
         "#;
         let errs = check_err(src);
         let errs_str = format!("{:?}", errs);
@@ -3098,7 +3101,7 @@ mod tests {
             r#"
             function f(x: int) -> int {
                 return x;
-            }
+            };
         "#,
         );
     }
@@ -3106,7 +3109,7 @@ mod tests {
     #[test]
     fn return_with_wrong_type_is_error() {
         assert!(has_type_error(
-            r#"function f(x: str) -> int { return x; }"#,
+            r#"function f(x: str) -> int { return x; };"#,
             "return",
         ));
     }
@@ -3117,7 +3120,7 @@ mod tests {
             r#"
             function pick(b: bool) -> int {
                 if b { return 1; } else { return 2; }
-            }
+            };
         "#,
         );
     }
@@ -3127,7 +3130,7 @@ mod tests {
         assert!(has_type_error(
             r#"function f(b: bool, x: str) -> int {
                 if b { return x; } else { return 0; }
-            }"#,
+            };"#,
             "return",
         ));
     }
@@ -3138,7 +3141,7 @@ mod tests {
             r#"
             function make() -> section {
                 return { port: int = 8080; };
-            }
+            };
         "#,
         );
     }
@@ -3146,7 +3149,7 @@ mod tests {
     #[test]
     fn section_fn_expr_return_is_error() {
         assert!(has_type_error(
-            r#"function make() -> section { return 42; }"#,
+            r#"function make() -> section { return 42; };"#,
             "section",
         ));
     }
@@ -3154,7 +3157,7 @@ mod tests {
     #[test]
     fn non_section_fn_section_block_return_is_error() {
         assert!(has_type_error(
-            r#"function make() -> int { return { port: int = 8080; }; }"#,
+            r#"function make() -> int { return { port: int = 8080; }; };"#,
             "section",
         ));
     }
@@ -3167,7 +3170,7 @@ mod tests {
             function f(b: bool) -> int {
                 if b { return 0; } else { var y: int = 1; }
                 return y;
-            }
+            };
         "#,
         );
     }
@@ -3175,7 +3178,7 @@ mod tests {
     #[test]
     fn local_var_type_mismatch_in_function_is_error() {
         assert!(has_type_error(
-            r#"function f() -> int { var x: int = "hello"; return x; }"#,
+            r#"function f() -> int { var x: int = "hello"; return x; };"#,
             "declared as",
         ));
     }

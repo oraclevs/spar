@@ -151,7 +151,7 @@ fn dry_run_prints_commands_without_executing_them() {
     run {{
         printf marker > '{}';
     }};
-}}"#,
+}};"#,
         marker.display()
     );
     let file = write_fixture(temp.path(), "dry.spar", &src);
@@ -192,7 +192,7 @@ fn task_commands_discover_sparmake_in_a_parent_directory() {
     write_fixture(
         directory.path(),
         "SparMake.spar",
-        "task [Build] { description: \"Found\"; run { true; }; }",
+        "task [Build] { description: \"Found\"; run { true; }; };",
     );
 
     let output = spar_in(&["tasks"], &nested);
@@ -224,9 +224,9 @@ fn tasks_groups_public_tasks_and_hides_private_tasks() {
         directory.path(),
         "groups.spar",
         r#"
-task [Build] { description: "Compile"; run { true; }; }
-task [Deploy] { group: "release"; run { true; }; }
-task [Secrets] { private: true; group: "release"; run { true; }; }
+task [Build] { description: "Compile"; run { true; }; };
+task [Deploy] { group: "release"; run { true; }; };
+task [Secrets] { private: true; group: "release"; run { true; }; };
 "#,
     );
 
@@ -260,9 +260,9 @@ fn run_choose_accepts_a_number_or_task_name_and_hides_private_tasks() {
         "choose.spar",
         &format!(
             r#"
-task [Build] {{ run {{ printf chosen > '{}'; }}; }}
-task [Test] {{ group: "quality"; run {{ printf named > '{}'; }}; }}
-task [Secret] {{ private: true; run {{ true; }}; }}
+task [Build] {{ run {{ printf chosen > '{}'; }}; }};
+task [Test] {{ group: "quality"; run {{ printf named > '{}'; }}; }};
+task [Secret] {{ private: true; run {{ true; }}; }};
 "#,
             first_marker.display(),
             second_marker.display()
@@ -295,12 +295,12 @@ fn show_binds_only_the_requested_task() {
         directory.path(),
         "show.spar",
         r#"
-task [Build] { run { echo dependency; }; }
+task [Build] { run { echo dependency; }; };
 task [Deploy](environment: str) {
     dependsOn: [Build];
     confirm: "Do not prompt";
     run { echo deploy-${environment}; };
-}
+};
 "#,
     );
 
@@ -335,8 +335,8 @@ task [Deploy](environment: str = "staging", *extra: str) {
     shell: ["bash", "-c"];
     env: { MODE: "release"; };
     run { deploy ${environment} ${extra}; };
-}
-task [Build] { run { build; }; }
+};
+task [Build] { run { build; }; };
 "#,
     );
 
@@ -383,7 +383,7 @@ fn private_task_remains_explicitly_runnable() {
         directory.path(),
         "private.spar",
         &format!(
-            "task [Secret] {{ private: true; run {{ printf yes > '{}'; }}; }}",
+            "task [Secret] {{ private: true; run {{ printf yes > '{}'; }}; }};",
             marker.display()
         ),
     );
@@ -404,7 +404,7 @@ fn run_choose_rejects_an_invalid_selection() {
     let file = write_fixture(
         directory.path(),
         "choose-invalid.spar",
-        "task [Build] { run { true; }; }",
+        "task [Build] { run { true; }; };",
     );
 
     let output = spar_with_input(
@@ -429,7 +429,7 @@ fn show_prints_a_shebang_script_in_full() {
         #!/bin/sh
         echo first; echo second
     };
-}"#,
+};"#,
     );
 
     let output = spar(&["show", "script", "-f", file.to_str().unwrap()]);

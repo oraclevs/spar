@@ -1923,7 +1923,7 @@ var endpoint: str = Config.host;
             r#"
             function double(x: int) -> int {
                 return x * 2;
-            }
+            };
             var n: int = double(x: 5);
         "#,
         );
@@ -1936,7 +1936,7 @@ var endpoint: str = Config.host;
             r#"
             function absVal(x: int) -> int {
                 if x < 0 { return 0 - x; } else { return x; }
-            }
+            };
             var a: int = absVal(x: 0 - 3);
             var b: int = absVal(x: 7);
         "#,
@@ -1953,7 +1953,7 @@ var endpoint: str = Config.host;
                 if x > 100 { return 100; }
                 else { var y: int = x; }
                 return y;
-            }
+            };
             var a: int = clamp(x: 200);
             var b: int = clamp(x: 42);
         "#,
@@ -1968,7 +1968,7 @@ var endpoint: str = Config.host;
             r#"
             function makeDb() -> section {
                 return { host: str = "localhost"; port: int = 5432; };
-            }
+            };
             [App]{ db: section = makeDb(); };
         "#,
         );
@@ -1992,7 +1992,7 @@ var endpoint: str = Config.host;
                 if flag { return 1; }
                 else { var result: int = 99; }
                 return result;
-            }
+            };
             var x: int = choose(flag: false);
         "#,
         );

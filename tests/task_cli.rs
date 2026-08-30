@@ -128,11 +128,7 @@ fn run_with_no_default_task_configured_fails_and_lists_tasks() {
 
 #[test]
 fn multiple_default_tasks_fail_at_compile_time() {
-    let output = spar(&[
-        "run",
-        "-f",
-        "tests/fixtures/tasks/multiple_defaults.spar",
-    ]);
+    let output = spar(&["run", "-f", "tests/fixtures/tasks/multiple_defaults.spar"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("multiple default"), "{stderr}");
@@ -216,11 +212,9 @@ fn missing_discovered_task_file_names_sparmake() {
     let output = spar_in(&["tasks"], directory.path());
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("SparMake.spar")
-    );
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("SparMake.spar"));
 }
 
 #[test]
@@ -239,13 +233,21 @@ task [Secrets] { private: true; group: "release"; run { true; }; }
     let output = spar(&["tasks", "-f", file.to_str().unwrap()]);
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Ungrouped") && stdout.contains("release"), "{stdout}");
-    assert!(stdout.contains("build") && stdout.contains("deploy"), "{stdout}");
+    assert!(
+        stdout.contains("Ungrouped") && stdout.contains("release"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("build") && stdout.contains("deploy"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("secrets"), "{stdout}");
 
     let output = spar(&["tasks", "--all", "-f", file.to_str().unwrap()]);
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout).unwrap().contains("secrets"));
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("secrets"));
 }
 
 #[test]
@@ -268,16 +270,21 @@ task [Secret] {{ private: true; run {{ true; }}; }}
     );
 
     let output = spar_with_input(&["run", "--choose", "-f", file.to_str().unwrap()], "1\n");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(first_marker.exists());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("secret"), "{stderr}");
 
-    let output = spar_with_input(
-        &["run", "--choose", "-f", file.to_str().unwrap()],
-        "test\n",
+    let output = spar_with_input(&["run", "--choose", "-f", file.to_str().unwrap()], "test\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(second_marker.exists());
 }
 
@@ -297,15 +304,13 @@ task [Deploy](environment: str) {
 "#,
     );
 
-    let output = spar(&[
-        "show",
-        "deploy",
-        "production",
-        "-f",
-        file.to_str().unwrap(),
-    ]);
+    let output = spar(&["show", "deploy", "production", "-f", file.to_str().unwrap()]);
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("echo deploy-production"), "{stdout}");
     assert!(!stdout.contains("dependency"), "{stdout}");
@@ -336,7 +341,11 @@ task [Build] { run { build; }; }
     );
 
     let output = spar(&["dump", "-f", file.to_str().unwrap()]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let deploy = value["tasks"]
         .as_array()
@@ -349,7 +358,10 @@ task [Build] { run { build; }; }
     assert_eq!(deploy["group"], "release");
     assert_eq!(deploy["private"], true);
     assert_eq!(deploy["confirm"], "Continue?");
-    assert_eq!(deploy["os"], serde_json::json!(["linux", "macos", "windows"]));
+    assert_eq!(
+        deploy["os"],
+        serde_json::json!(["linux", "macos", "windows"])
+    );
     assert_eq!(deploy["dependencies"], serde_json::json!(["Build"]));
     assert_eq!(deploy["parameters"][0]["default"], "staging");
     assert_eq!(deploy["parameters"][1]["variadic"], true);
@@ -378,7 +390,11 @@ fn private_task_remains_explicitly_runnable() {
 
     let output = spar(&["run", "secret", "-f", file.to_str().unwrap()]);
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(marker.exists());
 }
 
@@ -397,7 +413,9 @@ fn run_choose_rejects_an_invalid_selection() {
     );
 
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr).unwrap().contains("invalid task choice"));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("invalid task choice"));
 }
 
 #[test]
@@ -416,7 +434,11 @@ fn show_prints_a_shebang_script_in_full() {
 
     let output = spar(&["show", "script", "-f", file.to_str().unwrap()]);
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("#!/bin/sh"), "{stdout}");
     assert!(stdout.contains("echo first; echo second"), "{stdout}");

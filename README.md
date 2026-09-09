@@ -527,18 +527,27 @@ task [Deploy](environment: str) {
 ```
 
 ```bash
-spar tasks -f server.spar
-spar run   -f server.spar
-spar run   deploy production -f server.spar
-spar run   test --dry-run -f server.spar
+spar tasks  -f server.spar
+spar        -f server.spar               # bare = run the default task
+spar deploy production -f server.spar    # bare <task> = spar run <task>
+spar test --dry-run -f server.spar
 ```
 
-With no `-f`/`--file`, `spar tasks`/`spar run`/`spar show`/`spar dump`
-search the current directory and its parents for `SparMake.spar`.
+Any name that isn't a `spar` subcommand is treated as a task name — `spar
+<task> [args...]` is shorthand for `spar run <task> [args...]`. The explicit
+`spar run <task>` form still works and is identical. If a task's name
+happens to collide with a reserved subcommand (`check`, `run`, `tasks`, ...),
+the subcommand always wins for bare dispatch — reach that task with `spar
+run <name>` instead; `spar tasks` warns about the collision.
 
-Tasks also support default/variadic parameters, `private`/`group`/
-`confirm`/`os` attributes, shebang script recipes, `.env` loading via
-`@DotenvLoad`, per-task shell overrides, and an interactive `--choose`
+With no `-f`/`--file`, `spar tasks`/`spar run`/`spar show`/`spar dump`
+(and bare task dispatch) search the current directory and its parents for
+`SparMake.spar`.
+
+Tasks also support default/variadic/named parameters, `private`/`group`/
+`confirm` attributes, OS-labeled `run` blocks, shebang script recipes,
+`.env` loading via `@LoadEnv`, per-task shell overrides, and an interactive
+`--choose`
 picker. Tasks are not Make-style timestamp/file build targets — no
 incremental rebuilds, no input/output tracking, no caching. See
 [`docs/command-runner/tasks.md`](docs/command-runner/tasks.md) for the full
@@ -576,16 +585,23 @@ spar --version
 
 ```
 USAGE:
+    spar <task> [args...] [OPTIONS]     Shorthand for `spar run <task> [args...]`
     spar <COMMAND> [OPTIONS]
 
 COMMANDS:
+    <task>        [args...] [-f FILE] [--dry-run] [--choose]
+                                         Shorthand for `run <task>` — any name that isn't
+                                         a command below is treated as a task name
     check         <file.spar>           Validate — lex, parse, resolve, and type-check
-    emit          <file.spar>           Evaluate and emit config as JSON to stdout
+    emit          <file.spar> [-j|-y|-t]
+                                         Evaluate and emit config to stdout as JSON
+                                         (default), YAML (-y/--yaml), or TOML (-t/--toml)
     fmt           <file.spar>           Format a .spar file in place
     fmt --check   <file.spar>           Exit non-zero if the file is not already formatted
     tasks         [-f FILE] [--all]     List declared tasks (grouped; private hidden unless --all)
     run           [task] [args...] [-f FILE] [--dry-run] [--choose]
-                                         Run a task (the default task if none is named)
+                                         Run a task (the default task if none is named);
+                                         same as bare `spar <task>`
     show          <task> [args...] [-f FILE]
                                          Print one task's resolved commands without running it
     dump          [-f FILE]             Print the whole task catalog as JSON
@@ -598,9 +614,10 @@ ENVIRONMENT:
     NO_COLOR=1         Disable ANSI colour in error output
 ```
 
-`tasks`/`run`/`show`/`dump` take the file via `-f`/`--file`; without it,
-`spar` searches for `SparMake.spar` in the current directory and its
-parents. `check`/`emit`/`fmt` always take an explicit file positional.
+`tasks`/`run`/`show`/`dump` (and bare task dispatch) take the file via
+`-f`/`--file`; without it, `spar` searches for `SparMake.spar` in the
+current directory and its parents. `check`/`emit`/`fmt` always take an
+explicit file positional.
 
 ### Examples
 
@@ -608,8 +625,10 @@ parents. `check`/`emit`/`fmt` always take an explicit file positional.
 # Validate a file
 spar check server.spar
 
-# Emit JSON
+# Emit JSON (default), YAML, or TOML
 spar emit server.spar
+spar emit server.spar -y
+spar emit server.spar -t
 
 # Pipe to a file
 spar emit server.spar > /etc/myapp/config.json
@@ -625,9 +644,14 @@ spar tasks -f server.spar
 
 # Run the default task
 spar run -f server.spar
+spar -f server.spar                      # same, bare shorthand
 
 # Run a specific task with an argument
 spar run deploy production -f server.spar
+spar deploy production -f server.spar    # same, bare shorthand
+
+# Named arguments: override one defaulted parameter, skip the rest
+spar run cpd out=result -f cpd.spar
 
 # Preview commands without running them
 spar run test --dry-run -f server.spar

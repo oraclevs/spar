@@ -144,6 +144,13 @@ struct SelfFrame {
     fields: HashMap<Vec<String>, ConfigValue>,
 }
 
+#[derive(Clone)]
+struct ImportedProgram {
+    program: Program,
+    symbols: SymbolTable,
+    imports: HashMap<String, ImportedProgram>,
+}
+
 pub struct Evaluator {
     program: Program,
     symbols: SymbolTable,
@@ -155,7 +162,100 @@ pub struct Evaluator {
     self_stack: Vec<SelfFrame>,
     errors: Vec<SparError>,
     warnings: Vec<String>,
-    imported_programs: HashMap<String, Program>,
+    imported_programs: HashMap<String, ImportedProgram>,
+}
+
+fn build_imported_programs(
+    loaded: &HashMap<String, crate::loader::LoadedImport>,
+    base_dir: &std::path::Path,
+) -> Result<HashMap<String, ImportedProgram>, Vec<SparError>> {
+    let mut visiting = Vec::new();
+    let mut cache = HashMap::new();
+    loaded
+        .iter()
+        .map(|(alias, import)| {
+            load_imported_program(&base_dir.join(&import.path), &mut visiting, &mut cache)
+                .map(|program| (alias.clone(), program))
+        })
+        .collect()
+}
+
+fn load_imported_program(
+    path: &std::path::Path,
+    visiting: &mut Vec<std::path::PathBuf>,
+    cache: &mut HashMap<std::path::PathBuf, ImportedProgram>,
+) -> Result<ImportedProgram, Vec<SparError>> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(program) = cache.get(&canonical) {
+        return Ok(program.clone());
+    }
+    if let Some(cycle) = crate::depgraph::find_cycle_in_stack(visiting, &canonical) {
+        return Err(vec![SparError::ResolveError {
+            message: format!(
+                "import cycle detected during evaluation: {}",
+                cycle
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+            hint: None,
+            span: Span::dummy(),
+        }]);
+    }
+
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        vec![SparError::ResolveError {
+            message: format!("cannot read import file '{}': {error}", path.display()),
+            hint: None,
+            span: Span::dummy(),
+        }]
+    })?;
+    let tokens = crate::lexer::Lexer::new(&source)
+        .tokenize()
+        .map_err(|error| {
+            vec![SparError::ResolveError {
+                message: format!("import file '{}' has a lex error: {error}", path.display()),
+                hint: None,
+                span: Span::dummy(),
+            }]
+        })?;
+    let mut program = crate::parser::Parser::new(tokens)
+        .parse()
+        .map_err(|error| {
+            vec![SparError::ResolveError {
+                message: format!(
+                    "import file '{}' has a parse error: {error}",
+                    path.display()
+                ),
+                hint: None,
+                span: Span::dummy(),
+            }]
+        })?;
+    let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut expand_loader = crate::loader::ImportLoader::new(base_dir);
+    crate::loader::expand_imports(&mut program, &mut expand_loader)?;
+    let mut import_loader = crate::loader::ImportLoader::new(base_dir);
+    let loaded = crate::loader::collect_imports(&program, &mut import_loader)?;
+
+    visiting.push(canonical.clone());
+    let imports = loaded
+        .iter()
+        .map(|(alias, import)| {
+            load_imported_program(&base_dir.join(&import.path), visiting, cache)
+                .map(|program| (alias.clone(), program))
+        })
+        .collect::<Result<HashMap<_, _>, _>>();
+    visiting.pop();
+    let imports = imports?;
+    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &loaded)?;
+    let imported = ImportedProgram {
+        program,
+        symbols,
+        imports,
+    };
+    cache.insert(canonical, imported.clone());
+    Ok(imported)
 }
 
 impl Evaluator {
@@ -189,16 +289,7 @@ impl Evaluator {
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
         base_dir: &std::path::Path,
     ) -> Result<EvalResult, Vec<SparError>> {
-        let imported: HashMap<String, Program> = loaded
-            .iter()
-            .filter_map(|(alias, li)| {
-                let full = base_dir.join(&li.path);
-                let src = std::fs::read_to_string(&full).ok()?;
-                let tokens = crate::lexer::Lexer::new(&src).tokenize().ok()?;
-                let prog = crate::parser::Parser::new(tokens).parse().ok()?;
-                Some((alias.clone(), prog))
-            })
-            .collect();
+        let imported = build_imported_programs(loaded, base_dir)?;
         let mut ev = Evaluator::new(symbols.clone(), program.clone());
         ev.imported_programs = imported;
         let result = ev.run();
@@ -297,6 +388,11 @@ impl Evaluator {
             }
             other => self.errors.push(other.into_kl_error()),
         }
+    }
+
+    fn absorb_diagnostics(&mut self, sub: &mut Evaluator) {
+        self.errors.append(&mut sub.errors);
+        self.warnings.append(&mut sub.warnings);
     }
 }
 
@@ -921,25 +1017,28 @@ impl Evaluator {
                 if self.symbols.enums.contains_key(ns.as_str()) {
                     return Ok(ConfigValue::Str(name.clone()));
                 }
-                if let Some(imp_prog) = self.imported_programs.get(ns.as_str()).cloned() {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
-                    let mut sub = Evaluator::new(imp_sym.clone(), imp_prog);
-                    sub.imported_programs = self.imported_programs.clone();
-                    if imp_sym.lookup_section(&[name.to_string()]).is_some() {
-                        return sub
-                            .eval_section_by_path(&[name.to_string()])
+                if let Some(imported) = self.imported_programs.get(ns.as_str()).cloned() {
+                    let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
+                    sub.imported_programs = imported.imports;
+                    let result = if imported
+                        .symbols
+                        .lookup_section(&[name.to_string()])
+                        .is_some()
+                    {
+                        sub.eval_section_by_path(&[name.to_string()])
                             .map(ConfigValue::Section)
                             .ok_or_else(|| EvalErr::ImportRef {
                                 alias: ns.to_string(),
                                 symbol: name.to_string(),
-                            });
-                    }
-                    return sub.eval_global(name).ok_or_else(|| EvalErr::ImportRef {
-                        alias: ns.to_string(),
-                        symbol: name.to_string(),
-                    });
+                            })
+                    } else {
+                        sub.eval_global(name).ok_or_else(|| EvalErr::ImportRef {
+                            alias: ns.to_string(),
+                            symbol: name.to_string(),
+                        })
+                    };
+                    self.absorb_diagnostics(&mut sub);
+                    return result;
                 }
                 Err(EvalErr::CyclicRef {
                     name: format!("{ns}::{name}"),
@@ -951,24 +1050,67 @@ impl Evaluator {
                 name: String::new(),
                 span: nr.span.clone(),
             }),
-            // 3+ segments: alias::EnumName::Variant or similarly nested
-            // static lookups — recurse into the import, same deferred
-            // policy as the resolver/typechecker.
+            // 3+ segments: either `alias::EnumName::Variant` (rest[0] names
+            // an enum in the imported file — recurse, same deferred policy
+            // as the resolver/typechecker) or `alias::var::field[::field…]`
+            // (rest[0] names a plain var/section — evaluate it whole in the
+            // imported file's own evaluator, then walk the remaining
+            // segments as ordinary field access on that value). These are
+            // NOT the same shape: recursing with `rest` unconditionally (as
+            // this used to) re-interprets rest[0] as if it were itself an
+            // import alias, which it isn't — it has no entry in
+            // `imported_programs`, so that path fell through to a bogus
+            // "cyclic reference" error for every plain cross-file field
+            // access past the first segment.
             [first, rest @ ..] => {
                 if self.symbols.enums.contains_key(first.as_str()) {
                     return Ok(ConfigValue::Str(rest.last().cloned().unwrap_or_default()));
                 }
-                if let Some(imp_prog) = self.imported_programs.get(first.as_str()).cloned() {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
-                    let mut sub = Evaluator::new(imp_sym, imp_prog);
-                    sub.imported_programs = self.imported_programs.clone();
-                    let inner_nr = NamespaceRef {
-                        segments: rest.to_vec(),
-                        span: nr.span.clone(),
+                if let Some(imported) = self.imported_programs.get(first.as_str()).cloned() {
+                    let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
+                    sub.imported_programs = imported.imports;
+
+                    if imported.symbols.enums.contains_key(rest[0].as_str()) {
+                        let inner_nr = NamespaceRef {
+                            segments: rest.to_vec(),
+                            span: nr.span.clone(),
+                        };
+                        let result = sub.eval_namespace_ref(&inner_nr, &HashMap::new());
+                        self.absorb_diagnostics(&mut sub);
+                        return result;
+                    }
+
+                    let head = &rest[0];
+                    let value = if imported.symbols.lookup_section(&[head.clone()]).is_some() {
+                        sub.eval_section_by_path(&[head.clone()])
+                            .map(ConfigValue::Section)
+                    } else {
+                        sub.eval_global(head)
                     };
-                    return sub.eval_namespace_ref(&inner_nr, &HashMap::new());
+                    self.absorb_diagnostics(&mut sub);
+                    let mut value = value.ok_or_else(|| EvalErr::ImportRef {
+                        alias: first.to_string(),
+                        symbol: head.clone(),
+                    })?;
+                    for field in &rest[1..] {
+                        value = match value {
+                            ConfigValue::Section(map) => {
+                                map.get(field)
+                                    .cloned()
+                                    .ok_or_else(|| EvalErr::PathNotFound {
+                                        path: format!("{first}::{}", nr.segments[1..].join("::")),
+                                        span: nr.span.clone(),
+                                    })?
+                            }
+                            _ => {
+                                return Err(EvalErr::PathNotFound {
+                                    path: format!("{first}::{}", nr.segments[1..].join("::")),
+                                    span: nr.span.clone(),
+                                });
+                            }
+                        };
+                    }
+                    return Ok(value);
                 }
                 Err(EvalErr::CyclicRef {
                     name: nr.segments.join("::"),
@@ -1343,8 +1485,8 @@ impl Evaluator {
             let alias = segments[0];
             let group = segments[1];
             let fn_name = segments[2];
-            if let Some(imp_prog) = self.imported_programs.get(alias).cloned() {
-                let func_decl = imp_prog.items.iter().find_map(|item| {
+            if let Some(imported) = self.imported_programs.get(alias).cloned() {
+                let func_decl = imported.program.items.iter().find_map(|item| {
                     if let TopLevelItem::FunctionGroup(g) = item {
                         if g.name == group && !g.is_private {
                             return g
@@ -1357,16 +1499,14 @@ impl Evaluator {
                     None
                 });
                 if let Some(fd) = func_decl {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
-                    let mut sub = Evaluator::new(imp_sym, imp_prog);
+                    let mut sub = Evaluator::new(imported.symbols, imported.program);
+                    sub.imported_programs = imported.imports;
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
-                    let result = sub
-                        .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
-                        .unwrap_or(ConfigValue::Int(0));
+                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
+                    self.absorb_diagnostics(&mut sub);
+                    let result = result?.unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }
@@ -1402,8 +1542,8 @@ impl Evaluator {
             }
 
             // Cross-file plain function call: alias::fn(args)
-            if let Some(imp_prog) = self.imported_programs.get(ns).cloned() {
-                let func_decl = imp_prog.items.iter().find_map(|item| {
+            if let Some(imported) = self.imported_programs.get(ns).cloned() {
+                let func_decl = imported.program.items.iter().find_map(|item| {
                     if let TopLevelItem::Function(f) = item {
                         if f.name == fn_name && !f.is_private {
                             return Some(f.clone());
@@ -1412,16 +1552,14 @@ impl Evaluator {
                     None
                 });
                 if let Some(fd) = func_decl {
-                    let imp_sym = crate::resolver::Resolver::new()
-                        .resolve(&imp_prog, &[])
-                        .unwrap_or_else(|_| self.symbols.clone());
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
-                    let mut sub = Evaluator::new(imp_sym, imp_prog);
+                    let mut sub = Evaluator::new(imported.symbols, imported.program);
+                    sub.imported_programs = imported.imports;
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
-                    let result = sub
-                        .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
-                        .unwrap_or(ConfigValue::Int(0));
+                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
+                    self.absorb_diagnostics(&mut sub);
+                    let result = result?.unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }

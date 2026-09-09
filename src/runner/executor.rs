@@ -65,7 +65,7 @@ fn execute_with_io(
             let script = task_command.render(&bound_task.parameter_values);
             commands.push(script.clone());
 
-            if !bound_task.task.quiet {
+            if !bound_task.task.quiet || options.dry_run {
                 let _ = writeln!(echo, "{script}");
             }
 

@@ -1,5 +1,5 @@
 use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
-use spar::{renderer::ErrorRenderer, CompileOptions, Compiler};
+use spar::{renderer::ErrorRenderer, CompileOptions, Compiler, EmitFormat};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match parse_args(&args) {
         Cmd::Check(path) => cmd_check(&path),
-        Cmd::Emit(path) => cmd_emit(&path),
+        Cmd::Emit { path, format } => cmd_emit(&path, format),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
         Cmd::Tasks { path, global, all } => cmd_tasks(path, global, all),
         Cmd::Run {
@@ -39,7 +39,10 @@ fn main() {
 #[derive(Debug)]
 enum Cmd {
     Check(String),
-    Emit(String),
+    Emit {
+        path: String,
+        format: EmitFormat,
+    },
     Fmt {
         path: String,
         check: bool,
@@ -78,10 +81,7 @@ fn parse_args(args: &[String]) -> Cmd {
             Some(p) => Cmd::Check(p.clone()),
             None => Cmd::BadArgs("`check` requires a file path".into()),
         },
-        Some("emit") => match args.get(2) {
-            Some(p) => Cmd::Emit(p.clone()),
-            None => Cmd::BadArgs("`emit` requires a file path".into()),
-        },
+        Some("emit") => parse_emit_args(&args[2..]),
         Some("fmt") => match (args.get(2).map(String::as_str), args.get(3)) {
             (Some("--check"), Some(p)) => Cmd::Fmt {
                 path: p.clone(),
@@ -97,9 +97,13 @@ fn parse_args(args: &[String]) -> Cmd {
         Some("run") => parse_run_args(&args[2..]),
         Some("show") => parse_show_args(&args[2..]),
         Some("dump") => parse_dump_args(&args[2..]),
-        Some("--help") | Some("-h") | None => Cmd::Help,
-        Some("--version") | Some("-V") => Cmd::Version,
-        Some(other) => Cmd::BadArgs(format!("unknown command `{other}`")),
+        Some("--help") | Some("-h") | Some("help") => Cmd::Help,
+        Some("--version") | Some("-V") | Some("version") => Cmd::Version,
+        // Anything else is treated as a task-runner shorthand: `spar <name> [args...]`
+        // is exactly `spar run <name> [args...]`. Task-name validity (does this task
+        // even exist?) is checked later, once a task file is actually loaded.
+        Some(_) => parse_run_args(&args[1..]),
+        None => Cmd::Help,
     }
 }
 
@@ -189,7 +193,7 @@ fn parse_run_args(args: &[String]) -> Cmd {
                 index += 1;
             }
             other if positional.is_empty() && other.starts_with('-') => {
-                return Cmd::BadArgs(format!("unknown option for `run`: {other}"));
+                return Cmd::BadArgs(format!("unknown option: {other}"));
             }
             other => {
                 positional.push(other.to_owned());
@@ -274,22 +278,63 @@ fn parse_dump_args(args: &[String]) -> Cmd {
     Cmd::Dump { path, global }
 }
 
+fn parse_emit_args(args: &[String]) -> Cmd {
+    let mut path = None;
+    let mut format = None;
+    for arg in args {
+        match arg.as_str() {
+            "-j" | "--json" => {
+                if format.is_some() {
+                    return Cmd::BadArgs("`emit` accepts only one format flag".into());
+                }
+                format = Some(EmitFormat::Json);
+            }
+            "-y" | "--yaml" => {
+                if format.is_some() {
+                    return Cmd::BadArgs("`emit` accepts only one format flag".into());
+                }
+                format = Some(EmitFormat::Yaml);
+            }
+            "-t" | "--toml" => {
+                if format.is_some() {
+                    return Cmd::BadArgs("`emit` accepts only one format flag".into());
+                }
+                format = Some(EmitFormat::Toml);
+            }
+            other if path.is_none() => path = Some(other.to_owned()),
+            other => return Cmd::BadArgs(format!("unexpected argument for `emit`: {other}")),
+        }
+    }
+    let Some(path) = path else {
+        return Cmd::BadArgs("`emit` requires a file path".into());
+    };
+    Cmd::Emit {
+        path,
+        format: format.unwrap_or(EmitFormat::Json),
+    }
+}
+
 fn print_help() {
     println!(
         "spar — configuration language v{ver}
 
 USAGE:
+    spar <task> [args...] [OPTIONS]     Shorthand for `spar run <task> [args...]`
     spar <COMMAND> [OPTIONS]
 
 COMMANDS:
+    <task>        [args...] [-f FILE | -G] [--dry-run] [--choose]
+                                        Shorthand for `run <task>` — any name that isn't a
+                                        command below is treated as a task name
     check         <file.spar>           Validate a .spar file — runs lex, parse, resolve, and type check
-    emit          <file.spar>           Evaluate and print the config as JSON to stdout
+    emit          <file.spar> [-j|-y|-t]
+                                        Evaluate and print the config to stdout as JSON (default), YAML (-y/--yaml), or TOML (-t/--toml)
     fmt           <file.spar>           Format a .spar file in place
     fmt --check   <file.spar>           Exit non-zero if file is not already formatted
     tasks         [-f FILE | -G] [--all]
                                         List declared tasks
     run           [task] [args...] [-f FILE | -G] [--dry-run] [--choose]
-                                        Run a task (default task if omitted)
+                                        Run a task (default task if omitted); same as bare `spar <task>`
     show          <task> [args...] [-f FILE | -G]
                                         Show one task's resolved commands
     dump          [-f FILE | -G]        Dump the lowered task catalog as JSON
@@ -306,12 +351,16 @@ ENVIRONMENT:
 EXAMPLES:
     spar check server.spar
     spar emit  server.spar > config.json
+    spar emit  server.spar -y > config.yaml
+    spar emit  server.spar -t > config.toml
     spar fmt   server.spar
     spar fmt --check server.spar
     spar tasks -f server.spar
     spar run -f server.spar
     spar run deploy production -f server.spar
-    spar run test --dry-run -f server.spar",
+    spar run test --dry-run -f server.spar
+    spar deploy production -f server.spar   (same as `run` above)
+    spar test --dry-run -f server.spar      (same as `run` above)",
         ver = env!("CARGO_PKG_VERSION")
     );
 }
@@ -349,7 +398,7 @@ fn cmd_check(path: &str) {
 
 // ── `emit` command ────────────────────────────────────────────────────────────
 
-fn cmd_emit(path: &str) {
+fn cmd_emit(path: &str, format: EmitFormat) {
     let src = read_file(path);
     let renderer = make_renderer(&src, path);
     let options = CompileOptions {
@@ -372,7 +421,22 @@ fn cmd_emit(path: &str) {
     for w in &result.warnings {
         eprintln!("warning: {w}");
     }
-    println!("{}", emit_json(result, symbols));
+    let value = spar::emit::build_emit_json(result, symbols);
+    let rendered = match format {
+        EmitFormat::Json => serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into()),
+        EmitFormat::Yaml => serde_yaml::to_string(&value).unwrap_or_else(|e| {
+            eprintln!("error: failed to render YAML: {e}");
+            std::process::exit(1);
+        }),
+        EmitFormat::Toml => toml::to_string_pretty(&value).unwrap_or_else(|e| {
+            eprintln!("error: failed to render TOML: {e}");
+            std::process::exit(1);
+        }),
+    };
+    print!("{rendered}");
+    if format == EmitFormat::Json {
+        println!();
+    }
 }
 
 // ── `fmt` command ─────────────────────────────────────────────────────────────
@@ -419,6 +483,11 @@ fn cmd_tasks(path: Option<PathBuf>, global: bool, _all: bool) {
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
+    }
+    if let Some(tasks) = compilation.tasks.as_ref() {
+        for warning in tasks.reserved_name_warnings() {
+            eprintln!("warning: {warning}");
+        }
     }
     print_task_list(
         compilation.tasks.as_ref(),
@@ -527,6 +596,9 @@ fn cmd_run(
         eprintln!("error: {} declares no tasks", path.display());
         std::process::exit(1);
     };
+    for warning in tasks.reserved_name_warnings() {
+        eprintln!("warning: {warning}");
+    }
 
     let task = if choose {
         match choose_task(tasks) {
@@ -641,6 +713,9 @@ fn cmd_show(path: Option<PathBuf>, global: bool, task: String, args: Vec<String>
         eprintln!("error: {} declares no tasks", path.display());
         std::process::exit(1);
     };
+    for warning in tasks.reserved_name_warnings() {
+        eprintln!("warning: {warning}");
+    }
     let bound = tasks
         .bind(&TaskInvocation {
             task,
@@ -674,6 +749,11 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
+    }
+    if let Some(tasks) = compilation.tasks.as_ref() {
+        for warning in tasks.reserved_name_warnings() {
+            eprintln!("warning: {warning}");
+        }
     }
     let tasks = compilation
         .tasks
@@ -804,13 +884,6 @@ fn make_renderer<'a>(src: &'a str, path: &'a str) -> ErrorRenderer<'a> {
     } else {
         ErrorRenderer::new(src, path)
     }
-}
-
-// ── JSON emission ─────────────────────────────────────────────────────────────
-
-fn emit_json(result: &spar::evaluator::EvalResult, symbols: &spar::SymbolTable) -> String {
-    let val = spar::emit::build_emit_json(result, symbols);
-    serde_json::to_string_pretty(&val).unwrap_or_else(|_| "{}".to_string())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1098,6 +1171,78 @@ task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
             "old-style.spar".to_owned(),
         ];
         assert!(matches!(parse_args(&args), Cmd::BadArgs(_)));
+    }
+
+    #[test]
+    fn parse_args_bare_word_is_shorthand_for_run() {
+        let args = vec![
+            "spar".to_owned(),
+            "deploy".to_owned(),
+            "production".to_owned(),
+            "--dry-run".to_owned(),
+            "-f".to_owned(),
+            "Tasks.spar".to_owned(),
+        ];
+        match parse_args(&args) {
+            Cmd::Run {
+                path,
+                task,
+                args,
+                dry_run,
+                choose,
+                ..
+            } => {
+                assert_eq!(path, Some(PathBuf::from("Tasks.spar")));
+                assert_eq!(task.as_deref(), Some("deploy"));
+                assert_eq!(args, ["production"]);
+                assert!(dry_run);
+                assert!(!choose);
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_bare_flags_with_no_task_name_still_run_default() {
+        let args = vec!["spar".to_owned(), "--dry-run".to_owned()];
+        assert!(matches!(
+            parse_args(&args),
+            Cmd::Run {
+                task: None,
+                dry_run: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_args_reserved_keywords_win_over_bare_task_dispatch() {
+        // `run` is excluded: `spar run` with no further args legitimately
+        // produces Cmd::Run — that's the real `run` subcommand, not ambiguity.
+        for keyword in ["check", "emit", "fmt", "tasks", "show", "dump"] {
+            let args = vec!["spar".to_owned(), keyword.to_owned()];
+            assert!(
+                !matches!(parse_args(&args), Cmd::Run { .. }),
+                "`{keyword}` must not be treated as a bare task name"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_bare_help_and_version_words_still_work() {
+        assert!(matches!(
+            parse_args(&["spar".to_owned(), "help".to_owned()]),
+            Cmd::Help
+        ));
+        assert!(matches!(
+            parse_args(&["spar".to_owned(), "version".to_owned()]),
+            Cmd::Version
+        ));
+    }
+
+    #[test]
+    fn parse_args_no_args_is_help() {
+        assert!(matches!(parse_args(&["spar".to_owned()]), Cmd::Help));
     }
 
     #[test]

@@ -61,10 +61,40 @@ pub(super) fn bind(
     })
 }
 
+/// Splits `arg` into `(name, value)` on its first `=`, but only if `name`
+/// matches one of `task`'s declared parameters — this is what decides
+/// whether a call is in named-argument mode at all, so a positional value
+/// that merely contains `=` (e.g. `"KEY=value"`) is never mistaken for it.
+fn as_named_argument<'a>(task: &Task, arg: &'a str) -> Option<(&'a str, &'a str)> {
+    let (name, value) = arg.split_once('=')?;
+    task.parameters
+        .iter()
+        .any(|parameter| parameter.name == name)
+        .then_some((name, value))
+}
+
 fn bind_arguments(
     task: &Task,
     arguments: &[String],
 ) -> Result<BTreeMap<String, BoundValue>, RunnerError> {
+    if let Some(first) = arguments.first() {
+        if as_named_argument(task, first).is_some() {
+            let mut pairs = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                match argument.split_once('=') {
+                    Some((name, value)) => pairs.push((name, value)),
+                    None => {
+                        return Err(RunnerError::MixedArgumentStyle {
+                            task: task.name.clone(),
+                            argument: argument.clone(),
+                        })
+                    }
+                }
+            }
+            return bind_named_arguments(task, &pairs);
+        }
+    }
+
     let minimum = task
         .parameters
         .iter()
@@ -102,6 +132,66 @@ fn bind_arguments(
             values.insert(parameter.name.clone(), BoundValue::Scalar(default.clone()));
         }
     }
+    Ok(values)
+}
+
+/// Binds `name=value` pairs to `task`'s parameters, in declaration order,
+/// independent of the order the pairs were given in. A variadic parameter
+/// collects every pair with its name, in the order given; a defaulted
+/// parameter not named in `pairs` falls back to its default, so any prefix
+/// of optional parameters can be skipped.
+fn bind_named_arguments(
+    task: &Task,
+    pairs: &[(&str, &str)],
+) -> Result<BTreeMap<String, BoundValue>, RunnerError> {
+    let mut consumed = vec![false; pairs.len()];
+    let mut values = BTreeMap::new();
+
+    for parameter in &task.parameters {
+        let matches: Vec<usize> = pairs
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| *name == parameter.name)
+            .map(|(index, _)| index)
+            .collect();
+
+        if parameter.variadic {
+            let bound = matches
+                .iter()
+                .map(|&index| {
+                    consumed[index] = true;
+                    parse_argument(task, parameter, pairs[index].1)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            values.insert(parameter.name.clone(), BoundValue::Variadic(bound));
+        } else if matches.len() > 1 {
+            return Err(RunnerError::DuplicateNamedArgument {
+                task: task.name.clone(),
+                name: parameter.name.clone(),
+            });
+        } else if let Some(&index) = matches.first() {
+            consumed[index] = true;
+            values.insert(
+                parameter.name.clone(),
+                BoundValue::Scalar(parse_argument(task, parameter, pairs[index].1)?),
+            );
+        } else if let Some(default) = &parameter.default {
+            values.insert(parameter.name.clone(), BoundValue::Scalar(default.clone()));
+        } else {
+            return Err(RunnerError::MissingRequiredArgument {
+                task: task.name.clone(),
+                name: parameter.name.clone(),
+            });
+        }
+    }
+
+    if let Some(index) = consumed.iter().position(|&seen| !seen) {
+        return Err(RunnerError::UnknownNamedArgument {
+            task: task.name.clone(),
+            name: pairs[index].0.to_owned(),
+        });
+    }
+
     Ok(values)
 }
 
@@ -600,5 +690,210 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn cpd_task() -> Task {
+        let mut task = task("Cpd", &[]);
+        task.parameters = vec![
+            TaskParameter {
+                name: "file".to_owned(),
+                kind: ScalarKind::Str,
+                default: Some("main.dart".to_owned()),
+                variadic: false,
+            },
+            TaskParameter {
+                name: "out".to_owned(),
+                kind: ScalarKind::Str,
+                default: Some("main".to_owned()),
+                variadic: false,
+            },
+        ];
+        task
+    }
+
+    #[test]
+    fn named_argument_skips_an_earlier_defaulted_parameter() {
+        let tasks = TaskSet::new(vec![cpd_task()]).unwrap();
+
+        let bound = tasks
+            .bind(&TaskInvocation {
+                task: "cpd".to_owned(),
+                arguments: vec!["out=result".to_owned()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            bound.parameter_values,
+            BTreeMap::from([
+                ("file".to_owned(), BoundValue::Scalar("main.dart".to_owned())),
+                ("out".to_owned(), BoundValue::Scalar("result".to_owned())),
+            ])
+        );
+    }
+
+    #[test]
+    fn named_arguments_may_be_given_out_of_declaration_order() {
+        let tasks = TaskSet::new(vec![cpd_task()]).unwrap();
+
+        let bound = tasks
+            .bind(&TaskInvocation {
+                task: "cpd".to_owned(),
+                arguments: vec!["out=result".to_owned(), "file=lib.dart".to_owned()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            bound.parameter_values,
+            BTreeMap::from([
+                ("file".to_owned(), BoundValue::Scalar("lib.dart".to_owned())),
+                ("out".to_owned(), BoundValue::Scalar("result".to_owned())),
+            ])
+        );
+    }
+
+    #[test]
+    fn named_argument_with_unknown_parameter_name_is_an_error() {
+        let tasks = TaskSet::new(vec![cpd_task()]).unwrap();
+
+        let error = tasks
+            .bind(&TaskInvocation {
+                task: "cpd".to_owned(),
+                arguments: vec!["out=result".to_owned(), "bogus=1".to_owned()],
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::UnknownNamedArgument { task, name }
+                if task == "Cpd" && name == "bogus"
+        ));
+    }
+
+    #[test]
+    fn named_argument_given_twice_is_an_error() {
+        let tasks = TaskSet::new(vec![cpd_task()]).unwrap();
+
+        let error = tasks
+            .bind(&TaskInvocation {
+                task: "cpd".to_owned(),
+                arguments: vec!["out=result".to_owned(), "out=other".to_owned()],
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::DuplicateNamedArgument { task, name }
+                if task == "Cpd" && name == "out"
+        ));
+    }
+
+    #[test]
+    fn named_arguments_cannot_be_mixed_with_positional_ones() {
+        let tasks = TaskSet::new(vec![cpd_task()]).unwrap();
+
+        let error = tasks
+            .bind(&TaskInvocation {
+                task: "cpd".to_owned(),
+                arguments: vec!["out=result".to_owned(), "lib.dart".to_owned()],
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::MixedArgumentStyle { task, argument }
+                if task == "Cpd" && argument == "lib.dart"
+        ));
+    }
+
+    #[test]
+    fn a_positional_value_that_merely_contains_equals_is_not_treated_as_named() {
+        let tasks = TaskSet::new(vec![task_with_parameter(
+            "Configure",
+            TaskParameter {
+                name: "flag".to_owned(),
+                kind: ScalarKind::Str,
+                default: None,
+                variadic: false,
+            },
+        )])
+        .unwrap();
+
+        let bound = tasks
+            .bind(&TaskInvocation {
+                task: "configure".to_owned(),
+                arguments: vec!["KEY=value".to_owned()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            bound.parameter_values,
+            BTreeMap::from([("flag".to_owned(), BoundValue::Scalar("KEY=value".to_owned()))])
+        );
+    }
+
+    #[test]
+    fn named_argument_missing_a_required_parameter_is_an_error() {
+        let mut configure = task("Configure", &[]);
+        configure.parameters = vec![
+            TaskParameter {
+                name: "environment".to_owned(),
+                kind: ScalarKind::Str,
+                default: None,
+                variadic: false,
+            },
+            TaskParameter {
+                name: "region".to_owned(),
+                kind: ScalarKind::Str,
+                default: Some("us-east".to_owned()),
+                variadic: false,
+            },
+        ];
+        let tasks = TaskSet::new(vec![configure]).unwrap();
+
+        let error = tasks
+            .bind(&TaskInvocation {
+                task: "configure".to_owned(),
+                arguments: vec!["region=eu-west".to_owned()],
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runner::RunnerError::MissingRequiredArgument { task, name }
+                if task == "Configure" && name == "environment"
+        ));
+    }
+
+    #[test]
+    fn named_variadic_parameter_collects_repeated_keys() {
+        let tasks = TaskSet::new(vec![task_with_parameter(
+            "Deploy",
+            TaskParameter {
+                name: "tags".to_owned(),
+                kind: ScalarKind::Str,
+                default: None,
+                variadic: true,
+            },
+        )])
+        .unwrap();
+
+        let bound = tasks
+            .bind(&TaskInvocation {
+                task: "deploy".to_owned(),
+                arguments: vec![
+                    "tags=a".to_owned(),
+                    "tags=b".to_owned(),
+                    "tags=c".to_owned(),
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(
+            bound.parameter_values,
+            BTreeMap::from([(
+                "tags".to_owned(),
+                BoundValue::Variadic(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]),
+            )])
+        );
     }
 }

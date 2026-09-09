@@ -115,6 +115,12 @@ pub struct TaskInvocation {
     pub arguments: Vec<String>,
 }
 
+/// Top-level CLI keywords that always win over bare task-name dispatch
+/// (`spar <name>` runs task `<name>` unless `<name>` is one of these).
+/// Keep in sync with the keyword arms matched in `main.rs`'s `parse_args`.
+pub const RESERVED_CLI_COMMANDS: &[&str] =
+    &["check", "emit", "fmt", "tasks", "run", "show", "dump", "help", "version"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSet {
     tasks: BTreeMap<String, Task>,
@@ -188,6 +194,22 @@ impl TaskSet {
     /// Every declared task, ordered by its declared (PascalCase) name.
     pub fn iter(&self) -> impl Iterator<Item = &Task> {
         self.tasks.values()
+    }
+
+    /// One warning per task whose CLI name (lowercased) collides with a
+    /// reserved top-level command — that task is unreachable via bare
+    /// dispatch (`spar <name>`) and needs `spar run <name>` explicitly.
+    pub fn reserved_name_warnings(&self) -> Vec<String> {
+        self.cli_names
+            .iter()
+            .filter(|(cli_name, _)| RESERVED_CLI_COMMANDS.contains(&cli_name.as_str()))
+            .map(|(cli_name, source_name)| {
+                format!(
+                    "task {source_name} is shadowed by the reserved `{cli_name}` command; \
+                     run it with `spar run {cli_name}`"
+                )
+            })
+            .collect()
     }
 }
 

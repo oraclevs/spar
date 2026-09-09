@@ -202,18 +202,18 @@
 - Modify: `tests/task_lowering.rs`
 
 **Interfaces:**
-- Adds `Program::dotenv_load: bool` for first-line `@DotenvLoad`; `is_schema_file` remains independent and existing schema behavior stays stable.
+- Adds `Program::load_env: Option<String>` for first-line `@LoadEnv`; `is_schema_file` remains independent and existing schema behavior stays stable.
 - Produces `dotenv::load(path: &Path) -> Result<BTreeMap<String, String>, SparError>`; missing file returns an empty map.
 - Changes `lower_tasks(..., base_dir: &Path)` so `.env` is read next to the source.
 - Lowers all V2 fields and turns `is_shebang` into `TaskCommand::Script`.
 
 - [ ] **Step 1: Write pragma RED tests**
 
-  Accept `@DotenvLoad` only as the first item and reject it after a variable/task. Assert formatter output starts with `@DotenvLoad\n`. Keep `@SchemaFile` tests unchanged.
+  Accept `@LoadEnv` only as the first item and reject it after a variable/task. Assert formatter output starts with `@LoadEnv\n`. Keep `@SchemaFile` tests unchanged.
 
 - [ ] **Step 2: Observe pragma RED and implement it**
 
-  Run `cargo test parser::tests::dotenv_load_pragma_must_be_first`; confirm the parser reports an unknown pragma. Add the program flag and formatter support.
+  Run `cargo test parser::tests::load_env_pragma_defaults_to_dotenv_and_must_be_first`; confirm the parser reports an unknown pragma. Add the program path and formatter support.
 
 - [ ] **Step 3: Write dotenv parser RED tests**
 
@@ -459,7 +459,7 @@
 
 - [ ] **Step 2: Extend the example without replacing user work**
 
-  Preserve existing tasks and add focused examples of defaults/variadic values, one group/private task, shell override, and comments showing optional `@DotenvLoad`. Keep dangerous confirmation/script examples dry-run-safe.
+  Preserve existing tasks and add focused examples of defaults/variadic values, one group/private task, shell override, and comments showing optional `@LoadEnv`. Keep dangerous confirmation/script examples dry-run-safe.
 
 - [ ] **Step 3: Rewrite user command examples**
 

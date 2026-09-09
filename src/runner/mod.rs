@@ -10,5 +10,5 @@ pub use executor::{execute, ExecutionOptions, ExecutionReport};
 pub use graph::{BoundTask, ExecutionPlan};
 pub use task::{
     BoundValue, CommandTemplate, ScalarKind, Task, TaskCommand, TaskInvocation, TaskParameter,
-    TaskSet, TemplatePart,
+    TaskSet, TemplatePart, RESERVED_CLI_COMMANDS,
 };

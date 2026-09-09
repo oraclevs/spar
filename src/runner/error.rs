@@ -39,6 +39,22 @@ pub enum RunnerError {
         value: String,
         kind: ScalarKind,
     },
+    UnknownNamedArgument {
+        task: String,
+        name: String,
+    },
+    DuplicateNamedArgument {
+        task: String,
+        name: String,
+    },
+    MissingRequiredArgument {
+        task: String,
+        name: String,
+    },
+    MixedArgumentStyle {
+        task: String,
+        argument: String,
+    },
     InvalidShebang {
         task: String,
         message: String,
@@ -120,6 +136,22 @@ impl fmt::Display for RunnerError {
             } => write!(
                 formatter,
                 "task {task} argument {parameter} must be a {kind:?}, but received {value}"
+            ),
+            Self::UnknownNamedArgument { task, name } => {
+                write!(formatter, "task {task} has no parameter named `{name}`")
+            }
+            Self::DuplicateNamedArgument { task, name } => write!(
+                formatter,
+                "task {task} argument `{name}` was given more than once"
+            ),
+            Self::MissingRequiredArgument { task, name } => write!(
+                formatter,
+                "task {task} is missing required argument `{name}`"
+            ),
+            Self::MixedArgumentStyle { task, argument } => write!(
+                formatter,
+                "task {task} mixes named and positional arguments — once you use \
+                 `name=value`, all arguments must use that form (got `{argument}`)"
             ),
             Self::InvalidShebang { task, message } => {
                 write!(formatter, "task {task} has an invalid shebang: {message}")

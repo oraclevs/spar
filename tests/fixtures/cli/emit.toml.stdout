@@ -1,0 +1,4 @@
+name = "spar"
+
+[Server]
+port = 8080

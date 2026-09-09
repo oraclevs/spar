@@ -362,32 +362,64 @@ fn splice_selective(
     let mut pulled: HashSet<String> = requested.iter().map(|r| r.name.clone()).collect();
     let mut i = 0;
     while i < spliced.len() {
-        if let TopLevelItem::Type(t) = &spliced[i] {
-            let mut refs = Vec::new();
-            collect_named_type_refs(&t.fields, &mut refs);
-            let parent_name = t.name.clone();
-            for name in refs {
-                if pulled.insert(name.clone()) {
-                    match available.iter().find(|(n, _)| *n == name) {
-                        Some((_, dep_item @ (TopLevelItem::Type(_) | TopLevelItem::Enum(_)))) => {
-                            let localized = localize_visibility((*dep_item).clone());
-                            spliced.push(retag_top_level_span(localized, &decl.span));
-                        }
-                        Some(_) => {} // name resolves to a non-type item; resolver reports the shape mismatch
-                        None => {
-                            errors.push(SparError::ResolveError {
-                                message: format!(
-                                    "type `{}`, used by `{}`'s field, is not exported by '{}' — \
-                                     export it so the transitive import can resolve",
-                                    name, parent_name, decl.path
-                                ),
-                                hint: None,
-                                span: decl.span.clone(),
-                            });
-                        }
-                    }
+        match &spliced[i] {
+            TopLevelItem::Type(t) => {
+                let mut refs = Vec::new();
+                collect_named_type_refs(&t.fields, &mut refs);
+                let parent_name = t.name.clone();
+                for name in refs {
+                    pull_dependency(
+                        &name,
+                        &parent_name,
+                        "field",
+                        "type",
+                        &available,
+                        &mut pulled,
+                        &mut spliced,
+                        &mut errors,
+                        decl,
+                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                    );
                 }
             }
+            TopLevelItem::Section(s) => {
+                let parent_name = s.path.first().cloned().unwrap_or_default();
+                let mut type_refs = Vec::new();
+                if let Some(tb) = &s.type_binding {
+                    type_refs.push(tb.name.clone());
+                }
+                let mut section_refs = Vec::new();
+                collect_section_item_refs(&s.items, &mut section_refs);
+                for name in type_refs {
+                    pull_dependency(
+                        &name,
+                        &parent_name,
+                        "type binding",
+                        "type",
+                        &available,
+                        &mut pulled,
+                        &mut spliced,
+                        &mut errors,
+                        decl,
+                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                    );
+                }
+                for name in section_refs {
+                    pull_dependency(
+                        &name,
+                        &parent_name,
+                        "spread",
+                        "section",
+                        &available,
+                        &mut pulled,
+                        &mut spliced,
+                        &mut errors,
+                        decl,
+                        |item| matches!(item, TopLevelItem::Section(_)),
+                    );
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -406,6 +438,75 @@ fn collect_named_type_refs(fields: &[crate::ast::TypeField], out: &mut Vec<Strin
             TypeFieldShape::Primitive(_) => {}
             TypeFieldShape::Named(name) => out.push(name.clone()),
             TypeFieldShape::Section(nested) => collect_named_type_refs(nested, out),
+        }
+    }
+}
+
+/// Collects `...Target;` spread names out of a section body, including
+/// spreads nested inside inline section-typed field values (`field: {
+/// ...Target; };`) — the same shape a selectively-imported section like
+/// `Postgres -> PostgresType { environment: { ...ProductionEnvironment; }; }`
+/// carries. Only single-segment refs are treated as candidate top-level
+/// section names; a multi-segment path targets a field within an
+/// already-resolved value, not another top-level item.
+fn collect_section_item_refs(items: &[crate::ast::SectionItem], out: &mut Vec<String>) {
+    use crate::ast::{Expr, FieldValue, SectionItem};
+    for item in items {
+        match item {
+            SectionItem::Spread(spread) => {
+                if let Expr::NamespaceRef(nref) = &spread.expr {
+                    if let [name] = nref.segments.as_slice() {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            SectionItem::Field(f) => {
+                if let Some(FieldValue::Nested(nested)) = &f.value {
+                    collect_section_item_refs(nested, out);
+                }
+            }
+        }
+    }
+}
+
+/// Shared transitive-dependency resolver used while splicing a selectively
+/// imported item: `name` was referenced structurally (a type binding, a type
+/// field, or a spread target) by `parent_name` but wasn't itself requested.
+/// It must still be exported by the source file — the same rule that governs
+/// explicitly requested items — since a transitive pull is not a back door
+/// around visibility.
+#[allow(clippy::too_many_arguments)]
+fn pull_dependency<F: Fn(&crate::ast::TopLevelItem) -> bool>(
+    name: &str,
+    parent_name: &str,
+    dep_site: &str,
+    label: &str,
+    available: &[(&str, &crate::ast::TopLevelItem)],
+    pulled: &mut HashSet<String>,
+    spliced: &mut Vec<crate::ast::TopLevelItem>,
+    errors: &mut Vec<SparError>,
+    decl: &crate::ast::ImportDecl,
+    matches_kind: F,
+) {
+    if !pulled.insert(name.to_string()) {
+        return;
+    }
+    match available.iter().find(|(n, _)| *n == name) {
+        Some((_, dep_item)) if matches_kind(dep_item) => {
+            let localized = localize_visibility((*dep_item).clone());
+            spliced.push(retag_top_level_span(localized, &decl.span));
+        }
+        Some(_) => {} // name resolves to a different-shaped item; resolver reports the mismatch
+        None => {
+            errors.push(SparError::ResolveError {
+                message: format!(
+                    "{} `{}`, used by `{}`'s {}, is not exported by '{}' — \
+                     export it so the transitive import can resolve",
+                    label, name, parent_name, dep_site, decl.path
+                ),
+                hint: None,
+                span: decl.span.clone(),
+            });
         }
     }
 }
@@ -1552,6 +1653,65 @@ mod tests {
     }
 
     #[test]
+    fn expand_imports_selective_transitively_pulls_section_type_binding() {
+        // Regression: `import { Postgres }` where `Postgres -> PostgresType`
+        // must silently bring in `PostgresType` too — the caller never
+        // asked for it directly, it's load-bearing structure of the
+        // section they did ask for.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("compose.spar"),
+            concat!(
+                "export type [PostgresType]{ image: str; };\n",
+                "export [Postgres] -> PostgresType { image: \"postgres:16\"; };\n",
+            ),
+        )
+        .unwrap();
+        let src = r#"import { Postgres } from "compose.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let has_type = program.items.iter().any(|it| {
+            matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")
+        });
+        assert!(
+            has_type,
+            "PostgresType must be transitively spliced in, got items: {:?}",
+            program.items
+        );
+    }
+
+    #[test]
+    fn expand_imports_selective_transitively_pulls_spread_target() {
+        // Regression: `import { Postgres }` where Postgres's body spreads
+        // `...ProductionEnvironment` must bring that section in too, kept
+        // private (excluded from emit) the same as it was in the source file.
+        use std::fs;
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("compose.spar"),
+            concat!(
+                "private [ProductionEnvironment] { nodeEnv: \"production\"; };\n",
+                "export [Postgres] { environment: { ...ProductionEnvironment; }; };\n",
+            ),
+        )
+        .unwrap();
+        let src = r#"import { Postgres } from "compose.spar";"#;
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+
+        // Not exported yet — must fail with a clear, import-line-attributed error.
+        let err = expand_imports(&mut program, &mut loader).expect_err("must fail");
+        assert!(
+            err.iter().any(|e| e.to_string().contains("ProductionEnvironment")
+                && e.to_string().contains("not exported")),
+            "expected a not-exported error naming ProductionEnvironment, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn expand_imports_type_selective_can_import_an_enum_directly() {
         use std::fs;
         let dir = tempdir().unwrap();
@@ -1707,7 +1867,7 @@ mod tests {
         // the type here stands in for one that arrived via `import type`.
         let mut program = Program {
             is_schema_file: true,
-            dotenv_load: false,
+            load_env: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "PostgresType".into(),
@@ -1772,7 +1932,7 @@ mod tests {
     fn expand_schema_from_expands_named_type_reference_recursively() {
         let mut program = Program {
             is_schema_file: true,
-            dotenv_load: false,
+            load_env: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "Border".into(),
@@ -1838,7 +1998,7 @@ mod tests {
     fn expand_schema_from_errors_on_undeclared_type() {
         let mut program = Program {
             is_schema_file: true,
-            dotenv_load: false,
+            load_env: None,
             items: vec![TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
                 name: "Postgres".into(),
                 source_type: "NoSuchType".into(),

@@ -1609,6 +1609,7 @@ impl Parser {
         let mut shell = None;
         let mut run_blocks: Vec<RunBlock> = Vec::new();
         let mut seen_run_labels: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
+        let mut field_spans: Vec<(String, Span)> = Vec::new();
 
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             let (field_name, field_span) = if self.at(&Token::Private) {
@@ -1618,6 +1619,9 @@ impl Parser {
             } else {
                 self.expect_ident()?
             };
+            if field_name != "run" {
+                field_spans.push((field_name.clone(), field_span.clone()));
+            }
             match field_name.as_str() {
                 "run" => {
                     let (os_label, os_span) = if let Token::Ident(label) = self.peek().clone() {
@@ -1730,6 +1734,7 @@ impl Parser {
                 }
             }
         }
+        let closing_span = self.peek_span();
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Semicolon)?;
 
@@ -1756,6 +1761,8 @@ impl Parser {
             shell,
             run_blocks,
             span,
+            field_spans,
+            closing_span,
         })
     }
 

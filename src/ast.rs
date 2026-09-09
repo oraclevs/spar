@@ -45,6 +45,15 @@ pub struct TaskDecl {
     pub shell: Option<Expr>,
     pub run_blocks: Vec<RunBlock>,
     pub span: Span,
+    /// The source line of each metadata field (everything but `run`), in
+    /// the order they appeared — lets the formatter flush standalone
+    /// comments at the right point inside the task body even though these
+    /// fields are re-printed in a fixed canonical order.
+    pub field_spans: Vec<(String, Span)>,
+    /// The closing `}`'s span, so the formatter can flush any comment
+    /// trailing the last field/run block without leaking it outside the
+    /// task body.
+    pub closing_span: Span,
 }
 
 /// A task parameter carries task-runner-specific call-site behaviour.

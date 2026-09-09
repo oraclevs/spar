@@ -1,18 +1,29 @@
-//! JSON emission shared by the `spar` CLI and the WebAssembly playground.
+//! JSON/YAML/TOML emission shared by the `spar` CLI and the WebAssembly
+//! playground.
 //!
 //! `build_emit_json` is the single source of truth for the shape of emitted
-//! JSON (exported globals + public top-level sections, keys sorted). Both the
-//! CLI (`spar emit`, with imports) and `emit_to_json` (single-file, no imports)
-//! funnel through it so their output is identical.
+//! config (exported globals + public top-level sections, keys sorted) — as a
+//! `serde_json::Value`, which every supported output format serializes from.
+//! Both the CLI (`spar emit`, with imports) and `emit_to_json`/`emit_to_yaml`/
+//! `emit_to_toml` (single-file, no imports) funnel through it so their output
+//! is identical modulo format.
 
 use crate::evaluator::{ConfigValue, EvalResult};
 use crate::resolver::{GlobalEntry, SymbolTable};
 use crate::{CompileOptions, Compiler};
 
-/// Compile a single Spar source string to pretty-printed JSON, with no
-/// cross-file imports (the browser/playground has no filesystem). On failure
+/// Output format for `spar emit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitFormat {
+    Json,
+    Yaml,
+    Toml,
+}
+
+/// Compile a single Spar source string (no cross-file imports — the
+/// browser/playground has no filesystem) to a `serde_json::Value`. On failure
 /// returns one human-readable message per pipeline error.
-pub fn emit_to_json(src: &str) -> Result<String, Vec<String>> {
+fn compile_for_emit(src: &str) -> Result<serde_json::Value, Vec<String>> {
     let options = CompileOptions {
         allow_schema_file: false,
         ..CompileOptions::default()
@@ -21,7 +32,7 @@ pub fn emit_to_json(src: &str) -> Result<String, Vec<String>> {
     if !compilation.errors.is_empty() {
         return Err(compilation.errors.iter().map(ToString::to_string).collect());
     }
-    let value = build_emit_json(
+    Ok(build_emit_json(
         compilation
             .result
             .as_ref()
@@ -30,8 +41,29 @@ pub fn emit_to_json(src: &str) -> Result<String, Vec<String>> {
             .symbols
             .as_ref()
             .expect("successful compilation resolves"),
-    );
+    ))
+}
+
+/// Compile a single Spar source string to pretty-printed JSON, with no
+/// cross-file imports (the browser/playground has no filesystem). On failure
+/// returns one human-readable message per pipeline error.
+pub fn emit_to_json(src: &str) -> Result<String, Vec<String>> {
+    let value = compile_for_emit(src)?;
     Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()))
+}
+
+/// Compile a single Spar source string to YAML. Same scope/error contract as
+/// [`emit_to_json`].
+pub fn emit_to_yaml(src: &str) -> Result<String, Vec<String>> {
+    let value = compile_for_emit(src)?;
+    serde_yaml::to_string(&value).map_err(|e| vec![e.to_string()])
+}
+
+/// Compile a single Spar source string to TOML. Same scope/error contract as
+/// [`emit_to_json`].
+pub fn emit_to_toml(src: &str) -> Result<String, Vec<String>> {
+    let value = compile_for_emit(src)?;
+    toml::to_string_pretty(&value).map_err(|e| vec![e.to_string()])
 }
 
 /// Build the emitted JSON value: exported globals, then public top-level
@@ -117,5 +149,42 @@ fn config_value_to_json(val: &ConfigValue) -> serde_json::Value {
             }
             serde_json::Value::Object(obj)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRC: &str = r#"
+export var name: str = "spar";
+
+[Server]{
+    port: int = 8080;
+};
+"#;
+
+    #[test]
+    fn emit_to_yaml_renders_nested_sections() {
+        let yaml = emit_to_yaml(SRC).expect("compiles");
+        assert_eq!(yaml, "Server:\n  port: 8080\nname: spar\n");
+    }
+
+    #[test]
+    fn emit_to_toml_orders_scalars_before_tables() {
+        let toml = emit_to_toml(SRC).expect("compiles");
+        assert_eq!(toml, "name = \"spar\"\n\n[Server]\nport = 8080\n");
+    }
+
+    #[test]
+    fn emit_to_yaml_reports_pipeline_errors() {
+        let errors = emit_to_yaml("var x: int = \"not an int\";").unwrap_err();
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn emit_to_toml_reports_pipeline_errors() {
+        let errors = emit_to_toml("var x: int = \"not an int\";").unwrap_err();
+        assert!(!errors.is_empty());
     }
 }

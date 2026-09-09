@@ -141,7 +141,7 @@ File-level, opt-in, reusing the existing `@SchemaFile`-style directive
 convention already in the parser (see the `is_schema_file` handling):
 
 ```spar
-@DotenvLoad
+@LoadEnv
 export var appName: str = "demo";
 ...
 ```
@@ -154,7 +154,7 @@ its full dependency chain if a hand-rolled parser covers it in <50 lines).
 Precedence, lowest to highest: dotenv file → inherited process environment →
 task's own `env: {}` overlay. (I.e. dotenv never clobbers an already-set
 real env var; a task's explicit `env:` always wins over both.) Missing
-`.env` with `@DotenvLoad` present is not an error — it's a no-op, matching
+`.env` with `@LoadEnv` present is not an error — it's a no-op, matching
 Just's non-`dotenv-required` default.
 
 ## Shell customization

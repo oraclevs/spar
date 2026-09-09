@@ -23,7 +23,7 @@ pub mod typechecker;
 pub use ast::Program;
 pub use compiler::{Compilation, CompileOptions, Compiler};
 pub use de::{from_eval, from_str, SparDeserError};
-pub use emit::emit_to_json;
+pub use emit::{emit_to_json, emit_to_toml, emit_to_yaml, EmitFormat};
 pub use error::{Span, SparError};
 pub use evaluator::{ConfigValue, EvalResult, Evaluator};
 pub use lexer::Lexer;

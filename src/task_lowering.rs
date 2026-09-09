@@ -112,7 +112,7 @@ fn lower_one_task(
         .quiet
         .as_ref()
         .and_then(|e| eval_bool(program, symbols, eval_result, e, &mut errors))
-        .unwrap_or(false);
+        .unwrap_or(true);
     let private = decl
         .private
         .as_ref()

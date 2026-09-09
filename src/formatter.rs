@@ -75,7 +75,12 @@ impl<'a> CommentCursor<'a> {
         Self { comments, next: 0 }
     }
 
-    /// Emit all pending standalone comments whose source line < `before_line`.
+    /// Emit all pending comments whose source line < `before_line`, as
+    /// standalone lines. A comment lexed as trailing (on the same line as a
+    /// prior token) is meant to be claimed by a `take_trailing` call closer
+    /// to the field/item it followed — but if nothing claimed it before the
+    /// cursor sweeps past here, it must still be emitted rather than
+    /// silently dropped. A formatter must never delete a comment.
     fn emit_before_line(
         &mut self,
         before_line: u32,
@@ -88,12 +93,10 @@ impl<'a> CommentCursor<'a> {
             if c.line >= before_line {
                 break;
             }
-            if !c.is_trailing {
-                let ind = indent(depth, config);
-                out.push_str(&ind);
-                out.push_str(&c.text);
-                out.push('\n');
-            }
+            let ind = indent(depth, config);
+            out.push_str(&ind);
+            out.push_str(&c.text);
+            out.push('\n');
             self.next += 1;
         }
     }
@@ -338,11 +341,57 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str("];\n");
         }
 
-        TopLevelItem::Task(td) => format_task_decl(td, config, out),
+        TopLevelItem::Task(td) => {
+            // Reached only if a caller formats a lone `TaskDecl` outside the
+            // comment-aware top-level walk; there's no comment trivia to
+            // thread through in that case.
+            let mut empty = CommentCursor::new(&[]);
+            format_task_decl_cx(td, config, &mut empty, out);
+        }
     }
 }
 
-fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
+/// The source line the parser recorded for metadata field `name` (see
+/// `TaskDecl::field_spans`) — `None` if the field wasn't written at all.
+fn task_field_line(td: &TaskDecl, name: &str) -> Option<u32> {
+    td.field_spans
+        .iter()
+        .find(|(field_name, _)| field_name == name)
+        .map(|(_, span)| span.line)
+}
+
+/// Flushes any standalone comments before `name`'s source line (if the
+/// field is present at all — an absent field never had a line to anchor
+/// on) and appends a same-line trailing comment, if any, after `body` runs.
+fn with_task_field_comments(
+    td: &TaskDecl,
+    name: &str,
+    cx: &mut CommentCursor,
+    config: &FormatConfig,
+    out: &mut String,
+    body: impl FnOnce(&mut String),
+) {
+    let Some(line) = task_field_line(td, name) else {
+        return;
+    };
+    cx.emit_before_line(line, 1, config, out);
+    body(out);
+    if let Some(trailing) = cx.take_trailing(line) {
+        if out.ends_with('\n') {
+            out.pop();
+            out.push(' ');
+            out.push_str(&trailing);
+            out.push('\n');
+        }
+    }
+}
+
+fn format_task_decl_cx(
+    td: &TaskDecl,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+) {
     out.push_str("task [");
     out.push_str(&td.name);
     out.push(']');
@@ -370,80 +419,101 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
     let body_indent = indent(1, config);
 
     if let Some(desc) = &td.description {
-        out.push_str(&body_indent);
-        out.push_str("description: ");
-        format_expr(desc, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "description", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("description: ");
+            format_expr(desc, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(default) = &td.default {
-        out.push_str(&body_indent);
-        out.push_str("default: ");
-        format_expr(default, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "default", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("default: ");
+            format_expr(default, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(quiet) = &td.quiet {
-        out.push_str(&body_indent);
-        out.push_str("quiet: ");
-        format_expr(quiet, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "quiet", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("quiet: ");
+            format_expr(quiet, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(private) = &td.private {
-        out.push_str(&body_indent);
-        out.push_str("private: ");
-        format_expr(private, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "private", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("private: ");
+            format_expr(private, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(group) = &td.group {
-        out.push_str(&body_indent);
-        out.push_str("group: ");
-        format_expr(group, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "group", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("group: ");
+            format_expr(group, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(confirm) = &td.confirm {
-        out.push_str(&body_indent);
-        out.push_str("confirm: ");
-        format_expr(confirm, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "confirm", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("confirm: ");
+            format_expr(confirm, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if !td.depends_on.is_empty() {
-        out.push_str(&body_indent);
-        out.push_str("dependsOn: [");
-        for (i, dep) in td.depends_on.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+        with_task_field_comments(td, "dependsOn", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("dependsOn: [");
+            for (i, dep) in td.depends_on.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&dep.name);
             }
-            out.push_str(&dep.name);
-        }
-        out.push_str("];\n");
+            out.push_str("];\n");
+        });
     }
     if let Some(cwd) = &td.cwd {
-        out.push_str(&body_indent);
-        out.push_str("cwd: ");
-        format_expr(cwd, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "cwd", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("cwd: ");
+            format_expr(cwd, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if let Some(shell) = &td.shell {
-        out.push_str(&body_indent);
-        out.push_str("shell: ");
-        format_expr(shell, 0, 1, config, out);
-        out.push_str(";\n");
+        with_task_field_comments(td, "shell", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("shell: ");
+            format_expr(shell, 0, 1, config, out);
+            out.push_str(";\n");
+        });
     }
     if !td.env.is_empty() {
-        out.push_str(&body_indent);
-        out.push_str("env: {\n");
-        let env_indent = indent(2, config);
-        for (key, value) in &td.env {
-            out.push_str(&env_indent);
-            out.push_str(key);
-            out.push_str(": ");
-            format_expr(value, 0, 2, config, out);
-            out.push_str(";\n");
-        }
-        out.push_str(&body_indent);
-        out.push_str("};\n");
+        with_task_field_comments(td, "env", cx, config, out, |out| {
+            out.push_str(&body_indent);
+            out.push_str("env: {\n");
+            let env_indent = indent(2, config);
+            for (key, value) in &td.env {
+                out.push_str(&env_indent);
+                out.push_str(key);
+                out.push_str(": ");
+                format_expr(value, 0, 2, config, out);
+                out.push_str(";\n");
+            }
+            out.push_str(&body_indent);
+            out.push_str("};\n");
+        });
     }
 
     for block in &td.run_blocks {
+        cx.emit_before_line(block.span.line, 1, config, out);
         out.push_str(&body_indent);
         out.push_str("run");
         if let Some(os) = &block.os {
@@ -473,6 +543,12 @@ fn format_task_decl(td: &TaskDecl, config: &FormatConfig, out: &mut String) {
         out.push_str(&body_indent);
         out.push_str("};\n");
     }
+
+    // Anything left standalone before the closing `}` (e.g. a comment after
+    // the last run block, or a commented-out field with no live counterpart
+    // at all) stays inside the task rather than leaking into whatever comes
+    // after it.
+    cx.emit_before_line(td.closing_span.line, 1, config, out);
 
     out.push_str("};\n");
 }
@@ -519,6 +595,7 @@ fn format_top_level_item_cx(
             format_section_items_cx(&sd.items, 1, config, cx, out);
             out.push_str("};\n");
         }
+        TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
         _ => format_top_level_item(item, config, out),
     }
 }
@@ -1805,6 +1882,102 @@ function pick(flag: bool) -> int {
             a_pos < c_pos && c_pos < b_pos,
             "comment between a and b: {out}"
         );
+    }
+
+    #[test]
+    fn trailing_comment_on_a_lone_top_level_var_is_not_deleted() {
+        let src = "var x: int = 1; // trailing note\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("// trailing note"),
+            "trailing comment must survive formatting, not be silently dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn trailing_block_comment_on_a_top_level_var_is_not_deleted() {
+        let src = "var x: int /* inline */ = 1;\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("/* inline */"),
+            "trailing block comment must survive formatting: {out}"
+        );
+    }
+
+    #[test]
+    fn trailing_comment_before_the_next_top_level_item_is_not_deleted() {
+        let src = "var x: int = 1; // trailing\nvar y: int = 2;\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("// trailing"),
+            "trailing comment must survive formatting: {out}"
+        );
+        let x_pos = out.find("var x").unwrap();
+        let c_pos = out.find("// trailing").unwrap();
+        let y_pos = out.find("var y").unwrap();
+        assert!(x_pos < c_pos && c_pos < y_pos, "comment stays between x and y: {out}");
+    }
+
+    #[test]
+    fn preserves_a_commented_out_field_inside_a_task_body() {
+        let src = "task [Build] {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n};\n";
+        let out = fmt(src);
+        assert!(out.contains("// description: \"old\";"), "{out}");
+        let real_pos = out.find("description: \"real\"").unwrap();
+        let comment_pos = out.find("// description: \"old\";").unwrap();
+        let default_pos = out.find("default: true").unwrap();
+        let closing_pos = out.rfind("};").unwrap();
+        assert!(
+            real_pos < comment_pos && comment_pos < default_pos,
+            "comment must stay between description and default, inside the task: {out}"
+        );
+        assert!(comment_pos < closing_pos, "comment leaked outside the task: {out}");
+    }
+
+    #[test]
+    fn task_body_comment_does_not_leak_into_the_next_task() {
+        let src = "task [Build] {\n    run { true; };\n    // note about build\n};\ntask [Next] {\n    run { true; };\n};\n";
+        let out = fmt(src);
+        let build_close = out.find("task [Build]").unwrap();
+        let next_open = out.find("task [Next]").unwrap();
+        let comment_pos = out.find("// note about build").unwrap();
+        assert!(
+            build_close < comment_pos && comment_pos < next_open,
+            "comment must render before `task [Next]`, still inside Build: {out}"
+        );
+        // Must be indented as if inside the task body, not at column 0.
+        let comment_line = out.lines().find(|line| line.contains("// note about build")).unwrap();
+        assert!(comment_line.starts_with("    "), "comment must be indented inside the task: {comment_line:?}");
+    }
+
+    #[test]
+    fn task_body_comment_after_last_run_block_stays_inside() {
+        let src = "task [Build] {\n    run { true; };\n    // trailing note\n};\n";
+        let out = fmt(src);
+        let comment_pos = out.find("// trailing note").unwrap();
+        let closing_pos = out.rfind("};").unwrap();
+        assert!(comment_pos < closing_pos, "comment leaked past the closing brace: {out}");
+    }
+
+    #[test]
+    fn preserves_block_comments_inside_a_task_body() {
+        let src = "task [Build] {\n    /* multi\n       line */\n    run { true; };\n};\n";
+        let out = fmt(src);
+        assert!(out.contains("/* multi"), "{out}");
+        assert!(out.contains("line */"), "{out}");
+        let comment_pos = out.find("/* multi").unwrap();
+        let run_pos = out.find("run").unwrap();
+        let closing_pos = out.rfind("};").unwrap();
+        assert!(comment_pos < run_pos, "block comment must precede run block: {out}");
+        assert!(comment_pos < closing_pos, "block comment leaked outside the task: {out}");
+    }
+
+    #[test]
+    fn formatting_a_task_with_in_body_comments_twice_is_idempotent() {
+        let src = "task [Build] {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n    // trailing\n};\n";
+        let once = fmt(src);
+        let twice = fmt(&once);
+        assert_eq!(once, twice, "formatting must be idempotent: {once}");
     }
 
     #[test]

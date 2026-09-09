@@ -66,7 +66,14 @@ fn run_default_task_executes_when_no_task_given() {
 
 #[test]
 fn run_explicit_task_runs_its_dependency_first() {
-    let output = spar(&["run", "test", "-f", "tests/fixtures/tasks/basic.spar"]);
+    // quiet defaults true now, so use --dry-run to see the echoed plan order.
+    let output = spar(&[
+        "run",
+        "test",
+        "-f",
+        "tests/fixtures/tasks/basic.spar",
+        "--dry-run",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -213,12 +220,13 @@ fn quiet_successful_task_does_not_echo_script() {
 
 #[cfg(unix)]
 #[test]
-fn non_quiet_failing_task_still_dumps_full_script() {
+fn explicit_quiet_false_failing_task_still_dumps_full_script() {
     let directory = tempfile::tempdir().unwrap();
     let file = write_fixture(
         directory.path(),
         "loud-failure.spar",
         r#"task [LoudFailure] {
+    quiet: false;
     run {
         #!/bin/sh
         # LOUD_FAILURE_FULL_SCRIPT
@@ -236,6 +244,41 @@ fn non_quiet_failing_task_still_dumps_full_script() {
         stderr.contains(
             "error: task LoudFailure command \"#!/bin/sh\\n        # LOUD_FAILURE_FULL_SCRIPT\\n        exit 7\" failed with status exit status: 7"
         ),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn default_task_is_quiet_and_hides_full_script_on_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "default-quiet-failure.spar",
+        r#"task [DefaultFailure] {
+    run {
+        #!/bin/sh
+        # DEFAULT_QUIET_FULL_SCRIPT_SHOULD_NOT_APPEAR
+        printf 'quiet by default\n' >&2
+        exit 7
+    };
+};"#,
+    );
+
+    let output = spar(&["run", "defaultfailure", "-f", file.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("quiet by default"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "error: task DefaultFailure ({}:1) failed: exit status: 7",
+            file.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("DEFAULT_QUIET_FULL_SCRIPT_SHOULD_NOT_APPEAR"),
         "{stderr}"
     );
 }
@@ -537,4 +580,141 @@ fn show_prints_a_shebang_script_in_full() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("#!/bin/sh"), "{stdout}");
     assert!(stdout.contains("echo first; echo second"), "{stdout}");
+}
+
+#[test]
+fn bare_task_name_is_shorthand_for_run() {
+    let output = spar(&[
+        "deploy",
+        "production",
+        "-f",
+        "tests/fixtures/tasks/basic.spar",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bare_invocation_with_no_task_name_runs_default_task() {
+    let output = spar(&["-f", "tests/fixtures/tasks/basic.spar"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bare_unknown_task_name_still_fails_with_diagnostic() {
+    let output = spar(&["does-not-exist", "-f", "tests/fixtures/tasks/basic.spar"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("does-not-exist"), "{stderr}");
+}
+
+#[test]
+fn bare_reserved_keyword_still_runs_the_subcommand_not_a_same_named_task() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "shadow.spar",
+        r#"task [Check] { default: true; run { true; }; };"#,
+    );
+
+    // `spar check <file>` must run the `check` subcommand (compile-check the
+    // given file), not the task named `Check` — even though the task exists.
+    let output = spar(&["check", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stdout).unwrap().ends_with(": ok\n"));
+}
+
+#[test]
+fn task_name_shadowing_a_reserved_command_warns() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "shadow.spar",
+        r#"task [Check] { default: true; run { true; }; };"#,
+    );
+
+    let output = spar(&["tasks", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("shadowed by the reserved `check` command"), "{stderr}");
+    assert!(stderr.contains("spar run check"), "{stderr}");
+
+    // Still reachable via explicit `run`.
+    let output = spar(&["run", "check", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_argument_overrides_one_default_and_leaves_the_other() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "cpd.spar",
+        r#"task [Cpd](file: str = "main.dart", out: str = "main") {
+    default: true;
+    run { echo "compiling ${file} to ${out}"; };
+};"#,
+    );
+
+    let output = spar(&["run", "cpd", "out=result", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("compiling main.dart to result"), "{stdout}");
+
+    // Bare dispatch gets the same feature for free.
+    let output = spar(&["cpd", "out=result2", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("compiling main.dart to result2"), "{stdout}");
+}
+
+#[test]
+fn named_arguments_cannot_mix_with_positional_ones_end_to_end() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "cpd.spar",
+        r#"task [Cpd](file: str = "main.dart", out: str = "main") {
+    run { echo "compiling ${file} to ${out}"; };
+};"#,
+    );
+
+    let output = spar(&[
+        "run",
+        "cpd",
+        "out=result",
+        "lib.dart",
+        "-f",
+        file.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("mixes named and positional arguments"), "{stderr}");
 }

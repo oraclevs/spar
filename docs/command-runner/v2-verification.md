@@ -52,7 +52,7 @@ override, discovery, and grouped/`--choose`/`show`/`dump` CLI surface.)
 ## Manual cross-feature smoke test
 
 Run against a disposable `/tmp` fixture (not checked in), one file
-combining every V2 feature: `@DotenvLoad` + a `.env` providing `GREETING`,
+combining every V2 feature: `@LoadEnv` + a `.env` providing `GREETING`,
 a default task, a `private`+`group`+`confirm` task, a task with a default
 and a variadic parameter plus a `shell:` override, and a shebang script
 task.
@@ -100,7 +100,7 @@ shebang token parsing).
 
 All user-selected V2 buckets are implemented: recipe attributes
 (`private`/`group`/`confirm`/`os`), default and variadic parameters,
-shebang/script recipes, `.env` loading via `@DotenvLoad`, per-task shell
+shebang/script recipes, `.env` loading via `@LoadEnv`, per-task shell
 override, richer grouped `spar tasks`, built-in `--choose`, `spar show`,
 `spar dump`, and `SparMake.spar` discovery. Provenance updated in
 `just-extraction-map.md` (new "V2 additions" section, V1 rows left intact)

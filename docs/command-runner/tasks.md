@@ -21,6 +21,15 @@ A task's name follows the same `[PascalCase]` convention as a section. `spar
 tasks`/`spar run` address it by its lowercased form (`build`), and two tasks
 whose names collide once lowercased are a compile error.
 
+`spar <name> [args...]` is shorthand for `spar run <name> [args...]` — any
+first argument that isn't one of `spar`'s own subcommands (`check`, `emit`,
+`fmt`, `tasks`, `run`, `show`, `dump`) is treated as a task name, so `spar
+build` and `spar run build` are identical. If a task's lowercased name
+collides with one of those reserved subcommands (a task named `Check`, say),
+the subcommand always wins for bare dispatch — that task is only reachable
+via the explicit `spar run check`, and `spar tasks`/`spar run`/`spar show`/
+`spar dump` print a warning about the shadowing.
+
 The `run { ... }` block holds raw shell text, not ordinary Spar statements —
 quotes, pipes, redirects, and multiple commands separated by `;` are all
 preserved verbatim and handed to the platform shell one command at a time, in
@@ -101,6 +110,38 @@ task [Deploy](environment: str = "staging", *extra: str) {
 - Required parameters (no default) must still come before any parameter
   with a default, and before the variadic parameter if present.
 
+### Named arguments
+
+```bash
+spar run cpd out=result -f cpd.spar   # skip `file`, keep its default
+spar run cpd out=result file=lib.dart -f cpd.spar   # any order
+```
+
+Positional arguments fill parameters in declaration order, so overriding a
+later defaulted parameter normally means also supplying every parameter
+before it. Named arguments (`name=value`) are the alternative: give any
+subset of a task's parameters by name, in any order, and every parameter
+you omit falls back to its default (or is an error, if it's required).
+
+- A call is in named-argument mode only if its *first* argument has the
+  form `name=value` where `name` is one of the task's declared parameters.
+  Every remaining argument must then also be `name=value`, or it's an
+  error — named and positional arguments never mix in one call.
+- A name that isn't a declared parameter, or given twice for a
+  non-variadic parameter, is a compile-time-checked runtime error before
+  any command executes. A required parameter never given by name is also
+  an error.
+- A variadic parameter collects every argument with its name, in the
+  order given: `tags=a tags=b` binds `tags` to `["a", "b"]`.
+- Because mode is decided by the first argument only, a *positional*
+  value that happens to contain `=` (e.g. `spar run setenv KEY=value`) is
+  never mistaken for a named argument unless it exactly matches
+  `<a real parameter name>=...` — so a single mistyped named argument
+  (e.g. `out=result` misspelled as `otu=result`, where `otu` isn't a
+  parameter) is instead read as one positional argument, not an error.
+  Double-check the parameter name with `spar show`/`spar tasks` if a
+  named-argument call doesn't behave as expected.
+
 ## Environment
 
 ```spar
@@ -124,23 +165,26 @@ ordinary Spar string expressions, so `"${port}"` referencing a global
 ### Loading a `.env` file
 
 ```spar
-@DotenvLoad
+@LoadEnv
 
 export var appName: str = "demo";
 ...
 ```
 
-`@DotenvLoad` must be the first line of the file. When present, `spar`
+`@LoadEnv` must be the first line of the file. When present, `spar`
 loads `KEY=VALUE` pairs (`#` comments, blank lines, and quoted values are
 supported) from a `.env` file next to the `.spar` source, before every
 task's own `env: {}` is applied. Precedence, lowest to highest:
+
+Pass a string path to load a different file from the same directory, for
+example `@LoadEnv(".env.production")`.
 
 1. `.env` file values — never override a variable already set in the real
    process environment;
 2. the inherited process environment;
 3. the task's own `env: {}` block, which always wins.
 
-A missing `.env` with `@DotenvLoad` present is not an error.
+A missing `.env` with `@LoadEnv` present is not an error.
 
 ## Working directories
 
@@ -164,7 +208,6 @@ task [Deploy] {
     private: true;
     group: "release";
     confirm: "Really deploy to production?";
-    os: ["linux", "macos"];
 
     run { ./deploy.sh; };
 };
@@ -180,10 +223,33 @@ task [Deploy] {
   order, before any command runs; declining any one of them aborts the
   whole plan with a non-zero exit — nothing runs, not even an earlier
   task without its own `confirm`.
-- `os: [str]` — restricts the task to the listed platforms (`"linux"`,
-  `"macos"`, `"windows"`), checked against the running platform whether the
-  task was requested directly or reached as a dependency. A mismatch is a
-  runtime error, not a silent skip.
+
+## OS-specific run blocks
+
+A task can declare more than one `run` block, each labeled with a platform:
+
+```spar
+task [Build] {
+    run windows {
+        cmd /c build.bat;
+    };
+    run linux {
+        ./build.sh;
+    };
+    run macos {
+        ./build.sh;
+    };
+};
+```
+
+At lowering time, Spar picks the block whose label matches the running
+platform (`windows`, `linux`, or `macos`, from `std::env::consts::OS`) —
+checked whether the task was requested directly or reached as a
+dependency. A label-less `run { ... }` block, if present alongside labeled
+ones, is the fallback when no label matches the current platform; if
+neither a matching label nor a label-less block exists, that's a
+compile-time error, not a silent skip. A bare `run { ... }` with no other
+`run` blocks (the common case) always runs, on every platform.
 
 ## Shell customization
 
@@ -277,6 +343,11 @@ spar run -f server.spar               # default task
 spar run build -f server.spar         # explicit task
 spar run deploy prod -f server.spar   # explicit task with an argument
 spar run --choose -f server.spar      # pick a task interactively
+
+# bare shorthand — identical to the `run` forms above
+spar -f server.spar
+spar build -f server.spar
+spar deploy prod -f server.spar
 ```
 
 `--choose` (only valid with no task name given) prints a numbered,
@@ -314,5 +385,13 @@ since `dump` has no arguments to bind.
 
 A command that exits non-zero stops that task (and anything depending on
 it), and `spar run` exits non-zero itself. `spar` never suppresses a child
-program's own stdout/stderr; a task marked `quiet: true;` only stops the
-command line itself from being echoed before it runs.
+program's own stdout/stderr; `quiet` only stops the command line itself
+from being echoed before it runs (and, on failure, keeps the full
+script out of the error message).
+
+Tasks are `quiet: true;` by default — commands never echo unless the
+task sets `quiet: false;` explicitly. This is a security default: tasks
+loaded via `@LoadEnv` often interpolate secret values into the rendered
+command line, and quiet-by-default keeps those values out of the shell
+and logs. `--dry-run` always shows the full command plan regardless of
+`quiet`, since previewing commands is the point of `--dry-run`.

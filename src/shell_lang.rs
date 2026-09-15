@@ -124,7 +124,9 @@ impl<'a> BodyParser<'a> {
             commands.push(self.parse_command()?);
         }
         if commands.len() == 1 {
-            Ok(ShellStep::Command(commands.pop().expect("one command")))
+            Ok(ShellStep::Command(Box::new(
+                commands.pop().expect("one command"),
+            )))
         } else {
             Ok(ShellStep::Pipeline(commands))
         }

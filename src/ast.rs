@@ -133,7 +133,7 @@ pub enum ShellJoin {
 
 #[derive(Debug, Clone)]
 pub enum ShellStep {
-    Command(ShellCommandExpr),
+    Command(Box<ShellCommandExpr>),
     Pipeline(Vec<ShellCommandExpr>),
 }
 

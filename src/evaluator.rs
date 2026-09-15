@@ -192,6 +192,7 @@ pub struct Evaluator {
     warnings: Vec<String>,
     imported_programs: HashMap<String, ImportedProgram>,
     hosts: crate::host::HostRegistry,
+    effect_ledger: Option<crate::session::EffectLedger>,
 }
 
 fn build_imported_programs(
@@ -306,6 +307,7 @@ impl Evaluator {
             warnings: Vec::new(),
             imported_programs: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
+            effect_ledger: None,
         }
     }
 
@@ -314,6 +316,11 @@ impl Evaluator {
     /// are unaffected.
     pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
         self.hosts = hosts;
+        self
+    }
+
+    fn with_effect_ledger(mut self, effect_ledger: Option<crate::session::EffectLedger>) -> Self {
+        self.effect_ledger = effect_ledger;
         self
     }
 
@@ -338,8 +345,23 @@ impl Evaluator {
         base_dir: &std::path::Path,
         hosts: crate::host::HostRegistry,
     ) -> Result<EvalResult, Vec<SparError>> {
+        Self::evaluate_with_imports_base_and_effects(
+            program, symbols, loaded, base_dir, hosts, None,
+        )
+    }
+
+    pub(crate) fn evaluate_with_imports_base_and_effects(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        hosts: crate::host::HostRegistry,
+        effect_ledger: Option<crate::session::EffectLedger>,
+    ) -> Result<EvalResult, Vec<SparError>> {
         let imported = build_imported_programs(loaded, base_dir)?;
-        let mut ev = Evaluator::new(symbols.clone(), program.clone()).with_hosts(hosts);
+        let mut ev = Evaluator::new(symbols.clone(), program.clone())
+            .with_hosts(hosts)
+            .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         let result = ev.run();
         match result {
@@ -481,8 +503,24 @@ impl Evaluator {
         entry_name: &str,
         hosts: crate::host::HostRegistry,
     ) -> Result<(EvalResult, ConfigValue), Vec<SparError>> {
+        Self::evaluate_and_call_entry_with_imports_base_and_effects(
+            program, symbols, loaded, base_dir, entry_name, hosts, None,
+        )
+    }
+
+    pub(crate) fn evaluate_and_call_entry_with_imports_base_and_effects(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        entry_name: &str,
+        hosts: crate::host::HostRegistry,
+        effect_ledger: Option<crate::session::EffectLedger>,
+    ) -> Result<(EvalResult, ConfigValue), Vec<SparError>> {
         let imported = build_imported_programs(loaded, base_dir)?;
-        let mut ev = Evaluator::new(symbols.clone(), program.clone()).with_hosts(hosts);
+        let mut ev = Evaluator::new(symbols.clone(), program.clone())
+            .with_hosts(hosts)
+            .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         match ev.run() {
             Ok(eval_result) => {
@@ -1005,18 +1043,25 @@ impl Evaluator {
             }
             Expr::Shell(shell) => Ok(ConfigValue::Shell(lower_shell_expr(shell))),
             Expr::ExecShell(shell) => {
-                let outcome = execute_shell_plan(&lower_shell_expr(shell)).map_err(|error| {
-                    EvalErr::Host {
-                        message: format!("could not execute shell plan: {error}"),
-                    }
-                })?;
-                Ok(ConfigValue::Section(HashMap::from([
-                    ("success".to_string(), ConfigValue::Bool(outcome.success)),
-                    (
-                        "exitCode".to_string(),
-                        ConfigValue::Int(i64::from(outcome.exit_code)),
-                    ),
-                ])))
+                let run = || {
+                    let outcome =
+                        execute_shell_plan(&lower_shell_expr(shell)).map_err(|error| {
+                            EvalErr::Host {
+                                message: format!("could not execute shell plan: {error}"),
+                            }
+                        })?;
+                    Ok(ConfigValue::Section(HashMap::from([
+                        ("success".to_string(), ConfigValue::Bool(outcome.success)),
+                        (
+                            "exitCode".to_string(),
+                            ConfigValue::Int(i64::from(outcome.exit_code)),
+                        ),
+                    ])))
+                };
+                match &self.effect_ledger {
+                    Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
+                    None => run(),
+                }
             }
         }
     }
@@ -1155,6 +1200,7 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.effect_ledger = self.effect_ledger.clone();
                     let result = if imported
                         .symbols
                         .lookup_section(&[name.to_string()])
@@ -1205,6 +1251,7 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.effect_ledger = self.effect_ledger.clone();
 
                     if imported.symbols.enums.contains_key(rest[0].as_str()) {
                         let inner_nr = NamespaceRef {
@@ -1731,6 +1778,7 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.effect_ledger = self.effect_ledger.clone();
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
@@ -1786,6 +1834,7 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.effect_ledger = self.effect_ledger.clone();
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);

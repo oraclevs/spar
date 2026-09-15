@@ -7,18 +7,38 @@
 //! the new one), not just the new fragment. That's what makes rollback
 //! trivial and correct — a failing fragment simply never gets appended,
 //! so the session's committed source (and the globals last read off of
-//! it) are untouched. The cost is real: a fragment that calls a host
-//! function with an observable side effect (writing to a file, printing
-//! to stdout) will re-trigger every earlier fragment's host calls too on
-//! every subsequent `eval()`. Phase 0 doesn't attempt true incremental
-//! (parse-once, extend-in-place) evaluation — that's a materially bigger
-//! project than a session foundation needs to be to unblock `spar repl`.
+//! it) are untouched. Executed shell expressions are memoized by their
+//! stable source spans so their process effects are not repeated during
+//! replay. Other observable effects, such as host calls, still replay.
+//! Phase 0 doesn't attempt true incremental (parse-once, extend-in-place)
+//! evaluation — that's a materially bigger project than a session
+//! foundation needs to be to unblock `spar repl`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::compiler::{CompileOptions, Compiler};
 use crate::error::SparError;
 use crate::evaluator::ConfigValue;
+
+#[derive(Clone, Default, Debug)]
+pub struct EffectLedger(Arc<Mutex<HashMap<(usize, usize), ConfigValue>>>);
+
+impl EffectLedger {
+    pub(crate) fn get_or_try_run<E>(
+        &self,
+        span: (usize, usize),
+        run: impl FnOnce() -> Result<ConfigValue, E>,
+    ) -> Result<ConfigValue, E> {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(value) = guard.get(&span) {
+            return Ok(value.clone());
+        }
+        let value = run()?;
+        guard.insert(span, value.clone());
+        Ok(value)
+    }
+}
 
 pub struct Session {
     options: CompileOptions,
@@ -27,7 +47,8 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(options: CompileOptions) -> Self {
+    pub(crate) fn new(mut options: CompileOptions) -> Self {
+        options.effect_ledger = Some(EffectLedger::default());
         Self {
             options,
             committed_source: String::new(),
@@ -115,5 +136,30 @@ mod tests {
         let mut session = Engine::default().with_hosts(hosts).session();
         session.eval("var x: int = math::square(n: 6);").unwrap();
         assert_eq!(session.value("x"), Some(&ConfigValue::Int(36)));
+    }
+
+    #[test]
+    fn exec_shell_only_runs_once_across_session_replays() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("effect.txt");
+        let mut session = Engine::default().session();
+        let src = format!(
+            r#"function bump() -> int {{
+                var r: ExecResult = exec shell {{ printf x >> {:?}; }};
+                return 0;
+            }};
+            var mut triggered: int = bump();"#,
+            path.to_string_lossy()
+        );
+
+        session.eval(&src).unwrap();
+        session.eval("var mut count: int = 1;").unwrap();
+        session.eval("count = count + 1;").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "x",
+            "exec shell must only actually run once, not once per replay"
+        );
     }
 }

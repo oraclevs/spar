@@ -5,9 +5,15 @@
 //! no new syntax anywhere in this subsystem.
 
 pub mod error;
+pub mod lockfile;
 pub mod manifest;
 pub mod source;
+pub mod store;
 
 pub use error::PackageError;
+pub use lockfile::{
+    github_package_id, local_package_id, LockedPackage, LockedSource, Lockfile, PackageId,
+};
 pub use manifest::{PackageKind, PackageManifest};
 pub use source::{GitHubSelector, PackageSource};
+pub use store::{PackageStore, StorePaths};

@@ -80,6 +80,27 @@ fn mutable_assignment_must_match_the_declared_type() {
 }
 
 #[test]
+fn void_function_accepts_bare_return_and_implicit_fallthrough() {
+    check_ok("function noisy() -> void { return; };");
+    check_ok("function quiet() -> void { };");
+}
+
+#[test]
+fn void_function_rejects_a_value_returning_return() {
+    let error = check_err("function f() -> void { return 1; };");
+    assert!(error.contains("void"), "{error}");
+}
+
+#[test]
+fn non_void_function_rejects_bare_return() {
+    let error = check_err("function f() -> int { return; };");
+    assert!(
+        error.contains("int") && error.contains("no value"),
+        "{error}"
+    );
+}
+
+#[test]
 fn typecheck_function_parameter_default_type_mismatch() {
     let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
     assert!(

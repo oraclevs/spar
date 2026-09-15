@@ -136,6 +136,26 @@ fn mutable_assignments_cross_nested_lexical_blocks() {
 }
 
 #[test]
+fn void_function_bare_return_exits_early_and_call_statement_executes_side_effects() {
+    let result = eval_src(
+        r#"
+        var mut count: int = 0;
+        function bump(stop: bool) -> void {
+            count = count + 1;
+            if stop { return; }
+            count = count + 100;
+        };
+        bump(stop: true);
+        bump(stop: false);
+        "#,
+    );
+    assert_eq!(
+        result.globals["count"],
+        crate::evaluator::ConfigValue::Int(102)
+    );
+}
+
+#[test]
 fn eval_function_parameter_default_and_explicit_override() {
     let src = r#"
         var defaultName: str = "world";

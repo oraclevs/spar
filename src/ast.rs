@@ -5,6 +5,11 @@ pub struct Program {
     pub is_schema_file: bool,
     pub load_env: Option<String>,
     pub items: Vec<TopLevelItem>,
+    /// A leading `#!...` line, if the source had one. Not produced by the
+    /// parser itself — the lexer skips it as trivia; callers that care
+    /// about round-tripping it read it off the `Lexer` before tokenizing
+    /// and set it on the returned `Program`.
+    pub shebang: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +281,10 @@ pub enum SparType {
     Float,
     Bool,
     Section, // inline nested section body
+    /// Function return type only — the parser never accepts `void` for a
+    /// var, param, field, or list element type, so this variant can't
+    /// reach storage positions.
+    Void,
     List(Box<SparType>),
     Named(String), // a declared `type [X]{...}`, referenced by name
 }
@@ -511,6 +520,8 @@ pub struct IfStmt {
 
 #[derive(Debug, Clone)]
 pub enum ReturnValue {
+    /// Bare `return;` — only legal inside a `-> void` function.
+    Void,
     Expr(Expr),
     SectionBlock(Vec<ReturnField>),
 }

@@ -11,6 +11,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Float => "float".into(),
         SparType::Bool => "bool".into(),
         SparType::Section => "section".into(),
+        SparType::Void => "void".into(),
         SparType::List(inner) => format!("[{}]", display_type(inner)),
         SparType::Named(name) => name.clone(),
     }
@@ -2448,6 +2449,26 @@ impl<'a> TypeChecker<'a> {
         span: &Span,
     ) {
         match (ret_ty, ret_value) {
+            (SparType::Void, ReturnValue::Void) => {}
+            (SparType::Void, ReturnValue::Expr(_) | ReturnValue::SectionBlock(_)) => {
+                self.errors.push(SparError::TypeError {
+                    message: "function declares return type 'void' but this 'return' provides \
+                               a value — use bare 'return;'"
+                        .to_string(),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+            (ty, ReturnValue::Void) => {
+                self.errors.push(SparError::TypeError {
+                    message: format!(
+                        "function declares return type '{}' but this 'return;' provides no value",
+                        display_type(ty)
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
             (SparType::Section, ReturnValue::SectionBlock(fields)) => {
                 for field in fields {
                     if let Err(e) = self.check_expr_with_locals(&field.value, local_types) {

@@ -104,7 +104,9 @@ impl Compiler {
             errors: Vec::new(),
         };
 
-        let tokens = match Lexer::new(source).tokenize() {
+        let lexer = Lexer::new(source);
+        let shebang = lexer.shebang().map(str::to_owned);
+        let tokens = match lexer.tokenize() {
             Ok(tokens) => tokens,
             Err(error) => {
                 compilation.errors.push(error);
@@ -118,6 +120,7 @@ impl Compiler {
                 return compilation;
             }
         };
+        program.shebang = shebang;
 
         if program.is_schema_file && !self.options.allow_schema_file {
             compilation.errors.push(SparError::SchemaError {
@@ -189,5 +192,104 @@ impl Compiler {
         compilation.program = Some(program);
         compilation.symbols = Some(symbols);
         compilation
+    }
+}
+
+/// Validates a declared `main` function's signature: no parameters, a
+/// return type of `int` or `void`, and not `private`. A program with no
+/// `main` at all is `Ok(())` here — this only checks the shape of a
+/// declaration that exists; deciding whether Execute mode *requires* one
+/// present is that mode's job (Task 9), not this structural check's.
+pub fn validate_entry_signature(program: &Program) -> Result<(), SparError> {
+    let Some(main) = program.items.iter().find_map(|item| match item {
+        crate::ast::TopLevelItem::Function(f) if f.name == "main" => Some(f),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+
+    if main.is_private {
+        return Err(SparError::ResolveError {
+            message: "'main' cannot be declared 'private' — it must be callable as the \
+                       application entry point"
+                .into(),
+            hint: None,
+            span: main.span.clone(),
+        });
+    }
+    if !main.params.is_empty() {
+        return Err(SparError::ResolveError {
+            message: "'main' must not declare parameters".into(),
+            hint: None,
+            span: main.span.clone(),
+        });
+    }
+    if !matches!(
+        main.ret,
+        crate::ast::SparType::Int | crate::ast::SparType::Void
+    ) {
+        return Err(SparError::TypeError {
+            message: format!(
+                "'main' must return 'int' or 'void', found '{}'",
+                crate::typechecker::display_type(&main.ret)
+            ),
+            hint: None,
+            span: main.ret_span.clone(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Program {
+        let tokens = crate::Lexer::new(src).tokenize().expect("lex");
+        crate::Parser::new(tokens).parse().expect("parse")
+    }
+
+    fn assert_entry_ok(src: &str) {
+        validate_entry_signature(&parse(src)).expect("expected a valid entry signature");
+    }
+
+    fn assert_entry_error(src: &str, expected_substring: &str) {
+        let error = validate_entry_signature(&parse(src)).expect_err("expected an entry error");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains(expected_substring),
+            "expected error containing {expected_substring:?}, got: {message}"
+        );
+    }
+
+    #[test]
+    fn execute_entry_accepts_only_zero_argument_int_or_void_main() {
+        assert_entry_ok("function main() -> int { return 7; };");
+        assert_entry_ok("function main() -> void {};");
+        assert_entry_error(
+            "function main(x: int) -> int { return x; };",
+            "must not declare parameters",
+        );
+    }
+
+    #[test]
+    fn execute_entry_rejects_private_main() {
+        assert_entry_error(
+            "private function main() -> int { return 0; };",
+            "cannot be declared 'private'",
+        );
+    }
+
+    #[test]
+    fn execute_entry_rejects_a_non_int_non_void_return_type() {
+        assert_entry_error(
+            "function main() -> str { return \"ok\"; };",
+            "must return 'int' or 'void'",
+        );
+    }
+
+    #[test]
+    fn program_without_a_main_declaration_is_a_valid_entry_signature() {
+        assert_entry_ok("var x: int = 1;");
     }
 }

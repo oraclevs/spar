@@ -290,7 +290,9 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         // The typechecker rejects `list`/`section` task parameters before
         // lowering ever runs — this arm is unreachable in practice, but a
         // safe fallback beats a panic if that invariant ever slips.
-        SparType::List(_) | SparType::Section | SparType::Named(_) => ScalarKind::Str,
+        SparType::List(_) | SparType::Section | SparType::Named(_) | SparType::Void => {
+            ScalarKind::Str
+        }
     }
 }
 

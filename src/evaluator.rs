@@ -1629,7 +1629,10 @@ impl Evaluator {
         let result = self
             .eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
             .into_return()
-            .unwrap(); // resolver ensures every path returns
+            // resolver ensures every path returns, except a `void`
+            // function's implicit fallthrough, whose value a caller can
+            // never observe (the typechecker forbids storing it).
+            .unwrap_or(ConfigValue::Int(0));
 
         self.call_depth -= 1;
         Ok(result)
@@ -1689,6 +1692,10 @@ impl Evaluator {
                 }
                 FuncStmt::Return(ret_value, _) => {
                     let val = match ret_value {
+                        // `void` functions never let this value escape — the
+                        // typechecker forbids storing a void result — so a
+                        // bare `return;` just needs any placeholder here.
+                        ReturnValue::Void => ConfigValue::Int(0),
                         ReturnValue::Expr(e) => self.eval_expr(&e.clone(), local_scope)?,
                         ReturnValue::SectionBlock(fields) => {
                             let fields = fields.clone();

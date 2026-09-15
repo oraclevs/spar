@@ -1,6 +1,10 @@
 fn parse_ok(src: &str) -> crate::ast::Program {
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    crate::parser::Parser::new(tokens).parse().unwrap()
+    let lexer = crate::lexer::Lexer::new(src);
+    let shebang = lexer.shebang().map(str::to_owned);
+    let tokens = lexer.tokenize().unwrap();
+    let mut program = crate::parser::Parser::new(tokens).parse().unwrap();
+    program.shebang = shebang;
+    program
 }
 
 fn parse_err(src: &str) -> String {
@@ -124,6 +128,44 @@ fn parse_mutable_declarations_and_assignment() {
     assert!(matches!(
         program.items[1],
         crate::ast::TopLevelItem::Statement(crate::ast::Statement::Assignment { .. })
+    ));
+}
+
+#[test]
+fn parse_void_return_type_and_bare_return() {
+    let program = parse_ok("function doThing() -> void { return; };");
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function declaration");
+    };
+    assert_eq!(function.ret, crate::ast::SparType::Void);
+    assert!(matches!(
+        function.body.stmts[0],
+        crate::ast::Statement::Return(crate::ast::ReturnValue::Void, _)
+    ));
+}
+
+#[test]
+fn parse_void_function_with_implicit_fallthrough() {
+    let program = parse_ok("function doThing() -> void { };");
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function declaration");
+    };
+    assert!(function.body.stmts.is_empty());
+}
+
+#[test]
+fn void_is_rejected_as_a_variable_type() {
+    let err = parse_err("var x: void = 0;");
+    assert!(err.contains("expected a type"), "got: {err}");
+}
+
+#[test]
+fn leading_shebang_is_preserved_and_ignored_by_parser() {
+    let program = parse_ok("#!/usr/bin/env spar\nfunction main() -> void { return; };");
+    assert_eq!(program.shebang.as_deref(), Some("#!/usr/bin/env spar"));
+    assert!(matches!(
+        program.items[0],
+        crate::ast::TopLevelItem::Function(_)
     ));
 }
 

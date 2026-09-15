@@ -6,6 +6,45 @@ use crate::error::{Span, SparError};
 use crate::loader::LoadedImport;
 use crate::naming;
 
+fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::ExecShell(shell) => Some(shell.span.clone()),
+        Expr::Shell(_) | Expr::Literal(_) | Expr::NamespaceRef(_) => None,
+        Expr::String(string) => string.parts.iter().find_map(|part| match part {
+            StringPart::Literal(_) => None,
+            StringPart::Expr(expr) => find_exec_shell_span(expr),
+        }),
+        Expr::FieldAccess { base, .. } | Expr::Grouped(base, _) => find_exec_shell_span(base),
+        Expr::FnCall(call) => call.args.iter().find_map(find_exec_shell_span),
+        Expr::BinaryOp(binary) => {
+            find_exec_shell_span(&binary.lhs).or_else(|| find_exec_shell_span(&binary.rhs))
+        }
+        Expr::List(items, _) => items.iter().find_map(find_exec_shell_span),
+        Expr::Call { args, .. } => args
+            .iter()
+            .find_map(|argument| find_exec_shell_span(&argument.value)),
+        Expr::Unary { operand, .. } => find_exec_shell_span(operand),
+        Expr::Index { source, index, .. } => {
+            find_exec_shell_span(source).or_else(|| find_exec_shell_span(index))
+        }
+        Expr::Comprehension { source, body, .. } => {
+            find_exec_shell_span(source).or_else(|| find_exec_shell_span(body))
+        }
+        Expr::Object(items, _) => find_exec_shell_span_in_items(items),
+    }
+}
+
+fn find_exec_shell_span_in_items(items: &[SectionItem]) -> Option<Span> {
+    items.iter().find_map(|item| match item {
+        SectionItem::Field(field) => match &field.value {
+            Some(FieldValue::Expr(expr)) => find_exec_shell_span(expr),
+            Some(FieldValue::Nested(items)) => find_exec_shell_span_in_items(items),
+            None => None,
+        },
+        SectionItem::Spread(spread) => find_exec_shell_span(&spread.expr),
+    })
+}
+
 // ── Exhaustiveness / scope-exit analysis (pure; no resolver state needed) ─────
 
 /// If `stmts` always returns on every path, returns `None`.
@@ -1039,6 +1078,7 @@ impl Resolver {
                         &mut module_locals,
                         &mut module_mutable,
                         0,
+                        false,
                     );
                 }
             }
@@ -1088,7 +1128,7 @@ impl Resolver {
             }
         }
 
-        self.resolve_func_stmts(&f.body.stmts, &mut local_names, &mut mutable_names, 0);
+        self.resolve_func_stmts(&f.body.stmts, &mut local_names, &mut mutable_names, 0, true);
 
         if f.ret != SparType::Void && !stmts_always_return(&f.body.stmts) {
             self.errors.push(SparError::ResolveError {
@@ -1511,6 +1551,11 @@ impl Resolver {
                     self.errors.push(e);
                 }
             }
+            Expr::Shell(_) => {}
+            Expr::ExecShell(shell) => self.push_error(
+                "'exec shell' cannot appear at module scope — move it inside a function body",
+                shell.span.clone(),
+            ),
         }
     }
 
@@ -1775,10 +1820,12 @@ impl Resolver {
         local_names: &mut HashSet<String>,
         mutable_names: &mut HashSet<String>,
         loop_depth: usize,
+        allow_exec_shell: bool,
     ) {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
+                    self.reject_module_exec_shell(&lv.value, allow_exec_shell);
                     self.check_named_type_exists(&lv.ty, &lv.span);
                     if let Err(e) = self.resolve_expr_with_locals(&lv.value, local_names) {
                         self.errors.push(e);
@@ -1798,11 +1845,13 @@ impl Resolver {
                     }
                 }
                 FuncStmt::Expression(expr, _) => {
+                    self.reject_module_exec_shell(expr, allow_exec_shell);
                     if let Err(error) = self.resolve_expr_with_locals(expr, local_names) {
                         self.errors.push(error);
                     }
                 }
                 FuncStmt::Assignment { name, value, span } => {
+                    self.reject_module_exec_shell(value, allow_exec_shell);
                     if let Err(error) = self.resolve_expr_with_locals(value, local_names) {
                         self.errors.push(error);
                     }
@@ -1835,6 +1884,7 @@ impl Resolver {
                 FuncStmt::Return(ret_value, _) => match ret_value {
                     ReturnValue::Void => {}
                     ReturnValue::Expr(e) => {
+                        self.reject_module_exec_shell(e, allow_exec_shell);
                         if let Err(err) = self.resolve_expr_with_locals(e, local_names) {
                             self.errors.push(err);
                         }
@@ -1844,6 +1894,7 @@ impl Resolver {
                             if let Some(ty) = &rf.ty {
                                 self.check_named_type_exists(ty, &rf.span);
                             }
+                            self.reject_module_exec_shell(&rf.value, allow_exec_shell);
                             if let Err(err) = self.resolve_expr_with_locals(&rf.value, local_names)
                             {
                                 self.errors.push(err);
@@ -1865,6 +1916,7 @@ impl Resolver {
                 }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::For(statement) => {
+                    self.reject_module_exec_shell(&statement.iterable, allow_exec_shell);
                     if let Err(e) = self.resolve_expr_with_locals(&statement.iterable, local_names)
                     {
                         self.errors.push(e);
@@ -1890,9 +1942,11 @@ impl Resolver {
                         &mut loop_scope,
                         &mut loop_mutable,
                         loop_depth + 1,
+                        allow_exec_shell,
                     );
                 }
                 FuncStmt::If(if_stmt) => {
+                    self.reject_module_exec_shell(&if_stmt.condition, allow_exec_shell);
                     if let Err(e) = self.resolve_expr_with_locals(&if_stmt.condition, local_names) {
                         self.errors.push(e);
                     }
@@ -1905,6 +1959,7 @@ impl Resolver {
                         &mut then_scope,
                         &mut then_mutable,
                         loop_depth,
+                        allow_exec_shell,
                     );
                     let mut else_scope = local_names.clone();
                     let mut else_mutable = mutable_names.clone();
@@ -1913,6 +1968,7 @@ impl Resolver {
                         &mut else_scope,
                         &mut else_mutable,
                         loop_depth,
+                        allow_exec_shell,
                     );
 
                     // Branch declarations are lexical to their own blocks.
@@ -2166,6 +2222,7 @@ impl Resolver {
                 inner_locals.insert(var_name.clone());
                 self.resolve_expr_with_locals(body, &inner_locals)
             }
+            Expr::Shell(_) | Expr::ExecShell(_) => Ok(()),
         }
     }
 
@@ -2368,7 +2425,19 @@ impl Resolver {
                     }
                 }
             }
-            Expr::Literal(_) => {}
+            Expr::Shell(_) | Expr::ExecShell(_) | Expr::Literal(_) => {}
+        }
+    }
+
+    fn reject_module_exec_shell(&mut self, expr: &Expr, allow_exec_shell: bool) {
+        if !allow_exec_shell {
+            let Some(span) = find_exec_shell_span(expr) else {
+                return;
+            };
+            self.push_error(
+                "'exec shell' cannot appear at module scope — move it inside a function body",
+                span,
+            );
         }
     }
 

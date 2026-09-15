@@ -632,7 +632,9 @@ fn bare_reserved_keyword_still_runs_the_subcommand_not_a_same_named_task() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8(output.stdout).unwrap().ends_with(": ok\n"));
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .ends_with(": ok\n"));
 }
 
 #[test]
@@ -651,7 +653,10 @@ fn task_name_shadowing_a_reserved_command_warns() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("shadowed by the reserved `check` command"), "{stderr}");
+    assert!(
+        stderr.contains("shadowed by the reserved `check` command"),
+        "{stderr}"
+    );
     assert!(stderr.contains("spar run check"), "{stderr}");
 
     // Still reachable via explicit `run`.
@@ -692,7 +697,10 @@ fn named_argument_overrides_one_default_and_leaves_the_other() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("compiling main.dart to result2"), "{stdout}");
+    assert!(
+        stdout.contains("compiling main.dart to result2"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -716,5 +724,8 @@ fn named_arguments_cannot_mix_with_positional_ones_end_to_end() {
     ]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("mixes named and positional arguments"), "{stderr}");
+    assert!(
+        stderr.contains("mixes named and positional arguments"),
+        "{stderr}"
+    );
 }

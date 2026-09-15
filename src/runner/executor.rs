@@ -1,9 +1,9 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use super::{ExecutionPlan, ExprEval, RunnerError, TaskCommand};
 #[cfg(test)]
 use super::no_expr_eval;
+use super::{ExecutionPlan, ExprEval, RunnerError, TaskCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -36,13 +36,7 @@ fn execute_with_echo(
     options: &ExecutionOptions,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
-    execute_with_io(
-        plan,
-        options,
-        &no_expr_eval,
-        &mut std::io::empty(),
-        echo,
-    )
+    execute_with_io(plan, options, &no_expr_eval, &mut std::io::empty(), echo)
 }
 
 fn execute_with_io(

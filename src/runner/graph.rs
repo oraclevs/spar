@@ -725,7 +725,10 @@ mod tests {
         assert_eq!(
             bound.parameter_values,
             BTreeMap::from([
-                ("file".to_owned(), BoundValue::Scalar("main.dart".to_owned())),
+                (
+                    "file".to_owned(),
+                    BoundValue::Scalar("main.dart".to_owned())
+                ),
                 ("out".to_owned(), BoundValue::Scalar("result".to_owned())),
             ])
         );
@@ -827,7 +830,10 @@ mod tests {
 
         assert_eq!(
             bound.parameter_values,
-            BTreeMap::from([("flag".to_owned(), BoundValue::Scalar("KEY=value".to_owned()))])
+            BTreeMap::from([(
+                "flag".to_owned(),
+                BoundValue::Scalar("KEY=value".to_owned())
+            )])
         );
     }
 

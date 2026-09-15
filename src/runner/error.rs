@@ -161,7 +161,10 @@ impl fmt::Display for RunnerError {
                 write!(formatter, "task {task} has an invalid shebang: {message}")
             }
             Self::TaskExprFailed { task, message } => {
-                write!(formatter, "task {task} failed to evaluate a `${{...}}` expression: {message}")
+                write!(
+                    formatter,
+                    "task {task} failed to evaluate a `${{...}}` expression: {message}"
+                )
             }
             Self::Aborted { task } => write!(formatter, "task {task} aborted"),
             Self::CommandExecution {

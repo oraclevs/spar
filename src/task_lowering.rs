@@ -299,7 +299,13 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
 /// `spar show`/`spar dump` before parameters are ever bound).
 fn format_expr_source(expr: &Expr) -> String {
     let mut out = String::new();
-    crate::formatter::format_expr(expr, 0, 0, &crate::formatter::FormatConfig::default(), &mut out);
+    crate::formatter::format_expr(
+        expr,
+        0,
+        0,
+        &crate::formatter::FormatConfig::default(),
+        &mut out,
+    );
     out
 }
 

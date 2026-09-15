@@ -69,11 +69,11 @@ pub struct Lockfile {
 
 impl Lockfile {
     pub fn to_spar(&self) -> Result<String, PackageError> {
-        let mut out = String::from(
-            "[Lock] -> SparPackageLock {\n\
-                 formatVersion: 1;\n\
-                 root: [SparLockedDependency] = [\n",
-        );
+        let mut out = String::from(concat!(
+            "[Lock] -> SparPackageLock {\n",
+            "    formatVersion: 1;\n",
+            "    root: [SparLockedDependency] = [\n",
+        ));
         for (alias, package_id) in &self.root {
             out.push_str(&format!(
                 "        {{ alias: \"{}\"; packageId: \"{}\"; }},\n",
@@ -545,6 +545,7 @@ mod tests {
         let path = Path::new("spar.package.lock.spar");
         let text = original.to_spar().unwrap();
         assert!(text.starts_with("[Lock] -> SparPackageLock {"));
+        assert!(text.contains("\n    formatVersion: 1;\n    root:"));
         assert!(!text.contains("[[packages]]"));
         let parsed = Lockfile::parse_spar(&text, path).unwrap();
         assert_eq!(original, parsed);

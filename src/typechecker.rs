@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::error::{Span, SparError};
-use crate::resolver::{stmts_always_return, GlobalEntry, SymbolTable};
+use crate::resolver::{GlobalEntry, SymbolTable};
 
 pub fn display_type(ty: &SparType) -> String {
     match ty {
@@ -125,6 +125,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_program(&mut self, program: &Program) {
+        let mut module_locals = HashMap::new();
         for item in &program.items {
             match item {
                 TopLevelItem::Import(_) => {}
@@ -142,6 +143,11 @@ impl<'a> TypeChecker<'a> {
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.check_task(decl),
+                TopLevelItem::Statement(statement) => self.check_func_stmts(
+                    std::slice::from_ref(statement),
+                    &SparType::Int,
+                    &mut module_locals,
+                ),
             }
         }
     }
@@ -2363,13 +2369,8 @@ impl<'a> TypeChecker<'a> {
                 FuncStmt::Return(ret_value, span) => {
                     self.check_return_value(ret_value, ret_ty, local_types, span);
                 }
-                FuncStmt::For {
-                    var_name,
-                    iterable,
-                    body,
-                    span,
-                } => {
-                    let iterable_ty = self.infer_type_with_locals(iterable, local_types);
+                FuncStmt::For(statement) => {
+                    let iterable_ty = self.infer_type_with_locals(&statement.iterable, local_types);
                     let elem_ty = match iterable_ty {
                         Some(SparType::List(elem)) => Some(*elem),
                         Some(other) => {
@@ -2379,20 +2380,32 @@ impl<'a> TypeChecker<'a> {
                                     display_type(&other)
                                 ),
                                 hint: None,
-                                span: span.clone(),
+                                span: statement.span.clone(),
                             });
                             None
                         }
                         None => None,
                     };
-                    if let Err(e) = self.check_expr_with_locals(iterable, local_types) {
+                    if let Err(e) = self.check_expr_with_locals(&statement.iterable, local_types) {
                         self.errors.push(e);
                     }
                     let mut loop_types = local_types.clone();
                     if let Some(elem) = elem_ty {
-                        loop_types.insert(var_name.clone(), elem);
+                        match &statement.binding {
+                            ForBinding::Value { name, .. } => {
+                                loop_types.insert(name.clone(), elem);
+                            }
+                            ForBinding::Indexed {
+                                index_name,
+                                value_name,
+                                ..
+                            } => {
+                                loop_types.insert(index_name.clone(), SparType::Int);
+                                loop_types.insert(value_name.clone(), elem);
+                            }
+                        }
                     }
-                    let body = body.clone();
+                    let body = statement.body.clone();
                     self.check_func_stmts(&body, ret_ty, &mut loop_types);
                 }
                 FuncStmt::If(if_stmt) => {
@@ -2590,51 +2603,6 @@ impl<'a> TypeChecker<'a> {
         self.check_func_stmts(&if_stmt.then_stmts, ret_ty, &mut then_types);
         let mut else_types = local_types.clone();
         self.check_func_stmts(&if_stmt.else_stmts, ret_ty, &mut else_types);
-
-        let then_terminal = stmts_always_return(&if_stmt.then_stmts);
-        let else_terminal = stmts_always_return(&if_stmt.else_stmts);
-
-        // Only check type agreement when NEITHER branch is terminal
-        if !then_terminal && !else_terminal {
-            for (name, then_ty) in &then_types {
-                if local_types.contains_key(name) {
-                    continue;
-                }
-                if let Some(else_ty) = else_types.get(name) {
-                    if then_ty != else_ty {
-                        self.errors.push(SparError::TypeError {
-                            message: format!(
-                                "'{}' has type '{}' in the if-branch but '{}' in the else-branch \
-                                 — both branches must declare it with the same type",
-                                name,
-                                display_type(then_ty),
-                                display_type(else_ty)
-                            ),
-                            hint: None,
-                            span: if_stmt.span.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Merge non-terminal branch(es) into outer scope
-        match (then_terminal, else_terminal) {
-            (true, true) => {}
-            (false, true) => {
-                local_types.extend(then_types);
-            }
-            (true, false) => {
-                local_types.extend(else_types);
-            }
-            (false, false) => {
-                for (name, ty) in &then_types {
-                    if else_types.get(name) == Some(ty) {
-                        local_types.insert(name.clone(), ty.clone());
-                    }
-                }
-            }
-        }
     }
 
     // ── Type inference with local variable scope ──────────────────────────────
@@ -3188,16 +3156,18 @@ mod tests {
     }
 
     #[test]
-    fn terminal_branch_exemption_local_available_after_if() {
-        // then-branch always returns; else-branch declares `y` — `y` must be available after
-        check_ok(
-            r#"
+    fn terminal_branch_local_is_not_available_after_if() {
+        let src = r#"
             function f(b: bool) -> int {
                 if b { return 0; } else { var y: int = 1; }
                 return y;
             };
-        "#,
-        );
+        "#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        assert!(crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .is_err());
     }
 
     #[test]

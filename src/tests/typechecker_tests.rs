@@ -46,6 +46,33 @@ fn typecheck_call_expression_statements_in_nested_blocks() {
 }
 
 #[test]
+fn indexed_for_binds_int_index_and_list_element_type() {
+    check_ok(
+        r#"
+        function inspect(values: [str]) -> int {
+            for (index, value) in values {
+                var checkedIndex: int = index;
+                var checkedValue: str = value;
+                return checkedIndex;
+            }
+            return 0;
+        };
+        "#,
+    );
+}
+
+#[test]
+fn module_if_and_for_are_typechecked() {
+    check_ok(
+        r#"
+        function sink(value: int) -> int { return value; };
+        if true { sink(value: 1); }
+        for (index, value) in [2] { sink(value: index + value); }
+        "#,
+    );
+}
+
+#[test]
 fn typecheck_function_parameter_default_type_mismatch() {
     let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
     assert!(
@@ -110,8 +137,7 @@ fn typecheck_section_field_can_be_function_call() {
 fn typecheck_if_condition_must_be_bool() {
     let src = r#"
         function f(x: int) -> str {
-            if x { var r: str = "a"; } else { var r: str = "b"; }
-            return r;
+            if x { return "a"; } else { return "b"; }
         };
     "#;
     let err = check_err(src);

@@ -35,7 +35,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
                 }
             }
             // A for-loop never guarantees execution (iterable may be empty).
-            FuncStmt::For { .. } => {}
+            FuncStmt::For(_) => {}
         }
     }
     Some(scope)
@@ -51,7 +51,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
         FuncStmt::Expression(_, span) => span.clone(),
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
-        FuncStmt::For { span, .. } => span.clone(),
+        FuncStmt::For(statement) => statement.span.clone(),
     }
 }
 
@@ -389,6 +389,7 @@ impl Resolver {
                 TopLevelItem::FunctionGroup(decl) => self.register_function_group(decl),
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.register_task(decl),
+                TopLevelItem::Statement(_) => {}
             }
         }
     }
@@ -930,6 +931,7 @@ impl Resolver {
 
 impl Resolver {
     fn resolve_program(&mut self, program: &Program) {
+        let mut module_locals = HashSet::new();
         for item in &program.items {
             match item {
                 TopLevelItem::Import(_) => {}
@@ -964,6 +966,9 @@ impl Resolver {
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.resolve_task(decl),
+                TopLevelItem::Statement(statement) => {
+                    self.resolve_func_stmts(std::slice::from_ref(statement), &mut module_locals);
+                }
             }
         }
     }
@@ -1064,8 +1069,8 @@ impl Resolver {
                         terminated = true;
                     }
                 }
-                FuncStmt::For { body, .. } => {
-                    let body = body.clone();
+                FuncStmt::For(statement) => {
+                    let body = statement.body.clone();
                     self.check_unreachable(&body);
                     // A for-loop never sets terminated — iterable may be empty.
                 }
@@ -1725,18 +1730,26 @@ impl Resolver {
                         }
                     }
                 },
-                FuncStmt::For {
-                    var_name,
-                    iterable,
-                    body,
-                    ..
-                } => {
-                    if let Err(e) = self.resolve_expr_with_locals(iterable, local_names) {
+                FuncStmt::For(statement) => {
+                    if let Err(e) = self.resolve_expr_with_locals(&statement.iterable, local_names)
+                    {
                         self.errors.push(e);
                     }
                     let mut loop_scope = local_names.clone();
-                    loop_scope.insert(var_name.clone());
-                    let body = body.clone();
+                    match &statement.binding {
+                        ForBinding::Value { name, .. } => {
+                            loop_scope.insert(name.clone());
+                        }
+                        ForBinding::Indexed {
+                            index_name,
+                            value_name,
+                            ..
+                        } => {
+                            loop_scope.insert(index_name.clone());
+                            loop_scope.insert(value_name.clone());
+                        }
+                    }
+                    let body = statement.body.clone();
                     self.resolve_func_stmts(&body, &mut loop_scope);
                 }
                 FuncStmt::If(if_stmt) => {
@@ -1750,24 +1763,9 @@ impl Resolver {
                     let mut else_scope = local_names.clone();
                     self.resolve_func_stmts(&else_stmts, &mut else_scope);
 
-                    // Merge via sequence_exit_scope (handles terminal-branch exemption)
-                    let then_exit = sequence_exit_scope(&then_stmts);
-                    let else_exit = sequence_exit_scope(&else_stmts);
-                    match (then_exit, else_exit) {
-                        (None, None) => {}
-                        (Some(names), None) | (None, Some(names)) => {
-                            for name in names.keys() {
-                                local_names.insert(name.clone());
-                            }
-                        }
-                        (Some(then_names), Some(else_names)) => {
-                            for name in then_names.keys() {
-                                if else_names.contains_key(name) {
-                                    local_names.insert(name.clone());
-                                }
-                            }
-                        }
-                    }
+                    // Branch declarations are lexical to their own blocks.
+                    // Only assignments to an already-visible outer binding may
+                    // affect enclosing state; declarations never merge out.
                 }
             }
         }
@@ -2212,16 +2210,23 @@ impl Resolver {
                         }
                     }
                 },
-                FuncStmt::For {
-                    var_name,
-                    iterable,
-                    body,
-                    ..
-                } => {
-                    self.collect_closure_deps_expr(iterable, &locals, deps);
+                FuncStmt::For(statement) => {
+                    self.collect_closure_deps_expr(&statement.iterable, &locals, deps);
                     let mut loop_locals = locals.clone();
-                    loop_locals.insert(var_name.clone());
-                    self.collect_closure_deps_stmts(body, &loop_locals, deps);
+                    match &statement.binding {
+                        ForBinding::Value { name, .. } => {
+                            loop_locals.insert(name.clone());
+                        }
+                        ForBinding::Indexed {
+                            index_name,
+                            value_name,
+                            ..
+                        } => {
+                            loop_locals.insert(index_name.clone());
+                            loop_locals.insert(value_name.clone());
+                        }
+                    }
+                    self.collect_closure_deps_stmts(&statement.body, &loop_locals, deps);
                 }
                 FuncStmt::If(if_stmt) => {
                     self.collect_closure_deps_expr(&if_stmt.condition, &locals, deps);
@@ -2860,7 +2865,7 @@ function pick(debug: bool) -> int {
     }
 
     #[test]
-    fn mixed_terminal_and_nonterminal_branch_resolves_correctly() {
+    fn nonterminal_branch_local_does_not_escape() {
         let src = r#"
 function f(useDefault: bool) -> str {
     if useDefault {
@@ -2871,7 +2876,9 @@ function f(useDefault: bool) -> str {
     return computed;
 };
 "#;
-        resolve_ok(src);
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        assert!(Resolver::new().resolve(&program, &[]).is_err());
     }
 
     #[test]
@@ -2927,7 +2934,7 @@ function f(flag: bool) -> int {
     }
 
     #[test]
-    fn nested_if_inside_nonterminal_branch_merges_correctly() {
+    fn nested_branch_local_does_not_escape() {
         let src = r#"
 function f(a: bool, b: bool) -> int {
     if a {
@@ -2938,7 +2945,9 @@ function f(a: bool, b: bool) -> int {
     return x;
 };
 "#;
-        resolve_ok(src);
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        assert!(Resolver::new().resolve(&program, &[]).is_err());
     }
 
     #[test]

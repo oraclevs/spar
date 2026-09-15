@@ -136,13 +136,15 @@ task [Deploy](environment: str) {
     let task = tasks.get("deploy").expect("Deploy task must be lowered");
     let parts = &task.commands[0].template().parts;
     assert!(
-        parts
-            .iter()
-            .any(|p| matches!(p, TemplatePart::Expr { source, .. } if source.contains("environment"))),
+        parts.iter().any(
+            |p| matches!(p, TemplatePart::Expr { source, .. } if source.contains("environment"))
+        ),
         "{parts:?}"
     );
     assert_eq!(compilation.task_exprs.len(), 1);
-    assert!(compilation.task_exprs[0].param_kinds.contains_key("environment"));
+    assert!(compilation.task_exprs[0]
+        .param_kinds
+        .contains_key("environment"));
 }
 
 /// The exact shape that motivated deferred evaluation: a function call
@@ -154,8 +156,7 @@ task [Deploy](environment: str) {
 fn function_call_taking_a_task_parameter_is_deferred_to_run_time() {
     let src = r#"
 function fetchContainerName(forProd: bool) -> str {
-    if forProd { var r: str = "prod-db"; } else { var r: str = "dev-db"; }
-    return r;
+    if forProd { return "prod-db"; } else { return "dev-db"; }
 };
 
 task [DbDown](isProd: bool = false) {

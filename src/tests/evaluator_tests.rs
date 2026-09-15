@@ -24,6 +24,64 @@ fn eval_function_returning_str() {
 }
 
 #[test]
+fn eval_indexed_for_uses_zero_based_int_index() {
+    let result = eval_src(
+        r#"
+        function secondIndex(values: [str]) -> int {
+            for (index, value) in values {
+                if value == "second" { return index; }
+            }
+            return 99;
+        };
+        var result: int = secondIndex(values: ["first", "second"]);
+        "#,
+    );
+    assert_eq!(
+        result.globals["result"],
+        crate::evaluator::ConfigValue::Int(1)
+    );
+}
+
+#[test]
+fn evaluator_executes_module_if_and_for_statements() {
+    let source = r#"
+        function fail(value: int) -> int { return value / 0; };
+        var empty: [int] = [];
+        if false { fail(value: 1); }
+        for item in empty { fail(value: item); }
+        if true { fail(value: 2); }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+    let program = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&program, &[])
+        .unwrap();
+    crate::typechecker::TypeChecker::check(&program, &symbols).unwrap();
+    let error = crate::evaluator::Evaluator::new(symbols, program)
+        .run()
+        .unwrap_err();
+    assert!(error.to_string().contains("division by zero"), "{error}");
+}
+
+#[test]
+fn nested_block_shadowing_does_not_replace_outer_local() {
+    let result = eval_src(
+        r#"
+        function value() -> str {
+            var name: str = "outside";
+            if true { var name: str = "inside"; }
+            return name;
+        };
+        var result: str = value();
+        "#,
+    );
+    assert_eq!(
+        result.globals["result"],
+        crate::evaluator::ConfigValue::Str("outside".into())
+    );
+}
+
+#[test]
 fn eval_function_parameter_default_and_explicit_override() {
     let src = r#"
         var defaultName: str = "world";
@@ -98,8 +156,7 @@ fn eval_comprehension() {
 fn eval_function_with_if_else() {
     let src = r#"
         function choose(flag: bool) -> str {
-            if flag { var r: str = "yes"; } else { var r: str = "no"; }
-            return r;
+            if flag { return "yes"; } else { return "no"; }
         };
         var result: str = choose(flag: true);
     "#;

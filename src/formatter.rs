@@ -670,6 +670,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Bool => "bool".to_string(),
         SparType::Section => "section".to_string(),
         SparType::Void => "void".to_string(),
+        SparType::Shell => "shell".to_string(),
         SparType::List(inner) => format!("[{}]", format_type(inner)),
         SparType::Named(name) => name.clone(),
     }
@@ -955,7 +956,83 @@ pub(crate) fn format_expr(
             out.push('.');
             out.push_str(field);
         }
+
+        Expr::Shell(shell) => format_shell_expr(shell, false, depth, config, out),
+        Expr::ExecShell(shell) => format_shell_expr(shell, true, depth, config, out),
     }
+}
+
+fn format_shell_expr(
+    shell: &ShellExpr,
+    execute: bool,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
+    if execute {
+        out.push_str("exec ");
+    }
+    out.push_str("shell {");
+    if shell.steps.is_empty() {
+        out.push('}');
+        return;
+    }
+    out.push('\n');
+    for (_, step) in &shell.steps {
+        out.push_str(&indent(depth + 1, config));
+        match step {
+            ShellStep::Command(command) => format_shell_command(command, out),
+            ShellStep::Pipeline(commands) => {
+                for (index, command) in commands.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(" | ");
+                    }
+                    format_shell_command(command, out);
+                }
+            }
+        }
+        out.push_str(";\n");
+    }
+    out.push_str(&indent(depth, config));
+    out.push('}');
+}
+
+fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
+    format_shell_word(&command.program.text, out);
+    for argument in &command.args {
+        out.push(' ');
+        format_shell_word(&argument.text, out);
+    }
+    if let Some(redirect) = &command.stdout {
+        out.push_str(match redirect.mode {
+            spar_command::RedirectMode::Truncate => " > ",
+            spar_command::RedirectMode::Append => " >> ",
+        });
+        format_shell_word(&redirect.target.text, out);
+    }
+    if let Some(redirect) = &command.stderr {
+        out.push_str(" 2> ");
+        format_shell_word(&redirect.target.text, out);
+    }
+}
+
+fn format_shell_word(word: &str, out: &mut String) {
+    let needs_quotes = word.is_empty()
+        || word.bytes().any(|byte| {
+            byte.is_ascii_whitespace() || matches!(byte, b';' | b'|' | b'>' | b'{' | b'}' | b'"')
+        });
+    if !needs_quotes {
+        out.push_str(word);
+        return;
+    }
+    out.push('"');
+    for character in word.chars() {
+        if matches!(character, '\\' | '"') {
+            out.push('\\');
+        }
+        out.push(character);
+    }
+    out.push('"');
 }
 
 /// Renders one `{ ... }` object-literal field or spread, `"; "`-terminated,
@@ -1274,6 +1351,31 @@ mod tests {
     #[test]
     fn formats_simple_var() {
         assert_eq!(fmt("var x: int = 1;").trim(), "var x: int = 1;");
+    }
+
+    #[test]
+    fn format_shell_block() {
+        let source = "var x: shell = shell {\n    echo hi;\n};\n";
+        assert_eq!(fmt(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn format_command_sugar_uses_the_canonical_shell_block() {
+        let formatted = fmt("var x: shell = command echo hi;\n");
+        assert_eq!(formatted.trim(), "var x: shell = shell {\n    echo hi;\n};");
+    }
+
+    #[test]
+    fn format_pipeline_redirect_and_quoted_word() {
+        let source =
+            "var x: shell = shell {\n    cat \"my file.txt\" | grep error > test.log;\n};\n";
+        assert_eq!(fmt(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn format_exec_shell() {
+        let source = "function f() -> int {\n    var r: ExecResult = exec shell {\n        true;\n    };\n    return 0;\n};\n";
+        assert_eq!(fmt(source).trim(), source.trim());
     }
 
     #[test]

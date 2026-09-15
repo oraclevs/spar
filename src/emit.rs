@@ -149,6 +149,62 @@ fn config_value_to_json(val: &ConfigValue) -> serde_json::Value {
             }
             serde_json::Value::Object(obj)
         }
+        ConfigValue::Shell(plan) => shell_plan_to_json(plan),
+    }
+}
+
+fn shell_plan_to_json(plan: &spar_command::ShellPlan) -> serde_json::Value {
+    serde_json::json!({
+        "steps": plan.steps.iter().map(|(join, step)| {
+            let join = match join {
+                spar_command::Join::Always => "always",
+                spar_command::Join::OnSuccess => "onSuccess",
+                spar_command::Join::OnFailure => "onFailure",
+            };
+            let (kind, commands): (&str, Vec<&spar_command::CommandPlan>) = match step {
+                spar_command::Step::Command(command) => ("command", vec![command]),
+                spar_command::Step::Pipeline(pipeline) => {
+                    ("pipeline", pipeline.commands.iter().collect())
+                }
+            };
+            serde_json::json!({
+                "join": join,
+                "kind": kind,
+                "commands": commands.into_iter().map(command_plan_to_json).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>()
+    })
+}
+
+fn command_plan_to_json(command: &spar_command::CommandPlan) -> serde_json::Value {
+    serde_json::json!({
+        "program": command.program,
+        "args": command.args,
+        "environment": command.env.iter().map(|entry| {
+            serde_json::json!({ "key": entry.key, "value": entry.value })
+        }).collect::<Vec<_>>(),
+        "cwd": command.cwd.as_ref().map(|cwd| match cwd {
+            spar_command::WorkingDirectory::Path(path) => path,
+        }),
+        "stdin": command.stdin.as_ref().map(redirection_to_json),
+        "stdout": command.stdout.as_ref().map(redirection_to_json),
+        "stderr": command.stderr.as_ref().map(redirection_to_json),
+    })
+}
+
+fn redirection_to_json(redirection: &spar_command::Redirection) -> serde_json::Value {
+    match redirection {
+        spar_command::Redirection::File { path, mode } => serde_json::json!({
+            "kind": "file",
+            "path": path,
+            "mode": match mode {
+                spar_command::RedirectMode::Truncate => "truncate",
+                spar_command::RedirectMode::Append => "append",
+            },
+        }),
+        spar_command::Redirection::DuplicateFd(fd) => {
+            serde_json::json!({ "kind": "duplicateFd", "fd": fd })
+        }
     }
 }
 

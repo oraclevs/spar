@@ -283,7 +283,7 @@ impl Lockfile {
                 entry: string_field(&package_fields, "entry", path, "locked package")?.to_string(),
                 dependencies,
             };
-            if package.entry.as_str().is_empty() {
+            if package.entry.is_empty() {
                 return Err(lock_err(
                     path,
                     &format!("package '{id}' entry must not be empty"),

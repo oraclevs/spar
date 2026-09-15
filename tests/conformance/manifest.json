@@ -3,6 +3,7 @@
   "valid": [
     "basic.spar",
     "functions.spar",
-    "schema.spar"
+    "schema.spar",
+    "phase0_compatibility.spar"
   ]
 }

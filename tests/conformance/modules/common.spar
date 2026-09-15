@@ -1,0 +1,15 @@
+function borderRadiusCircular(all: int) -> [int] {
+    return [all, all, all, all];
+};
+
+function paddingAll(all: int) -> [int] {
+    return [all, all, all, all];
+};
+
+function colorWithAlpha(color: str, alpha: float) -> str {
+    return color;
+};
+
+export [Colors] {
+    red: str = "red";
+};

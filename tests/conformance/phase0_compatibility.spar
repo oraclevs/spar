@@ -1,0 +1,127 @@
+@LoadEnv
+
+// import schema "schema/test.spar";
+import { borderRadiusCircular, paddingAll, colorWithAlpha, Colors } from "modules/common.spar";
+
+import "modules/lib.spar";
+
+import { WindowRuleType as Type } from "modules/hypr_types.spar";
+
+var flutterUi: str = "Building panel ui config in spar";
+
+[Container]{
+    padding: [int] = paddingAll(all: 5);
+    decoration: section = {
+        color: str = Colors.red;
+        borderRadius: [int] = borderRadiusCircular(all: 5);
+        border: section = {
+            sides: [int] = Border.sides;
+            width: int = Border.width;
+        };
+        boxShadow: section = {
+            color: str = colorWithAlpha(color: Colors.red, alpha: 0.89);
+            blurRadius: int = 12;
+            offset: [int] = [0, 6];
+        };
+    };
+    child: str = flutterUi;
+};
+
+private [Border]{
+    sides: [int] = [2, 4, 6, 7];
+    width: int = 5;
+};
+
+private function borderConf() -> section {
+    return {
+        sides: [int] = [2, 4, 6, 7];
+        width: int = 5;
+    };
+};
+
+type [Border]{
+    sides?: [int];
+    width?: int;
+};
+
+type [BoxShadow]{
+    color: str;
+    blurRadius?: int;
+    offset?: [int];
+};
+
+export type [Decoration]{
+    color?: str;
+    borderRadius?: [int];
+    border?: Border;
+    boxShadow?: BoxShadow;
+};
+
+type [Human]{
+    name: str;
+    age: int;
+};
+
+private [Man] -> Human {
+    name: "John";
+    age: 29;
+};
+
+var name: str = "mike";
+
+var people: [Human] = [{ name: "Mike"; age: 5; }];
+
+var person: Human = people[0];
+
+function print(name: str) -> str {
+    return name;
+};
+
+function looper(people: [Human]) -> int {
+    for person in people {
+        var gt: str = print(name: person.name);
+        if person.name == "jude" {
+            return 6;
+        }
+        return 0;
+    }
+    return 0;
+};
+
+private [Tki]{
+    device: Devices = Devices::MacOs;
+};
+
+export enum Devices {
+    Ios,
+    Android,
+    Windows,
+    MacOs
+};
+
+functionGroup EdgeInsect {
+    function only() -> [int] {
+        return [1, 2, 3, 5];
+    }
+
+    private function semantic(hor: float, ver: float) -> [int] {
+        return [1, 2, 3, 5];
+    }
+};
+
+/// vts
+[MainCont]{
+    padding: [int] = EdgeInsect::only();
+    margin: [int] = EdgeInsect::semantic();
+    device: Devices = Tki.device;
+};
+
+task [Default] {
+    default: true;
+    quiet: true;
+
+    run linux {
+        echo "Testing env #{KUDICALL_RO_PASSWORD:-} ";
+        echo "Hello Occ";
+    };
+};

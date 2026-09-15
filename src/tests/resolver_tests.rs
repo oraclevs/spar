@@ -89,6 +89,32 @@ fn resolver_accepts_call_expression_statements_in_nested_blocks() {
 }
 
 #[test]
+fn locals_declared_in_both_if_branches_do_not_leak() {
+    let error = resolve_err(
+        r#"
+        function value(flag: bool) -> int {
+            if flag { var inside: int = 1; } else { var inside: int = 2; }
+            return inside;
+        };
+        "#,
+    );
+    assert!(error.contains("undefined reference: `inside`"), "{error}");
+}
+
+#[test]
+fn local_declared_after_terminal_branch_stays_block_scoped() {
+    let error = resolve_err(
+        r#"
+        function value(flag: bool) -> int {
+            if flag { return 1; } else { var inside: int = 2; }
+            return inside;
+        };
+        "#,
+    );
+    assert!(error.contains("undefined reference: `inside`"), "{error}");
+}
+
+#[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"
         function f(x: str) -> str { return x; };

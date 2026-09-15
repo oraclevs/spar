@@ -7,6 +7,15 @@ pub struct Parser {
     pos: usize,
 }
 
+fn statement_span(statement: &Statement) -> Span {
+    match statement {
+        Statement::LocalVar(declaration) => declaration.span.clone(),
+        Statement::Expression(_, span) | Statement::Return(_, span) => span.clone(),
+        Statement::If(statement) => statement.span.clone(),
+        Statement::For(statement) => statement.span.clone(),
+    }
+}
+
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
         Self { tokens, pos: 0 }
@@ -137,6 +146,7 @@ impl Parser {
                         TopLevelItem::FunctionGroup(d) => d.span.clone(),
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
                         TopLevelItem::Task(d) => d.span.clone(),
+                        TopLevelItem::Statement(s) => statement_span(s),
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
                     return Err(SparError::ParseError {
@@ -223,6 +233,14 @@ impl Parser {
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
             Token::Ident(s) if s == "task" => Ok(TopLevelItem::Task(Box::new(self.parse_task_decl()?))),
+            Token::KwIf | Token::KwFor => {
+                Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
+            }
+            Token::Ident(_)
+            | Token::TypeStr
+            | Token::TypeInt
+            | Token::TypeFloat
+            | Token::TypeBool => Ok(TopLevelItem::Statement(self.parse_func_stmt()?)),
             Token::Export => {
                 self.advance();
                 match self.peek() {
@@ -1481,7 +1499,31 @@ impl Parser {
     fn parse_for_stmt(&mut self) -> Result<FuncStmt, SparError> {
         let span = self.peek_span();
         self.expect(&Token::KwFor)?;
-        let (var_name, _) = self.expect_ident()?;
+        let binding = if self.at(&Token::LParen) {
+            self.advance();
+            let (index_name, index_span) = self.expect_ident()?;
+            self.expect(&Token::Comma)?;
+            let (value_name, value_span) = self.expect_ident()?;
+            self.expect(&Token::RParen)?;
+            if index_name == value_name {
+                return Err(SparError::ParseError {
+                    message: "indexed loop bindings must use two different names".into(),
+                    span: value_span,
+                });
+            }
+            ForBinding::Indexed {
+                index_name,
+                index_span,
+                value_name,
+                value_span,
+            }
+        } else {
+            let (name, name_span) = self.expect_ident()?;
+            ForBinding::Value {
+                name,
+                span: name_span,
+            }
+        };
         self.expect(&Token::KwIn)?;
         let iterable = self.parse_or()?;
         self.expect(&Token::LBrace)?;
@@ -1490,12 +1532,12 @@ impl Parser {
             body.push(self.parse_func_stmt()?);
         }
         self.expect(&Token::RBrace)?;
-        Ok(FuncStmt::For {
-            var_name,
+        Ok(FuncStmt::For(ForStmt {
+            binding,
             iterable,
             body,
             span,
-        })
+        }))
     }
 
     fn parse_local_var_decl(&mut self) -> Result<LocalVarDecl, SparError> {

@@ -371,6 +371,22 @@ impl Evaluator {
             }
         }
 
+        let statements: Vec<Statement> = self
+            .program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TopLevelItem::Statement(statement) => Some(statement.clone()),
+                _ => None,
+            })
+            .collect();
+        if !statements.is_empty() {
+            let mut module_scope = HashMap::new();
+            if let Err(error) = self.eval_func_stmts(&statements, &mut module_scope) {
+                self.push_eval_error(error);
+            }
+        }
+
         if self.errors.is_empty() {
             Ok(EvalResult {
                 globals: self.global_cache.clone(),
@@ -1660,20 +1676,28 @@ impl Evaluator {
                     };
                     return Ok(Some(val));
                 }
-                FuncStmt::For {
-                    var_name,
-                    iterable,
-                    body,
-                    ..
-                } => {
-                    let items = match self.eval_expr(&iterable.clone(), local_scope)? {
+                FuncStmt::For(statement) => {
+                    let items = match self.eval_expr(&statement.iterable, local_scope)? {
                         ConfigValue::List(items) => items,
                         _ => unreachable!("typechecker ensures for-loop iterable is a list"),
                     };
-                    for item in items {
+                    for (index, item) in items.into_iter().enumerate() {
                         let mut loop_scope = local_scope.clone();
-                        loop_scope.insert(var_name.clone(), item);
-                        let body = body.clone();
+                        match &statement.binding {
+                            ForBinding::Value { name, .. } => {
+                                loop_scope.insert(name.clone(), item);
+                            }
+                            ForBinding::Indexed {
+                                index_name,
+                                value_name,
+                                ..
+                            } => {
+                                loop_scope
+                                    .insert(index_name.clone(), ConfigValue::Int(index as i64));
+                                loop_scope.insert(value_name.clone(), item);
+                            }
+                        }
+                        let body = statement.body.clone();
                         if let Some(v) = self.eval_func_stmts(&body, &mut loop_scope)? {
                             return Ok(Some(v));
                         }
@@ -1689,9 +1713,6 @@ impl Evaluator {
                     let mut branch_scope = local_scope.clone();
                     if let Some(v) = self.eval_func_stmts(&branch, &mut branch_scope)? {
                         return Ok(Some(v));
-                    }
-                    for (k, v) in branch_scope {
-                        local_scope.insert(k, v);
                     }
                 }
             }
@@ -2114,8 +2135,7 @@ var endpoint: str = Config.host;
             r#"
             function clamp(x: int) -> int {
                 if x > 100 { return 100; }
-                else { var y: int = x; }
-                return y;
+                else { return x; }
             };
             var a: int = clamp(x: 200);
             var b: int = clamp(x: 42);
@@ -2153,8 +2173,7 @@ var endpoint: str = Config.host;
             r#"
             function choose(flag: bool) -> int {
                 if flag { return 1; }
-                else { var result: int = 99; }
-                return result;
+                else { return 99; }
             };
             var x: int = choose(flag: false);
         "#,

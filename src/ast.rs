@@ -20,6 +20,7 @@ pub enum TopLevelItem {
     Enum(EnumDecl),
     FunctionGroup(FunctionGroupDecl),
     Task(Box<TaskDecl>),
+    Statement(Statement),
 }
 
 /// A `task [Name](params) { ... }` declaration. Metadata fields
@@ -455,16 +456,33 @@ pub enum Statement {
     Expression(Expr, Span),
     If(IfStmt),
     Return(ReturnValue, Span),
-    For {
-        var_name: String,
-        iterable: Expr,
-        body: Vec<FuncStmt>,
-        span: Span,
-    },
+    For(ForStmt),
 }
 
 /// Backward-compatible name retained for embedders that inspect the public AST.
 pub type FuncStmt = Statement;
+
+#[derive(Debug, Clone)]
+pub struct ForStmt {
+    pub binding: ForBinding,
+    pub iterable: Expr,
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForBinding {
+    Value {
+        name: String,
+        span: Span,
+    },
+    Indexed {
+        index_name: String,
+        index_span: Span,
+        value_name: String,
+        value_span: Span,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalVarDecl {

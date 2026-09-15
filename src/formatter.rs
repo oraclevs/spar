@@ -128,6 +128,12 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::FunctionGroup(d) => d.span.line,
         TopLevelItem::SchemaFrom(d) => d.span.line,
         TopLevelItem::Task(d) => d.span.line,
+        TopLevelItem::Statement(statement) => match statement {
+            Statement::LocalVar(declaration) => declaration.span.line,
+            Statement::Expression(_, span) | Statement::Return(_, span) => span.line,
+            Statement::If(statement) => statement.span.line,
+            Statement::For(statement) => statement.span.line,
+        },
     }
 }
 
@@ -348,6 +354,8 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             let mut empty = CommentCursor::new(&[]);
             format_task_decl_cx(td, config, &mut empty, out);
         }
+
+        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out),
     }
 }
 
@@ -595,6 +603,7 @@ fn format_top_level_item_cx(
             format_section_items_cx(&sd.items, 1, config, cx, out);
             out.push_str("};\n");
         }
+        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out),
         TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
         _ => format_top_level_item(item, config, out),
     }
@@ -1038,19 +1047,27 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             }
         }
 
-        FuncStmt::For {
-            var_name,
-            iterable,
-            body,
-            ..
-        } => {
+        FuncStmt::For(statement) => {
             out.push_str(&ind);
             out.push_str("for ");
-            out.push_str(var_name);
+            match &statement.binding {
+                ForBinding::Value { name, .. } => out.push_str(name),
+                ForBinding::Indexed {
+                    index_name,
+                    value_name,
+                    ..
+                } => {
+                    out.push('(');
+                    out.push_str(index_name);
+                    out.push_str(", ");
+                    out.push_str(value_name);
+                    out.push(')');
+                }
+            }
             out.push_str(" in ");
-            format_expr(iterable, 0, depth, config, out);
+            format_expr(&statement.iterable, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(body, depth + 1, config, out);
+            format_func_stmts(&statement.body, depth + 1, config, out);
             out.push_str(&ind);
             out.push_str("}\n");
         }
@@ -1765,6 +1782,21 @@ function pick(flag: bool) -> int {
         );
         let twice = format_source(&once).expect("format again");
         assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn formats_module_and_indexed_loop_statements_canonically() {
+        let src = "if(true){notify();}\nfor(index,value) in [1,2]{notify();}\n";
+        let formatted = format_source(src).expect("format");
+        assert!(
+            formatted.contains("if (true) {\n    notify();\n}"),
+            "got: {formatted}"
+        );
+        assert!(
+            formatted.contains("for (index, value) in [1, 2] {"),
+            "got: {formatted}"
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]

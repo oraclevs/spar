@@ -62,6 +62,47 @@ fn reject_non_call_expression_statement() {
 }
 
 #[test]
+fn parse_module_if_for_and_call_statements() {
+    let program = parse_ok(
+        r#"
+        function sink(value: int) -> int { return value; };
+        if true { sink(value: 1); }
+        for item in [2] { sink(value: item); }
+        sink(value: 3);
+        "#,
+    );
+    assert!(matches!(
+        &program.items[1],
+        crate::ast::TopLevelItem::Statement(crate::ast::Statement::If(_))
+    ));
+    assert!(matches!(
+        &program.items[2],
+        crate::ast::TopLevelItem::Statement(crate::ast::Statement::For(_))
+    ));
+    assert!(matches!(
+        &program.items[3],
+        crate::ast::TopLevelItem::Statement(crate::ast::Statement::Expression(_, _))
+    ));
+}
+
+#[test]
+fn parse_indexed_for_binding() {
+    let program = parse_ok(
+        "function first(xs: [str]) -> int { for (index, value) in xs { return index; } return 0; };",
+    );
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    assert!(matches!(
+        &function.body.stmts[0],
+        crate::ast::Statement::For(crate::ast::ForStmt {
+            binding: crate::ast::ForBinding::Indexed { index_name, value_name, .. },
+            ..
+        }) if index_name == "index" && value_name == "value"
+    ));
+}
+
+#[test]
 fn parse_function_parameter_default() {
     let prog = parse_ok(r#"function greet(name: str = "world") -> str { return name; };"#);
     let crate::ast::TopLevelItem::Function(function) = &prog.items[0] else {

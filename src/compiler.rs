@@ -21,6 +21,10 @@ pub struct CompileOptions {
     /// Native functions `ns::fn(...)` calls may dispatch to — empty by
     /// default, so every existing caller behaves exactly as before.
     pub hosts: crate::host::HostRegistry,
+    /// Routes bare (non-filesystem-looking) imports through a project's
+    /// resolved package lock/store — `None` by default, so an ordinary
+    /// project with no `spar.package.spar` behaves exactly as before.
+    pub locator: Option<crate::package::ModuleLocator>,
 }
 
 impl Default for CompileOptions {
@@ -30,6 +34,7 @@ impl Default for CompileOptions {
             evaluate: true,
             allow_schema_file: true,
             hosts: crate::host::HostRegistry::default(),
+            locator: None,
         }
     }
 }
@@ -97,6 +102,14 @@ impl Compiler {
         &self.options
     }
 
+    fn import_loader(&self) -> ImportLoader {
+        let loader = ImportLoader::new(&self.options.base_dir);
+        match &self.options.locator {
+            Some(locator) => loader.with_locator(locator.clone()),
+            None => loader,
+        }
+    }
+
     pub fn compile(&self, source: &str) -> Compilation {
         let mut compilation = Compilation {
             program: None,
@@ -137,12 +150,12 @@ impl Compiler {
             return compilation;
         }
 
-        let mut expand_loader = ImportLoader::new(&self.options.base_dir);
+        let mut expand_loader = self.import_loader();
         if let Err(errors) = loader::expand_imports(&mut program, &mut expand_loader) {
             compilation.errors.extend(errors);
         }
 
-        let mut import_loader = ImportLoader::new(&self.options.base_dir);
+        let mut import_loader = self.import_loader();
         match loader::collect_imports(&program, &mut import_loader) {
             Ok(imports) => compilation.imports = imports,
             Err(errors) => compilation.errors.extend(errors),

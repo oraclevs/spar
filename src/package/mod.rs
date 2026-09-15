@@ -7,6 +7,7 @@
 pub mod error;
 pub mod github;
 pub mod local;
+pub mod locator;
 pub mod lockfile;
 pub mod manifest;
 pub mod resolver;
@@ -16,6 +17,7 @@ pub mod store;
 pub use error::PackageError;
 pub use github::{FetchedRevision, GitCommandProvider, NetworkPolicy, PackageProvider};
 pub use local::LocalSource;
+pub use locator::ModuleLocator;
 pub use lockfile::{
     github_package_id, local_package_id, LockedPackage, LockedSource, Lockfile, PackageId,
 };

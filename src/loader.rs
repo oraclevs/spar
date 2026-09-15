@@ -7,18 +7,60 @@ use std::path::{Path, PathBuf};
 pub struct LoadedImport {
     pub path: String,
     pub exports: HashSet<String>,
+    /// Where `path` actually resolved to on disk — a plain
+    /// `base_dir.join(path)` for a filesystem import, or a store
+    /// snapshot path for a package-aware bare import resolved through a
+    /// `ModuleLocator`. Evaluation reads this directly instead of
+    /// re-deriving it from `path`, so it only ever needs to know how to
+    /// resolve an import once.
+    pub resolved_path: PathBuf,
 }
 
 pub struct ImportLoader {
     base_dir: PathBuf,
+    locator: Option<crate::package::ModuleLocator>,
 }
 
 impl ImportLoader {
     pub fn new(base: &Path) -> Self {
         Self {
             base_dir: base.to_path_buf(),
+            locator: None,
         }
     }
+
+    /// Makes a bare (non-filesystem-looking) import string resolve
+    /// through `locator`'s package lock/store instead of failing as a
+    /// missing file — chainable so existing `ImportLoader::new(...)`
+    /// call sites are unaffected.
+    pub fn with_locator(mut self, locator: crate::package::ModuleLocator) -> Self {
+        self.locator = Some(locator);
+        self
+    }
+
+    /// Where a raw import string in this file should read from.
+    /// Filesystem-like strings (`./x`, `../x`, `/x`, or anything with a
+    /// `.spar` suffix) always resolve relative to `base_dir`, exactly as
+    /// before package-aware imports existed. A bare word with no
+    /// locator, or one whose edges don't recognize it, falls back to the
+    /// same `base_dir`-relative join — so it still fails with today's
+    /// familiar "cannot find import file" diagnostic rather than a
+    /// separate "unknown package" one.
+    fn resolve_path(&self, raw: &str) -> PathBuf {
+        if looks_like_filesystem_path(raw) {
+            return self.base_dir.join(raw);
+        }
+        if let Some(locator) = &self.locator {
+            if let Some(resolved) = locator.resolve_import(&self.base_dir, raw) {
+                return resolved;
+            }
+        }
+        self.base_dir.join(raw)
+    }
+}
+
+fn looks_like_filesystem_path(raw: &str) -> bool {
+    raw.starts_with('.') || raw.starts_with('/') || raw.contains('/') || raw.ends_with(".spar")
 }
 
 /// Splice selective/asPartOf import targets into `program`'s own top-level
@@ -261,7 +303,7 @@ fn splice_selective(
 ) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
     use crate::ast::TopLevelItem;
 
-    let full_path = loader.base_dir.join(&decl.path);
+    let full_path = loader.resolve_path(&decl.path);
     if !full_path.exists() {
         return Err(vec![SparError::ResolveError {
             message: format!(
@@ -605,7 +647,7 @@ pub fn collect_imports(
                 .to_string()
         });
 
-        let full_path = loader.base_dir.join(&decl.path);
+        let full_path = loader.resolve_path(&decl.path);
         if !full_path.exists() {
             errors.push(SparError::ResolveError {
                 message: format!(
@@ -687,6 +729,7 @@ pub fn collect_imports(
             LoadedImport {
                 path: decl.path.clone(),
                 exports,
+                resolved_path: full_path.clone(),
             },
         );
     }

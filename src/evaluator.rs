@@ -191,14 +191,18 @@ pub struct Evaluator {
 
 fn build_imported_programs(
     loaded: &HashMap<String, crate::loader::LoadedImport>,
-    base_dir: &std::path::Path,
+    _base_dir: &std::path::Path,
 ) -> Result<HashMap<String, ImportedProgram>, Vec<SparError>> {
     let mut visiting = Vec::new();
     let mut cache = HashMap::new();
     loaded
         .iter()
         .map(|(alias, import)| {
-            load_imported_program(&base_dir.join(&import.path), &mut visiting, &mut cache)
+            // `resolved_path` is already the right file — a plain
+            // filesystem join for an ordinary import, or a package
+            // store snapshot path for a package-aware bare import — so
+            // this never re-derives it from `base_dir`/`import.path`.
+            load_imported_program(&import.resolved_path, &mut visiting, &mut cache)
                 .map(|program| (alias.clone(), program))
         })
         .collect()
@@ -266,7 +270,7 @@ fn load_imported_program(
     let imports = loaded
         .iter()
         .map(|(alias, import)| {
-            load_imported_program(&base_dir.join(&import.path), visiting, cache)
+            load_imported_program(&import.resolved_path, visiting, cache)
                 .map(|program| (alias.clone(), program))
         })
         .collect::<Result<HashMap<_, _>, _>>();

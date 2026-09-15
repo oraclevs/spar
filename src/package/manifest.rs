@@ -21,11 +21,19 @@ pub enum PackageKind {
 }
 
 impl PackageKind {
-    fn conventional_entry(self) -> &'static str {
+    pub fn conventional_entry(self) -> &'static str {
         match self {
             PackageKind::Application => "src/main.spar",
             PackageKind::Library => "src/lib.spar",
             PackageKind::Config => "src/config.spar",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PackageKind::Application => "application",
+            PackageKind::Library => "library",
+            PackageKind::Config => "config",
         }
     }
 }
@@ -175,6 +183,53 @@ impl PackageManifest {
             overrides,
         })
     }
+
+    /// Renders this manifest back to canonical Spar source — the CLI's
+    /// `init`/`add`/`remove` write manifests this way rather than
+    /// text-patching an existing file, so the result is always a valid,
+    /// literal-only manifest regardless of how the file looked before.
+    /// This does not preserve comments or formatting a human added by
+    /// hand; manifests are tool-managed the same way `spar.lock` is.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("[Package] {\n");
+        out.push_str(&format!("    name: str = \"{}\";\n", escape(&self.name)));
+        out.push_str(&format!("    version: str = \"{}\";\n", self.version));
+        out.push_str(&format!("    kind: str = \"{}\";\n", self.kind.as_str()));
+        out.push_str(&format!(
+            "    entry: str = \"{}\";\n",
+            escape(&self.entry.to_string_lossy())
+        ));
+        out.push_str("};\n");
+
+        if !self.dependencies.is_empty() {
+            out.push_str("\n[Dependencies] {\n");
+            for (alias, request) in &self.dependencies {
+                out.push_str(&format!("    {alias}: str = \"{}\";\n", escape(request)));
+            }
+            out.push_str("};\n");
+        }
+
+        if !self.overrides.is_empty() {
+            out.push_str("\n[Overrides] {\n");
+            for (alias, request) in &self.overrides {
+                out.push_str(&format!("    {alias}: str = \"{}\";\n", escape(request)));
+            }
+            out.push_str("};\n");
+        }
+
+        out
+    }
+
+    pub fn write(&self, path: &Path) -> Result<(), PackageError> {
+        std::fs::write(path, self.render()).map_err(|e| PackageError::Io {
+            message: format!("failed to write {}: {e}", path.display()),
+        })
+    }
+}
+
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn is_valid_package_name(name: &str) -> bool {

@@ -4,6 +4,7 @@
 //! current project's lockfile when `"http"` isn't a filesystem path) —
 //! no new syntax anywhere in this subsystem.
 
+pub mod commands;
 pub mod error;
 pub mod github;
 pub mod local;

@@ -156,6 +156,7 @@ pub struct TaskInvocation {
 /// Keep in sync with the keyword arms matched in `main.rs`'s `parse_args`.
 pub const RESERVED_CLI_COMMANDS: &[&str] = &[
     "check", "emit", "fmt", "tasks", "run", "show", "dump", "exec", "repl", "help", "version",
+    "init", "add", "remove", "install", "update", "tree",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

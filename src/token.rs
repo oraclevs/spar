@@ -18,6 +18,7 @@ pub enum Token {
     TypeBool,
     TypeSection, // the keyword "section" as a type annotation
     TypeVoid,    // the keyword "void" — only legal as a function return type
+    TypeShell,
 
     // Boolean literals
     True,
@@ -68,6 +69,8 @@ pub enum Token {
     KwIn,
     KwBreak,
     KwContinue,
+    KwCommand,
+    KwExec,
 
     // Arrow
     Arrow,
@@ -80,6 +83,14 @@ pub enum Token {
     Comma,
     DotDotDot,
     ColonColon,
+
+    // Dedicated native shell-language tokens.
+    ShellBlockStart,
+    ShellBlockEnd,
+    ShellWord(String),
+    ShellPipe,
+    ShellRedirectAppend,
+    ShellRedirectStderr,
 
     // Delimiters
     LParen,
@@ -151,6 +162,7 @@ impl Token {
             Token::TypeBool => "'bool'",
             Token::TypeSection => "'section'",
             Token::TypeVoid => "'void'",
+            Token::TypeShell => "'shell'",
             Token::EqEq => "'=='",
             Token::NotEq => "'!='",
             Token::Lt => "'<'",
@@ -169,6 +181,8 @@ impl Token {
             Token::KwIn => "'in'",
             Token::KwBreak => "'break'",
             Token::KwContinue => "'continue'",
+            Token::KwCommand => "'command'",
+            Token::KwExec => "'exec'",
             Token::Arrow => "'->'",
             Token::Ident(_) => "identifier",
             Token::StringStart => "string",
@@ -181,6 +195,12 @@ impl Token {
             Token::RunStart => "'{'",
             Token::ShellFragment(_) => "shell text",
             Token::RunEnd => "end of run block",
+            Token::ShellBlockStart => "'shell {'",
+            Token::ShellBlockEnd => "end of shell block",
+            Token::ShellWord(_) => "shell word",
+            Token::ShellPipe => "'|'",
+            Token::ShellRedirectAppend => "'>>'",
+            Token::ShellRedirectStderr => "'2>'",
             Token::Eof => "end of file",
         }
     }
@@ -201,6 +221,7 @@ pub fn keyword_or_ident(s: String) -> Token {
         "bool" => Token::TypeBool,
         "section" => Token::TypeSection,
         "void" => Token::TypeVoid,
+        "shell" => Token::TypeShell,
         "true" => Token::True,
         "false" => Token::False,
         "function" => Token::KwFunction,
@@ -211,6 +232,8 @@ pub fn keyword_or_ident(s: String) -> Token {
         "in" => Token::KwIn,
         "break" => Token::KwBreak,
         "continue" => Token::KwContinue,
+        "command" => Token::KwCommand,
+        "exec" => Token::KwExec,
         _ => Token::Ident(s),
     }
 }

@@ -115,6 +115,50 @@ pub enum ShellTemplatePart {
     Expr(Expr),
 }
 
+/// A native command-language expression. This is not the same mechanism as
+/// `ShellCommand`/`ShellTemplatePart` above — see the design doc's "Why this
+/// needs a dedicated sub-grammar" section.
+#[derive(Debug, Clone)]
+pub struct ShellExpr {
+    pub steps: Vec<(ShellJoin, ShellStep)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellJoin {
+    Always,
+    OnSuccess,
+    OnFailure,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellStep {
+    Command(ShellCommandExpr),
+    Pipeline(Vec<ShellCommandExpr>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellCommandExpr {
+    pub program: ShellWord,
+    pub args: Vec<ShellWord>,
+    pub stdout: Option<ShellRedirect>,
+    pub stderr: Option<ShellRedirect>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellWord {
+    pub text: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellRedirect {
+    pub target: ShellWord,
+    pub mode: spar_command::RedirectMode,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
@@ -285,6 +329,7 @@ pub enum SparType {
     /// var, param, field, or list element type, so this variant can't
     /// reach storage positions.
     Void,
+    Shell,
     List(Box<SparType>),
     Named(String), // a declared `type [X]{...}`, referenced by name
 }
@@ -347,6 +392,8 @@ pub enum Expr {
     /// captured as `FieldValue::Nested` by `parse_field_decl`, never as
     /// this variant.
     Object(Vec<SectionItem>, Span),
+    Shell(ShellExpr),
+    ExecShell(ShellExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -163,6 +163,60 @@ fn assignment_requires_an_existing_mutable_binding() {
     );
 }
 
+fn logging_host() -> crate::host::HostRegistry {
+    let mut hosts = crate::host::HostRegistry::new();
+    hosts
+        .register(crate::host::HostFunction::new(
+            "log",
+            "write",
+            vec![("message", crate::ast::SparType::Str)],
+            crate::ast::SparType::Void,
+            |_| Ok(crate::evaluator::ConfigValue::Int(0)),
+        ))
+        .unwrap();
+    hosts
+}
+
+#[test]
+fn host_call_with_wrong_param_name_is_a_resolve_error() {
+    let src = "log::write(msg: \"hi\");";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let error = crate::resolver::Resolver::new()
+        .with_hosts(logging_host())
+        .resolve(&prog, &[])
+        .unwrap_err();
+    let message = format!("{error:?}");
+    assert!(message.contains("has no param 'msg'"), "{message}");
+}
+
+#[test]
+fn host_call_missing_a_required_argument_is_a_resolve_error() {
+    let src = "log::write();";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let error = crate::resolver::Resolver::new()
+        .with_hosts(logging_host())
+        .resolve(&prog, &[])
+        .unwrap_err();
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("missing required argument 'message'"),
+        "{message}"
+    );
+}
+
+#[test]
+fn host_call_with_correct_args_resolves() {
+    let src = "log::write(message: \"hi\");";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    crate::resolver::Resolver::new()
+        .with_hosts(logging_host())
+        .resolve(&prog, &[])
+        .expect("a correctly-named host call should resolve");
+}
+
 #[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"

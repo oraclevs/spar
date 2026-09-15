@@ -35,6 +35,20 @@ impl Engine {
         Self { options }
     }
 
+    /// Registers native functions this engine's `ns::fn(...)` calls may
+    /// dispatch to, in every mode (Check for name/type checking, Emit and
+    /// Execute for actually calling them).
+    pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
+        self.options.hosts = hosts;
+        self
+    }
+
+    /// A persistent, incrementally-evaluated session over this engine's
+    /// hosts and options — see `session::Session`.
+    pub fn session(&self) -> crate::session::Session {
+        crate::session::Session::new(self.options.clone())
+    }
+
     /// Check mode: lex, parse, resolve, and type-check only. Never
     /// evaluates the module (so it can never call `main` or run any other
     /// top-level side effect) — safe for LSP/CI use on arbitrary source.
@@ -85,6 +99,7 @@ impl Engine {
             &checked.imports,
             &self.options.base_dir,
             "main",
+            self.options.hosts.clone(),
         )?;
 
         let exit_status = match result {
@@ -151,6 +166,58 @@ fn require_entry_signature(program: &Program) -> Result<(), SparError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::{HostFunction, HostRegistry};
+
+    #[test]
+    fn registered_namespaced_host_function_is_typechecked_and_called() {
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_in_closure = recorded.clone();
+        let mut hosts = HostRegistry::new();
+        hosts
+            .register(HostFunction::new(
+                "log",
+                "write",
+                vec![("message", crate::ast::SparType::Str)],
+                crate::ast::SparType::Void,
+                move |args| {
+                    let ConfigValue::Str(message) = &args[0] else {
+                        return Err("expected str".to_string());
+                    };
+                    recorded_in_closure.lock().unwrap().push(message.clone());
+                    Ok(ConfigValue::Int(0))
+                },
+            ))
+            .unwrap();
+
+        Engine::default()
+            .with_hosts(hosts)
+            .execute_source("function main() -> void { log::write(message: \"hello\"); };")
+            .expect("execute should succeed");
+
+        assert_eq!(recorded.lock().unwrap().as_slice(), ["hello"]);
+    }
+
+    #[test]
+    fn host_function_return_value_is_usable_by_a_caller() {
+        let mut hosts = HostRegistry::new();
+        hosts
+            .register(HostFunction::new(
+                "math",
+                "answer",
+                vec![],
+                crate::ast::SparType::Int,
+                |_| Ok(ConfigValue::Int(42)),
+            ))
+            .unwrap();
+
+        let outcome = Engine::default()
+            .with_hosts(hosts)
+            .execute_source(
+                "var result: int = math::answer(); function main() -> int { return result; };",
+            )
+            .expect("execute should succeed");
+        assert_eq!(outcome.exit_status, 42);
+    }
 
     #[test]
     fn check_never_evaluates_or_requires_main() {

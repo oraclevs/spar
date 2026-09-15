@@ -18,6 +18,9 @@ pub struct CompileOptions {
     pub base_dir: PathBuf,
     pub evaluate: bool,
     pub allow_schema_file: bool,
+    /// Native functions `ns::fn(...)` calls may dispatch to — empty by
+    /// default, so every existing caller behaves exactly as before.
+    pub hosts: crate::host::HostRegistry,
 }
 
 impl Default for CompileOptions {
@@ -26,6 +29,7 @@ impl Default for CompileOptions {
             base_dir: PathBuf::from("."),
             evaluate: true,
             allow_schema_file: true,
+            hosts: crate::host::HostRegistry::default(),
         }
     }
 }
@@ -144,7 +148,11 @@ impl Compiler {
             Err(errors) => compilation.errors.extend(errors),
         }
 
-        let symbols = match Resolver::resolve_with_imports(&program, &compilation.imports) {
+        let symbols = match Resolver::resolve_with_imports_and_hosts(
+            &program,
+            &compilation.imports,
+            self.options.hosts.clone(),
+        ) {
             Ok(symbols) => symbols,
             Err(errors) => {
                 compilation.errors.extend(errors);
@@ -171,6 +179,7 @@ impl Compiler {
                 &symbols,
                 &compilation.imports,
                 &self.options.base_dir,
+                self.options.hosts.clone(),
             ) {
                 Ok(result) => {
                     match crate::task_lowering::lower_tasks(

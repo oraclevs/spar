@@ -324,6 +324,20 @@ fn parse_exec_shell_expression() {
 }
 
 #[test]
+fn parse_local_var_can_infer_exec_shell_result_type() {
+    let program = parse_ok(
+        "function run() -> int { var result = exec shell { true; }; return result.exitCode; };",
+    );
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    let crate::ast::FuncStmt::LocalVar(local) = &function.body.stmts[0] else {
+        panic!("expected local variable");
+    };
+    assert!(local.ty.is_none());
+}
+
+#[test]
 fn parse_bare_exec_without_shell_is_an_error() {
     let error = parse_err("function f() -> int { var r: int = exec 1; return 0; };");
     assert!(

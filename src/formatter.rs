@@ -1088,8 +1088,10 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
                 out.push_str("mut ");
             }
             out.push_str(&lv.name);
-            out.push_str(": ");
-            out.push_str(&format_type(&lv.ty));
+            if let Some(ty) = &lv.ty {
+                out.push_str(": ");
+                out.push_str(&format_type(ty));
+            }
             out.push_str(" = ");
             format_expr(&lv.value, 0, depth, config, out);
             out.push_str(";\n");
@@ -1376,6 +1378,12 @@ mod tests {
     fn format_exec_shell() {
         let source = "function f() -> int {\n    var r: ExecResult = exec shell {\n        true;\n    };\n    return 0;\n};\n";
         assert_eq!(fmt(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn format_inferred_exec_shell_local_preserves_omitted_type() {
+        let src = "function f() -> int {\n    var r = exec shell {\n        true;\n    };\n    return r.exitCode;\n};\n";
+        assert_eq!(fmt(src).trim(), src.trim());
     }
 
     #[test]

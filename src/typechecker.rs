@@ -2297,8 +2297,8 @@ impl<'a> TypeChecker<'a> {
                         self.errors.push(e);
                     }
 
-                    let handled_as_named_object = match (&lv.ty, &lv.value) {
-                        (SparType::Named(name), Expr::Object(items, _)) => {
+                    let handled_as_named_object = match (lv.ty.as_ref(), &lv.value) {
+                        (Some(SparType::Named(name)), Expr::Object(items, _)) => {
                             let config_fields: Vec<&FieldDecl> = items
                                 .iter()
                                 .filter_map(|i| {
@@ -2320,7 +2320,7 @@ impl<'a> TypeChecker<'a> {
                             }
                             true
                         }
-                        (SparType::List(elem_ty), Expr::List(elems, _))
+                        (Some(SparType::List(elem_ty)), Expr::List(elems, _))
                             if matches!(elem_ty.as_ref(), SparType::Named(_)) =>
                         {
                             let SparType::Named(name) = elem_ty.as_ref() else {
@@ -2355,22 +2355,32 @@ impl<'a> TypeChecker<'a> {
                     };
 
                     if handled_as_named_object {
-                        local_types.insert(lv.name.clone(), lv.ty.clone());
+                        local_types.insert(
+                            lv.name.clone(),
+                            lv.ty
+                                .clone()
+                                .expect("named object handling requires a declared type"),
+                        );
                     } else {
                         let actual = self.infer_type_with_locals(&lv.value, local_types);
-                        match actual {
-                            Some(ref t) if t == &lv.ty => {
-                                local_types.insert(lv.name.clone(), lv.ty.clone());
+                        match (lv.ty.as_ref(), actual) {
+                            (Some(declared), Some(ref actual)) if actual == declared => {
+                                local_types.insert(lv.name.clone(), declared.clone());
                             }
-                            Some(t) => self.errors.push(SparError::TypeError {
+                            (Some(declared), Some(actual)) => {
+                                self.errors.push(SparError::TypeError {
                                 message: format!(
                                     "local variable '{}' declared as '{}' but assigned a value of type '{}'",
-                                    lv.name, display_type(&lv.ty), display_type(&t)
+                                    lv.name, display_type(declared), display_type(&actual)
                                 ),
                                 hint: None,
                                 span: lv.span.clone(),
-                            }),
-                            None => self.errors.push(SparError::TypeError {
+                            })
+                            }
+                            (None, Some(actual)) => {
+                                local_types.insert(lv.name.clone(), actual);
+                            }
+                            (_, None) => self.errors.push(SparError::TypeError {
                                 message: format!("cannot infer type of var '{}'", lv.name),
                                 hint: None,
                                 span: lv.span.clone(),

@@ -36,6 +36,14 @@ pub struct CommandTemplate {
 pub enum TemplatePart {
     Literal(String),
     Parameter(String),
+    /// A `${...}` interpolation that mixes a task parameter with anything
+    /// else (a function call, concatenation, field access, ...). Its value
+    /// isn't known until parameters are bound, so it's evaluated at render
+    /// time via the `ExprEval` callback; `id` indexes into the expression
+    /// table the compiler carries alongside the `TaskSet` (`runner` itself
+    /// stays free of `ast::Expr`). `source` is the original `${...}` text,
+    /// used only for display before binding (`render_unbound`).
+    Expr { id: usize, source: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,19 +52,39 @@ pub enum BoundValue {
     Variadic(Vec<String>),
 }
 
+/// Evaluates a `TemplatePart::Expr` at render time: given its table `id`
+/// and the task's bound parameter values, produces the interpolated text.
+/// Supplied by the caller (the `spar` binary wires this to `Evaluator`)
+/// since `runner` has no `Evaluator`/`ast` dependency of its own.
+pub type ExprEval<'a> = dyn Fn(usize, &BTreeMap<String, BoundValue>) -> Result<String, String> + 'a;
+
+/// An `ExprEval` for callers that never render a `TemplatePart::Expr`
+/// (unit tests, or any run block with no parameter-dependent expressions).
+pub fn no_expr_eval(_id: usize, _values: &BTreeMap<String, BoundValue>) -> Result<String, String> {
+    Err("this command interpolates an expression but no expression \
+         evaluator was supplied to render it"
+        .to_owned())
+}
+
 impl CommandTemplate {
-    pub fn render(&self, values: &BTreeMap<String, BoundValue>) -> String {
-        self.parts
-            .iter()
-            .map(|part| match part {
-                TemplatePart::Literal(literal) => literal.clone(),
+    pub fn render(
+        &self,
+        values: &BTreeMap<String, BoundValue>,
+        exprs: &ExprEval,
+    ) -> Result<String, String> {
+        let mut out = String::new();
+        for part in &self.parts {
+            match part {
+                TemplatePart::Literal(literal) => out.push_str(literal),
                 TemplatePart::Parameter(name) => match values.get(name) {
-                    Some(BoundValue::Scalar(value)) => value.clone(),
-                    Some(BoundValue::Variadic(values)) => values.join(" "),
-                    None => String::new(),
+                    Some(BoundValue::Scalar(value)) => out.push_str(value),
+                    Some(BoundValue::Variadic(values)) => out.push_str(&values.join(" ")),
+                    None => {}
                 },
-            })
-            .collect()
+                TemplatePart::Expr { id, .. } => out.push_str(&exprs(*id, values)?),
+            }
+        }
+        Ok(out)
     }
 
     pub fn render_unbound(&self) -> String {
@@ -65,6 +93,7 @@ impl CommandTemplate {
             .map(|part| match part {
                 TemplatePart::Literal(literal) => literal.clone(),
                 TemplatePart::Parameter(name) => format!("${{{name}}}"),
+                TemplatePart::Expr { source, .. } => format!("${{{source}}}"),
             })
             .collect()
     }
@@ -77,8 +106,12 @@ impl TaskCommand {
         }
     }
 
-    pub fn render(&self, values: &BTreeMap<String, BoundValue>) -> String {
-        self.template().render(values)
+    pub fn render(
+        &self,
+        values: &BTreeMap<String, BoundValue>,
+        exprs: &ExprEval,
+    ) -> Result<String, String> {
+        self.template().render(values, exprs)
     }
 
     pub fn render_unbound(&self) -> String {
@@ -328,7 +361,10 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(template.render(&values), "deploy staging --force blue");
+        assert_eq!(
+            template.render(&values, &no_expr_eval).unwrap(),
+            "deploy staging --force blue"
+        );
         assert_eq!(template.render_unbound(), "deploy ${environment} ${extra}");
     }
 }

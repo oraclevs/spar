@@ -1,7 +1,9 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use super::{ExecutionPlan, RunnerError, TaskCommand};
+use super::{ExecutionPlan, ExprEval, RunnerError, TaskCommand};
+#[cfg(test)]
+use super::no_expr_eval;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -17,10 +19,12 @@ pub struct ExecutionReport {
 pub fn execute(
     plan: &ExecutionPlan,
     options: &ExecutionOptions,
+    exprs: &ExprEval,
 ) -> Result<ExecutionReport, RunnerError> {
     execute_with_io(
         plan,
         options,
+        exprs,
         &mut std::io::stdin().lock(),
         &mut std::io::stderr().lock(),
     )
@@ -32,12 +36,19 @@ fn execute_with_echo(
     options: &ExecutionOptions,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
-    execute_with_io(plan, options, &mut std::io::empty(), echo)
+    execute_with_io(
+        plan,
+        options,
+        &no_expr_eval,
+        &mut std::io::empty(),
+        echo,
+    )
 }
 
 fn execute_with_io(
     plan: &ExecutionPlan,
     options: &ExecutionOptions,
+    exprs: &ExprEval,
     input: &mut dyn BufRead,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
@@ -62,7 +73,12 @@ fn execute_with_io(
 
     for bound_task in &plan.tasks {
         for task_command in &bound_task.task.commands {
-            let script = task_command.render(&bound_task.parameter_values);
+            let script = task_command
+                .render(&bound_task.parameter_values, exprs)
+                .map_err(|message| RunnerError::TaskExprFailed {
+                    task: bound_task.task.name.clone(),
+                    message,
+                })?;
             commands.push(script.clone());
 
             if !bound_task.task.quiet || options.dry_run {
@@ -163,8 +179,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::runner::{
-        execute, BoundTask, CommandTemplate, ExecutionOptions, ExecutionPlan, Task, TaskCommand,
-        TemplatePart,
+        execute, no_expr_eval, BoundTask, CommandTemplate, ExecutionOptions, ExecutionPlan, Task,
+        TaskCommand, TemplatePart,
     };
 
     fn plan(command: String) -> ExecutionPlan {
@@ -266,6 +282,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -293,6 +310,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -310,6 +328,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap_err();
 
@@ -340,6 +359,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         );
 
         assert!(result.is_err());
@@ -364,6 +384,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -390,6 +411,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -419,6 +441,7 @@ mod tests {
                 dry_run: true,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -483,6 +506,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
         )
         .unwrap();
 
@@ -512,6 +536,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
             &mut input,
             &mut output,
         )
@@ -541,6 +566,7 @@ mod tests {
                 dry_run: false,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
             &mut input,
             &mut output,
         )
@@ -567,6 +593,7 @@ mod tests {
                 dry_run: true,
                 base_dir: directory.path().to_owned(),
             },
+            &no_expr_eval,
             &mut input,
             &mut output,
         )

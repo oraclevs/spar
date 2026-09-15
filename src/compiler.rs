@@ -9,6 +9,7 @@ use crate::evaluator::{EvalResult, Evaluator};
 use crate::loader::{self, ImportLoader, LoadedImport};
 use crate::resolver::{Resolver, SymbolTable};
 use crate::runner::TaskSet;
+use crate::task_lowering::TaskExprEntry;
 use crate::typechecker::TypeChecker;
 use crate::{Lexer, Parser};
 
@@ -54,6 +55,13 @@ pub struct Compilation {
     /// evaluate — has succeeded; task declarations never appear in
     /// `result`/emitted JSON.
     pub tasks: Option<TaskSet>,
+    /// Task `run` block expressions that mix a parameter with other
+    /// values (function calls, concatenation, ...) and so can't be
+    /// pre-evaluated — indexed by the `id` on each `TemplatePart::Expr`
+    /// in `tasks`. Evaluate one with `Evaluator::eval_standalone`, using
+    /// `program`/`symbols`/`result` and the task's bound parameter
+    /// values, to render that command at run time.
+    pub task_exprs: Vec<TaskExprEntry>,
     pub errors: Vec<SparError>,
 }
 
@@ -92,6 +100,7 @@ impl Compiler {
             imports: HashMap::new(),
             result: None,
             tasks: None,
+            task_exprs: Vec::new(),
             errors: Vec::new(),
         };
 
@@ -166,6 +175,7 @@ impl Compiler {
                         &symbols,
                         &result,
                         &self.options.base_dir,
+                        &mut compilation.task_exprs,
                     ) {
                         Ok(tasks) => compilation.tasks = tasks,
                         Err(errors) => compilation.errors.extend(errors),

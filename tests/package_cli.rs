@@ -130,7 +130,8 @@ fn add_resolves_materializes_and_writes_manifest_and_lock() {
 
     let manifest_text = fs::read_to_string(fx.project_dir.join("spar.package.spar")).unwrap();
     assert!(manifest_text.contains("github:owner/colors@1.0.0"));
-    assert!(fx.project_dir.join("spar.lock").is_file());
+    assert!(fx.project_dir.join("spar.package.lock.spar").is_file());
+    assert!(!fx.project_dir.join("spar.lock").exists());
 }
 
 #[test]
@@ -345,4 +346,53 @@ fn tree_on_a_project_with_no_lockfile_is_empty() {
     let fx = fixture();
     commands::init(&fx.project_dir, "myapp", PackageKind::Application).unwrap();
     assert_eq!(commands::tree(&fx.project_dir).unwrap(), "");
+}
+
+#[test]
+fn language_cli_commands_use_the_project_lockfile_for_bare_imports() {
+    let fx = fixture();
+    commands::init(&fx.project_dir, "myapp", PackageKind::Application).unwrap();
+    commands::add(
+        &fx.project_dir,
+        "colors",
+        "github:owner/colors@1.0.0",
+        &fx.provider,
+        NetworkPolicy::Allow,
+        &fx.store,
+    )
+    .unwrap();
+    fs::write(
+        fx.project_dir.join("src/main.spar"),
+        concat!(
+            "import { red } from \"colors\";\n",
+            "export var selected: str = red;\n",
+            "function main() -> int { return 0; };\n",
+        ),
+    )
+    .unwrap();
+
+    for command in [
+        ["check", "src/main.spar"],
+        ["emit", "src/main.spar"],
+        ["exec", "src/main.spar"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+            .args(command)
+            .current_dir(&fx.project_dir)
+            .env(
+                "XDG_DATA_HOME",
+                fx.project_dir.parent().unwrap().join("data"),
+            )
+            .env(
+                "XDG_CACHE_HOME",
+                fx.project_dir.parent().unwrap().join("cache"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

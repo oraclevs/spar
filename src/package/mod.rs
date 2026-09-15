@@ -21,6 +21,7 @@ pub use local::LocalSource;
 pub use locator::ModuleLocator;
 pub use lockfile::{
     github_package_id, local_package_id, LockedPackage, LockedSource, Lockfile, PackageId,
+    LEGACY_PACKAGE_LOCK_FILE, PACKAGE_LOCK_FILE,
 };
 pub use manifest::{PackageKind, PackageManifest};
 pub use resolver::{DependencyResolver, ResolvedGraph, ResolvedNode};

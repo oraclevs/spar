@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::package::lockfile::{Lockfile, PackageId};
+use crate::package::lockfile::{LockedSource, Lockfile, PackageId};
 use crate::package::store::PackageStore;
 
 #[derive(Clone, Debug)]
@@ -63,8 +63,11 @@ impl ModuleLocator {
         };
         let target_id = edges.get(alias)?;
         let package = self.lockfile.packages.get(target_id)?;
-        let snapshot = self.store.snapshot_path(target_id);
-        Some(snapshot.join(&package.entry))
+        let package_root = match &package.source {
+            LockedSource::Github { .. } => self.store.snapshot_path(target_id),
+            LockedSource::Path { path } => PathBuf::from(path),
+        };
+        Some(package_root.join(&package.entry))
     }
 
     /// A locator scoped to one of the current package's own
@@ -134,6 +137,32 @@ mod tests {
         assert!(locator
             .resolve_import(Path::new("."), "nonexistent")
             .is_none());
+    }
+
+    #[test]
+    fn local_path_import_uses_the_live_source_instead_of_the_immutable_store() {
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .root
+            .insert("toolkit".to_string(), "path-toolkit".to_string());
+        lockfile.packages.insert(
+            "path-toolkit".to_string(),
+            LockedPackage {
+                name: "toolkit".into(),
+                version: "1.0.0".into(),
+                source: LockedSource::Path {
+                    path: "/workspace/toolkit".into(),
+                },
+                integrity: None,
+                entry: "src/lib.spar".into(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        let locator = ModuleLocator::for_root(lockfile, test_store());
+        assert_eq!(
+            locator.resolve_import(Path::new("."), "toolkit"),
+            Some(PathBuf::from("/workspace/toolkit/src/lib.spar"))
+        );
     }
 
     #[test]

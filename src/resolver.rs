@@ -19,6 +19,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
                 scope.insert(local.name.clone(), local.ty.clone());
             }
             FuncStmt::Expression(_, _) => {}
+            FuncStmt::Assignment { .. } => {}
             FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
             FuncStmt::If(if_stmt) => {
                 let then_exit = sequence_exit_scope(&if_stmt.then_stmts);
@@ -50,6 +51,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
     match stmt {
         FuncStmt::LocalVar(l) => l.span.clone(),
         FuncStmt::Expression(_, span) => span.clone(),
+        FuncStmt::Assignment { span, .. } => span.clone(),
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For(statement) => statement.span.clone(),
@@ -63,6 +65,7 @@ pub enum GlobalEntry {
         ty: SparType,
         optional: bool,
         exported: bool,
+        mutable: bool,
         span: Span,
     },
     Dynamic {
@@ -710,6 +713,7 @@ impl Resolver {
                 ty: decl.ty.clone(),
                 optional: decl.optional,
                 exported: decl.exported,
+                mutable: decl.mutable,
                 span: decl.span.clone(),
             },
         );
@@ -934,6 +938,7 @@ impl Resolver {
 impl Resolver {
     fn resolve_program(&mut self, program: &Program) {
         let mut module_locals = HashSet::new();
+        let mut module_mutable = HashSet::new();
         for item in &program.items {
             match item {
                 TopLevelItem::Import(_) => {}
@@ -969,7 +974,12 @@ impl Resolver {
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.resolve_task(decl),
                 TopLevelItem::Statement(statement) => {
-                    self.resolve_func_stmts(std::slice::from_ref(statement), &mut module_locals, 0);
+                    self.resolve_func_stmts(
+                        std::slice::from_ref(statement),
+                        &mut module_locals,
+                        &mut module_mutable,
+                        0,
+                    );
                 }
             }
         }
@@ -1010,6 +1020,7 @@ impl Resolver {
     fn resolve_one_function_body(&mut self, f: &FunctionDecl) -> HashSet<DeclId> {
         let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         let mut local_names = param_names.clone();
+        let mut mutable_names = HashSet::new();
 
         for param in &f.params {
             if let Some(default) = &param.default {
@@ -1017,7 +1028,7 @@ impl Resolver {
             }
         }
 
-        self.resolve_func_stmts(&f.body.stmts, &mut local_names, 0);
+        self.resolve_func_stmts(&f.body.stmts, &mut local_names, &mut mutable_names, 0);
 
         if !stmts_always_return(&f.body.stmts) {
             self.errors.push(SparError::ResolveError {
@@ -1062,6 +1073,7 @@ impl Resolver {
                 }
                 FuncStmt::LocalVar(_) => {}
                 FuncStmt::Expression(_, _) => {}
+                FuncStmt::Assignment { .. } => {}
                 FuncStmt::If(if_stmt) => {
                     let then_stmts = if_stmt.then_stmts.clone();
                     let else_stmts = if_stmt.else_stmts.clone();
@@ -1696,6 +1708,7 @@ impl Resolver {
         &mut self,
         stmts: &[FuncStmt],
         local_names: &mut HashSet<String>,
+        mutable_names: &mut HashSet<String>,
         loop_depth: usize,
     ) {
         for stmt in stmts {
@@ -1713,10 +1726,45 @@ impl Resolver {
                         });
                     }
                     local_names.insert(lv.name.clone());
+                    if lv.mutable {
+                        mutable_names.insert(lv.name.clone());
+                    } else {
+                        mutable_names.remove(&lv.name);
+                    }
                 }
                 FuncStmt::Expression(expr, _) => {
                     if let Err(error) = self.resolve_expr_with_locals(expr, local_names) {
                         self.errors.push(error);
+                    }
+                }
+                FuncStmt::Assignment { name, value, span } => {
+                    if let Err(error) = self.resolve_expr_with_locals(value, local_names) {
+                        self.errors.push(error);
+                    }
+                    let exists_locally = local_names.contains(name);
+                    let exists_globally = self.globals.contains_key(name);
+                    let mutable = if exists_locally {
+                        mutable_names.contains(name)
+                    } else {
+                        matches!(
+                            self.globals.get(name),
+                            Some(GlobalEntry::Var { mutable: true, .. })
+                        )
+                    };
+                    if !exists_locally && !exists_globally {
+                        self.errors.push(SparError::ResolveError {
+                            message: format!("cannot assign to '{name}': binding is not declared"),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    } else if !mutable {
+                        self.errors.push(SparError::ResolveError {
+                            message: format!("cannot assign to immutable binding '{name}'"),
+                            hint: Some(format!(
+                                "declare it as `var mut {name}: ...` to allow assignment"
+                            )),
+                            span: span.clone(),
+                        });
                     }
                 }
                 FuncStmt::Return(ret_value, _) => match ret_value {
@@ -1756,6 +1804,7 @@ impl Resolver {
                         self.errors.push(e);
                     }
                     let mut loop_scope = local_names.clone();
+                    let mut loop_mutable = mutable_names.clone();
                     match &statement.binding {
                         ForBinding::Value { name, .. } => {
                             loop_scope.insert(name.clone());
@@ -1770,18 +1819,35 @@ impl Resolver {
                         }
                     }
                     let body = statement.body.clone();
-                    self.resolve_func_stmts(&body, &mut loop_scope, loop_depth + 1);
+                    self.resolve_func_stmts(
+                        &body,
+                        &mut loop_scope,
+                        &mut loop_mutable,
+                        loop_depth + 1,
+                    );
                 }
                 FuncStmt::If(if_stmt) => {
                     if let Err(e) = self.resolve_expr_with_locals(&if_stmt.condition, local_names) {
                         self.errors.push(e);
                     }
                     let mut then_scope = local_names.clone();
+                    let mut then_mutable = mutable_names.clone();
                     let then_stmts = if_stmt.then_stmts.clone();
                     let else_stmts = if_stmt.else_stmts.clone();
-                    self.resolve_func_stmts(&then_stmts, &mut then_scope, loop_depth);
+                    self.resolve_func_stmts(
+                        &then_stmts,
+                        &mut then_scope,
+                        &mut then_mutable,
+                        loop_depth,
+                    );
                     let mut else_scope = local_names.clone();
-                    self.resolve_func_stmts(&else_stmts, &mut else_scope, loop_depth);
+                    let mut else_mutable = mutable_names.clone();
+                    self.resolve_func_stmts(
+                        &else_stmts,
+                        &mut else_scope,
+                        &mut else_mutable,
+                        loop_depth,
+                    );
 
                     // Branch declarations are lexical to their own blocks.
                     // Only assignments to an already-visible outer binding may
@@ -2221,6 +2287,9 @@ impl Resolver {
                 }
                 FuncStmt::Expression(expr, _) => {
                     self.collect_closure_deps_expr(expr, &locals, deps);
+                }
+                FuncStmt::Assignment { value, .. } => {
+                    self.collect_closure_deps_expr(value, &locals, deps);
                 }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, _) => match ret_value {

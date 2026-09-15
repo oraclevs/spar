@@ -115,6 +115,19 @@ fn parse_break_and_continue_statements() {
 }
 
 #[test]
+fn parse_mutable_declarations_and_assignment() {
+    let program = parse_ok("var mut count: int = 0; count = count + 1;");
+    let crate::ast::TopLevelItem::Var(declaration) = &program.items[0] else {
+        panic!("expected variable declaration");
+    };
+    assert!(declaration.mutable);
+    assert!(matches!(
+        program.items[1],
+        crate::ast::TopLevelItem::Statement(crate::ast::Statement::Assignment { .. })
+    ));
+}
+
+#[test]
 fn parse_function_parameter_default() {
     let prog = parse_ok(r#"function greet(name: str = "world") -> str { return name; };"#);
     let crate::ast::TopLevelItem::Function(function) = &prog.items[0] else {

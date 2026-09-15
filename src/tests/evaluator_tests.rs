@@ -114,6 +114,28 @@ fn break_and_continue_target_the_innermost_loop() {
 }
 
 #[test]
+fn mutable_assignments_cross_nested_lexical_blocks() {
+    let result = eval_src(
+        r#"
+        function count(values: [int]) -> int {
+            var mut total: int = 0;
+            for value in values {
+                if value == 2 { continue; }
+                total = total + value;
+            }
+            return total;
+        };
+        var mut moduleCount: int = 0;
+        if true { moduleCount = count(values: [1, 2, 3]); }
+        "#,
+    );
+    assert_eq!(
+        result.globals["moduleCount"],
+        crate::evaluator::ConfigValue::Int(4)
+    );
+}
+
+#[test]
 fn eval_function_parameter_default_and_explicit_override() {
     let src = r#"
         var defaultName: str = "world";

@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{Span, SparError};
+use crate::shell_lang::{parse_command_expression, parse_shell_block};
 use crate::token::{SpannedToken, Token};
 
 pub struct Parser {
@@ -970,7 +971,8 @@ impl Parser {
             Token::TypeFloat   => SparType::Float,
             Token::TypeBool    => SparType::Bool,
             Token::TypeSection => SparType::Section,
-            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', 'section', or a declared type name), found {}", self.peek().human_name()))),
+            Token::TypeShell   => SparType::Shell,
+            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', 'section', 'shell', or a declared type name), found {}", self.peek().human_name()))),
         };
         self.advance();
         Ok(ty)
@@ -1178,6 +1180,32 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 self.parse_fn_call("bool".to_string(), span)
+            }
+            Token::ShellBlockStart => {
+                let (shell, consumed) = parse_shell_block(&self.tokens[self.pos..])?;
+                self.pos += consumed;
+                Ok(Expr::Shell(shell))
+            }
+            Token::KwCommand => {
+                let (shell, consumed) = parse_command_expression(&self.tokens[self.pos..])?;
+                // The command expression's terminating semicolon is also the
+                // containing Spar statement's semicolon, so leave it for the
+                // caller's ordinary statement parser to consume.
+                self.pos += consumed - 1;
+                Ok(Expr::Shell(shell))
+            }
+            Token::KwExec => {
+                let exec_span = self.peek_span();
+                self.advance();
+                if !self.at(&Token::ShellBlockStart) {
+                    return Err(SparError::ParseError {
+                        message: "'exec' must be followed by 'shell { ... }'".to_string(),
+                        span: exec_span,
+                    });
+                }
+                let (shell, consumed) = parse_shell_block(&self.tokens[self.pos..])?;
+                self.pos += consumed;
+                Ok(Expr::ExecShell(shell))
             }
             Token::KwFor => self.parse_comprehension(),
             _ => Err(self.error(format!(
@@ -1729,6 +1757,13 @@ impl Parser {
                 let field_span = self.peek_span();
                 self.advance();
                 ("private".to_string(), field_span)
+            } else if self.at(&Token::TypeShell) {
+                // `shell` was already a task metadata field before it became
+                // the native command-plan type keyword. Preserve that
+                // established field spelling in this one declaration context.
+                let field_span = self.peek_span();
+                self.advance();
+                ("shell".to_string(), field_span)
             } else {
                 self.expect_ident()?
             };

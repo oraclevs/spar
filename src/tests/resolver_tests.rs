@@ -15,6 +15,29 @@ fn resolve_err(src: &str) -> String {
     }
 }
 
+#[test]
+fn exec_shell_at_module_scope_is_rejected() {
+    let errors = resolve_err(
+        "type [ExecResult]{ success: bool; exitCode: int; }; var x: ExecResult = exec shell { true; };",
+    );
+    assert!(
+        errors.to_lowercase().contains("exec") && errors.to_lowercase().contains("function"),
+        "got: {errors}"
+    );
+}
+
+#[test]
+fn exec_shell_inside_a_function_body_is_allowed() {
+    resolve_ok(
+        "type [ExecResult]{ success: bool; exitCode: int; }; function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };",
+    );
+}
+
+#[test]
+fn plain_shell_construction_at_module_scope_is_allowed() {
+    resolve_ok("var x: shell = shell { true; };");
+}
+
 // ── SparType::Named existence validation ─────────────────────────────────────
 
 #[test]

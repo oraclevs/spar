@@ -1672,9 +1672,10 @@ mod tests {
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
-        let has_type = program.items.iter().any(|it| {
-            matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")
-        });
+        let has_type = program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType"));
         assert!(
             has_type,
             "PostgresType must be transitively spliced in, got items: {:?}",
@@ -1704,8 +1705,9 @@ mod tests {
         // Not exported yet — must fail with a clear, import-line-attributed error.
         let err = expand_imports(&mut program, &mut loader).expect_err("must fail");
         assert!(
-            err.iter().any(|e| e.to_string().contains("ProductionEnvironment")
-                && e.to_string().contains("not exported")),
+            err.iter()
+                .any(|e| e.to_string().contains("ProductionEnvironment")
+                    && e.to_string().contains("not exported")),
             "expected a not-exported error naming ProductionEnvironment, got: {:?}",
             err
         );

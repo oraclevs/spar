@@ -43,7 +43,10 @@ pub enum TemplatePart {
     /// table the compiler carries alongside the `TaskSet` (`runner` itself
     /// stays free of `ast::Expr`). `source` is the original `${...}` text,
     /// used only for display before binding (`render_unbound`).
-    Expr { id: usize, source: String },
+    Expr {
+        id: usize,
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,8 +154,9 @@ pub struct TaskInvocation {
 /// Top-level CLI keywords that always win over bare task-name dispatch
 /// (`spar <name>` runs task `<name>` unless `<name>` is one of these).
 /// Keep in sync with the keyword arms matched in `main.rs`'s `parse_args`.
-pub const RESERVED_CLI_COMMANDS: &[&str] =
-    &["check", "emit", "fmt", "tasks", "run", "show", "dump", "help", "version"];
+pub const RESERVED_CLI_COMMANDS: &[&str] = &[
+    "check", "emit", "fmt", "tasks", "run", "show", "dump", "help", "version",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSet {

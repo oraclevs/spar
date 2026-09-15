@@ -1,5 +1,10 @@
-use spar::runner::{BoundValue, ExecutionOptions, RunnerError, ScalarKind, TaskInvocation, TaskSet};
-use spar::{renderer::ErrorRenderer, Compilation, CompileOptions, Compiler, ConfigValue, EmitFormat, Evaluator};
+use spar::runner::{
+    BoundValue, ExecutionOptions, RunnerError, ScalarKind, TaskInvocation, TaskSet,
+};
+use spar::{
+    renderer::ErrorRenderer, Compilation, CompileOptions, Compiler, ConfigValue, EmitFormat,
+    Evaluator,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};

@@ -969,7 +969,10 @@ impl<'a> Lexer<'a> {
                     if let Some(t) = self.lex_single_token(c, start, line, col)? {
                         self.last_token_line = line;
                         let is_run = matches!(&t.token, Token::Ident(s) if s == "run");
-                        let is_shell = matches!(&t.token, Token::TypeShell);
+                        let is_shell_return_type =
+                            matches!(tokens.last().map(|token| &token.token), Some(Token::Arrow));
+                        let is_shell =
+                            matches!(&t.token, Token::TypeShell) && !is_shell_return_type;
                         let is_command = matches!(&t.token, Token::KwCommand);
                         tokens.push(t);
                         if is_run {
@@ -1510,6 +1513,14 @@ mod tests {
                 Token::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn shell_return_type_does_not_enter_command_mode() {
+        let tokens = lex("function main() -> shell { return shell {}; };");
+        assert_eq!(tokens[5], Token::TypeShell);
+        assert_eq!(tokens[6], Token::LBrace);
+        assert!(tokens.contains(&Token::ShellBlockStart));
     }
 
     #[test]

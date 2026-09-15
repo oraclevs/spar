@@ -275,6 +275,73 @@ fn parse_unary_not() {
 }
 
 #[test]
+fn parse_shell_block_expression() {
+    let program = parse_ok("var x: shell = shell { echo hi; };");
+    let crate::ast::TopLevelItem::Var(declaration) = &program.items[0] else {
+        panic!("expected variable declaration")
+    };
+    assert!(matches!(
+        declaration.value,
+        Some(crate::ast::Expr::Shell(_))
+    ));
+}
+
+#[test]
+fn parse_command_sugar_equals_a_single_statement_shell_block() {
+    fn command_shape(program: crate::ast::Program) -> (String, Vec<String>) {
+        let crate::ast::TopLevelItem::Var(declaration) = &program.items[0] else {
+            panic!("expected variable declaration")
+        };
+        let Some(crate::ast::Expr::Shell(expression)) = &declaration.value else {
+            panic!("expected shell expression")
+        };
+        let crate::ast::ShellStep::Command(command) = &expression.steps[0].1 else {
+            panic!("expected command")
+        };
+        (
+            command.program.text.clone(),
+            command.args.iter().map(|arg| arg.text.clone()).collect(),
+        )
+    }
+
+    assert_eq!(
+        command_shape(parse_ok("var x: shell = command echo hi;")),
+        command_shape(parse_ok("var x: shell = shell { echo hi; };"))
+    );
+}
+
+#[test]
+fn parse_exec_shell_expression() {
+    let program =
+        parse_ok("function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };");
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function")
+    };
+    let crate::ast::FuncStmt::LocalVar(declaration) = &function.body.stmts[0] else {
+        panic!("expected local variable")
+    };
+    assert!(matches!(declaration.value, crate::ast::Expr::ExecShell(_)));
+}
+
+#[test]
+fn parse_bare_exec_without_shell_is_an_error() {
+    let error = parse_err("function f() -> int { var r: int = exec 1; return 0; };");
+    assert!(
+        error.contains("exec") && error.contains("shell"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn parse_main_returning_shell() {
+    let program = parse_ok("function main() -> shell { return shell { echo hi; }; };");
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function")
+    };
+    assert_eq!(function.ret, crate::ast::SparType::Shell);
+}
+
+#[test]
 fn parse_comprehension() {
     let src = r#"var y: [str] = for x in items { x };"#;
     let prog = parse_ok(src);

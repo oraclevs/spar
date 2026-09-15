@@ -552,7 +552,7 @@ pub enum ForBinding {
 pub struct LocalVarDecl {
     pub name: String,
     pub mutable: bool,
-    pub ty: SparType,
+    pub ty: Option<SparType>,
     pub value: Expr,
     pub span: Span,
 }

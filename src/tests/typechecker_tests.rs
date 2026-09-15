@@ -37,7 +37,7 @@ fn exec_shell_has_exec_result_type() {
         r#"
         type [ExecResult]{ success: bool; exitCode: int; };
         function f() -> bool {
-            var r: ExecResult = exec shell { true; };
+            var r = exec shell { true; };
             return r.success;
         };
         "#,

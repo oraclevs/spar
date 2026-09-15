@@ -145,7 +145,7 @@ mod tests {
         let mut session = Engine::default().session();
         let src = format!(
             r#"function bump() -> int {{
-                var r: ExecResult = exec shell {{ printf x >> {:?}; }};
+                var r = exec shell {{ printf x >> {:?}; }};
                 return 0;
             }};
             var mut triggered: int = bump();"#,

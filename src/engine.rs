@@ -302,7 +302,7 @@ mod tests {
             .execute_source(
                 r#"
                 function main() -> int {
-                    var r: ExecResult = exec shell { true; };
+                    var r = exec shell { true; };
                     return r.exitCode;
                 };
                 "#,
@@ -317,7 +317,7 @@ mod tests {
             .execute_source(
                 r#"
                 function main() -> int {
-                    var r: ExecResult = exec shell { false; };
+                    var r = exec shell { false; };
                     if r.success { return 1; }
                     return 0;
                 };
@@ -334,7 +334,7 @@ mod tests {
         let source = format!(
             r#"
             function main() -> int {{
-                var r: ExecResult = exec shell {{ false; printf x > "{}"; }};
+                var r = exec shell {{ false; printf x > "{}"; }};
                 if r.success {{ return 1; }}
                 return 0;
             }};

@@ -1632,8 +1632,12 @@ impl Parser {
             false
         };
         let (name, _) = self.expect_ident()?;
-        self.expect(&Token::Colon)?;
-        let ty = self.parse_type()?;
+        let ty = if self.at(&Token::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         self.expect(&Token::Eq)?;
         let value = self.parse_or()?;
         self.expect(&Token::Semicolon)?;

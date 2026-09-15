@@ -49,8 +49,8 @@ fn find_exec_shell_span_in_items(items: &[SectionItem]) -> Option<Span> {
 
 /// If `stmts` always returns on every path, returns `None`.
 /// Otherwise returns `Some(scope)` — names in scope after the sequence falls through.
-pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, SparType>> {
-    let mut scope: HashMap<String, SparType> = HashMap::new();
+pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, Option<SparType>>> {
+    let mut scope: HashMap<String, Option<SparType>> = HashMap::new();
     for stmt in stmts {
         match stmt {
             FuncStmt::Return(_, _) => return None,
@@ -1833,7 +1833,9 @@ impl Resolver {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
                     self.reject_module_exec_shell(&lv.value, allow_exec_shell);
-                    self.check_named_type_exists(&lv.ty, &lv.span);
+                    if let Some(ty) = &lv.ty {
+                        self.check_named_type_exists(ty, &lv.span);
+                    }
                     if let Err(e) = self.resolve_expr_with_locals(&lv.value, local_names) {
                         self.errors.push(e);
                     }

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use crate::package::error::PackageError;
 use crate::package::github::{NetworkPolicy, PackageProvider};
-use crate::package::lockfile::{LockedSource, Lockfile, PackageId};
+use crate::package::lockfile::{
+    LockedSource, Lockfile, PackageId, LEGACY_PACKAGE_LOCK_FILE, PACKAGE_LOCK_FILE,
+};
 use crate::package::manifest::{PackageKind, PackageManifest};
 use crate::package::resolver::DependencyResolver;
 use crate::package::source::PackageSource;
@@ -21,7 +23,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
 }
 
 fn lockfile_path(dir: &Path) -> PathBuf {
-    dir.join("spar.lock")
+    dir.join(PACKAGE_LOCK_FILE)
 }
 
 fn read_manifest(dir: &Path) -> Result<PackageManifest, PackageError> {
@@ -38,6 +40,16 @@ fn read_manifest(dir: &Path) -> Result<PackageManifest, PackageError> {
 fn read_lockfile(dir: &Path) -> Result<Option<Lockfile>, PackageError> {
     let path = lockfile_path(dir);
     if !path.is_file() {
+        let legacy = dir.join(LEGACY_PACKAGE_LOCK_FILE);
+        if legacy.is_file() {
+            return Err(PackageError::Lockfile {
+                message: format!(
+                    "found obsolete {}; regenerate it as {} with `spar install`",
+                    legacy.display(),
+                    PACKAGE_LOCK_FILE
+                ),
+            });
+        }
         return Ok(None);
     }
     Lockfile::read(&path).map(Some)

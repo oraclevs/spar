@@ -512,7 +512,7 @@ fn parse_emit_args(args: &[String]) -> Cmd {
 
 fn print_help() {
     println!(
-        "spar — configuration language v{ver}
+        "spar — scripting language v{ver}
 
 USAGE:
     spar <task> [args...] [OPTIONS]     Shorthand for `spar run <task> [args...]`
@@ -588,6 +588,43 @@ fn use_stdout_color() -> bool {
     use_color() && std::io::stdout().is_terminal()
 }
 
+/// Builds offline compile options for a source path. When the source belongs
+/// to a Spar package project with an existing lockfile, bare imports resolve
+/// through that lock and the durable global store. No provider/network code
+/// is involved in ordinary language or task commands.
+fn compile_options_for_path(path: &Path) -> Result<CompileOptions, String> {
+    let mut options = CompileOptions::for_path(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot determine current directory: {error}"))?
+            .join(path)
+    };
+    let Some(project_dir) = absolute.parent().and_then(|parent| {
+        parent
+            .ancestors()
+            .find(|directory| directory.join("spar.package.spar").is_file())
+    }) else {
+        return Ok(options);
+    };
+    let lock_path = project_dir.join(spar::package::PACKAGE_LOCK_FILE);
+    if lock_path.is_file() {
+        let lockfile =
+            spar::package::Lockfile::read(&lock_path).map_err(|error| error.to_string())?;
+        let store = spar::package::PackageStore::new(spar::package::StorePaths::from_env());
+        options.locator = Some(spar::package::ModuleLocator::for_root(lockfile, store));
+    }
+    Ok(options)
+}
+
+fn compile_options_for_path_or_exit(path: &Path) -> CompileOptions {
+    compile_options_for_path(path).unwrap_or_else(|error| {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    })
+}
+
 // ── `check` command ───────────────────────────────────────────────────────────
 
 fn cmd_check(path: &str) {
@@ -595,7 +632,7 @@ fn cmd_check(path: &str) {
     let renderer = make_renderer(&src, path);
     let options = CompileOptions {
         evaluate: false,
-        ..CompileOptions::for_path(path)
+        ..compile_options_for_path_or_exit(Path::new(path))
     };
     let compilation = Compiler::new(options).compile(&src);
     if compilation.errors.is_empty() {
@@ -613,7 +650,7 @@ fn cmd_emit(path: &str, format: EmitFormat) {
     let renderer = make_renderer(&src, path);
     let options = CompileOptions {
         allow_schema_file: false,
-        ..CompileOptions::for_path(path)
+        ..compile_options_for_path_or_exit(Path::new(path))
     };
     let compilation = Compiler::new(options).compile(&src);
     if !compilation.errors.is_empty() {
@@ -689,7 +726,7 @@ fn cmd_tasks(path: Option<PathBuf>, global: bool, _all: bool) {
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
-    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
+    let compilation = Compiler::new(compile_options_for_path_or_exit(&path)).compile(&src);
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
@@ -794,7 +831,7 @@ fn cmd_run(
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
-    let options = CompileOptions::for_path(&path);
+    let options = compile_options_for_path_or_exit(&path);
     let base_dir = options.base_dir.clone();
     let compilation = Compiler::new(options).compile(&src);
     if !compilation.errors.is_empty() {
@@ -915,7 +952,7 @@ fn cmd_show(path: Option<PathBuf>, global: bool, task: String, args: Vec<String>
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
-    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
+    let compilation = Compiler::new(compile_options_for_path_or_exit(&path)).compile(&src);
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
@@ -963,7 +1000,7 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
     let path_text = path.to_string_lossy();
     let src = read_file(&path_text);
     let renderer = make_renderer(&src, &path_text);
-    let compilation = Compiler::new(CompileOptions::for_path(&path)).compile(&src);
+    let compilation = Compiler::new(compile_options_for_path_or_exit(&path)).compile(&src);
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
         std::process::exit(1);
@@ -992,7 +1029,9 @@ fn cmd_exec(path: &str, program_args: Vec<String>) {
     // the `--` boundary now so scripts/tooling can rely on it, exposed to
     // Spar source itself once the runtime foundation grows one.
     let _ = program_args;
-    match Engine::new(CompileOptions::for_path(path)).execute_path(Path::new(path)) {
+    match Engine::new(compile_options_for_path_or_exit(Path::new(path)))
+        .execute_path(Path::new(path))
+    {
         Ok(outcome) => std::process::exit(outcome.exit_status),
         Err(errors) => {
             let src = read_file(path);
@@ -1174,7 +1213,7 @@ fn cmd_package_tree() {
     let dir = package_project_dir();
     let output = package_exit_on_error(spar::package::commands::tree(&dir));
     if output.is_empty() {
-        println!("no dependencies (no spar.lock)");
+        println!("no dependencies (no {})", spar::package::PACKAGE_LOCK_FILE);
     } else {
         print!("{output}");
     }

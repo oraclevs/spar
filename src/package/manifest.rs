@@ -189,7 +189,8 @@ impl PackageManifest {
     /// text-patching an existing file, so the result is always a valid,
     /// literal-only manifest regardless of how the file looked before.
     /// This does not preserve comments or formatting a human added by
-    /// hand; manifests are tool-managed the same way `spar.lock` is.
+    /// hand; manifests are tool-managed the same way
+    /// `spar.package.lock.spar` is.
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("[Package] {\n");

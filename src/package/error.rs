@@ -6,6 +6,9 @@ pub enum PackageError {
     /// field, or uses a construct manifests don't allow (anything beyond
     /// literal `[Package]`/`[Dependencies]`/`[Overrides]` string fields).
     Manifest { message: String },
+    /// A generated `spar.package.lock.spar` file is malformed or contains
+    /// an internally inconsistent dependency graph.
+    Lockfile { message: String },
     /// A dependency request string (`github:owner/repo@1.0.0`, `path:..`)
     /// doesn't parse.
     InvalidRequest { message: String },
@@ -32,6 +35,7 @@ impl std::fmt::Display for PackageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             PackageError::Manifest { message }
+            | PackageError::Lockfile { message }
             | PackageError::InvalidRequest { message }
             | PackageError::Io { message }
             | PackageError::NotFound { message }

@@ -37,8 +37,8 @@ fn lockfile_in_order(names: &[&str]) -> Lockfile {
 #[test]
 fn lockfile_serialization_is_stable_regardless_of_insertion_order() {
     assert_eq!(
-        lockfile_in_order(&["a", "b"]).to_toml().unwrap(),
-        lockfile_in_order(&["b", "a"]).to_toml().unwrap()
+        lockfile_in_order(&["a", "b"]).to_spar().unwrap(),
+        lockfile_in_order(&["b", "a"]).to_spar().unwrap()
     );
 }
 
@@ -104,7 +104,7 @@ fn altered_snapshot_fails_sha256_integrity_check() {
 #[test]
 fn lockfile_write_atomically_and_read_round_trips() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("spar.lock");
+    let path = dir.path().join("spar.package.lock.spar");
     let lockfile = lockfile_in_order(&["http", "colors"]);
     lockfile.write_atomically(&path).unwrap();
     assert_eq!(Lockfile::read(&path).unwrap(), lockfile);

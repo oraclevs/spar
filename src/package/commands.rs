@@ -209,9 +209,8 @@ pub fn install(
             }
             Ok(lockfile)
         }
-        None => resolve_and_materialize(&manifest, dir, provider, network, store).map(|lockfile| {
+        None => resolve_and_materialize(&manifest, dir, provider, network, store).inspect(|lockfile| {
             let _ = lockfile.write_atomically(&lockfile_path(dir));
-            lockfile
         }),
     }
 }

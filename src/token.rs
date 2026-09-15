@@ -64,6 +64,8 @@ pub enum Token {
     KwElse,
     KwFor,
     KwIn,
+    KwBreak,
+    KwContinue,
 
     // Arrow
     Arrow,
@@ -161,6 +163,8 @@ impl Token {
             Token::KwElse => "'else'",
             Token::KwFor => "'for'",
             Token::KwIn => "'in'",
+            Token::KwBreak => "'break'",
+            Token::KwContinue => "'continue'",
             Token::Arrow => "'->'",
             Token::Ident(_) => "identifier",
             Token::StringStart => "string",
@@ -199,6 +203,8 @@ pub fn keyword_or_ident(s: String) -> Token {
         "else" => Token::KwElse,
         "for" => Token::KwFor,
         "in" => Token::KwIn,
+        "break" => Token::KwBreak,
+        "continue" => Token::KwContinue,
         _ => Token::Ident(s),
     }
 }

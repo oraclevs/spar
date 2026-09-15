@@ -11,6 +11,7 @@ fn statement_span(statement: &Statement) -> Span {
     match statement {
         Statement::LocalVar(declaration) => declaration.span.clone(),
         Statement::Expression(_, span) | Statement::Return(_, span) => span.clone(),
+        Statement::Break(span) | Statement::Continue(span) => span.clone(),
         Statement::If(statement) => statement.span.clone(),
         Statement::For(statement) => statement.span.clone(),
     }
@@ -233,7 +234,7 @@ impl Parser {
             Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
             Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
             Token::Ident(s) if s == "task" => Ok(TopLevelItem::Task(Box::new(self.parse_task_decl()?))),
-            Token::KwIf | Token::KwFor => {
+            Token::KwIf | Token::KwFor | Token::KwBreak | Token::KwContinue => {
                 Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
             }
             Token::Ident(_)
@@ -1479,6 +1480,18 @@ impl Parser {
             };
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Return(ret_value, start_span));
+        }
+        if self.at(&Token::KwBreak) {
+            let span = self.peek_span();
+            self.advance();
+            self.expect(&Token::Semicolon)?;
+            return Ok(FuncStmt::Break(span));
+        }
+        if self.at(&Token::KwContinue) {
+            let span = self.peek_span();
+            self.advance();
+            self.expect(&Token::Semicolon)?;
+            return Ok(FuncStmt::Continue(span));
         }
         if self.at(&Token::Var) {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));

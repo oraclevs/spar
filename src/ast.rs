@@ -457,6 +457,8 @@ pub enum Statement {
     If(IfStmt),
     Return(ReturnValue, Span),
     For(ForStmt),
+    Break(Span),
+    Continue(Span),
 }
 
 /// Backward-compatible name retained for embedders that inspect the public AST.

@@ -576,7 +576,8 @@ impl<'a> Lexer<'a> {
         if label_end > label_start {
             let label_pos = self.pos;
             let (label_line, label_col) = (self.line, self.col);
-            let label_text = self.source[self.pos..self.pos + (label_end - label_start)].to_string();
+            let label_text =
+                self.source[self.pos..self.pos + (label_end - label_start)].to_string();
             for _ in label_start..label_end {
                 self.advance();
             }
@@ -1079,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn lex_keywords_function_return_if_else_for_in() {
+    fn lex_keywords_function_return_if_else_for_in_break_continue() {
         let cases: &[(&str, Token)] = &[
             ("function", Token::KwFunction),
             ("return", Token::KwReturn),
@@ -1087,6 +1088,8 @@ mod tests {
             ("else", Token::KwElse),
             ("for", Token::KwFor),
             ("in", Token::KwIn),
+            ("break", Token::KwBreak),
+            ("continue", Token::KwContinue),
         ];
         for (src, expected) in cases {
             let tokens = Lexer::new(src).tokenize().unwrap();

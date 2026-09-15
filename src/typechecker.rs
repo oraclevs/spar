@@ -2366,6 +2366,7 @@ impl<'a> TypeChecker<'a> {
                         self.errors.push(error);
                     }
                 }
+                FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, span) => {
                     self.check_return_value(ret_value, ret_ty, local_types, span);
                 }

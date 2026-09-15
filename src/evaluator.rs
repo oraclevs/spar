@@ -83,6 +83,22 @@ enum EvalErr {
     },
 }
 
+enum StatementFlow {
+    Normal,
+    Break,
+    Continue,
+    Return(ConfigValue),
+}
+
+impl StatementFlow {
+    fn into_return(self) -> Option<ConfigValue> {
+        match self {
+            Self::Return(value) => Some(value),
+            Self::Normal | Self::Break | Self::Continue => None,
+        }
+    }
+}
+
 impl EvalErr {
     fn into_kl_error(self) -> SparError {
         match self {
@@ -1526,7 +1542,7 @@ impl Evaluator {
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
                     self.absorb_diagnostics(&mut sub);
-                    let result = result?.unwrap_or(ConfigValue::Int(0));
+                    let result = result?.into_return().unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }
@@ -1556,6 +1572,7 @@ impl Evaluator {
                 self.eval_default_args(&fd, &mut local_scope)?;
                 let result = self
                     .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                    .into_return()
                     .unwrap_or(ConfigValue::Int(0));
                 self.call_depth -= 1;
                 return Ok(result);
@@ -1579,7 +1596,7 @@ impl Evaluator {
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
                     self.absorb_diagnostics(&mut sub);
-                    let result = result?.unwrap_or(ConfigValue::Int(0));
+                    let result = result?.into_return().unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
                     return Ok(result);
                 }
@@ -1611,6 +1628,7 @@ impl Evaluator {
 
         let result = self
             .eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
+            .into_return()
             .unwrap(); // resolver ensures every path returns
 
         self.call_depth -= 1;
@@ -1651,7 +1669,7 @@ impl Evaluator {
         &mut self,
         stmts: &[FuncStmt],
         local_scope: &mut HashMap<String, ConfigValue>,
-    ) -> Result<Option<ConfigValue>, EvalErr> {
+    ) -> Result<StatementFlow, EvalErr> {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
@@ -1674,8 +1692,10 @@ impl Evaluator {
                             ConfigValue::Section(map)
                         }
                     };
-                    return Ok(Some(val));
+                    return Ok(StatementFlow::Return(val));
                 }
+                FuncStmt::Break(_) => return Ok(StatementFlow::Break),
+                FuncStmt::Continue(_) => return Ok(StatementFlow::Continue),
                 FuncStmt::For(statement) => {
                     let items = match self.eval_expr(&statement.iterable, local_scope)? {
                         ConfigValue::List(items) => items,
@@ -1698,8 +1718,10 @@ impl Evaluator {
                             }
                         }
                         let body = statement.body.clone();
-                        if let Some(v) = self.eval_func_stmts(&body, &mut loop_scope)? {
-                            return Ok(Some(v));
+                        match self.eval_func_stmts(&body, &mut loop_scope)? {
+                            StatementFlow::Normal | StatementFlow::Continue => {}
+                            StatementFlow::Break => break,
+                            flow @ StatementFlow::Return(_) => return Ok(flow),
                         }
                     }
                 }
@@ -1711,13 +1733,14 @@ impl Evaluator {
                         _ => unreachable!("typechecker ensures bool condition"),
                     };
                     let mut branch_scope = local_scope.clone();
-                    if let Some(v) = self.eval_func_stmts(&branch, &mut branch_scope)? {
-                        return Ok(Some(v));
+                    match self.eval_func_stmts(&branch, &mut branch_scope)? {
+                        StatementFlow::Normal => {}
+                        flow => return Ok(flow),
                     }
                 }
             }
         }
-        Ok(None)
+        Ok(StatementFlow::Normal)
     }
 }
 

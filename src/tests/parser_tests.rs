@@ -103,6 +103,18 @@ fn parse_indexed_for_binding() {
 }
 
 #[test]
+fn parse_break_and_continue_statements() {
+    let program = parse_ok("for item in [1] { if true { continue; } break; }");
+    let crate::ast::TopLevelItem::Statement(crate::ast::Statement::For(loop_stmt)) =
+        &program.items[0]
+    else {
+        panic!("expected module for statement");
+    };
+    assert!(matches!(loop_stmt.body[0], crate::ast::Statement::If(_)));
+    assert!(matches!(loop_stmt.body[1], crate::ast::Statement::Break(_)));
+}
+
+#[test]
 fn parse_function_parameter_default() {
     let prog = parse_ok(r#"function greet(name: str = "world") -> str { return name; };"#);
     let crate::ast::TopLevelItem::Function(function) = &prog.items[0] else {

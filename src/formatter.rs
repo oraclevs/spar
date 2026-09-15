@@ -130,7 +130,10 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Task(d) => d.span.line,
         TopLevelItem::Statement(statement) => match statement {
             Statement::LocalVar(declaration) => declaration.span.line,
-            Statement::Expression(_, span) | Statement::Return(_, span) => span.line,
+            Statement::Expression(_, span)
+            | Statement::Return(_, span)
+            | Statement::Break(span)
+            | Statement::Continue(span) => span.line,
             Statement::If(statement) => statement.span.line,
             Statement::For(statement) => statement.span.line,
         },
@@ -1000,6 +1003,16 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str(&ind);
             format_expr(expr, 0, depth, config, out);
             out.push_str(";\n");
+        }
+
+        FuncStmt::Break(_) => {
+            out.push_str(&ind);
+            out.push_str("break;\n");
+        }
+
+        FuncStmt::Continue(_) => {
+            out.push_str(&ind);
+            out.push_str("continue;\n");
         }
 
         FuncStmt::Return(rv, _) => {

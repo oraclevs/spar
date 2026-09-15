@@ -1097,20 +1097,19 @@ fn validate_fields(
                             // know" precedent as the has_spreads skip
                             // below.
                             None => {}
-                            Some(actual_ty) => {
-                                if actual_ty != expected_ty {
-                                    errors.push(SparError::SchemaError {
-                                        message: format!(
-                                            "field `{}::{}` declared as `{}` but schema expects `{}`",
-                                            section_path,
-                                            sf.name,
-                                            kl_type_name(actual_ty),
-                                            kl_type_name(expected_ty),
-                                        ),
-                                        span: cf.span.clone(),
-                                    });
-                                }
+                            Some(actual_ty) if actual_ty != expected_ty => {
+                                errors.push(SparError::SchemaError {
+                                    message: format!(
+                                        "field `{}::{}` declared as `{}` but schema expects `{}`",
+                                        section_path,
+                                        sf.name,
+                                        kl_type_name(actual_ty),
+                                        kl_type_name(expected_ty),
+                                    ),
+                                    span: cf.span.clone(),
+                                });
                             }
+                            Some(_) => {}
                         }
                     }
                     SchemaFieldShape::Section(nested_schema) => {

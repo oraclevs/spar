@@ -323,7 +323,7 @@ impl<'a> TypeChecker<'a> {
                                 "field '{}' in '[{path_str}]' must be a nested section (required by the bound \
                                  schema) but value is {}",
                                 field.name,
-                                actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                    actual.as_ref().map(display_type).unwrap_or_else(|| "unknown".into()),
                             ),
                             None,
                             field.span.clone(),
@@ -377,7 +377,7 @@ impl<'a> TypeChecker<'a> {
                             "field '{}' in '[{path_str}]' has type 'section' but value is {} \
                              — use '= {{ ... }}' for a nested section body or a function returning 'section'",
                             field.name,
-                            actual.as_ref().map(|t| display_type(t)).unwrap_or_else(|| "unknown".into()),
+                                actual.as_ref().map(display_type).unwrap_or_else(|| "unknown".into()),
                         ),
                         None,
                         field.span.clone(),
@@ -1287,7 +1287,7 @@ impl<'a> TypeChecker<'a> {
                 .symbols
                 .types
                 .get(&type_name)
-                .and_then(|te| te.fields.iter().find(|f| &f.name == field))
+                .and_then(|te| te.fields.iter().find(|f| f.name == field))
                 .map(|f| self.field_shape_to_type(&f.shape)),
             _ => None,
         }
@@ -1604,7 +1604,7 @@ impl<'a> TypeChecker<'a> {
                                     "operator `!` requires a bool operand, got {}",
                                     operand_ty
                                         .as_ref()
-                                        .map(|t| display_type(t))
+                                        .map(display_type)
                                         .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 None,
@@ -1619,7 +1619,7 @@ impl<'a> TypeChecker<'a> {
                                     "unary `-` requires int or float, got {}",
                                     operand_ty
                                         .as_ref()
-                                        .map(|t| display_type(t))
+                                        .map(display_type)
                                         .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 None,
@@ -1643,7 +1643,7 @@ impl<'a> TypeChecker<'a> {
                             "list index must be int, got {}",
                             index_ty
                                 .as_ref()
-                                .map(|t| display_type(t))
+                                .map(display_type)
                                 .unwrap_or_else(|| "unknown".into()),
                         ),
                         None,
@@ -1673,7 +1673,7 @@ impl<'a> TypeChecker<'a> {
                             "for-comprehension source must be a list, got {}",
                             source_ty
                                 .as_ref()
-                                .map(|t| display_type(t))
+                                .map(display_type)
                                 .unwrap_or_else(|| "unknown".into()),
                         ),
                         None,
@@ -1926,7 +1926,7 @@ impl<'a> TypeChecker<'a> {
                                     display_type(&param_ty),
                                     actual
                                         .as_ref()
-                                        .map(|t| display_type(t))
+                                        .map(display_type)
                                         .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 hint: None,
@@ -1985,7 +1985,7 @@ impl<'a> TypeChecker<'a> {
                                     display_type(&param_ty),
                                     actual
                                         .as_ref()
-                                        .map(|t| display_type(t))
+                                        .map(display_type)
                                         .unwrap_or_else(|| "unknown".into()),
                                 ),
                                 hint: None,
@@ -2614,7 +2614,7 @@ impl<'a> TypeChecker<'a> {
                             display_type(ty),
                             actual
                                 .as_ref()
-                                .map(|t| display_type(t))
+                                .map(display_type)
                                 .unwrap_or_else(|| "unknown".into()),
                         ),
                         hint: None,
@@ -2652,7 +2652,7 @@ impl<'a> TypeChecker<'a> {
                     "if condition must be 'bool', found '{}'",
                     cond_ty
                         .as_ref()
-                        .map(|t| display_type(t))
+                        .map(display_type)
                         .unwrap_or_else(|| "unknown".into()),
                 ),
                 hint: None,

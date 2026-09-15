@@ -268,11 +268,11 @@ impl Parser {
                 // Reject 'private var', 'private export', 'private dynamic'
                 match self.peek() {
                     Token::Var | Token::Export | Token::Dynamic => {
-                        return Err(self.error(
+                        Err(self.error(
                             "'private' cannot be used with variables — \
                              use 'var' for private variables (they are not emitted by default) \
                              or 'export var' to include them in output".to_string()
-                        ));
+                        ))
                     }
                     Token::LBracket => {
                         let item = self.parse_section(false, true)?;
@@ -1504,7 +1504,7 @@ impl Parser {
             return Ok(FuncStmt::If(self.parse_if_stmt()?));
         }
         if self.at(&Token::KwFor) {
-            return Ok(self.parse_for_stmt()?);
+            return self.parse_for_stmt();
         }
         if self.at(&Token::KwReturn) {
             let start_span = self.peek_span();

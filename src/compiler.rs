@@ -16,6 +16,9 @@ use crate::{Lexer, Parser};
 #[derive(Clone, Debug)]
 pub struct CompileOptions {
     pub base_dir: PathBuf,
+    /// Original source identity. Reserved metadata basenames use this to
+    /// preload their compiler-owned schemas and validation rules.
+    pub source_path: Option<PathBuf>,
     pub evaluate: bool,
     pub allow_schema_file: bool,
     /// Native functions `ns::fn(...)` calls may dispatch to — empty by
@@ -31,6 +34,7 @@ impl Default for CompileOptions {
     fn default() -> Self {
         Self {
             base_dir: PathBuf::from("."),
+            source_path: None,
             evaluate: true,
             allow_schema_file: true,
             hosts: crate::host::HostRegistry::default(),
@@ -41,13 +45,14 @@ impl Default for CompileOptions {
 
 impl CompileOptions {
     pub fn for_path(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
         let base_dir = path
-            .as_ref()
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         Self {
             base_dir,
+            source_path: Some(path.to_path_buf()),
             ..Self::default()
         }
     }
@@ -138,6 +143,18 @@ impl Compiler {
             }
         };
         program.shebang = shebang;
+
+        if let Some((path, kind)) = self
+            .options
+            .source_path
+            .as_deref()
+            .and_then(|path| crate::package::metadata_kind(path).map(|kind| (path, kind)))
+        {
+            if let Err(error) = crate::package::metadata::validate_source(source, path, kind) {
+                compilation.errors.push(error);
+            }
+            crate::package::metadata::inject_builtin_types(&mut program, kind);
+        }
 
         if program.is_schema_file && !self.options.allow_schema_file {
             compilation.errors.push(SparError::SchemaError {

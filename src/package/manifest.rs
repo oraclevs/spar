@@ -101,6 +101,15 @@ impl PackageManifest {
 
         let fields =
             package_fields.ok_or_else(|| manifest_err(path, "missing [Package] section"))?;
+        if let Some(field) = fields
+            .keys()
+            .find(|field| !matches!(field.as_str(), "name" | "version" | "kind" | "entry"))
+        {
+            return Err(manifest_err(
+                path,
+                &format!("[Package] contains unknown field '{field}'"),
+            ));
+        }
 
         let name = fields
             .get("name")
@@ -172,6 +181,15 @@ impl PackageManifest {
                     ),
                 ));
             }
+            if !matches!(
+                crate::package::source::PackageSource::parse(&overrides[alias]),
+                Ok(crate::package::source::PackageSource::LocalPath(_))
+            ) {
+                return Err(manifest_err(
+                    path,
+                    &format!("[Overrides] entry '{alias}' must use a local 'path:' source"),
+                ));
+            }
         }
 
         Ok(PackageManifest {
@@ -193,12 +211,12 @@ impl PackageManifest {
     /// `spar.package.lock.spar` is.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str("[Package] {\n");
-        out.push_str(&format!("    name: str = \"{}\";\n", escape(&self.name)));
-        out.push_str(&format!("    version: str = \"{}\";\n", self.version));
-        out.push_str(&format!("    kind: str = \"{}\";\n", self.kind.as_str()));
+        out.push_str("[Package] -> SparPackage {\n");
+        out.push_str(&format!("    name: \"{}\";\n", escape(&self.name)));
+        out.push_str(&format!("    version: \"{}\";\n", self.version));
+        out.push_str(&format!("    kind: \"{}\";\n", self.kind.as_str()));
         out.push_str(&format!(
-            "    entry: str = \"{}\";\n",
+            "    entry: \"{}\";\n",
             escape(&self.entry.to_string_lossy())
         ));
         out.push_str("};\n");

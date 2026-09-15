@@ -204,6 +204,12 @@ impl Lockfile {
             let revision = string_field(&package_fields, "revision", path, "locked package")?;
             let integrity_text =
                 string_field(&package_fields, "integrity", path, "locked package")?;
+            if id.is_empty() || name.is_empty() {
+                return Err(lock_err(
+                    path,
+                    "locked package id and name must not be empty",
+                ));
+            }
             let source = match source_kind {
                 "github" => {
                     let Some((owner, repo)) = source_location.split_once('/') else {
@@ -214,10 +220,22 @@ impl Lockfile {
                             ),
                         ));
                     };
-                    if owner.is_empty() || repo.is_empty() || revision.is_empty() {
+                    if owner.is_empty() || repo.is_empty() {
                         return Err(lock_err(
                             path,
-                            &format!("package '{id}' GitHub source requires owner, repository, and revision"),
+                            &format!("package '{id}' GitHub source requires owner and repository"),
+                        ));
+                    }
+                    if !is_full_git_commit(revision) {
+                        return Err(lock_err(
+                            path,
+                            &format!("package '{id}' revision must be a full hexadecimal commit"),
+                        ));
+                    }
+                    if !is_sha256_integrity(integrity_text) {
+                        return Err(lock_err(
+                            path,
+                            &format!("package '{id}' must contain a complete SHA-256 integrity"),
                         ));
                     }
                     LockedSource::Github {
@@ -265,6 +283,12 @@ impl Lockfile {
                 entry: string_field(&package_fields, "entry", path, "locked package")?.to_string(),
                 dependencies,
             };
+            if package.entry.as_str().is_empty() {
+                return Err(lock_err(
+                    path,
+                    &format!("package '{id}' entry must not be empty"),
+                ));
+            }
             if packages.insert(id.clone(), package).is_some() {
                 return Err(lock_err(path, &format!("duplicate package id '{id}'")));
             }
@@ -435,10 +459,25 @@ fn parse_edge(expr: &Expr, path: &Path) -> Result<(String, PackageId), PackageEr
     };
     let fields = field_map(items, path, "dependency edge")?;
     expect_fields(&fields, &["alias", "packageId"], path, "dependency edge")?;
-    Ok((
-        string_field(&fields, "alias", path, "dependency edge")?.to_string(),
-        string_field(&fields, "packageId", path, "dependency edge")?.to_string(),
-    ))
+    let alias = string_field(&fields, "alias", path, "dependency edge")?;
+    let package_id = string_field(&fields, "packageId", path, "dependency edge")?;
+    if alias.is_empty() || package_id.is_empty() {
+        return Err(lock_err(
+            path,
+            "dependency edge alias and packageId must not be empty",
+        ));
+    }
+    Ok((alias.to_string(), package_id.to_string()))
+}
+
+fn is_full_git_commit(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_sha256_integrity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 /// A `PackageId` for a resolved GitHub revision: stable, filesystem-safe,
@@ -474,7 +513,7 @@ mod tests {
                 repo: name.into(),
                 revision: "0123456789abcdef0123456789abcdef01234567".into(),
             },
-            integrity: Some("sha256:deadbeef".into()),
+            integrity: Some(format!("sha256:{}", "d".repeat(64))),
             entry: "src/lib.spar".into(),
             dependencies: BTreeMap::new(),
         }
@@ -533,5 +572,23 @@ mod tests {
         let p3 = local_package_id(Path::new("/tmp/other"));
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn lockfile_rejects_non_immutable_github_identity() {
+        let path = Path::new("spar.package.lock.spar");
+        let source = lockfile_in_order(&["http"])
+            .to_spar()
+            .unwrap()
+            .replace("0123456789abcdef0123456789abcdef01234567", "moving-branch");
+        let error = Lockfile::parse_spar(&source, path).unwrap_err();
+        assert!(error.to_string().contains("full hexadecimal commit"));
+
+        let source = lockfile_in_order(&["http"])
+            .to_spar()
+            .unwrap()
+            .replace(&format!("sha256:{}", "d".repeat(64)), "sha256:bad");
+        let error = Lockfile::parse_spar(&source, path).unwrap_err();
+        assert!(error.to_string().contains("SHA-256 integrity"));
     }
 }

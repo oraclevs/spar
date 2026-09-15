@@ -275,9 +275,14 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "spar-command",
  "tempfile",
  "toml",
 ]
+
+[[package]]
+name = "spar-command"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

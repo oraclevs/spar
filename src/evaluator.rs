@@ -1642,6 +1642,9 @@ impl Evaluator {
                     let val = self.eval_expr(&lv.value.clone(), local_scope)?;
                     local_scope.insert(lv.name.clone(), val);
                 }
+                FuncStmt::Expression(expr, _) => {
+                    self.eval_expr(expr, local_scope)?;
+                }
                 FuncStmt::Return(ret_value, _) => {
                     let val = match ret_value {
                         ReturnValue::Expr(e) => self.eval_expr(&e.clone(), local_scope)?,

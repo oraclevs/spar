@@ -322,12 +322,16 @@ impl Evaluator {
     /// Evaluate a single expression against an already-computed evaluation
     /// result (globals + sections) — used by `task_lowering` to resolve
     /// ordinary Spar values referenced from task metadata and shell
-    /// interpolation. Reuses `eval_expr` so scalar coercion, `env()`/`str()`
-    /// calls, and field access behave identically to normal Spar value
-    /// evaluation. `local_scope` lets a caller supply already-known local
-    /// bindings — empty for `task_lowering`, since task parameter *values*
-    /// aren't known until the CLI binds them.
-    pub(crate) fn eval_standalone(
+    /// interpolation, and by the `spar` binary at task-run time to
+    /// evaluate a `TemplatePart::Expr` (a `${...}` interpolation that
+    /// mixes a task parameter with other values, e.g. a function call).
+    /// Reuses `eval_expr` so scalar coercion, `env()`/`str()` calls, and
+    /// field access behave identically to normal Spar value evaluation.
+    /// `local_scope` lets a caller supply already-known local bindings —
+    /// empty for plain `task_lowering` metadata, or the task's bound
+    /// parameter values (coerced to `ConfigValue`) when rendering a
+    /// `TemplatePart::Expr`.
+    pub fn eval_standalone(
         program: &Program,
         symbols: &SymbolTable,
         result: &EvalResult,

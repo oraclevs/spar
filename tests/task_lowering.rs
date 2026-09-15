@@ -115,8 +115,13 @@ task [Build] {
     assert!(!compilation.errors.is_empty());
 }
 
+/// A `${...}` interpolation that mixes a task parameter with anything else
+/// (here, `+` with a global) can't be pre-evaluated at compile time — the
+/// parameter's value isn't known until the CLI binds it — so it's lowered
+/// to a `TemplatePart::Expr` and deferred to task-run time instead of
+/// being rejected.
 #[test]
-fn parameter_combined_with_other_values_in_one_interpolation_is_rejected() {
+fn parameter_combined_with_other_values_in_one_interpolation_is_deferred_to_run_time() {
     let src = r#"
 export var suffix: str = "prod";
 
@@ -125,11 +130,52 @@ task [Deploy](environment: str) {
 };
 "#;
     let compilation = compile(src);
-    assert!(!compilation.errors.is_empty());
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    let task = tasks.get("deploy").expect("Deploy task must be lowered");
+    let parts = &task.commands[0].template().parts;
     assert!(
-        errors_contain(&compilation, "cannot combine a task parameter"),
-        "{:?}",
-        compilation.errors
+        parts
+            .iter()
+            .any(|p| matches!(p, TemplatePart::Expr { source, .. } if source.contains("environment"))),
+        "{parts:?}"
+    );
+    assert_eq!(compilation.task_exprs.len(), 1);
+    assert!(compilation.task_exprs[0].param_kinds.contains_key("environment"));
+}
+
+/// The exact shape that motivated deferred evaluation: a function call
+/// that takes a task parameter as an argument. Not a bare parameter
+/// reference, so it must lower to `TemplatePart::Expr` rather than being
+/// rejected or silently pre-evaluated (the function's result depends on
+/// the parameter value, which isn't known until the CLI binds it).
+#[test]
+fn function_call_taking_a_task_parameter_is_deferred_to_run_time() {
+    let src = r#"
+function fetchContainerName(forProd: bool) -> str {
+    if forProd { var r: str = "prod-db"; } else { var r: str = "dev-db"; }
+    return r;
+};
+
+task [DbDown](isProd: bool = false) {
+    run { docker stop ${fetchContainerName(forProd: isProd)}; };
+};
+"#;
+    let compilation = compile(src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+
+    let tasks = compilation.tasks.expect("task set must be lowered");
+    let task = tasks.get("dbdown").expect("DbDown task must be lowered");
+    let parts = &task.commands[0].template().parts;
+    assert!(
+        parts.iter().any(|p| matches!(p, TemplatePart::Expr { .. })),
+        "{parts:?}"
+    );
+    assert_eq!(compilation.task_exprs.len(), 1);
+    assert_eq!(
+        compilation.task_exprs[0].param_kinds.get("isProd"),
+        Some(&spar::runner::ScalarKind::Bool)
     );
 }
 

@@ -734,7 +734,7 @@ fn fits_inline(out: &str, candidate: &str) -> bool {
     !candidate.contains('\n') && current_column(out) + candidate.chars().count() <= MAX_LINE_WIDTH
 }
 
-fn format_expr(
+pub(crate) fn format_expr(
     expr: &Expr,
     parent_prec: u8,
     depth: usize,

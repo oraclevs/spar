@@ -1,7 +1,59 @@
-use spar::runner::{ExecutionOptions, RunnerError, TaskInvocation, TaskSet};
-use spar::{renderer::ErrorRenderer, CompileOptions, Compiler, EmitFormat};
+use spar::runner::{BoundValue, ExecutionOptions, RunnerError, ScalarKind, TaskInvocation, TaskSet};
+use spar::{renderer::ErrorRenderer, Compilation, CompileOptions, Compiler, ConfigValue, EmitFormat, Evaluator};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+
+/// Builds the `ExprEval` callback `runner::execute`/`CommandTemplate::render`
+/// use to resolve a `TemplatePart::Expr` (a `${...}` interpolation that
+/// mixes a task parameter with other values) at task-run time, once
+/// parameter values are bound. Reuses the already-computed `Evaluator`
+/// result the rest of `compilation` was built from.
+fn task_expr_evaluator(
+    compilation: &Compilation,
+) -> impl Fn(usize, &BTreeMap<String, BoundValue>) -> Result<String, String> + '_ {
+    let program = compilation.program.as_ref().expect("compiled program");
+    let symbols = compilation.symbols.as_ref().expect("compiled symbols");
+    let eval_result = compilation.result.as_ref().expect("compiled eval result");
+    let entries = &compilation.task_exprs;
+    move |id, values| {
+        let entry = entries
+            .get(id)
+            .ok_or_else(|| format!("internal error: unknown task expression #{id}"))?;
+        let mut local_scope = HashMap::new();
+        for (name, kind) in &entry.param_kinds {
+            if let Some(value) = values.get(name) {
+                local_scope.insert(name.clone(), bound_to_config(value, *kind));
+            }
+        }
+        Evaluator::eval_standalone(program, symbols, eval_result, &entry.expr, &local_scope)
+            .map(|v| v.coerce_to_str())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn bound_to_config(value: &BoundValue, kind: ScalarKind) -> ConfigValue {
+    match value {
+        BoundValue::Variadic(items) => {
+            ConfigValue::List(items.iter().cloned().map(ConfigValue::Str).collect())
+        }
+        BoundValue::Scalar(s) => match kind {
+            ScalarKind::Str => ConfigValue::Str(s.clone()),
+            ScalarKind::Int => s
+                .parse()
+                .map(ConfigValue::Int)
+                .unwrap_or_else(|_| ConfigValue::Str(s.clone())),
+            ScalarKind::Float => s
+                .parse()
+                .map(ConfigValue::Float)
+                .unwrap_or_else(|_| ConfigValue::Str(s.clone())),
+            ScalarKind::Bool => s
+                .parse()
+                .map(ConfigValue::Bool)
+                .unwrap_or_else(|_| ConfigValue::Str(s.clone())),
+        },
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -645,7 +697,8 @@ fn cmd_run(
     };
 
     let exec_options = ExecutionOptions { dry_run, base_dir };
-    if let Err(e) = spar::runner::execute(&plan, &exec_options) {
+    let exprs = task_expr_evaluator(&compilation);
+    if let Err(e) = spar::runner::execute(&plan, &exec_options, &exprs) {
         match e {
             RunnerError::QuietCommandFailed {
                 task,
@@ -727,8 +780,15 @@ fn cmd_show(path: Option<PathBuf>, global: bool, task: String, args: Vec<String>
         });
     let color = use_stdout_color();
     let mut output = std::io::stdout().lock();
+    let exprs = task_expr_evaluator(&compilation);
     for command in &bound.task.commands {
-        print_resolved_command(&command.render(&bound.parameter_values), color, &mut output);
+        match command.render(&bound.parameter_values, &exprs) {
+            Ok(rendered) => print_resolved_command(&rendered, color, &mut output),
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 

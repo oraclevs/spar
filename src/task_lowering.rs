@@ -9,12 +9,16 @@
 //! `Evaluator::eval_standalone`, using the same evaluation result already
 //! computed for the rest of the program. `run` block interpolations
 //! (`${...}`) are different: a bare reference to a task parameter is left
-//! as a neutral `TemplatePart::Parameter` slot (its value isn't known
-//! until the CLI binds arguments), while anything else is pre-evaluated
-//! the same way metadata is. An expression that mixes a task parameter
-//! with other values in one `${...}` can't be represented by either case,
-//! so it's rejected with a precise diagnostic instead of silently doing
-//! the wrong thing.
+//! as a neutral `TemplatePart::Parameter` slot, and anything that doesn't
+//! mention a task parameter at all is pre-evaluated the same way metadata
+//! is — both have known values before the CLI ever binds arguments. An
+//! expression that *does* mention a parameter but isn't a bare reference
+//! (a function call taking a parameter, string concatenation, field
+//! access, ...) can't be pre-evaluated, since the parameter's value isn't
+//! known until the CLI binds it; it's instead lowered to
+//! `TemplatePart::Expr` and evaluated at task-run time against the bound
+//! parameter values, via `Evaluator::eval_standalone` again — see
+//! `lower_run_block` and `Compilation::task_exprs`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,17 +31,36 @@ use crate::runner::{
     CommandTemplate, ScalarKind, Task, TaskCommand, TaskParameter, TaskSet, TemplatePart,
 };
 
+/// A `${...}` interpolation lowered to `TemplatePart::Expr` because it
+/// mentions a task parameter without being a bare reference to one.
+/// Carried on `Compilation::task_exprs`, indexed by `TemplatePart::Expr`'s
+/// `id`, so the `spar` binary can evaluate it at task-run time via
+/// `Evaluator::eval_standalone` once parameters are bound — see the module
+/// doc comment above.
+#[derive(Debug, Clone)]
+pub struct TaskExprEntry {
+    pub expr: Expr,
+    /// Declared scalar type of every task parameter this task exposes,
+    /// so a caller evaluating `expr` can coerce each bound (string) CLI
+    /// argument to the right `ConfigValue` before binding it as a local.
+    pub param_kinds: HashMap<String, ScalarKind>,
+}
+
 /// Lowers every `task [...]  { ... }` declaration in `program` into a
 /// `runner::TaskSet`. Returns `Ok(None)` when the program declares no
 /// tasks at all — callers shouldn't attach an empty task catalog to
 /// `Compilation`. `eval_result` must be the program's already-computed
 /// evaluation result (global/section values), since task metadata and
-/// non-parameter interpolations are pre-evaluated against it.
+/// non-parameter interpolations are pre-evaluated against it. Any
+/// parameter-dependent `run` block expression that can't be pre-evaluated
+/// is appended to `expr_table` instead; its index there becomes the `id`
+/// on the corresponding `TemplatePart::Expr`.
 pub fn lower_tasks(
     program: &Program,
     symbols: &SymbolTable,
     eval_result: &EvalResult,
     base_dir: &Path,
+    expr_table: &mut Vec<TaskExprEntry>,
 ) -> Result<Option<TaskSet>, Vec<SparError>> {
     let decls: Vec<&TaskDecl> = program
         .items
@@ -56,7 +79,7 @@ pub fn lower_tasks(
     let mut tasks: Vec<Task> = Vec::new();
 
     for decl in &decls {
-        match lower_one_task(decl, program, symbols, eval_result, base_dir) {
+        match lower_one_task(decl, program, symbols, eval_result, base_dir, expr_table) {
             Ok(task) => tasks.push(task),
             Err(mut errs) => errors.append(&mut errs),
         }
@@ -96,6 +119,7 @@ fn lower_one_task(
     symbols: &SymbolTable,
     eval_result: &EvalResult,
     base_dir: &Path,
+    expr_table: &mut Vec<TaskExprEntry>,
 ) -> Result<Task, Vec<SparError>> {
     let mut errors: Vec<SparError> = Vec::new();
 
@@ -157,6 +181,11 @@ fn lower_one_task(
     }
 
     let param_names: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+    let param_kinds: HashMap<String, ScalarKind> = decl
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), scalar_kind(&p.ty)))
+        .collect();
     let parameters: Vec<TaskParameter> = decl
         .params
         .iter()
@@ -190,25 +219,19 @@ fn lower_one_task(
                         }
                         ShellTemplatePart::Expr(expr) => match bare_param_ref(expr, &param_names) {
                             Some(name) => parts.push(TemplatePart::Parameter(name)),
-                            None => {
-                                if expr_mentions_any(expr, &param_names) {
-                                    errors.push(SparError::EvalError {
-                                        message: format!(
-                                            "task '{}': a '${{...}}' interpolation cannot combine a task \
-                                             parameter with other values — reference the parameter alone \
-                                             (e.g. '${{{}}}'), or use a literal / global value instead",
-                                            decl.name,
-                                            param_names.iter().next().cloned().unwrap_or_default()
-                                        ),
-                                        span: command.span.clone(),
-                                    });
-                                    continue;
-                                }
-                                match eval_any(program, symbols, eval_result, expr) {
-                                    Ok(v) => parts.push(TemplatePart::Literal(v.coerce_to_str())),
-                                    Err(e) => errors.push(e),
-                                }
+                            None if expr_mentions_any(expr, &param_names) => {
+                                let id = expr_table.len();
+                                let source = format_expr_source(expr);
+                                expr_table.push(TaskExprEntry {
+                                    expr: expr.clone(),
+                                    param_kinds: param_kinds.clone(),
+                                });
+                                parts.push(TemplatePart::Expr { id, source });
                             }
+                            None => match eval_any(program, symbols, eval_result, expr) {
+                                Ok(v) => parts.push(TemplatePart::Literal(v.coerce_to_str())),
+                                Err(e) => errors.push(e),
+                            },
                         },
                     }
                 }
@@ -271,6 +294,15 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
     }
 }
 
+/// Renders `expr` back to Spar source text, for display inside an
+/// unbound `${...}` template (`CommandTemplate::render_unbound`, used by
+/// `spar show`/`spar dump` before parameters are ever bound).
+fn format_expr_source(expr: &Expr) -> String {
+    let mut out = String::new();
+    crate::formatter::format_expr(expr, 0, 0, &crate::formatter::FormatConfig::default(), &mut out);
+    out
+}
+
 /// `expr` is exactly a bare reference to one of `param_names` — the only
 /// shape `task_lowering` can turn into a neutral `TemplatePart::Parameter`
 /// slot instead of pre-evaluating.
@@ -286,8 +318,10 @@ fn bare_param_ref(expr: &Expr, param_names: &HashSet<String>) -> Option<String> 
 }
 
 /// Does `expr` reference any of `param_names` anywhere within it? Used to
-/// detect the unsupported case of a task parameter combined with other
-/// values inside one `${...}` (e.g. `${environment + "-x"}`).
+/// detect the deferred case of a task parameter combined with other
+/// values inside one `${...}` (e.g. `${environment + "-x"}`, or a function
+/// call taking a parameter as an argument) — lowered to `TemplatePart::Expr`
+/// and evaluated at task-run time instead of here.
 fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
     match expr {
         Expr::NamespaceRef(nr) => nr.segments.len() == 1 && param_names.contains(&nr.segments[0]),

@@ -12,6 +12,7 @@ pub mod host;
 pub mod lexer;
 pub mod loader;
 pub mod naming;
+pub mod package;
 pub mod parser;
 pub mod renderer;
 pub mod resolver;

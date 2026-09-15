@@ -1702,14 +1702,12 @@ fn lower_shell_redirect(redirect: &ShellRedirect) -> spar_command::Redirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ShellPlanOutcome {
+pub struct ShellPlanOutcome {
     pub success: bool,
     pub exit_code: i32,
 }
 
-pub(crate) fn execute_shell_plan(
-    plan: &spar_command::ShellPlan,
-) -> std::io::Result<ShellPlanOutcome> {
+pub fn execute_shell_plan(plan: &spar_command::ShellPlan) -> std::io::Result<ShellPlanOutcome> {
     let mut outcome = ShellPlanOutcome {
         success: true,
         exit_code: 0,

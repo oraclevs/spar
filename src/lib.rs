@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod command;
 pub mod compiler;
 pub mod de;
 pub mod depgraph;
@@ -26,12 +27,13 @@ pub mod token;
 pub mod typechecker;
 
 pub use ast::Program;
+pub use command::parse_shell_plan;
 pub use compiler::{Compilation, CompileOptions, Compiler};
 pub use de::{from_eval, from_str, SparDeserError};
 pub use emit::{emit_to_json, emit_to_toml, emit_to_yaml, EmitFormat};
 pub use engine::{Engine, ExecutionOutcome};
 pub use error::{Span, SparError};
-pub use evaluator::{ConfigValue, EvalResult, Evaluator};
+pub use evaluator::{execute_shell_plan, ConfigValue, EvalResult, Evaluator, ShellPlanOutcome};
 pub use host::{HostError, HostFunction, HostRegistry};
 pub use lexer::Lexer;
 pub use parser::Parser;

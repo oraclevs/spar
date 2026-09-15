@@ -24,5 +24,5 @@ toml = "1"
 tempfile = "3"
 semver = "1"
 sha2 = "0.10"
-spar-command = { path = "../../../spar-command" }
-spar-process = { path = "../../../spar-process" }
+spar-command = { path = "../spar-command" }
+spar-process = { path = "../spar-process" }

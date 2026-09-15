@@ -82,6 +82,38 @@ fn nested_block_shadowing_does_not_replace_outer_local() {
 }
 
 #[test]
+fn break_and_continue_target_the_innermost_loop() {
+    let result = eval_src(
+        r#"
+        function afterContinue() -> int {
+            for value in [1, 2] {
+                if value == 1 { continue; }
+                return value;
+            }
+            return 99;
+        };
+        function afterInnerBreak() -> int {
+            for outer in [7] {
+                for inner in [1] { break; }
+                return outer;
+            }
+            return 99;
+        };
+        var continued: int = afterContinue();
+        var innerBreak: int = afterInnerBreak();
+        "#,
+    );
+    assert_eq!(
+        result.globals["continued"],
+        crate::evaluator::ConfigValue::Int(2)
+    );
+    assert_eq!(
+        result.globals["innerBreak"],
+        crate::evaluator::ConfigValue::Int(7)
+    );
+}
+
+#[test]
 fn eval_function_parameter_default_and_explicit_override() {
     let src = r#"
         var defaultName: str = "world";

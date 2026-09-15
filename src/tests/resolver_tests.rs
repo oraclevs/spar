@@ -115,6 +115,30 @@ fn local_declared_after_terminal_branch_stays_block_scoped() {
 }
 
 #[test]
+fn break_and_continue_outside_loops_are_rejected_with_spans() {
+    for (src, keyword) in [("break;", "break"), ("continue;", "continue")] {
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        let program = crate::parser::Parser::new(tokens).parse().unwrap();
+        let errors = crate::resolver::Resolver::new()
+            .resolve(&program, &[])
+            .unwrap_err();
+        let error = errors
+            .iter()
+            .find(|error| error.to_string().contains(keyword))
+            .unwrap();
+        let crate::error::SparError::ResolveError { span, .. } = error else {
+            panic!("expected resolve error");
+        };
+        assert_eq!((span.line, span.col), (1, 1));
+    }
+}
+
+#[test]
+fn break_and_continue_inside_nested_loop_blocks_resolve() {
+    resolve_ok("for item in [1] { if true { continue; } if false { break; } }");
+}
+
+#[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"
         function f(x: str) -> str { return x; };

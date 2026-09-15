@@ -19,6 +19,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
                 scope.insert(local.name.clone(), local.ty.clone());
             }
             FuncStmt::Expression(_, _) => {}
+            FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
             FuncStmt::If(if_stmt) => {
                 let then_exit = sequence_exit_scope(&if_stmt.then_stmts);
                 let else_exit = sequence_exit_scope(&if_stmt.else_stmts);
@@ -52,6 +53,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For(statement) => statement.span.clone(),
+        FuncStmt::Break(span) | FuncStmt::Continue(span) => span.clone(),
     }
 }
 
@@ -967,7 +969,7 @@ impl Resolver {
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.resolve_task(decl),
                 TopLevelItem::Statement(statement) => {
-                    self.resolve_func_stmts(std::slice::from_ref(statement), &mut module_locals);
+                    self.resolve_func_stmts(std::slice::from_ref(statement), &mut module_locals, 0);
                 }
             }
         }
@@ -1015,7 +1017,7 @@ impl Resolver {
             }
         }
 
-        self.resolve_func_stmts(&f.body.stmts, &mut local_names);
+        self.resolve_func_stmts(&f.body.stmts, &mut local_names, 0);
 
         if !stmts_always_return(&f.body.stmts) {
             self.errors.push(SparError::ResolveError {
@@ -1055,7 +1057,7 @@ impl Resolver {
                 });
             }
             match stmt {
-                FuncStmt::Return(_, _) => {
+                FuncStmt::Return(_, _) | FuncStmt::Break(_) | FuncStmt::Continue(_) => {
                     terminated = true;
                 }
                 FuncStmt::LocalVar(_) => {}
@@ -1690,7 +1692,12 @@ impl Resolver {
 
     // ── Function body helpers ─────────────────────────────────────────────────
 
-    fn resolve_func_stmts(&mut self, stmts: &[FuncStmt], local_names: &mut HashSet<String>) {
+    fn resolve_func_stmts(
+        &mut self,
+        stmts: &[FuncStmt],
+        local_names: &mut HashSet<String>,
+        loop_depth: usize,
+    ) {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
@@ -1730,6 +1737,19 @@ impl Resolver {
                         }
                     }
                 },
+                FuncStmt::Break(span) | FuncStmt::Continue(span) if loop_depth == 0 => {
+                    let keyword = if matches!(stmt, FuncStmt::Break(_)) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    self.errors.push(SparError::ResolveError {
+                        message: format!("'{keyword}' is only valid inside a loop"),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::For(statement) => {
                     if let Err(e) = self.resolve_expr_with_locals(&statement.iterable, local_names)
                     {
@@ -1750,7 +1770,7 @@ impl Resolver {
                         }
                     }
                     let body = statement.body.clone();
-                    self.resolve_func_stmts(&body, &mut loop_scope);
+                    self.resolve_func_stmts(&body, &mut loop_scope, loop_depth + 1);
                 }
                 FuncStmt::If(if_stmt) => {
                     if let Err(e) = self.resolve_expr_with_locals(&if_stmt.condition, local_names) {
@@ -1759,9 +1779,9 @@ impl Resolver {
                     let mut then_scope = local_names.clone();
                     let then_stmts = if_stmt.then_stmts.clone();
                     let else_stmts = if_stmt.else_stmts.clone();
-                    self.resolve_func_stmts(&then_stmts, &mut then_scope);
+                    self.resolve_func_stmts(&then_stmts, &mut then_scope, loop_depth);
                     let mut else_scope = local_names.clone();
-                    self.resolve_func_stmts(&else_stmts, &mut else_scope);
+                    self.resolve_func_stmts(&else_stmts, &mut else_scope, loop_depth);
 
                     // Branch declarations are lexical to their own blocks.
                     // Only assignments to an already-visible outer binding may
@@ -2202,6 +2222,7 @@ impl Resolver {
                 FuncStmt::Expression(expr, _) => {
                     self.collect_closure_deps_expr(expr, &locals, deps);
                 }
+                FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, _) => match ret_value {
                     ReturnValue::Expr(e) => self.collect_closure_deps_expr(e, &locals, deps),
                     ReturnValue::SectionBlock(fields) => {

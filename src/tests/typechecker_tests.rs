@@ -21,6 +21,47 @@ fn check_err(src: &str) -> String {
 }
 
 #[test]
+fn shell_block_has_shell_type() {
+    check_ok("var x: shell = shell { echo hi; };");
+}
+
+#[test]
+fn shell_type_mismatch_errors() {
+    let errors = check_err("var x: int = shell { echo hi; };");
+    assert!(errors.contains("type mismatch"), "got: {errors}");
+}
+
+#[test]
+fn exec_shell_has_exec_result_type() {
+    check_ok(
+        r#"
+        type [ExecResult]{ success: bool; exitCode: int; };
+        function f() -> bool {
+            var r: ExecResult = exec shell { true; };
+            return r.success;
+        };
+        "#,
+    );
+}
+
+#[test]
+fn shell_plus_shell_is_legal() {
+    check_ok(
+        r#"
+        function a() -> shell { return shell { true; }; };
+        function b() -> shell { return shell { true; }; };
+        var x: shell = a() + b();
+        "#,
+    );
+}
+
+#[test]
+fn shell_plus_int_is_a_clear_error() {
+    let errors = check_err("var x: shell = shell { true; } + 1;");
+    assert!(errors.to_lowercase().contains("shell"), "got: {errors}");
+}
+
+#[test]
 fn typecheck_function_arg_type_mismatch() {
     let src = r#"
         function double(x: int) -> int { return x; };

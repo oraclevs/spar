@@ -12,6 +12,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Bool => "bool".into(),
         SparType::Section => "section".into(),
         SparType::Void => "void".into(),
+        SparType::Shell => "shell".into(),
         SparType::List(inner) => format!("[{}]", display_type(inner)),
         SparType::Named(name) => name.clone(),
     }
@@ -1243,6 +1244,8 @@ impl<'a> TypeChecker<'a> {
                     _ => None,                 // source is not a list; error reported elsewhere
                 }
             }
+            Expr::Shell(_) => Some(SparType::Shell),
+            Expr::ExecShell(_) => Some(SparType::Named("ExecResult".to_string())),
         }
     }
 
@@ -1331,6 +1334,7 @@ impl<'a> TypeChecker<'a> {
                 (SparType::Str, SparType::Str) => Some(SparType::Str),
                 (SparType::Int, SparType::Int) => Some(SparType::Int),
                 (SparType::Float, SparType::Float) => Some(SparType::Float),
+                (SparType::Shell, SparType::Shell) => Some(SparType::Shell),
                 _ => None,
             },
             BinOp::Sub | BinOp::Mul | BinOp::Div => match (lhs, rhs) {
@@ -1504,6 +1508,7 @@ impl<'a> TypeChecker<'a> {
                             (SparType::Str, SparType::Str)
                                 | (SparType::Int, SparType::Int)
                                 | (SparType::Float, SparType::Float)
+                                | (SparType::Shell, SparType::Shell)
                         ),
                         BinOp::Sub | BinOp::Mul | BinOp::Div => matches!(
                             (l, r),
@@ -1679,6 +1684,7 @@ impl<'a> TypeChecker<'a> {
             Expr::Literal(_) => {}
             Expr::NamespaceRef(_) => {}
             Expr::FieldAccess { base, .. } => self.check_expr_internal(base),
+            Expr::Shell(_) | Expr::ExecShell(_) => {}
         }
     }
 
@@ -2071,6 +2077,7 @@ impl<'a> TypeChecker<'a> {
             Expr::Literal(_) => Ok(()),
             Expr::NamespaceRef(_) => Ok(()),
             Expr::FieldAccess { base, .. } => self.check_expr_with_locals(base, locals),
+            Expr::Shell(_) | Expr::ExecShell(_) => Ok(()),
         }
     }
 
@@ -2086,7 +2093,10 @@ impl<'a> TypeChecker<'a> {
     /// lowering-representability concern, not a type concern.
     fn check_task(&mut self, decl: &TaskDecl) {
         for param in &decl.params {
-            if matches!(param.ty, SparType::Section | SparType::List(_)) {
+            if matches!(
+                param.ty,
+                SparType::Section | SparType::List(_) | SparType::Shell
+            ) {
                 self.push_type_error(
                     format!(
                         "task parameter '{}': type must be 'str', 'int', 'float', or 'bool' — \
@@ -2760,7 +2770,12 @@ impl<'a> TypeChecker<'a> {
         let rty = self.infer_type_with_locals(&b.rhs, locals)?;
         match b.op {
             BinOp::Add => {
-                if lty == rty && matches!(lty, SparType::Int | SparType::Float | SparType::Str) {
+                if lty == rty
+                    && matches!(
+                        lty,
+                        SparType::Int | SparType::Float | SparType::Str | SparType::Shell
+                    )
+                {
                     Some(lty)
                 } else {
                     None

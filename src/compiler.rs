@@ -293,11 +293,11 @@ pub fn validate_entry_signature(program: &Program) -> Result<(), SparError> {
     }
     if !matches!(
         main.ret,
-        crate::ast::SparType::Int | crate::ast::SparType::Void
+        crate::ast::SparType::Int | crate::ast::SparType::Void | crate::ast::SparType::Shell
     ) {
         return Err(SparError::TypeError {
             message: format!(
-                "'main' must return 'int' or 'void', found '{}'",
+                "'main' must return 'int', 'void', or 'shell', found '{}'",
                 crate::typechecker::display_type(&main.ret)
             ),
             hint: None,
@@ -337,6 +337,11 @@ mod tests {
             "function main(x: int) -> int { return x; };",
             "must not declare parameters",
         );
+    }
+
+    #[test]
+    fn execute_entry_accepts_main_returning_shell() {
+        assert_entry_ok("function main() -> shell { return shell { true; }; };");
     }
 
     #[test]

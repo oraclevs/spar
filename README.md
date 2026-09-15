@@ -1,6 +1,8 @@
 # Spar
 
-**A statically typed configuration language. Emits JSON. Deserializes directly into Rust structs.**
+**A statically typed scripting language, with native configuration, task automation, and package management built in.**
+
+Spar started as a typed configuration language and still is one — the same `.spar` files, `spar emit`, and Rust deserialization below are unchanged. It's grown a scripting core alongside that: mutable variables, `if`/`for` at module scope, `break`/`continue`, `void` functions, a `main` entry point, and `spar exec`/`spar repl` to actually run a `.spar` file as a program rather than only evaluate it as config.
 
 Write your configuration in `.spar` files — with types, computed values, cross-file imports, and schema validation — then either run `spar emit` to produce clean JSON, or load the config straight into your Rust application with one call:
 
@@ -72,8 +74,16 @@ $ spar emit server.spar
   - [Functions](#functions)
   - [Cross-file imports](#cross-file-imports)
   - [Schema validation](#schema-validation)
+- [Scripting](#scripting)
+  - [Mutable variables and assignment](#mutable-variables-and-assignment)
+  - [Global control flow](#global-control-flow)
+  - [Indexed iteration, break, and continue](#indexed-iteration-break-and-continue)
+  - [void functions and main](#void-functions-and-main)
+  - [Running a script](#running-a-script)
+  - [REPL](#repl)
 - [Rust Integration](#rust-integration)
 - [Task Runner](#task-runner)
+- [Packages](#packages)
 - [Installation](#installation)
 - [CLI Reference](#cli-reference)
 - [Editor Support](#editor-support)
@@ -416,6 +426,90 @@ error[schema]: section `Server` is missing required field `port`
 
 ---
 
+## Scripting
+
+Everything above evaluates a `.spar` file as configuration — computed once, emitted as data. Spar can also run a `.spar` file as a program.
+
+### Mutable variables and assignment
+
+`var` is immutable by default, same as everywhere else in this doc. Add `mut` to allow reassignment:
+
+```spar
+var mut count: int = 0;
+count = count + 1;
+```
+
+Reassigning a plain `var`, or a name that was never declared, is a resolve-time error — the diagnostic for the first case suggests adding `mut`.
+
+### Global control flow
+
+`if` and `for` work at module scope, not just inside functions:
+
+```spar
+var mut total: int = 0;
+var values: [int] = [1, 2, 3];
+
+for value in values {
+    if value > 1 {
+        total = total + value;
+    }
+}
+```
+
+Each `{ ... }` block is its own lexical scope — a `var` declared inside an `if`/`for` body doesn't leak out, and it can shadow an outer name of the same name without affecting the outer one.
+
+### Indexed iteration, break, and continue
+
+```spar
+for (index, value) in values {
+    if value == 2 {
+        continue;
+    }
+    if index == 2 {
+        break;
+    }
+}
+```
+
+`index` is always `int`; `value`'s type is the list's element type. `break`/`continue` are only valid inside a loop and always target the innermost one.
+
+### void functions and main
+
+```spar
+function log(message: str) -> void {
+    return;   // bare return — only legal in a void function
+}
+
+function main() -> int {
+    log(message: "starting");
+    return 0;
+}
+```
+
+A `void` function may also fall off the end of its body with no explicit `return` at all. `main` is an ordinary function name, not a keyword — it just has special meaning to `spar exec`: zero parameters, returning `int` (used as the process exit status) or `void` (exits `0` unless a runtime error occurs).
+
+### Running a script
+
+```bash
+spar exec app.spar
+spar exec app.spar -- arg1 arg2   # -- separates spar's own args from the program's
+spar ./app.spar                    # shorthand for exec, when the name looks like a path
+```
+
+`spar exec` loads the module graph, initializes it (module-scope statements run once, in source order), locates `main`, calls it, and exits with its status. A leading `#!/usr/bin/env spar` line is recognized and preserved by the formatter, so a script can be made directly executable with `chmod +x`.
+
+`spar check`/`spar emit` never call `main` — they stay pure static-analysis/config-evaluation surfaces, safe for LSP and CI use even on a file that declares one.
+
+### REPL
+
+```bash
+spar repl
+```
+
+A minimal, persistent scripting session: each fragment you enter is evaluated against everything entered before it. A fragment that fails to typecheck or evaluate never commits — the session's state is exactly what it was before that fragment, so one bad line doesn't corrupt the session. Input is buffered until brace/bracket/paren nesting balances and the fragment ends in `;` (every top-level Spar statement already requires one), so a multi-line `function`/`task` body doesn't get evaluated one line at a time.
+
+---
+
 ## Rust Integration
 
 The `spar` crate is both a CLI tool and a Rust library. Add it to your project:
@@ -556,6 +650,35 @@ example.
 
 ---
 
+## Packages
+
+Reusable Spar code, versioned and shared via GitHub or a local path — declared in a manifest written in Spar itself, `spar.package.spar`:
+
+```spar
+[Package] {
+    name: str = "my-app";
+    version: str = "1.0.0";
+    kind: str = "application";
+};
+
+[Dependencies] {
+    http: str = "github:owner/spar-http@1.4.0";
+};
+```
+
+Import a dependency exactly like a local file, by its declared alias instead of a path:
+
+```spar
+import "http" as http;
+import { get, post } from "http";
+```
+
+`spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.lock`. `spar install` materializes every locked dependency from its exact recorded revision — never re-resolving a version requirement or branch, so an upstream tag moving after you've locked it can't silently change what gets installed — and `spar install --offline` fails clearly instead of touching the network if anything's still missing. `spar update [alias]` is the explicit, opposite operation: re-resolve against the manifest's current requests. `spar remove <alias>` drops a dependency and re-locks. `spar tree` prints the resolved dependency tree.
+
+Resolved packages live once per machine, deduplicated by exact revision, under `$XDG_DATA_HOME/spar/store` (`~/.local/share/spar/store` by default) — never inside a project directory, and never something a project-local `node_modules`-style folder would need. Ordinary execution (`check`, `emit`, `exec`, task runs, ordinary imports) only ever reads the lockfile and that store; it never touches the network. Installing a package never executes any code from it — there are no install lifecycle scripts.
+
+---
+
 ## Installation
 
 Spar is built with Rust. You need the Rust toolchain installed (`rustup.rs`).
@@ -605,6 +728,16 @@ COMMANDS:
     show          <task> [args...] [-f FILE]
                                          Print one task's resolved commands without running it
     dump          [-f FILE]             Print the whole task catalog as JSON
+    exec          <file.spar> [-- args...]
+                                         Run file.spar's `main` and exit with its status
+    repl                                 Start an interactive scripting session
+    init          [name] [--app|--lib|--config]
+                                         Create spar.package.spar in the current directory
+    add           <alias> <request>     Add/update a dependency, resolve, and lock it
+    remove        <alias>               Remove a dependency and re-lock
+    install       [--offline]           Materialize every locked dependency into the store
+    update        [alias]               Re-resolve one dependency, or all of them
+    tree                                 Print the locked dependency tree
 
 OPTIONS:
     -h, --help         Show this help message
@@ -727,6 +860,10 @@ src/
   formatter.rs     Canonical source formatter
   renderer.rs      Error display with source spans
   loader.rs        Import resolution and schema validation
+  engine.rs        Check/Emit/Execute mode facade
+  session.rs       Persistent, transactional eval for the REPL
+  host.rs          Native Rust function registry (ns::fn(...) calls)
+  package/         Manifest, lockfile, global store, dependency resolution, package CLI
   de.rs            Serde deserializer (from_str / from_eval)
   lib.rs           Public crate API
   main.rs          CLI entry point

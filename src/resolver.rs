@@ -476,6 +476,12 @@ impl Resolver {
     }
 }
 
+impl Default for Resolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Pass 1: Registration ──────────────────────────────────────────────────────
 
 impl Resolver {
@@ -926,7 +932,8 @@ impl Resolver {
         for item in &decl.items {
             if let SectionItem::Field(f) = item {
                 if let Some(FieldValue::Nested(sub_fields)) = &f.value {
-                    let nested_path = [decl.path.as_slice(), &[f.name.clone()]].concat();
+                    let nested_path =
+                        [decl.path.as_slice(), std::slice::from_ref(&f.name)].concat();
                     self.register_nested_section(nested_path, sub_fields);
                 }
             }
@@ -958,7 +965,8 @@ impl Resolver {
                 } else {
                     // Recurse for deeper nesting
                     if let Some(FieldValue::Nested(sub)) = &field.value {
-                        let nested_path = [path.as_slice(), &[field.name.clone()]].concat();
+                        let nested_path =
+                            [path.as_slice(), std::slice::from_ref(&field.name)].concat();
                         self.register_nested_section(nested_path, sub);
                     }
                     if !naming::is_camel_case(&field.name) {
@@ -1640,9 +1648,8 @@ impl Resolver {
                 {
                     if self.migration_hint_target(first) {
                         self.push_error(
-                            format!(
-                                "field access via '::' is no longer supported — use '.' instead"
-                            ),
+                            "field access via '::' is no longer supported — use '.' instead"
+                                .to_string(),
                             nr.span.clone(),
                         );
                     } else {
@@ -2508,14 +2515,11 @@ impl Resolver {
                         );
                     }
                 }
-                [alias, _] => {
-                    if !self.imports.contains_key(alias.as_str()) {
-                        self.push_error(
-                            format!("undefined import namespace `{alias}` in spread"),
-                            spread.span.clone(),
-                        );
-                    }
-                }
+                [alias, _] if !self.imports.contains_key(alias.as_str()) => self.push_error(
+                    format!("undefined import namespace `{alias}` in spread"),
+                    spread.span.clone(),
+                ),
+                [_, _] => {}
                 _ => {}
             },
             Expr::FieldAccess { base, field, .. } if matches!(base.as_ref(), Expr::NamespaceRef(nr) if nr.segments == ["global"]) => {

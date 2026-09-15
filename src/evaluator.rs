@@ -809,7 +809,8 @@ impl Evaluator {
                             match self.eval_expr(&val_expr, local_scope) {
                                 Ok(ConfigValue::Section(map)) => {
                                     // Section-returning function call — register at nested path
-                                    let nested_path = [parent_path, &[field.name.clone()]].concat();
+                                    let nested_path =
+                                        [parent_path, std::slice::from_ref(&field.name)].concat();
                                     if let Some(frame) = self.self_stack.last_mut() {
                                         frame.fields.insert(
                                             nested_path.clone(),
@@ -819,7 +820,8 @@ impl Evaluator {
                                     self.section_cache.insert(nested_path, map);
                                 }
                                 Ok(val) => {
-                                    let field_path = [parent_path, &[field.name.clone()]].concat();
+                                    let field_path =
+                                        [parent_path, std::slice::from_ref(&field.name)].concat();
                                     if let Some(frame) = self.self_stack.last_mut() {
                                         frame.fields.insert(field_path, val.clone());
                                     }
@@ -831,7 +833,8 @@ impl Evaluator {
                             }
                         }
                         Some(FieldValue::Nested(sub_items)) => {
-                            let nested_path = [parent_path, &[field.name.clone()]].concat();
+                            let nested_path =
+                                [parent_path, std::slice::from_ref(&field.name)].concat();
                             let nested_map =
                                 self.eval_section_fields(sub_items, &nested_path, &HashMap::new());
                             if let Some(frame) = self.self_stack.last_mut() {
@@ -1203,10 +1206,10 @@ impl Evaluator {
                     sub.effect_ledger = self.effect_ledger.clone();
                     let result = if imported
                         .symbols
-                        .lookup_section(&[name.to_string()])
+                        .lookup_section(std::slice::from_ref(name))
                         .is_some()
                     {
-                        sub.eval_section_by_path(&[name.to_string()])
+                        sub.eval_section_by_path(std::slice::from_ref(name))
                             .map(ConfigValue::Section)
                             .ok_or_else(|| EvalErr::ImportRef {
                                 alias: ns.to_string(),
@@ -1264,8 +1267,12 @@ impl Evaluator {
                     }
 
                     let head = &rest[0];
-                    let value = if imported.symbols.lookup_section(&[head.clone()]).is_some() {
-                        sub.eval_section_by_path(&[head.clone()])
+                    let value = if imported
+                        .symbols
+                        .lookup_section(std::slice::from_ref(head))
+                        .is_some()
+                    {
+                        sub.eval_section_by_path(std::slice::from_ref(head))
                             .map(ConfigValue::Section)
                     } else {
                         sub.eval_global(head)

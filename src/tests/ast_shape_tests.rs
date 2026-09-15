@@ -30,3 +30,16 @@ fn ast_new_types_compile() {
     };
     let _ = _fd;
 }
+
+#[test]
+fn function_control_flow_uses_shared_statement_type() {
+    use crate::ast::{FuncStmt, Statement};
+
+    fn accepts_shared_statement(_: &Statement) {}
+
+    let statement = FuncStmt::Return(
+        crate::ast::ReturnValue::Expr(crate::ast::Expr::Literal(crate::ast::Literal::Int(0))),
+        crate::Span::dummy(),
+    );
+    accepts_shared_statement(&statement);
+}

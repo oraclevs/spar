@@ -444,8 +444,13 @@ pub struct FunctionBody {
     pub span: Span,
 }
 
+/// One executable Spar statement.
+///
+/// Function bodies currently expose the historical `FuncStmt` alias below;
+/// module and nested block support can therefore grow around one statement
+/// representation without duplicating control-flow nodes.
 #[derive(Debug, Clone)]
-pub enum FuncStmt {
+pub enum Statement {
     LocalVar(LocalVarDecl),
     If(IfStmt),
     Return(ReturnValue, Span),
@@ -456,6 +461,9 @@ pub enum FuncStmt {
         span: Span,
     },
 }
+
+/// Backward-compatible name retained for embedders that inspect the public AST.
+pub type FuncStmt = Statement;
 
 #[derive(Debug, Clone)]
 pub struct LocalVarDecl {

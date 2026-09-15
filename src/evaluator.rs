@@ -1679,6 +1679,14 @@ impl Evaluator {
                 FuncStmt::Expression(expr, _) => {
                     self.eval_expr(expr, local_scope)?;
                 }
+                FuncStmt::Assignment { name, value, .. } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    if local_scope.contains_key(name) {
+                        local_scope.insert(name.clone(), value);
+                    } else {
+                        self.global_cache.insert(name.clone(), value);
+                    }
+                }
                 FuncStmt::Return(ret_value, _) => {
                     let val = match ret_value {
                         ReturnValue::Expr(e) => self.eval_expr(&e.clone(), local_scope)?,
@@ -1702,23 +1710,30 @@ impl Evaluator {
                         _ => unreachable!("typechecker ensures for-loop iterable is a list"),
                     };
                     for (index, item) in items.into_iter().enumerate() {
-                        let mut loop_scope = local_scope.clone();
+                        let snapshot = local_scope.clone();
                         match &statement.binding {
                             ForBinding::Value { name, .. } => {
-                                loop_scope.insert(name.clone(), item);
+                                local_scope.insert(name.clone(), item);
                             }
                             ForBinding::Indexed {
                                 index_name,
                                 value_name,
                                 ..
                             } => {
-                                loop_scope
+                                local_scope
                                     .insert(index_name.clone(), ConfigValue::Int(index as i64));
-                                loop_scope.insert(value_name.clone(), item);
+                                local_scope.insert(value_name.clone(), item);
                             }
                         }
                         let body = statement.body.clone();
-                        match self.eval_func_stmts(&body, &mut loop_scope)? {
+                        let flow = self.eval_func_stmts(&body, local_scope)?;
+                        restore_block_scope(
+                            local_scope,
+                            &snapshot,
+                            &body,
+                            Some(&statement.binding),
+                        );
+                        match flow {
                             StatementFlow::Normal | StatementFlow::Continue => {}
                             StatementFlow::Break => break,
                             flow @ StatementFlow::Return(_) => return Ok(flow),
@@ -1732,8 +1747,10 @@ impl Evaluator {
                         ConfigValue::Bool(false) => if_stmt.else_stmts.clone(),
                         _ => unreachable!("typechecker ensures bool condition"),
                     };
-                    let mut branch_scope = local_scope.clone();
-                    match self.eval_func_stmts(&branch, &mut branch_scope)? {
+                    let snapshot = local_scope.clone();
+                    let flow = self.eval_func_stmts(&branch, local_scope)?;
+                    restore_block_scope(local_scope, &snapshot, &branch, None);
+                    match flow {
                         StatementFlow::Normal => {}
                         flow => return Ok(flow),
                     }
@@ -1741,6 +1758,41 @@ impl Evaluator {
             }
         }
         Ok(StatementFlow::Normal)
+    }
+}
+
+fn restore_block_scope(
+    scope: &mut HashMap<String, ConfigValue>,
+    snapshot: &HashMap<String, ConfigValue>,
+    statements: &[FuncStmt],
+    loop_binding: Option<&ForBinding>,
+) {
+    let mut declared: Vec<&str> = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            FuncStmt::LocalVar(declaration) => Some(declaration.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if let Some(binding) = loop_binding {
+        match binding {
+            ForBinding::Value { name, .. } => declared.push(name),
+            ForBinding::Indexed {
+                index_name,
+                value_name,
+                ..
+            } => {
+                declared.push(index_name);
+                declared.push(value_name);
+            }
+        }
+    }
+    for name in declared {
+        if let Some(previous) = snapshot.get(name) {
+            scope.insert(name.to_string(), previous.clone());
+        } else {
+            scope.remove(name);
+        }
     }
 }
 
@@ -1850,6 +1902,7 @@ var endpoint: str = Config.host;
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_float_literal() {
         let r = eval_ok("var x: float = 3.14;");
         assert_eq!(global(&r, "x"), ConfigValue::Float(3.14));

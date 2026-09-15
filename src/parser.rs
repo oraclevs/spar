@@ -10,6 +10,7 @@ pub struct Parser {
 fn statement_span(statement: &Statement) -> Span {
     match statement {
         Statement::LocalVar(declaration) => declaration.span.clone(),
+        Statement::Assignment { span, .. } => span.clone(),
         Statement::Expression(_, span) | Statement::Return(_, span) => span.clone(),
         Statement::Break(span) | Statement::Continue(span) => span.clone(),
         Statement::If(statement) => statement.span.clone(),
@@ -76,6 +77,13 @@ impl Parser {
 
     fn at(&self, tok: &Token) -> bool {
         self.peek() == tok
+    }
+
+    fn next_is(&self, tok: &Token) -> bool {
+        self.tokens
+            .get(self.pos + 1)
+            .map(|spanned| &spanned.token == tok)
+            .unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -454,6 +462,13 @@ impl Parser {
         let span = self.peek_span();
         self.expect(&Token::Var)?;
 
+        let mutable = if self.at(&Token::KwMut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let (name, _) = self.expect_ident()?;
 
         let optional = if self.at(&Token::Question) {
@@ -476,6 +491,7 @@ impl Parser {
         self.expect(&Token::Semicolon)?;
         Ok(VarDecl {
             exported,
+            mutable,
             name,
             optional,
             ty,
@@ -1497,6 +1513,15 @@ impl Parser {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
         }
 
+        if self.at_ident() && self.next_is(&Token::Eq) {
+            let span = self.peek_span();
+            let (name, _) = self.expect_ident()?;
+            self.expect(&Token::Eq)?;
+            let value = self.parse_expr()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(FuncStmt::Assignment { name, value, span });
+        }
+
         let span = self.peek_span();
         let expression = self.parse_expr()?;
         if !matches!(expression, Expr::Call { .. } | Expr::FnCall(_)) {
@@ -1556,6 +1581,12 @@ impl Parser {
     fn parse_local_var_decl(&mut self) -> Result<LocalVarDecl, SparError> {
         let span = self.peek_span();
         self.expect(&Token::Var)?;
+        let mutable = if self.at(&Token::KwMut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let (name, _) = self.expect_ident()?;
         self.expect(&Token::Colon)?;
         let ty = self.parse_type()?;
@@ -1564,6 +1595,7 @@ impl Parser {
         self.expect(&Token::Semicolon)?;
         Ok(LocalVarDecl {
             name,
+            mutable,
             ty,
             value,
             span,

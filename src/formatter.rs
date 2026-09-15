@@ -130,6 +130,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Task(d) => d.span.line,
         TopLevelItem::Statement(statement) => match statement {
             Statement::LocalVar(declaration) => declaration.span.line,
+            Statement::Assignment { span, .. } => span.line,
             Statement::Expression(_, span)
             | Statement::Return(_, span)
             | Statement::Break(span)
@@ -184,6 +185,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str("export ");
             }
             out.push_str("var ");
+            if vd.mutable {
+                out.push_str("mut ");
+            }
             out.push_str(&vd.name);
             if vd.optional {
                 out.push('?');
@@ -991,11 +995,22 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
         FuncStmt::LocalVar(lv) => {
             out.push_str(&ind);
             out.push_str("var ");
+            if lv.mutable {
+                out.push_str("mut ");
+            }
             out.push_str(&lv.name);
             out.push_str(": ");
             out.push_str(&format_type(&lv.ty));
             out.push_str(" = ");
             format_expr(&lv.value, 0, depth, config, out);
+            out.push_str(";\n");
+        }
+
+        FuncStmt::Assignment { name, value, .. } => {
+            out.push_str(&ind);
+            out.push_str(name);
+            out.push_str(" = ");
+            format_expr(value, 0, depth, config, out);
             out.push_str(";\n");
         }
 

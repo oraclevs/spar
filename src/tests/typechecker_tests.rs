@@ -73,6 +73,13 @@ fn module_if_and_for_are_typechecked() {
 }
 
 #[test]
+fn mutable_assignment_must_match_the_declared_type() {
+    check_ok("var mut count: int = 0; count = 1;");
+    let error = check_err("var mut count: int = 0; count = \"wrong\";");
+    assert!(error.contains("assigned") && error.contains("int") && error.contains("str"));
+}
+
+#[test]
 fn typecheck_function_parameter_default_type_mismatch() {
     let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
     assert!(

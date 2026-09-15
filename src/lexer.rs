@@ -926,7 +926,10 @@ mod tests {
 
     #[test]
     fn test_float_literal() {
-        assert_eq!(lex("3.14"), vec![Token::FloatLit(3.14), Token::Eof]);
+        #[allow(clippy::approx_constant)]
+        {
+            assert_eq!(lex("3.14"), vec![Token::FloatLit(3.14), Token::Eof]);
+        }
     }
 
     #[test]

@@ -139,6 +139,20 @@ fn break_and_continue_inside_nested_loop_blocks_resolve() {
 }
 
 #[test]
+fn assignment_requires_an_existing_mutable_binding() {
+    let immutable = resolve_err("var count: int = 0; count = 1;");
+    assert!(immutable.contains("immutable"), "got: {immutable}");
+    assert!(immutable.contains("var mut count"), "got: {immutable}");
+
+    let missing = resolve_err("missing = 1;");
+    assert!(missing.contains("not declared"), "got: {missing}");
+
+    resolve_ok(
+        "function f() -> int { var mut count: int = 0; if true { count = 1; } return count; };",
+    );
+}
+
+#[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"
         function f(x: str) -> str { return x; };

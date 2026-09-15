@@ -4,6 +4,7 @@ use crate::error::Span;
 pub enum Token {
     // Keywords
     Var,
+    KwMut,
     Export,
     Import,
     As,
@@ -135,6 +136,7 @@ impl Token {
             Token::Star => "'*'",
             Token::Slash => "'/'",
             Token::Var => "'var'",
+            Token::KwMut => "'mut'",
             Token::Export => "'export'",
             Token::Import => "'import'",
             Token::As => "'as'",
@@ -185,6 +187,7 @@ impl Token {
 pub fn keyword_or_ident(s: String) -> Token {
     match s.as_str() {
         "var" => Token::Var,
+        "mut" => Token::KwMut,
         "export" => Token::Export,
         "import" => Token::Import,
         "as" => Token::As,

@@ -218,6 +218,7 @@ pub struct SchemaFromDecl {
 #[derive(Debug, Clone)]
 pub struct VarDecl {
     pub exported: bool,
+    pub mutable: bool,
     pub name: String,
     pub optional: bool,
     pub ty: SparType,
@@ -453,6 +454,11 @@ pub struct FunctionBody {
 #[derive(Debug, Clone)]
 pub enum Statement {
     LocalVar(LocalVarDecl),
+    Assignment {
+        name: String,
+        value: Expr,
+        span: Span,
+    },
     Expression(Expr, Span),
     If(IfStmt),
     Return(ReturnValue, Span),
@@ -489,6 +495,7 @@ pub enum ForBinding {
 #[derive(Debug, Clone)]
 pub struct LocalVarDecl {
     pub name: String,
+    pub mutable: bool,
     pub ty: SparType,
     pub value: Expr,
     pub span: Span,

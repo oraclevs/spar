@@ -2366,6 +2366,29 @@ impl<'a> TypeChecker<'a> {
                         self.errors.push(error);
                     }
                 }
+                FuncStmt::Assignment { name, value, span } => {
+                    if let Err(error) = self.check_expr_with_locals(value, local_types) {
+                        self.errors.push(error);
+                    }
+                    let expected = local_types
+                        .get(name)
+                        .cloned()
+                        .or_else(|| self.lookup_global_type(name));
+                    let actual = self.infer_type_with_locals(value, local_types);
+                    if let (Some(expected), Some(actual)) = (expected, actual) {
+                        if expected != actual {
+                            self.errors.push(SparError::TypeError {
+                                message: format!(
+                                    "binding '{name}' has type '{}' but is assigned a value of type '{}'",
+                                    display_type(&expected),
+                                    display_type(&actual)
+                                ),
+                                hint: None,
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, span) => {
                     self.check_return_value(ret_value, ret_ty, local_types, span);

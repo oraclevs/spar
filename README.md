@@ -655,10 +655,11 @@ example.
 Reusable Spar code, versioned and shared via GitHub or a local path — declared in a manifest written in Spar itself, `spar.package.spar`:
 
 ```spar
-[Package] {
-    name: str = "my-app";
-    version: str = "1.0.0";
-    kind: str = "application";
+[Package] -> SparPackage {
+    name: "my-app";
+    version: "1.0.0";
+    kind: "application";
+    entry: "src/main.spar";
 };
 
 [Dependencies] {
@@ -673,9 +674,13 @@ import "http" as http;
 import { get, post } from "http";
 ```
 
-`spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.lock`. `spar install` materializes every locked dependency from its exact recorded revision — never re-resolving a version requirement or branch, so an upstream tag moving after you've locked it can't silently change what gets installed — and `spar install --offline` fails clearly instead of touching the network if anything's still missing. `spar update [alias]` is the explicit, opposite operation: re-resolve against the manifest's current requests. `spar remove <alias>` drops a dependency and re-locks. `spar tree` prints the resolved dependency tree.
+The exact filename activates Spar's built-in `SparPackage` schema: `spar check` and `spar-ls` validate required fields and offer field/kind completions without copying a schema into each project. `[Dependencies]` and `[Overrides]` remain open alias maps, but every value is validated as a literal package request; overrides must use `path:`.
 
-Resolved packages live once per machine, deduplicated by exact revision, under `$XDG_DATA_HOME/spar/store` (`~/.local/share/spar/store` by default) — never inside a project directory, and never something a project-local `node_modules`-style folder would need. Ordinary execution (`check`, `emit`, `exec`, task runs, ordinary imports) only ever reads the lockfile and that store; it never touches the network. Installing a package never executes any code from it — there are no install lifecycle scripts.
+`spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.package.lock.spar`. The generated lock is typed Spar source (`[Lock] -> SparPackageLock`), not TOML, and records exact graph edges, remote commits, and integrity identities. Commit it to version control; don't hand-edit it.
+
+`spar install` materializes every locked dependency from its exact recorded revision — never re-resolving a version requirement or branch, so an upstream tag moving after you've locked it can't silently change what gets installed — and `spar install --offline` fails clearly instead of touching the network if anything's still missing. `spar update [alias]` is the explicit, opposite operation: re-resolve against the manifest's current requests. `spar remove <alias>` drops a dependency and re-locks. `spar tree` prints the resolved dependency tree.
+
+Immutable resolved packages live once per machine, deduplicated by exact revision, under `$XDG_DATA_HOME/spar/store` (`~/.local/share/spar/store` by default) — never inside a project directory, and never something a project-local `node_modules`-style folder would need. A `path:../local` dependency is different: it is a live development checkout outside the application and resolves directly rather than being copied into the immutable store. Ordinary execution (`check`, `emit`, `exec`, task runs, ordinary imports) only ever reads `spar.package.lock.spar`, live locked paths, and the store; it never touches the network. Installing a package never executes any code from it — there are no install lifecycle scripts.
 
 ---
 

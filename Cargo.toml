@@ -2,7 +2,7 @@
 name = "spar"
 version = "0.3.0"
 edition = "2021"
-description = "A statically typed configuration language that emits JSON and deserializes into Rust structs"
+description = "A statically typed scripting language with native configuration and task automation"
 license = "MIT"
 repository = "https://github.com/oraclevs/spar"
 keywords = ["configuration", "config", "language", "json", "spar"]

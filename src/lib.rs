@@ -18,6 +18,7 @@ pub mod renderer;
 pub mod resolver;
 pub mod runner;
 pub mod session;
+mod shell_lang;
 pub mod task_lowering;
 #[cfg(test)]
 pub mod tests;

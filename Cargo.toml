@@ -1,6 +1,6 @@
 [package]
 name = "spar"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "A statically typed configuration language that emits JSON and deserializes into Rust structs"
 license = "MIT"

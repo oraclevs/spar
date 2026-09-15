@@ -1,0 +1,3 @@
+[Library] {
+    loaded: bool = true;
+};

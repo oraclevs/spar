@@ -13,11 +13,11 @@ interpolation, no function calls, no references to other values. Parsing a
 manifest never runs the resolver, type checker, or evaluator.
 
 ```spar
-[Package] {
-    name: str = "my-app";
-    version: str = "1.0.0";
-    kind: str = "application";
-    entry: str = "src/main.spar";
+[Package] -> SparPackage {
+    name: "my-app";
+    version: "1.0.0";
+    kind: "application";
+    entry: "src/main.spar";
 };
 
 [Dependencies] {
@@ -33,6 +33,12 @@ manifest never runs the resolver, type checker, or evaluator.
 conventional `entry` when one isn't given explicitly: `src/main.spar`,
 `src/lib.spar`, `src/config.spar` respectively. An explicit `entry` is always
 authoritative.
+
+The reserved filename implicitly preloads `SparPackage`; no import or copied
+schema is needed. `spar check` validates the shape, and `spar-ls` exposes its
+fields and allowed `kind` values for completion and hover. The package tools
+emit this typed form. Older unbound `[Package] { ... }` sections are still
+accepted when reading a manifest.
 
 `[Overrides]` swaps a dependency's resolution for local development without
 touching the declared `[Dependencies]` entry — every alias in `[Overrides]`
@@ -61,18 +67,26 @@ import { get, post } from "http";
 
 ## Lockfile and global store
 
-`spar add`/`spar install`/`spar update` write `spar.lock` — the exact
-resolved dependency graph, sorted deterministically so diffs stay readable.
-Commit it to version control; you shouldn't need to hand-edit it.
+`spar add`/`spar install`/`spar update` write `spar.package.lock.spar` — the
+exact resolved dependency graph as typed Spar source, sorted deterministically
+so diffs stay readable. Its root is `[Lock] -> SparPackageLock`; built-in
+`SparLockedPackage` and `SparLockedDependency` shapes validate package
+identities and graph edges. Commit it to version control; you shouldn't need
+to hand-edit this generated file.
 
-Resolved package contents live once per machine, deduplicated by exact
+Immutable resolved package contents live once per machine, deduplicated by exact
 revision, under `$XDG_DATA_HOME/spar/store` (`~/.local/share/spar/store` by
 default) — never inside a project directory. Disposable fetch metadata lives
 under `$XDG_CACHE_HOME/spar/`.
 
+Local `path:` dependencies are live development checkouts and are not copied
+into either the application or the immutable store. Keep them as separate
+directories/repositories (a sibling such as `path:../spar-http` is typical).
+
 **Ordinary execution never touches the network.** `spar check`, `spar emit`,
-`spar exec`, task runs, and ordinary imports only ever read `spar.lock` and
-the global store. Network access is confined to the explicit commands below.
+`spar exec`, task runs, and ordinary imports only ever read
+`spar.package.lock.spar`, locked live paths, and the global store. Network
+access is confined to the explicit commands below.
 
 ## Commands
 
@@ -84,7 +98,7 @@ the global store. Network access is confined to the explicit commands below.
 | `spar install` | maybe | Materializes every already-locked package at its exact recorded revision — never re-resolving a version requirement or branch, so a moved upstream tag can't silently change what installs. Only fetches for snapshots the store doesn't already have. |
 | `spar install --offline` | no | Same, but fails clearly if anything's still missing instead of touching the network. |
 | `spar update [alias]` | yes | Re-resolves against the manifest's *current* requests — the explicit, opposite operation to `install`. This is the one command that intentionally moves a lock forward. |
-| `spar tree` | no | Prints the resolved dependency tree from `spar.lock`. |
+| `spar tree` | no | Prints the resolved dependency tree from `spar.package.lock.spar`. |
 
 \* `remove` only needs the network if the remaining dependency graph still
 has something to (re-)resolve.

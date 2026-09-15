@@ -353,10 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_entry_rejects_a_non_int_non_void_return_type() {
+    fn execute_entry_rejects_a_non_int_non_void_non_shell_return_type() {
         assert_entry_error(
             "function main() -> str { return \"ok\"; };",
-            "must return 'int' or 'void'",
+            "must return 'int', 'void', or 'shell'",
         );
     }
 

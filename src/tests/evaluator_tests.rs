@@ -1007,3 +1007,62 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
     let r = eval_src(src);
     assert_eq!(r.globals["result"], crate::evaluator::ConfigValue::Int(6));
 }
+
+#[test]
+fn eval_shell_block_lowers_to_expected_plan() {
+    let result = eval_src("var x: shell = shell { echo hi; };");
+    let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
+        panic!("expected ConfigValue::Shell")
+    };
+    let spar_command::Step::Command(command) = &plan.steps[0].1 else {
+        panic!("expected command")
+    };
+    assert_eq!(command.program, "echo");
+    assert_eq!(command.args, ["hi"]);
+}
+
+#[test]
+fn eval_pipeline_and_redirect_lower_correctly() {
+    let result = eval_src("var x: shell = shell { cat input | grep x > out.log; };");
+    let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
+        panic!("expected ConfigValue::Shell")
+    };
+    let spar_command::Step::Pipeline(pipeline) = &plan.steps[0].1 else {
+        panic!("expected pipeline")
+    };
+    assert_eq!(pipeline.commands.len(), 2);
+    assert_eq!(
+        pipeline.commands[1].stdout,
+        Some(spar_command::Redirection::File {
+            path: "out.log".into(),
+            mode: spar_command::RedirectMode::Truncate,
+        })
+    );
+}
+
+#[test]
+fn eval_shell_plus_shell_composes_in_order() {
+    let result = eval_src(
+        r#"
+        function lint() -> shell { return shell { cargo clippy; }; };
+        function build() -> shell { return shell { cargo build; }; };
+        var x: shell = lint() + build();
+        "#,
+    );
+    let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
+        panic!("expected ConfigValue::Shell")
+    };
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0].0, spar_command::Join::Always);
+    assert_eq!(plan.steps[1].0, spar_command::Join::OnSuccess);
+    let spar_command::Step::Command(second) = &plan.steps[1].1 else {
+        panic!("expected command")
+    };
+    assert_eq!(second.program, "cargo");
+    assert_eq!(second.args, ["build"]);
+}
+
+#[test]
+fn eval_shell_construction_at_module_scope_is_deferred_data() {
+    eval_src("var x: shell = shell { this-program-does-not-exist-xyz; };");
+}

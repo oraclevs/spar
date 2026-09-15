@@ -17,6 +17,7 @@ pub enum ConfigValue {
     Bool(bool),
     List(Vec<ConfigValue>),
     Section(HashMap<String, ConfigValue>),
+    Shell(spar_command::ShellPlan),
 }
 
 impl ConfigValue {
@@ -30,6 +31,9 @@ impl ConfigValue {
             ConfigValue::Section(_) => {
                 unreachable!("sections cannot appear in string interpolation")
             }
+            ConfigValue::Shell(_) => {
+                unreachable!("shell plans cannot appear in string interpolation")
+            }
         }
     }
 
@@ -41,6 +45,7 @@ impl ConfigValue {
             ConfigValue::Bool(_) => "bool",
             ConfigValue::List(_) => "list",
             ConfigValue::Section(_) => "section",
+            ConfigValue::Shell(_) => "shell",
         }
     }
 }
@@ -621,7 +626,7 @@ impl Evaluator {
                 self.collect_expr_deps(index, deps);
             }
             Expr::FieldAccess { base, .. } => self.collect_expr_deps(base, deps),
-            Expr::Literal(_) => {}
+            Expr::Shell(_) | Expr::ExecShell(_) | Expr::Literal(_) => {}
         }
     }
 }
@@ -998,6 +1003,10 @@ impl Evaluator {
                     }),
                 }
             }
+            Expr::Shell(shell) => Ok(ConfigValue::Shell(lower_shell_expr(shell))),
+            Expr::ExecShell(_) => Err(EvalErr::Host {
+                message: "exec shell execution is not available yet".to_string(),
+            }),
         }
     }
 
@@ -1484,6 +1493,9 @@ impl Evaluator {
             (BinOp::Add, ConfigValue::Str(a), ConfigValue::Str(b)) => {
                 Ok(ConfigValue::Str(format!("{a}{b}")))
             }
+            (BinOp::Add, ConfigValue::Shell(a), ConfigValue::Shell(b)) => {
+                Ok(ConfigValue::Shell(a.clone().then(b.clone())))
+            }
             (BinOp::Sub, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a - b)),
             (BinOp::Sub, ConfigValue::Float(a), ConfigValue::Float(b)) => {
                 Ok(ConfigValue::Float(a - b))
@@ -1575,6 +1587,52 @@ impl Evaluator {
             }
             _ => unreachable!("typechecker ensures numeric operands"),
         }
+    }
+}
+
+pub(crate) fn lower_shell_expr(expression: &ShellExpr) -> spar_command::ShellPlan {
+    spar_command::ShellPlan {
+        steps: expression
+            .steps
+            .iter()
+            .map(|(join, step)| {
+                let join = match join {
+                    ShellJoin::Always => spar_command::Join::Always,
+                    ShellJoin::OnSuccess => spar_command::Join::OnSuccess,
+                    ShellJoin::OnFailure => spar_command::Join::OnFailure,
+                };
+                let step = match step {
+                    ShellStep::Command(command) => {
+                        spar_command::Step::Command(lower_shell_command(command))
+                    }
+                    ShellStep::Pipeline(commands) => {
+                        spar_command::Step::Pipeline(spar_command::PipelinePlan {
+                            commands: commands.iter().map(lower_shell_command).collect(),
+                        })
+                    }
+                };
+                (join, step)
+            })
+            .collect(),
+    }
+}
+
+fn lower_shell_command(command: &ShellCommandExpr) -> spar_command::CommandPlan {
+    spar_command::CommandPlan {
+        program: command.program.text.clone(),
+        args: command.args.iter().map(|word| word.text.clone()).collect(),
+        env: Vec::new(),
+        cwd: None,
+        stdin: None,
+        stdout: command.stdout.as_ref().map(lower_shell_redirect),
+        stderr: command.stderr.as_ref().map(lower_shell_redirect),
+    }
+}
+
+fn lower_shell_redirect(redirect: &ShellRedirect) -> spar_command::Redirection {
+    spar_command::Redirection::File {
+        path: redirect.target.text.clone(),
+        mode: redirect.mode.clone(),
     }
 }
 

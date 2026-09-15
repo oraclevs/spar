@@ -84,6 +84,12 @@ fn main() {
         Cmd::Dump { path, global } => cmd_dump(path, global),
         Cmd::Exec { path, program_args } => cmd_exec(&path, program_args),
         Cmd::Repl => cmd_repl(),
+        Cmd::PackageInit { name, kind } => cmd_package_init(name, kind),
+        Cmd::PackageAdd { alias, request } => cmd_package_add(&alias, &request),
+        Cmd::PackageRemove { alias } => cmd_package_remove(&alias),
+        Cmd::PackageInstall { offline } => cmd_package_install(offline),
+        Cmd::PackageUpdate { alias } => cmd_package_update(alias),
+        Cmd::PackageTree => cmd_package_tree(),
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -134,6 +140,24 @@ enum Cmd {
         program_args: Vec<String>,
     },
     Repl,
+    PackageInit {
+        name: Option<String>,
+        kind: spar::package::PackageKind,
+    },
+    PackageAdd {
+        alias: String,
+        request: String,
+    },
+    PackageRemove {
+        alias: String,
+    },
+    PackageInstall {
+        offline: bool,
+    },
+    PackageUpdate {
+        alias: Option<String>,
+    },
+    PackageTree,
     Help,
     Version,
     BadArgs(String),
@@ -163,6 +187,12 @@ fn parse_args(args: &[String]) -> Cmd {
         Some("dump") => parse_dump_args(&args[2..]),
         Some("exec") => parse_exec_args(&args[2..]),
         Some("repl") => Cmd::Repl,
+        Some("init") => parse_package_init_args(&args[2..]),
+        Some("add") => parse_package_add_args(&args[2..]),
+        Some("remove") => parse_package_remove_args(&args[2..]),
+        Some("install") => parse_package_install_args(&args[2..]),
+        Some("update") => parse_package_update_args(&args[2..]),
+        Some("tree") => Cmd::PackageTree,
         Some("--help") | Some("-h") | Some("help") => Cmd::Help,
         Some("--version") | Some("-V") | Some("version") => Cmd::Version,
         // Script-execution shorthand: `spar ./foo.spar` or `spar foo.spar` runs
@@ -203,6 +233,73 @@ fn parse_exec_args(args: &[String]) -> Cmd {
     Cmd::Exec {
         path: path.clone(),
         program_args,
+    }
+}
+
+fn parse_package_init_args(args: &[String]) -> Cmd {
+    let mut name = None;
+    let mut kind = spar::package::PackageKind::Application;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--lib" | "--library" => {
+                kind = spar::package::PackageKind::Library;
+                index += 1;
+            }
+            "--config" => {
+                kind = spar::package::PackageKind::Config;
+                index += 1;
+            }
+            "--app" | "--application" => {
+                kind = spar::package::PackageKind::Application;
+                index += 1;
+            }
+            other if name.is_none() && !other.starts_with('-') => {
+                name = Some(other.to_string());
+                index += 1;
+            }
+            other => return Cmd::BadArgs(format!("unexpected argument for `init`: {other}")),
+        }
+    }
+    Cmd::PackageInit { name, kind }
+}
+
+fn parse_package_add_args(args: &[String]) -> Cmd {
+    match (args.first(), args.get(1)) {
+        (Some(alias), Some(request)) if args.len() == 2 => Cmd::PackageAdd {
+            alias: alias.clone(),
+            request: request.clone(),
+        },
+        _ => Cmd::BadArgs(
+            "`add` requires an alias and a dependency request: `spar add <alias> <request>`".into(),
+        ),
+    }
+}
+
+fn parse_package_remove_args(args: &[String]) -> Cmd {
+    match args.first() {
+        Some(alias) if args.len() == 1 => Cmd::PackageRemove {
+            alias: alias.clone(),
+        },
+        _ => Cmd::BadArgs("`remove` requires exactly one alias".into()),
+    }
+}
+
+fn parse_package_install_args(args: &[String]) -> Cmd {
+    match args {
+        [] => Cmd::PackageInstall { offline: false },
+        [flag] if flag == "--offline" => Cmd::PackageInstall { offline: true },
+        _ => Cmd::BadArgs("`install` accepts only an optional `--offline` flag".into()),
+    }
+}
+
+fn parse_package_update_args(args: &[String]) -> Cmd {
+    match args {
+        [] => Cmd::PackageUpdate { alias: None },
+        [alias] => Cmd::PackageUpdate {
+            alias: Some(alias.clone()),
+        },
+        _ => Cmd::BadArgs("`update` accepts at most one dependency alias".into()),
     }
 }
 
@@ -440,6 +537,13 @@ COMMANDS:
     exec          <file.spar> [-- args...]
                                         Run file.spar's `main` and exit with its status
     repl                                Start an interactive scripting session
+    init          [name] [--app|--lib|--config]
+                                        Create spar.package.spar in the current directory
+    add           <alias> <request>     Add/update a dependency, resolve, and lock it
+    remove        <alias>               Remove a dependency and re-lock
+    install       [--offline]           Materialize every locked dependency into the store
+    update        [alias]               Re-resolve one dependency, or all of them
+    tree                                Print the locked dependency tree
 
 OPTIONS:
     -h, --help        Show this help
@@ -963,6 +1067,117 @@ fn repl_fragment_complete(buffer: &str) -> bool {
         }
     }
     !in_string && depth <= 0 && buffer.trim_end().ends_with(';')
+}
+
+// ── package commands ─────────────────────────────────────────────────────────
+
+fn package_store() -> spar::package::PackageStore {
+    spar::package::PackageStore::new(spar::package::StorePaths::from_env())
+}
+
+fn package_project_dir() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("error: cannot determine current directory: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn package_exit_on_error<T>(result: Result<T, spar::package::PackageError>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_package_init(name: Option<String>, kind: spar::package::PackageKind) {
+    let dir = package_project_dir();
+    let name = name.unwrap_or_else(|| {
+        dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "app".to_string())
+    });
+    let manifest = package_exit_on_error(spar::package::commands::init(&dir, &name, kind));
+    println!(
+        "created spar.package.spar for '{}' ({})",
+        manifest.name,
+        kind.as_str()
+    );
+}
+
+fn cmd_package_add(alias: &str, request: &str) {
+    let dir = package_project_dir();
+    let provider = spar::package::GitCommandProvider::default();
+    let store = package_store();
+    let lockfile = package_exit_on_error(spar::package::commands::add(
+        &dir,
+        alias,
+        request,
+        &provider,
+        spar::package::NetworkPolicy::Allow,
+        &store,
+    ));
+    println!(
+        "added '{alias}' — {} package(s) locked",
+        lockfile.packages.len()
+    );
+}
+
+fn cmd_package_remove(alias: &str) {
+    let dir = package_project_dir();
+    let provider = spar::package::GitCommandProvider::default();
+    let store = package_store();
+    let lockfile = package_exit_on_error(spar::package::commands::remove(
+        &dir,
+        alias,
+        &provider,
+        spar::package::NetworkPolicy::Allow,
+        &store,
+    ));
+    println!(
+        "removed '{alias}' — {} package(s) locked",
+        lockfile.packages.len()
+    );
+}
+
+fn cmd_package_install(offline: bool) {
+    let dir = package_project_dir();
+    let provider = spar::package::GitCommandProvider::default();
+    let store = package_store();
+    let network = if offline {
+        spar::package::NetworkPolicy::Offline
+    } else {
+        spar::package::NetworkPolicy::Allow
+    };
+    let lockfile = package_exit_on_error(spar::package::commands::install(
+        &dir, &provider, network, &store,
+    ));
+    println!("installed — {} package(s) locked", lockfile.packages.len());
+}
+
+fn cmd_package_update(alias: Option<String>) {
+    let dir = package_project_dir();
+    let provider = spar::package::GitCommandProvider::default();
+    let store = package_store();
+    let lockfile = package_exit_on_error(spar::package::commands::update(
+        &dir,
+        alias.as_deref(),
+        &provider,
+        &store,
+    ));
+    println!("updated — {} package(s) locked", lockfile.packages.len());
+}
+
+fn cmd_package_tree() {
+    let dir = package_project_dir();
+    let output = package_exit_on_error(spar::package::commands::tree(&dir));
+    if output.is_empty() {
+        println!("no dependencies (no spar.lock)");
+    } else {
+        print!("{output}");
+    }
 }
 
 fn task_json(task: &spar::runner::Task) -> serde_json::Value {
@@ -1511,6 +1726,59 @@ task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
             parse_args(&args),
             Cmd::Run { task: Some(name), .. } if name == "exec"
         ));
+    }
+
+    #[test]
+    fn package_commands_are_reserved_but_explicit_run_can_use_same_task_name() {
+        for name in ["init", "add", "remove", "install", "update", "tree"] {
+            assert!(
+                !matches!(
+                    parse_args(&[String::from("spar"), name.to_owned()]),
+                    Cmd::Run { .. }
+                ),
+                "`{name}` must dispatch as the package command, not a bare task name"
+            );
+            assert!(matches!(
+                parse_args(&[String::from("spar"), "run".to_owned(), name.to_owned()]),
+                Cmd::Run { task: Some(task), .. } if task == name
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_args_install_offline_sets_network_policy_offline() {
+        assert!(matches!(
+            parse_args(&[
+                String::from("spar"),
+                "install".to_owned(),
+                "--offline".to_owned()
+            ]),
+            Cmd::PackageInstall { offline: true }
+        ));
+        assert!(matches!(
+            parse_args(&[String::from("spar"), "install".to_owned()]),
+            Cmd::PackageInstall { offline: false }
+        ));
+    }
+
+    #[test]
+    fn parse_args_add_requires_alias_and_request() {
+        assert!(matches!(
+            parse_args(&[String::from("spar"), "add".to_owned()]),
+            Cmd::BadArgs(_)
+        ));
+        match parse_args(&[
+            String::from("spar"),
+            "add".to_owned(),
+            "http".to_owned(),
+            "github:owner/http@1.0.0".to_owned(),
+        ]) {
+            Cmd::PackageAdd { alias, request } => {
+                assert_eq!(alias, "http");
+                assert_eq!(request, "github:owner/http@1.0.0");
+            }
+            other => panic!("expected Cmd::PackageAdd, got {other:?}"),
+        }
     }
 
     #[test]

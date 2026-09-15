@@ -116,6 +116,19 @@ impl PackageStore {
         Ok(final_path)
     }
 
+    /// The integrity value recorded for an already-materialized snapshot
+    /// (the same one `verify` checks against), for a caller — the
+    /// package CLI's `add`/`install`/`update` — that wants to record it
+    /// in the lockfile.
+    pub fn read_integrity(&self, snapshot: &Path) -> Result<String, PackageError> {
+        let path = snapshot.join(INTEGRITY_MARKER);
+        std::fs::read_to_string(&path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| PackageError::NotFound {
+                message: format!("no recorded integrity marker at {}: {e}", path.display()),
+            })
+    }
+
     /// Recomputes a materialized snapshot's content hash and compares it
     /// against the one recorded when it was materialized.
     pub fn verify(&self, snapshot: &Path) -> Result<(), PackageError> {

@@ -15,7 +15,7 @@ fn sample_package(name: &str) -> LockedPackage {
             repo: name.into(),
             revision: "0123456789abcdef0123456789abcdef01234567".into(),
         },
-        integrity: Some("sha256:deadbeef".into()),
+        integrity: Some(format!("sha256:{}", "d".repeat(64))),
         entry: "src/lib.spar".into(),
         dependencies: BTreeMap::new(),
     }

@@ -1030,7 +1030,7 @@ impl Resolver {
 
         self.resolve_func_stmts(&f.body.stmts, &mut local_names, &mut mutable_names, 0);
 
-        if !stmts_always_return(&f.body.stmts) {
+        if f.ret != SparType::Void && !stmts_always_return(&f.body.stmts) {
             self.errors.push(SparError::ResolveError {
                 message: format!(
                     "function '{}' does not guarantee a value is returned on every \
@@ -1768,6 +1768,7 @@ impl Resolver {
                     }
                 }
                 FuncStmt::Return(ret_value, _) => match ret_value {
+                    ReturnValue::Void => {}
                     ReturnValue::Expr(e) => {
                         if let Err(err) = self.resolve_expr_with_locals(e, local_names) {
                             self.errors.push(err);
@@ -2293,6 +2294,7 @@ impl Resolver {
                 }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, _) => match ret_value {
+                    ReturnValue::Void => {}
                     ReturnValue::Expr(e) => self.collect_closure_deps_expr(e, &locals, deps),
                     ReturnValue::SectionBlock(fields) => {
                         for rf in fields {

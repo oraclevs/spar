@@ -1153,6 +1153,7 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
         crate::ast::SparType::Float => "float".to_string(),
         crate::ast::SparType::Bool => "bool".to_string(),
         crate::ast::SparType::Section => "section".to_string(),
+        crate::ast::SparType::Void => "void".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
         crate::ast::SparType::Named(name) => name.clone(),
     }
@@ -1870,6 +1871,7 @@ mod tests {
         let mut program = Program {
             is_schema_file: true,
             load_env: None,
+            shebang: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "PostgresType".into(),
@@ -1935,6 +1937,7 @@ mod tests {
         let mut program = Program {
             is_schema_file: true,
             load_env: None,
+            shebang: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     name: "Border".into(),
@@ -2001,6 +2004,7 @@ mod tests {
         let mut program = Program {
             is_schema_file: true,
             load_env: None,
+            shebang: None,
             items: vec![TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
                 name: "Postgres".into(),
                 source_type: "NoSuchType".into(),

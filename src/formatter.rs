@@ -14,8 +14,11 @@ impl Default for FormatConfig {
 }
 
 pub fn format_source(src: &str) -> Result<String, SparError> {
-    let (tokens, comments) = Lexer::new(src).tokenize_with_comments()?;
-    let program = Parser::new(tokens).parse()?;
+    let lexer = Lexer::new(src);
+    let shebang = lexer.shebang().map(str::to_owned);
+    let (tokens, comments) = lexer.tokenize_with_comments()?;
+    let mut program = Parser::new(tokens).parse()?;
+    program.shebang = shebang;
     Ok(format_program_with_comments(
         &program,
         &FormatConfig::default(),
@@ -35,6 +38,10 @@ pub fn format_program_with_comments(
     let mut out = String::new();
     let mut cx = CommentCursor::new(comments);
 
+    if let Some(shebang) = &program.shebang {
+        out.push_str(shebang);
+        out.push('\n');
+    }
     if let Some(path) = &program.load_env {
         if path == ".env" {
             out.push_str("@LoadEnv\n");
@@ -50,7 +57,11 @@ pub fn format_program_with_comments(
 
     for (i, item) in program.items.iter().enumerate() {
         let item_line = item_span_line(item);
-        if i > 0 || program.load_env.is_some() || program.is_schema_file {
+        if i > 0
+            || program.shebang.is_some()
+            || program.load_env.is_some()
+            || program.is_schema_file
+        {
             out.push('\n');
         }
         // Emit any standalone comments preceding this item (after the blank-line separator)
@@ -658,6 +669,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Float => "float".to_string(),
         SparType::Bool => "bool".to_string(),
         SparType::Section => "section".to_string(),
+        SparType::Void => "void".to_string(),
         SparType::List(inner) => format!("[{}]", format_type(inner)),
         SparType::Named(name) => name.clone(),
     }
@@ -1032,8 +1044,13 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
 
         FuncStmt::Return(rv, _) => {
             out.push_str(&ind);
+            if matches!(rv, ReturnValue::Void) {
+                out.push_str("return;\n");
+                return;
+            }
             out.push_str("return ");
             match rv {
+                ReturnValue::Void => unreachable!("handled above"),
                 ReturnValue::Expr(e) => {
                     format_expr(e, 0, depth, config, out);
                     out.push_str(";\n");
@@ -1719,6 +1736,7 @@ function pick(flag: bool) -> int {
         let program = Program {
             is_schema_file: false,
             load_env: None,
+            shebang: None,
             items: vec![TopLevelItem::Import(ImportDecl {
                 path: "dir\\file.spar".to_string(), // stored with literal backslash
                 kind: ImportKind::Aliased(Some("x".to_string())),
@@ -1741,6 +1759,7 @@ function pick(flag: bool) -> int {
         let program = Program {
             is_schema_file: false,
             load_env: None,
+            shebang: None,
             items: vec![TopLevelItem::Section(SectionDecl {
                 exported: false,
                 private: false,

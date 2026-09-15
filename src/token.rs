@@ -17,6 +17,7 @@ pub enum Token {
     TypeFloat,
     TypeBool,
     TypeSection, // the keyword "section" as a type annotation
+    TypeVoid,    // the keyword "void" — only legal as a function return type
 
     // Boolean literals
     True,
@@ -149,6 +150,7 @@ impl Token {
             Token::TypeStr => "'str'",
             Token::TypeBool => "'bool'",
             Token::TypeSection => "'section'",
+            Token::TypeVoid => "'void'",
             Token::EqEq => "'=='",
             Token::NotEq => "'!='",
             Token::Lt => "'<'",
@@ -198,6 +200,7 @@ pub fn keyword_or_ident(s: String) -> Token {
         "float" => Token::TypeFloat,
         "bool" => Token::TypeBool,
         "section" => Token::TypeSection,
+        "void" => Token::TypeVoid,
         "true" => Token::True,
         "false" => Token::False,
         "function" => Token::KwFunction,

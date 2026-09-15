@@ -193,6 +193,7 @@ impl Parser {
             is_schema_file,
             load_env,
             items,
+            shebang: None,
         })
     }
 
@@ -926,6 +927,19 @@ impl Parser {
         Ok(items)
     }
 
+    /// A function's `-> ...` type. Identical to `parse_type` except it also
+    /// accepts `void`, which is only legal here — no other type position
+    /// recognizes the `void` keyword, so a var/param/field/list-element
+    /// type of `void` is rejected by `parse_type`'s ordinary "expected a
+    /// type" error rather than needing a dedicated semantic check.
+    fn parse_function_return_type(&mut self) -> Result<SparType, SparError> {
+        if self.at(&Token::TypeVoid) {
+            self.advance();
+            return Ok(SparType::Void);
+        }
+        self.parse_type()
+    }
+
     fn parse_type(&mut self) -> Result<SparType, SparError> {
         if self.at(&Token::LBracket) {
             self.advance();
@@ -1397,7 +1411,7 @@ impl Parser {
         self.expect(&Token::RParen)?;
         self.expect(&Token::Arrow)?;
         let ret_span = self.peek_span();
-        let ret = self.parse_type()?;
+        let ret = self.parse_function_return_type()?;
         self.expect(&Token::LBrace)?;
         let mut stmts = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -1467,7 +1481,9 @@ impl Parser {
         if self.at(&Token::KwReturn) {
             let start_span = self.peek_span();
             self.advance(); // consume 'return'
-            let ret_value = if self.at(&Token::LBrace) {
+            let ret_value = if self.at(&Token::Semicolon) {
+                ReturnValue::Void
+            } else if self.at(&Token::LBrace) {
                 self.advance(); // consume '{'
                 let mut fields = Vec::new();
                 while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {

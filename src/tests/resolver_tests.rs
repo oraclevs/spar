@@ -139,6 +139,17 @@ fn break_and_continue_inside_nested_loop_blocks_resolve() {
 }
 
 #[test]
+fn void_function_with_no_return_at_all_resolves() {
+    resolve_ok("function noop() -> void { };");
+}
+
+#[test]
+fn non_void_function_still_requires_a_return_on_every_path() {
+    let error = resolve_err("function f() -> int { };");
+    assert!(error.contains("does not guarantee"), "got: {error}");
+}
+
+#[test]
 fn assignment_requires_an_existing_mutable_binding() {
     let immutable = resolve_err("var count: int = 0; count = 1;");
     assert!(immutable.contains("immutable"), "got: {immutable}");

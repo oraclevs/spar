@@ -16,10 +16,17 @@ pub struct Lexer<'a> {
     col: u32,
     last_token_line: u32,
     comments: Vec<CommentTrivia>,
+    shebang: Option<String>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
+        let shebang = if source.starts_with("#!") {
+            let end = source.find('\n').unwrap_or(source.len());
+            Some(source[..end].trim_end_matches('\r').to_string())
+        } else {
+            None
+        };
         Self {
             source,
             bytes: source.as_bytes(),
@@ -28,7 +35,15 @@ impl<'a> Lexer<'a> {
             col: 1,
             last_token_line: 0,
             comments: Vec::new(),
+            shebang,
         }
+    }
+
+    /// A leading `#!...` line, if `source` started with one. Only valid to
+    /// read before/alongside `tokenize()` — `Lexer::new` computes it
+    /// up front from raw source, independent of tokenizing.
+    pub fn shebang(&self) -> Option<&str> {
+        self.shebang.as_deref()
     }
 
     fn peek(&self) -> Option<u8> {
@@ -693,6 +708,10 @@ impl<'a> Lexer<'a> {
 
     fn tokenize_inner(&mut self) -> Result<Vec<SpannedToken>, SparError> {
         let mut tokens: Vec<SpannedToken> = Vec::new();
+
+        if self.shebang.is_some() {
+            self.skip_line_comment(); // stops before the '\n', same as `//`
+        }
 
         loop {
             let start = self.pos;

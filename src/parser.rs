@@ -1365,11 +1365,7 @@ impl Parser {
         let ret = self.parse_type()?;
         self.expect(&Token::LBrace)?;
         let mut stmts = Vec::new();
-        while self.at(&Token::Var)
-            || self.at(&Token::KwIf)
-            || self.at(&Token::KwReturn)
-            || self.at(&Token::KwFor)
-        {
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             stmts.push(self.parse_func_stmt()?);
         }
         let body_span = self.peek_span();
@@ -1466,7 +1462,20 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Return(ret_value, start_span));
         }
-        Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?))
+        if self.at(&Token::Var) {
+            return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
+        }
+
+        let span = self.peek_span();
+        let expression = self.parse_expr()?;
+        if !matches!(expression, Expr::Call { .. } | Expr::FnCall(_)) {
+            return Err(SparError::ParseError {
+                message: "only function calls may be used as expression statements".into(),
+                span,
+            });
+        }
+        self.expect(&Token::Semicolon)?;
+        Ok(FuncStmt::Expression(expression, span))
     }
 
     fn parse_for_stmt(&mut self) -> Result<FuncStmt, SparError> {
@@ -1608,7 +1617,8 @@ impl Parser {
         let mut cwd = None;
         let mut shell = None;
         let mut run_blocks: Vec<RunBlock> = Vec::new();
-        let mut seen_run_labels: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
+        let mut seen_run_labels: std::collections::HashSet<Option<String>> =
+            std::collections::HashSet::new();
         let mut field_spans: Vec<(String, Span)> = Vec::new();
 
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -1638,7 +1648,10 @@ impl Parser {
                             Some(label) => format!("task 'run {label}' block may only appear once"),
                             None => "task can only have one default 'run {}' block".to_string(),
                         };
-                        return Err(SparError::ParseError { message, span: run_start });
+                        return Err(SparError::ParseError {
+                            message,
+                            span: run_start,
+                        });
                     }
                     run_blocks.push(RunBlock {
                         os: os_label,
@@ -2747,7 +2760,9 @@ function f(flag: bool) -> int {
             };\n\
         };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
-        let err = crate::parser::Parser::new(tokens).parse().expect_err("must reject");
+        let err = crate::parser::Parser::new(tokens)
+            .parse()
+            .expect_err("must reject");
         let message = format!("{err}");
         assert!(message.contains("windows"), "{message}");
     }
@@ -2763,9 +2778,14 @@ function f(flag: bool) -> int {
             };\n\
         };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
-        let err = crate::parser::Parser::new(tokens).parse().expect_err("must reject");
+        let err = crate::parser::Parser::new(tokens)
+            .parse()
+            .expect_err("must reject");
         let message = format!("{err}");
-        assert!(message.contains("default") || message.contains("once"), "{message}");
+        assert!(
+            message.contains("default") || message.contains("once"),
+            "{message}"
+        );
     }
 
     #[test]

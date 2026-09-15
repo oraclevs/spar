@@ -2355,6 +2355,11 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                 }
+                FuncStmt::Expression(expr, _) => {
+                    if let Err(error) = self.check_expr_with_locals(expr, local_types) {
+                        self.errors.push(error);
+                    }
+                }
                 FuncStmt::Return(ret_value, span) => {
                     self.check_return_value(ret_value, ret_ty, local_types, span);
                 }

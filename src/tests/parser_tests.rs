@@ -31,6 +31,37 @@ fn parse_function_decl_str_return() {
 }
 
 #[test]
+fn parse_call_expression_statements_in_function_blocks() {
+    let program = parse_ok(
+        r#"
+        function sink(value: int) -> int { return value; };
+        function main() -> int {
+            sink(value: 1);
+            if true { sink(value: 2); }
+            for item in [3] { sink(value: item); }
+            return 0;
+        };
+        "#,
+    );
+    let crate::ast::TopLevelItem::Function(main) = &program.items[1] else {
+        panic!("expected main function");
+    };
+    assert!(matches!(
+        main.body.stmts.first(),
+        Some(crate::ast::Statement::Expression(_, _))
+    ));
+}
+
+#[test]
+fn reject_non_call_expression_statement() {
+    let error = parse_err("function main() -> int { 42; return 0; };");
+    assert!(
+        error.contains("only function calls may be used as expression statements"),
+        "{error}"
+    );
+}
+
+#[test]
 fn parse_function_parameter_default() {
     let prog = parse_ok(r#"function greet(name: str = "world") -> str { return name; };"#);
     let crate::ast::TopLevelItem::Function(function) = &prog.items[0] else {

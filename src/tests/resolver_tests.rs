@@ -74,6 +74,21 @@ fn resolver_registers_function() {
 }
 
 #[test]
+fn resolver_accepts_call_expression_statements_in_nested_blocks() {
+    resolve_ok(
+        r#"
+        function sink(value: int) -> int { return value; };
+        function main() -> int {
+            sink(value: 1);
+            if true { sink(value: 2); }
+            for item in [3] { sink(value: item); }
+            return 0;
+        };
+        "#,
+    );
+}
+
+#[test]
 fn resolver_rejects_duplicate_function() {
     let src = r#"
         function f(x: str) -> str { return x; };

@@ -987,6 +987,12 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str(";\n");
         }
 
+        FuncStmt::Expression(expr, _) => {
+            out.push_str(&ind);
+            format_expr(expr, 0, depth, config, out);
+            out.push_str(";\n");
+        }
+
         FuncStmt::Return(rv, _) => {
             out.push_str(&ind);
             out.push_str("return ");
@@ -1915,7 +1921,10 @@ function pick(flag: bool) -> int {
         let x_pos = out.find("var x").unwrap();
         let c_pos = out.find("// trailing").unwrap();
         let y_pos = out.find("var y").unwrap();
-        assert!(x_pos < c_pos && c_pos < y_pos, "comment stays between x and y: {out}");
+        assert!(
+            x_pos < c_pos && c_pos < y_pos,
+            "comment stays between x and y: {out}"
+        );
     }
 
     #[test]
@@ -1931,7 +1940,10 @@ function pick(flag: bool) -> int {
             real_pos < comment_pos && comment_pos < default_pos,
             "comment must stay between description and default, inside the task: {out}"
         );
-        assert!(comment_pos < closing_pos, "comment leaked outside the task: {out}");
+        assert!(
+            comment_pos < closing_pos,
+            "comment leaked outside the task: {out}"
+        );
     }
 
     #[test]
@@ -1946,8 +1958,14 @@ function pick(flag: bool) -> int {
             "comment must render before `task [Next]`, still inside Build: {out}"
         );
         // Must be indented as if inside the task body, not at column 0.
-        let comment_line = out.lines().find(|line| line.contains("// note about build")).unwrap();
-        assert!(comment_line.starts_with("    "), "comment must be indented inside the task: {comment_line:?}");
+        let comment_line = out
+            .lines()
+            .find(|line| line.contains("// note about build"))
+            .unwrap();
+        assert!(
+            comment_line.starts_with("    "),
+            "comment must be indented inside the task: {comment_line:?}"
+        );
     }
 
     #[test]
@@ -1956,7 +1974,10 @@ function pick(flag: bool) -> int {
         let out = fmt(src);
         let comment_pos = out.find("// trailing note").unwrap();
         let closing_pos = out.rfind("};").unwrap();
-        assert!(comment_pos < closing_pos, "comment leaked past the closing brace: {out}");
+        assert!(
+            comment_pos < closing_pos,
+            "comment leaked past the closing brace: {out}"
+        );
     }
 
     #[test]
@@ -1968,8 +1989,14 @@ function pick(flag: bool) -> int {
         let comment_pos = out.find("/* multi").unwrap();
         let run_pos = out.find("run").unwrap();
         let closing_pos = out.rfind("};").unwrap();
-        assert!(comment_pos < run_pos, "block comment must precede run block: {out}");
-        assert!(comment_pos < closing_pos, "block comment leaked outside the task: {out}");
+        assert!(
+            comment_pos < run_pos,
+            "block comment must precede run block: {out}"
+        );
+        assert!(
+            comment_pos < closing_pos,
+            "block comment leaked outside the task: {out}"
+        );
     }
 
     #[test]

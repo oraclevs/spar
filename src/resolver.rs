@@ -18,6 +18,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             FuncStmt::LocalVar(local) => {
                 scope.insert(local.name.clone(), local.ty.clone());
             }
+            FuncStmt::Expression(_, _) => {}
             FuncStmt::If(if_stmt) => {
                 let then_exit = sequence_exit_scope(&if_stmt.then_stmts);
                 let else_exit = sequence_exit_scope(&if_stmt.else_stmts);
@@ -47,6 +48,7 @@ pub(crate) fn stmts_always_return(stmts: &[FuncStmt]) -> bool {
 fn func_stmt_span(stmt: &FuncStmt) -> Span {
     match stmt {
         FuncStmt::LocalVar(l) => l.span.clone(),
+        FuncStmt::Expression(_, span) => span.clone(),
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For { span, .. } => span.clone(),
@@ -1052,6 +1054,7 @@ impl Resolver {
                     terminated = true;
                 }
                 FuncStmt::LocalVar(_) => {}
+                FuncStmt::Expression(_, _) => {}
                 FuncStmt::If(if_stmt) => {
                     let then_stmts = if_stmt.then_stmts.clone();
                     let else_stmts = if_stmt.else_stmts.clone();
@@ -1699,6 +1702,11 @@ impl Resolver {
                     }
                     local_names.insert(lv.name.clone());
                 }
+                FuncStmt::Expression(expr, _) => {
+                    if let Err(error) = self.resolve_expr_with_locals(expr, local_names) {
+                        self.errors.push(error);
+                    }
+                }
                 FuncStmt::Return(ret_value, _) => match ret_value {
                     ReturnValue::Expr(e) => {
                         if let Err(err) = self.resolve_expr_with_locals(e, local_names) {
@@ -2192,6 +2200,9 @@ impl Resolver {
                 FuncStmt::LocalVar(lv) => {
                     self.collect_closure_deps_expr(&lv.value, &locals, deps);
                     locals.insert(lv.name.clone());
+                }
+                FuncStmt::Expression(expr, _) => {
+                    self.collect_closure_deps_expr(expr, &locals, deps);
                 }
                 FuncStmt::Return(ret_value, _) => match ret_value {
                     ReturnValue::Expr(e) => self.collect_closure_deps_expr(e, &locals, deps),

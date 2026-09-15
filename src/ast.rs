@@ -452,6 +452,7 @@ pub struct FunctionBody {
 #[derive(Debug, Clone)]
 pub enum Statement {
     LocalVar(LocalVarDecl),
+    Expression(Expr, Span),
     If(IfStmt),
     Return(ReturnValue, Span),
     For {

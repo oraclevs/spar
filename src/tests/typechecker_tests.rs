@@ -31,6 +31,21 @@ fn typecheck_function_arg_type_mismatch() {
 }
 
 #[test]
+fn typecheck_call_expression_statements_in_nested_blocks() {
+    check_ok(
+        r#"
+        function sink(value: int) -> int { return value; };
+        function main() -> int {
+            sink(value: 1);
+            if true { sink(value: 2); }
+            for item in [3] { sink(value: item); }
+            return 0;
+        };
+        "#,
+    );
+}
+
+#[test]
 fn typecheck_function_parameter_default_type_mismatch() {
     let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
     assert!(

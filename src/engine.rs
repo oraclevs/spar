@@ -93,13 +93,14 @@ impl Engine {
 
         require_entry_signature(program).map_err(|e| vec![e])?;
 
-        let (_, result) = Evaluator::evaluate_and_call_entry_with_imports_and_base(
+        let (_, result) = Evaluator::evaluate_and_call_entry_with_imports_base_and_effects(
             program,
             symbols,
             &checked.imports,
             &self.options.base_dir,
             "main",
             self.options.hosts.clone(),
+            self.options.effect_ledger.clone(),
         )?;
 
         let exit_status = match result {

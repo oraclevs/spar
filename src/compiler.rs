@@ -28,6 +28,10 @@ pub struct CompileOptions {
     /// resolved package lock/store — `None` by default, so an ordinary
     /// project with no `spar.package.spar` behaves exactly as before.
     pub locator: Option<crate::package::ModuleLocator>,
+    /// Optional replay guard for process effects. Ordinary one-shot
+    /// compilation leaves this unset; persistent sessions install one
+    /// shared ledger across every replay.
+    pub effect_ledger: Option<crate::session::EffectLedger>,
 }
 
 impl Default for CompileOptions {
@@ -39,6 +43,7 @@ impl Default for CompileOptions {
             allow_schema_file: true,
             hosts: crate::host::HostRegistry::default(),
             locator: None,
+            effect_ledger: None,
         }
     }
 }
@@ -206,12 +211,13 @@ impl Compiler {
         }
 
         if self.options.evaluate && compilation.errors.is_empty() {
-            match Evaluator::evaluate_with_imports_and_base(
+            match Evaluator::evaluate_with_imports_base_and_effects(
                 &program,
                 &symbols,
                 &compilation.imports,
                 &self.options.base_dir,
                 self.options.hosts.clone(),
+                self.options.effect_ledger.clone(),
             ) {
                 Ok(result) => {
                     match crate::task_lowering::lower_tasks(

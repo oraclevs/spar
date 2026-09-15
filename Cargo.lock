@@ -276,6 +276,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "spar-command",
+ "spar-process",
  "tempfile",
  "toml",
 ]
@@ -283,6 +284,14 @@ dependencies = [
 [[package]]
 name = "spar-command"
 version = "0.1.0"
+
+[[package]]
+name = "spar-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "spar-command",
+]
 
 [[package]]
 name = "syn"

@@ -144,6 +144,8 @@ impl Compiler {
         };
         program.shebang = shebang;
 
+        inject_exec_result_type(&mut program);
+
         if let Some((path, kind)) = self
             .options
             .source_path
@@ -232,6 +234,32 @@ impl Compiler {
         compilation.symbols = Some(symbols);
         compilation
     }
+}
+
+fn inject_exec_result_type(program: &mut Program) {
+    use crate::ast::{SparType, TopLevelItem, TypeDecl, TypeField, TypeFieldShape};
+
+    let span = crate::Span::new(0, 0, 1, 1);
+    program.items.push(TopLevelItem::Type(TypeDecl {
+        name: "ExecResult".to_string(),
+        name_span: span.clone(),
+        exported: false,
+        fields: vec![
+            TypeField {
+                name: "success".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::Bool),
+                span: span.clone(),
+            },
+            TypeField {
+                name: "exitCode".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::Int),
+                span: span.clone(),
+            },
+        ],
+        span,
+    }));
 }
 
 /// Validates a declared `main` function's signature: no parameters, a

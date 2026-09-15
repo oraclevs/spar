@@ -81,6 +81,9 @@ enum EvalErr {
         path: String,
         span: Span,
     },
+    Host {
+        message: String,
+    },
 }
 
 enum StatementFlow {
@@ -142,6 +145,10 @@ impl EvalErr {
                 ),
                 span: Span::dummy(),
             },
+            EvalErr::Host { message } => SparError::EvalError {
+                message,
+                span: Span::dummy(),
+            },
         }
     }
 }
@@ -179,6 +186,7 @@ pub struct Evaluator {
     errors: Vec<SparError>,
     warnings: Vec<String>,
     imported_programs: HashMap<String, ImportedProgram>,
+    hosts: crate::host::HostRegistry,
 }
 
 fn build_imported_programs(
@@ -288,7 +296,16 @@ impl Evaluator {
             errors: Vec::new(),
             warnings: Vec::new(),
             imported_programs: HashMap::new(),
+            hosts: crate::host::HostRegistry::default(),
         }
+    }
+
+    /// Registers native functions this evaluator's `ns::fn(...)` calls may
+    /// dispatch to — chainable so existing `Evaluator::new(...)` callers
+    /// are unaffected.
+    pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
+        self.hosts = hosts;
+        self
     }
 
     pub fn evaluate_with_imports(
@@ -296,7 +313,13 @@ impl Evaluator {
         symbols: &SymbolTable,
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
     ) -> Result<EvalResult, Vec<SparError>> {
-        Self::evaluate_with_imports_and_base(program, symbols, loaded, std::path::Path::new("."))
+        Self::evaluate_with_imports_and_base(
+            program,
+            symbols,
+            loaded,
+            std::path::Path::new("."),
+            crate::host::HostRegistry::default(),
+        )
     }
 
     pub fn evaluate_with_imports_and_base(
@@ -304,9 +327,10 @@ impl Evaluator {
         symbols: &SymbolTable,
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
         base_dir: &std::path::Path,
+        hosts: crate::host::HostRegistry,
     ) -> Result<EvalResult, Vec<SparError>> {
         let imported = build_imported_programs(loaded, base_dir)?;
-        let mut ev = Evaluator::new(symbols.clone(), program.clone());
+        let mut ev = Evaluator::new(symbols.clone(), program.clone()).with_hosts(hosts);
         ev.imported_programs = imported;
         let result = ev.run();
         match result {
@@ -446,9 +470,10 @@ impl Evaluator {
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
         base_dir: &std::path::Path,
         entry_name: &str,
+        hosts: crate::host::HostRegistry,
     ) -> Result<(EvalResult, ConfigValue), Vec<SparError>> {
         let imported = build_imported_programs(loaded, base_dir)?;
-        let mut ev = Evaluator::new(symbols.clone(), program.clone());
+        let mut ev = Evaluator::new(symbols.clone(), program.clone()).with_hosts(hosts);
         ev.imported_programs = imported;
         match ev.run() {
             Ok(eval_result) => {
@@ -1105,6 +1130,7 @@ impl Evaluator {
                 if let Some(imported) = self.imported_programs.get(ns.as_str()).cloned() {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
+                    sub.hosts = self.hosts.clone();
                     let result = if imported
                         .symbols
                         .lookup_section(&[name.to_string()])
@@ -1154,6 +1180,7 @@ impl Evaluator {
                 if let Some(imported) = self.imported_programs.get(first.as_str()).cloned() {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
+                    sub.hosts = self.hosts.clone();
 
                     if imported.symbols.enums.contains_key(rest[0].as_str()) {
                         let inner_nr = NamespaceRef {
@@ -1587,6 +1614,7 @@ impl Evaluator {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
+                    sub.hosts = self.hosts.clone();
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
@@ -1641,6 +1669,7 @@ impl Evaluator {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
+                    sub.hosts = self.hosts.clone();
                     sub.call_depth = self.call_depth;
                     sub.eval_default_args(&fd, &mut local_scope)?;
                     let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
@@ -1650,6 +1679,20 @@ impl Evaluator {
                     return Ok(result);
                 }
             }
+            // Registered host function: ns::fn(args)
+            if let Some(host_fn) = self.hosts.get(ns, fn_name).cloned() {
+                let bound = self.eval_explicit_args(args, caller_scope)?;
+                let ordered: Vec<ConfigValue> = host_fn
+                    .params
+                    .iter()
+                    .map(|(param_name, _)| bound[param_name].clone())
+                    .collect();
+                self.call_depth -= 1;
+                return host_fn.call(&ordered).map_err(|e| EvalErr::Host {
+                    message: e.to_string(),
+                });
+            }
+
             self.call_depth -= 1;
             return Err(EvalErr::ImportRef {
                 alias: ns.to_string(),

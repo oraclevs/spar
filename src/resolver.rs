@@ -152,6 +152,9 @@ pub struct SymbolTable {
     pub enums: HashMap<String, EnumEntry>,
     pub function_groups: HashMap<String, FunctionGroupEntry>,
     pub tasks: HashMap<String, TaskEntry>,
+    /// Registered host functions' signatures, keyed by (namespace, name) —
+    /// empty unless the resolver was built with `Resolver::new().with_hosts(...)`.
+    pub hosts: HashMap<(String, String), crate::host::HostSignature>,
 }
 
 impl SymbolTable {
@@ -236,6 +239,7 @@ pub struct Resolver {
     function_groups: HashMap<String, FunctionGroupEntry>,
     tasks: HashMap<String, TaskEntry>,
     loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
+    hosts: crate::host::HostRegistry,
     errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
 }
@@ -252,9 +256,18 @@ impl Resolver {
             function_groups: HashMap::new(),
             tasks: HashMap::new(),
             loaded_exports: HashMap::new(),
+            hosts: crate::host::HostRegistry::default(),
             errors: Vec::new(),
             current_section: None,
         }
+    }
+
+    /// Makes `ns::fn(...)` calls into `hosts`' registered namespaces
+    /// resolve instead of erroring as undefined — chainable so existing
+    /// `Resolver::new().resolve(...)` call sites are unaffected.
+    pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
+        self.hosts = hosts;
+        self
     }
 
     fn with_loaded(exports: HashMap<String, HashSet<String>>) -> Self {
@@ -268,6 +281,7 @@ impl Resolver {
             function_groups: HashMap::new(),
             tasks: HashMap::new(),
             loaded_exports: exports,
+            hosts: crate::host::HostRegistry::default(),
             errors: Vec::new(),
             current_section: None,
         }
@@ -305,6 +319,7 @@ impl Resolver {
                 enums: self.enums,
                 function_groups: self.function_groups,
                 tasks: self.tasks,
+                hosts: self.hosts.signatures(),
             })
         } else {
             Err(self.errors)
@@ -315,6 +330,14 @@ impl Resolver {
         program: &Program,
         loaded: &HashMap<String, LoadedImport>,
     ) -> Result<SymbolTable, Vec<SparError>> {
+        Self::resolve_with_imports_and_hosts(program, loaded, crate::host::HostRegistry::default())
+    }
+
+    pub fn resolve_with_imports_and_hosts(
+        program: &Program,
+        loaded: &HashMap<String, LoadedImport>,
+        hosts: crate::host::HostRegistry,
+    ) -> Result<SymbolTable, Vec<SparError>> {
         // Build alias → exported names map
         let exports: HashMap<String, HashSet<String>> = loaded
             .iter()
@@ -322,6 +345,7 @@ impl Resolver {
             .collect();
 
         let mut r = Resolver::with_loaded(exports);
+        r.hosts = hosts;
         r.register(program);
         r.check_function_group_import_collisions();
         r.resolve_program(program);
@@ -336,9 +360,45 @@ impl Resolver {
                 enums: r.enums,
                 function_groups: r.function_groups,
                 tasks: r.tasks,
+                hosts: r.hosts.signatures(),
             })
         } else {
             Err(r.errors)
+        }
+    }
+
+    /// Validates a host-function call's named arguments against its
+    /// declared params: every arg name must be declared, and every
+    /// declared param must be present — host functions take no defaults.
+    fn check_host_call_args(
+        &mut self,
+        host_fn: &crate::host::HostFunction,
+        args: &[CallArg],
+        name_span: &Span,
+    ) {
+        let param_names: HashSet<&str> = host_fn.params.iter().map(|(n, _)| n.as_str()).collect();
+        for arg in args {
+            if !param_names.contains(arg.param_name.as_str()) {
+                self.push_error(
+                    format!(
+                        "host function '{}::{}' has no param '{}'",
+                        host_fn.namespace, host_fn.name, arg.param_name
+                    ),
+                    arg.param_name_span.clone(),
+                );
+            }
+        }
+        let given: HashSet<&str> = args.iter().map(|a| a.param_name.as_str()).collect();
+        for (name, _) in &host_fn.params {
+            if !given.contains(name.as_str()) {
+                self.push_error(
+                    format!(
+                        "call to host function '{}::{}' is missing required argument '{name}'",
+                        host_fn.namespace, host_fn.name
+                    ),
+                    name_span.clone(),
+                );
+            }
         }
     }
 
@@ -1366,6 +1426,11 @@ impl Resolver {
                             for arg in args {
                                 self.resolve_expr(&arg.value);
                             }
+                        } else if let Some(host_fn) = self.hosts.get(ns, fn_name).cloned() {
+                            self.check_host_call_args(&host_fn, args, name_span);
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
                         } else {
                             self.push_error(
                                 format!("undefined function '{name}'"),
@@ -1982,6 +2047,40 @@ impl Resolver {
                                     return Err(SparError::ResolveError {
                                         message: format!(
                                             "function '{fn_name}' not exported from '{ns}'"
+                                        ),
+                                        hint: None,
+                                        span: name_span.clone(),
+                                    });
+                                }
+                            }
+                            for arg in args {
+                                self.resolve_expr_with_locals(&arg.value, locals)?;
+                            }
+                            return Ok(());
+                        }
+                        if let Some(host_fn) = self.hosts.get(ns, fn_name) {
+                            let param_names: HashSet<&str> =
+                                host_fn.params.iter().map(|(n, _)| n.as_str()).collect();
+                            for arg in args {
+                                if !param_names.contains(arg.param_name.as_str()) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!(
+                                            "host function '{ns}::{fn_name}' has no param '{}'",
+                                            arg.param_name
+                                        ),
+                                        hint: None,
+                                        span: arg.param_name_span.clone(),
+                                    });
+                                }
+                            }
+                            let given: HashSet<&str> =
+                                args.iter().map(|a| a.param_name.as_str()).collect();
+                            for (param_name, _) in &host_fn.params {
+                                if !given.contains(param_name.as_str()) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!(
+                                            "call to host function '{ns}::{fn_name}' is missing \
+                                             required argument '{param_name}'"
                                         ),
                                         hint: None,
                                         span: name_span.clone(),

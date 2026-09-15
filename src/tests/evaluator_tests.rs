@@ -848,6 +848,7 @@ fn eval_cross_file_function_group_call() {
         &symbols,
         &loaded,
         dir.path(),
+        crate::host::HostRegistry::default(),
     )
     .expect("eval failed");
 
@@ -890,6 +891,7 @@ fn eval_cross_file_function_group_call_with_defaulted_arg() {
         &symbols,
         &loaded,
         dir.path(),
+        crate::host::HostRegistry::default(),
     )
     .expect("eval failed");
 

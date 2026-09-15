@@ -1304,7 +1304,13 @@ impl<'a> TypeChecker<'a> {
                 .function_groups
                 .get(segments[0])
                 .and_then(|g| g.functions.get(segments[1]))
-                .map(|fe| fe.ret.clone()),
+                .map(|fe| fe.ret.clone())
+                .or_else(|| {
+                    self.symbols
+                        .hosts
+                        .get(&(segments[0].to_string(), segments[1].to_string()))
+                        .map(|host_fn| host_fn.ret.clone())
+                }),
             1 => self.symbols.functions.get(name).map(|fe| fe.ret.clone()),
             _ => None,
         }
@@ -3073,6 +3079,7 @@ mod tests {
                         enums: Default::default(),
                         function_groups: Default::default(),
                         tasks: Default::default(),
+                        hosts: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -3100,6 +3107,7 @@ mod tests {
                         enums: Default::default(),
                         function_groups: Default::default(),
                         tasks: Default::default(),
+                        hosts: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(

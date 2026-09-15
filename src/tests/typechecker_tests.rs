@@ -101,6 +101,40 @@ fn non_void_function_rejects_bare_return() {
 }
 
 #[test]
+fn host_call_return_type_typechecks_against_declared_var_type() {
+    let mut hosts = crate::host::HostRegistry::new();
+    hosts
+        .register(crate::host::HostFunction::new(
+            "math",
+            "answer",
+            vec![],
+            crate::ast::SparType::Int,
+            |_| Ok(crate::evaluator::ConfigValue::Int(42)),
+        ))
+        .unwrap();
+
+    let src = "var x: int = math::answer();";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .with_hosts(hosts.clone())
+        .resolve(&prog, &[])
+        .unwrap();
+    crate::typechecker::TypeChecker::check(&prog, &symbols)
+        .expect("host call return type should match declared var type");
+
+    let bad_src = "var x: str = math::answer();";
+    let tokens = crate::lexer::Lexer::new(bad_src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .with_hosts(hosts)
+        .resolve(&prog, &[])
+        .unwrap();
+    let error = crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap_err();
+    assert!(!error.is_empty());
+}
+
+#[test]
 fn typecheck_function_parameter_default_type_mismatch() {
     let error = check_err(r#"function greet(name: str = 42) -> str { return name; };"#);
     assert!(

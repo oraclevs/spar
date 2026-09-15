@@ -1004,9 +1004,20 @@ impl Evaluator {
                 }
             }
             Expr::Shell(shell) => Ok(ConfigValue::Shell(lower_shell_expr(shell))),
-            Expr::ExecShell(_) => Err(EvalErr::Host {
-                message: "exec shell execution is not available yet".to_string(),
-            }),
+            Expr::ExecShell(shell) => {
+                let outcome = execute_shell_plan(&lower_shell_expr(shell)).map_err(|error| {
+                    EvalErr::Host {
+                        message: format!("could not execute shell plan: {error}"),
+                    }
+                })?;
+                Ok(ConfigValue::Section(HashMap::from([
+                    ("success".to_string(), ConfigValue::Bool(outcome.success)),
+                    (
+                        "exitCode".to_string(),
+                        ConfigValue::Int(i64::from(outcome.exit_code)),
+                    ),
+                ])))
+            }
         }
     }
 
@@ -1634,6 +1645,49 @@ fn lower_shell_redirect(redirect: &ShellRedirect) -> spar_command::Redirection {
         path: redirect.target.text.clone(),
         mode: redirect.mode.clone(),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShellPlanOutcome {
+    pub success: bool,
+    pub exit_code: i32,
+}
+
+pub(crate) fn execute_shell_plan(
+    plan: &spar_command::ShellPlan,
+) -> std::io::Result<ShellPlanOutcome> {
+    let mut outcome = ShellPlanOutcome {
+        success: true,
+        exit_code: 0,
+    };
+    let options = spar_process::ExecutionOptions::default();
+
+    for (join, step) in &plan.steps {
+        let should_run = match join {
+            spar_command::Join::Always => true,
+            spar_command::Join::OnSuccess => outcome.success,
+            spar_command::Join::OnFailure => !outcome.success,
+        };
+        if !should_run {
+            continue;
+        }
+
+        let command_output = match step {
+            spar_command::Step::Command(command) => spar_process::run_command(command, &options)?,
+            spar_command::Step::Pipeline(pipeline) => {
+                spar_process::run_pipeline(pipeline, &options)?
+            }
+        };
+        outcome = ShellPlanOutcome {
+            success: command_output.status.success,
+            exit_code: command_output
+                .status
+                .code
+                .unwrap_or(if command_output.status.success { 0 } else { 1 }),
+        };
+    }
+
+    Ok(outcome)
 }
 
 // ── Function call evaluation ──────────────────────────────────────────────────

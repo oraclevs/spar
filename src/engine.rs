@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::ast::{Program, TopLevelItem};
 use crate::compiler::{validate_entry_signature, Compilation, CompileOptions, Compiler};
 use crate::error::{Span, SparError};
-use crate::evaluator::{ConfigValue, Evaluator};
+use crate::evaluator::{execute_shell_plan, ConfigValue, Evaluator};
 
 /// The result of running Execute mode's `main` to completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +104,18 @@ impl Engine {
 
         let exit_status = match result {
             ConfigValue::Int(status) => status as i32,
+            ConfigValue::Shell(plan) => {
+                execute_shell_plan(&plan)
+                    .map_err(|error| {
+                        vec![SparError::EvalError {
+                            message: format!(
+                                "could not execute shell plan returned by 'main': {error}"
+                            ),
+                            span: Span::dummy(),
+                        }]
+                    })?
+                    .exit_code
+            }
             // `main() -> void` — the typechecker guarantees `main` never
             // returns anything else.
             _ => 0,
@@ -281,5 +293,69 @@ mod tests {
             "emit must not call main either: {:?}",
             compilation.errors
         );
+    }
+
+    #[test]
+    fn exec_shell_true_reports_success() {
+        let outcome = Engine::default()
+            .execute_source(
+                r#"
+                function main() -> int {
+                    var r: ExecResult = exec shell { true; };
+                    return r.exitCode;
+                };
+                "#,
+            )
+            .expect("exec shell should succeed");
+        assert_eq!(outcome.exit_status, 0);
+    }
+
+    #[test]
+    fn exec_shell_false_can_be_handled_by_spar_logic() {
+        let outcome = Engine::default()
+            .execute_source(
+                r#"
+                function main() -> int {
+                    var r: ExecResult = exec shell { false; };
+                    if r.success { return 1; }
+                    return 0;
+                };
+                "#,
+            )
+            .expect("a failed child command is data, not an evaluator error");
+        assert_eq!(outcome.exit_status, 0);
+    }
+
+    #[test]
+    fn exec_shell_sequence_stops_on_first_failure_by_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("must-not-exist");
+        let source = format!(
+            r#"
+            function main() -> int {{
+                var r: ExecResult = exec shell {{ false; printf x > "{}"; }};
+                if r.success {{ return 1; }}
+                return 0;
+            }};
+            "#,
+            marker.display()
+        );
+        let outcome = Engine::default()
+            .execute_source(&source)
+            .expect("program handles child failure");
+        assert_eq!(outcome.exit_status, 0);
+        assert!(!marker.exists(), "later OnSuccess step must not run");
+    }
+
+    #[test]
+    fn main_returning_shell_executes_and_maps_its_status() {
+        let success = Engine::default()
+            .execute_source("function main() -> shell { return shell { true; }; };")
+            .expect("shell main should execute");
+        let failure = Engine::default()
+            .execute_source("function main() -> shell { return shell { false; }; };")
+            .expect("child failure should map to an outcome");
+        assert_eq!(success.exit_status, 0);
+        assert_ne!(failure.exit_status, 0);
     }
 }

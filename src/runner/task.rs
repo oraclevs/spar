@@ -155,7 +155,7 @@ pub struct TaskInvocation {
 /// (`spar <name>` runs task `<name>` unless `<name>` is one of these).
 /// Keep in sync with the keyword arms matched in `main.rs`'s `parse_args`.
 pub const RESERVED_CLI_COMMANDS: &[&str] = &[
-    "check", "emit", "fmt", "tasks", "run", "show", "dump", "help", "version",
+    "check", "emit", "fmt", "tasks", "run", "show", "dump", "exec", "repl", "help", "version",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

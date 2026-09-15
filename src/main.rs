@@ -3,7 +3,7 @@ use spar::runner::{
 };
 use spar::{
     renderer::ErrorRenderer, Compilation, CompileOptions, Compiler, ConfigValue, EmitFormat,
-    Evaluator,
+    Engine, Evaluator,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
@@ -82,6 +82,8 @@ fn main() {
             args,
         } => cmd_show(path, global, task, args),
         Cmd::Dump { path, global } => cmd_dump(path, global),
+        Cmd::Exec { path, program_args } => cmd_exec(&path, program_args),
+        Cmd::Repl => cmd_repl(),
         Cmd::Help => print_help(),
         Cmd::Version => println!("spar {}", env!("CARGO_PKG_VERSION")),
         Cmd::BadArgs(msg) => {
@@ -127,6 +129,11 @@ enum Cmd {
         path: Option<PathBuf>,
         global: bool,
     },
+    Exec {
+        path: String,
+        program_args: Vec<String>,
+    },
+    Repl,
     Help,
     Version,
     BadArgs(String),
@@ -154,13 +161,48 @@ fn parse_args(args: &[String]) -> Cmd {
         Some("run") => parse_run_args(&args[2..]),
         Some("show") => parse_show_args(&args[2..]),
         Some("dump") => parse_dump_args(&args[2..]),
+        Some("exec") => parse_exec_args(&args[2..]),
+        Some("repl") => Cmd::Repl,
         Some("--help") | Some("-h") | Some("help") => Cmd::Help,
         Some("--version") | Some("-V") | Some("version") => Cmd::Version,
+        // Script-execution shorthand: `spar ./foo.spar` or `spar foo.spar` runs
+        // `main` in that file, exactly like `spar exec foo.spar`, when the name
+        // looks path-like (a `.spar` suffix or an explicit path separator/`.`
+        // prefix) and really does name an existing file — so a task that just
+        // happens to share a name with some unrelated file in cwd isn't
+        // accidentally swallowed by this shorthand.
+        Some(name)
+            if (name.ends_with(".spar") || name.contains('/') || name.starts_with('.'))
+                && Path::new(name).is_file() =>
+        {
+            Cmd::Exec {
+                path: name.to_string(),
+                program_args: args[2..].to_vec(),
+            }
+        }
         // Anything else is treated as a task-runner shorthand: `spar <name> [args...]`
         // is exactly `spar run <name> [args...]`. Task-name validity (does this task
         // even exist?) is checked later, once a task file is actually loaded.
         Some(_) => parse_run_args(&args[1..]),
         None => Cmd::Help,
+    }
+}
+
+fn parse_exec_args(args: &[String]) -> Cmd {
+    let Some(path) = args.first() else {
+        return Cmd::BadArgs("`exec` requires a file path".into());
+    };
+    // Everything after the path is a program argument; an optional leading
+    // `--` (the documented CLI/program-argument boundary) is dropped rather
+    // than passed through literally.
+    let rest = &args[1..];
+    let program_args = match rest.first().map(String::as_str) {
+        Some("--") => rest[1..].to_vec(),
+        _ => rest.to_vec(),
+    };
+    Cmd::Exec {
+        path: path.clone(),
+        program_args,
     }
 }
 
@@ -395,6 +437,9 @@ COMMANDS:
     show          <task> [args...] [-f FILE | -G]
                                         Show one task's resolved commands
     dump          [-f FILE | -G]        Dump the lowered task catalog as JSON
+    exec          <file.spar> [-- args...]
+                                        Run file.spar's `main` and exit with its status
+    repl                                Start an interactive scripting session
 
 OPTIONS:
     -h, --help        Show this help
@@ -417,7 +462,11 @@ EXAMPLES:
     spar run deploy production -f server.spar
     spar run test --dry-run -f server.spar
     spar deploy production -f server.spar   (same as `run` above)
-    spar test --dry-run -f server.spar      (same as `run` above)",
+    spar test --dry-run -f server.spar      (same as `run` above)
+    spar exec  app.spar
+    spar exec  app.spar -- arg1 arg2
+    spar ./app.spar                         (same as `exec` above)
+    spar repl",
         ver = env!("CARGO_PKG_VERSION")
     );
 }
@@ -829,6 +878,91 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({ "tasks": tasks })).unwrap()
     );
+}
+
+// ── `exec` command ────────────────────────────────────────────────────────────
+
+fn cmd_exec(path: &str, program_args: Vec<String>) {
+    // Phase 0's `main` takes no parameters and there's no language-level API
+    // to read `program_args` yet (spec section 16) — accepted and parsed for
+    // the `--` boundary now so scripts/tooling can rely on it, exposed to
+    // Spar source itself once the runtime foundation grows one.
+    let _ = program_args;
+    match Engine::new(CompileOptions::for_path(path)).execute_path(Path::new(path)) {
+        Ok(outcome) => std::process::exit(outcome.exit_status),
+        Err(errors) => {
+            let src = read_file(path);
+            let renderer = make_renderer(&src, path);
+            eprintln!("{}", renderer.render_all(&errors));
+            std::process::exit(1);
+        }
+    }
+}
+
+// ── `repl` command ────────────────────────────────────────────────────────────
+
+fn cmd_repl() {
+    let mut session = Engine::default().session();
+    let interactive = std::io::stdin().is_terminal();
+    let mut input = std::io::stdin().lock();
+    let mut buffer = String::new();
+    loop {
+        if interactive {
+            eprint!(
+                "{}",
+                if buffer.is_empty() {
+                    "spar> "
+                } else {
+                    "....> "
+                }
+            );
+            let _ = std::io::stderr().flush();
+        }
+        let mut line = String::new();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => break, // EOF or read error — exit cleanly either way
+            Ok(_) => {}
+        }
+        buffer.push_str(&line);
+        if repl_fragment_complete(&buffer) {
+            let fragment = std::mem::take(&mut buffer);
+            if let Err(errors) = session.eval(&fragment) {
+                let renderer = make_renderer(&fragment, "<repl>");
+                eprintln!("{}", renderer.render_all(&errors));
+            }
+        }
+    }
+    std::process::exit(0);
+}
+
+/// A REPL fragment is ready to evaluate once its brace/bracket/paren nesting
+/// (ignoring string contents) returns to zero and it ends with the `;` every
+/// top-level Spar declaration/statement requires — so a multi-line function
+/// or task body keeps prompting for more input instead of being evaluated
+/// one line at a time.
+fn repl_fragment_complete(buffer: &str) -> bool {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in buffer.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    !in_string && depth <= 0 && buffer.trim_end().ends_with(';')
 }
 
 fn task_json(task: &spar::runner::Task) -> serde_json::Value {
@@ -1308,6 +1442,89 @@ task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
     #[test]
     fn parse_args_no_args_is_help() {
         assert!(matches!(parse_args(&["spar".to_owned()]), Cmd::Help));
+    }
+
+    #[test]
+    fn parse_args_explicit_exec_requires_a_path() {
+        assert!(matches!(
+            parse_args(&["spar".to_owned(), "exec".to_owned()]),
+            Cmd::BadArgs(_)
+        ));
+    }
+
+    #[test]
+    fn parse_args_exec_preserves_arguments_after_double_dash() {
+        let args = ["spar", "exec", "app.spar", "--", "one", "two", "--flag"].map(str::to_owned);
+        match parse_args(&args) {
+            Cmd::Exec { path, program_args } => {
+                assert_eq!(path, "app.spar");
+                assert_eq!(program_args, vec!["one", "two", "--flag"]);
+            }
+            other => panic!("expected Cmd::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_exec_without_double_dash_still_collects_trailing_args() {
+        let args = ["spar", "exec", "app.spar", "one"].map(str::to_owned);
+        match parse_args(&args) {
+            Cmd::Exec { path, program_args } => {
+                assert_eq!(path, "app.spar");
+                assert_eq!(program_args, vec!["one"]);
+            }
+            other => panic!("expected Cmd::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_bare_repl_dispatches_to_repl() {
+        assert!(matches!(
+            parse_args(&["spar".to_owned(), "repl".to_owned()]),
+            Cmd::Repl
+        ));
+    }
+
+    #[test]
+    fn parse_args_existing_spar_path_beats_task_shorthand() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("app.spar");
+        std::fs::write(&file, "function main() -> int { return 0; };").unwrap();
+        let args = vec!["spar".to_owned(), file.to_string_lossy().into_owned()];
+        match parse_args(&args) {
+            Cmd::Exec { path, .. } => assert_eq!(path, file.to_string_lossy()),
+            other => panic!("expected Cmd::Exec for an existing .spar path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_nonexistent_spar_looking_name_falls_back_to_task_shorthand() {
+        // No such file on disk — must NOT be treated as script shorthand,
+        // even though the name ends in `.spar`.
+        let args = vec!["spar".to_owned(), "definitely-missing.spar".to_owned()];
+        assert!(matches!(parse_args(&args), Cmd::Run { .. }));
+    }
+
+    #[test]
+    fn parse_args_run_can_still_name_a_task_literally_called_exec() {
+        let args = vec!["spar".to_owned(), "run".to_owned(), "exec".to_owned()];
+        assert!(matches!(
+            parse_args(&args),
+            Cmd::Run { task: Some(name), .. } if name == "exec"
+        ));
+    }
+
+    #[test]
+    fn repl_fragment_completion_waits_for_balanced_braces_and_trailing_semicolon() {
+        assert!(!repl_fragment_complete("var x: int = 1"));
+        assert!(repl_fragment_complete("var x: int = 1;"));
+        assert!(!repl_fragment_complete("function f() -> int {"));
+        assert!(repl_fragment_complete(
+            "function f() -> int {\n    return 1;\n};"
+        ));
+        // A `;` inside a string must not be mistaken for the statement
+        // terminator.
+        assert!(!repl_fragment_complete("var x: str = \"a;b\""));
+        assert!(repl_fragment_complete("var x: str = \"a;b\";"));
     }
 
     #[test]

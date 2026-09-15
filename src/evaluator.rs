@@ -414,6 +414,55 @@ impl Evaluator {
         }
     }
 
+    /// Calls a declared, zero-argument top-level function by name and
+    /// returns its result. Used by Execute mode to invoke `main` after
+    /// `run()` has already performed module initialization — never call
+    /// this before `run()`, or `main` would see an uninitialized module.
+    pub fn call_entry(&mut self, name: &str) -> Result<ConfigValue, SparError> {
+        let func_decl = self
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                TopLevelItem::Function(f) if f.name == name => Some(f.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| SparError::EvalError {
+                message: format!("no zero-argument function named '{name}' to execute"),
+                span: Span::dummy(),
+            })?;
+        let mut local_scope = HashMap::new();
+        self.eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)
+            .map(|flow| flow.into_return().unwrap_or(ConfigValue::Int(0)))
+            .map_err(EvalErr::into_kl_error)
+    }
+
+    /// Runs module initialization exactly once, then calls `entry_name` (a
+    /// declared zero-argument top-level function — Execute mode's `main`).
+    /// Returns the module's `EvalResult` alongside the entry call's value.
+    pub fn evaluate_and_call_entry_with_imports_and_base(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        entry_name: &str,
+    ) -> Result<(EvalResult, ConfigValue), Vec<SparError>> {
+        let imported = build_imported_programs(loaded, base_dir)?;
+        let mut ev = Evaluator::new(symbols.clone(), program.clone());
+        ev.imported_programs = imported;
+        match ev.run() {
+            Ok(eval_result) => {
+                let entry_result = ev.call_entry(entry_name).map_err(|e| vec![e])?;
+                Ok((eval_result, entry_result))
+            }
+            Err(first_err) => {
+                let mut errs = vec![first_err];
+                errs.extend(std::mem::take(&mut ev.errors));
+                Err(errs)
+            }
+        }
+    }
+
     fn push_eval_error(&mut self, e: EvalErr) {
         match e {
             EvalErr::ImportRef { alias, symbol } => {

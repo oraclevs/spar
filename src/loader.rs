@@ -1197,6 +1197,7 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
         crate::ast::SparType::Bool => "bool".to_string(),
         crate::ast::SparType::Section => "section".to_string(),
         crate::ast::SparType::Void => "void".to_string(),
+        crate::ast::SparType::Shell => "shell".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
         crate::ast::SparType::Named(name) => name.clone(),
     }

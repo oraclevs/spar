@@ -154,6 +154,9 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
                 iter: map.iter(),
                 next_value: None,
             }),
+            ConfigValue::Shell(_) => Err(<SparDeserError as de::Error>::custom(
+                "shell plans are runtime values and cannot be deserialized as configuration",
+            )),
         }
     }
 

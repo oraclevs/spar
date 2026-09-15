@@ -290,9 +290,11 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         // The typechecker rejects `list`/`section` task parameters before
         // lowering ever runs — this arm is unreachable in practice, but a
         // safe fallback beats a panic if that invariant ever slips.
-        SparType::List(_) | SparType::Section | SparType::Named(_) | SparType::Void => {
-            ScalarKind::Str
-        }
+        SparType::List(_)
+        | SparType::Section
+        | SparType::Named(_)
+        | SparType::Void
+        | SparType::Shell => ScalarKind::Str,
     }
 }
 
@@ -333,7 +335,7 @@ fn bare_param_ref(expr: &Expr, param_names: &HashSet<String>) -> Option<String> 
 fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
     match expr {
         Expr::NamespaceRef(nr) => nr.segments.len() == 1 && param_names.contains(&nr.segments[0]),
-        Expr::Literal(_) => false,
+        Expr::Literal(_) | Expr::Shell(_) | Expr::ExecShell(_) => false,
         Expr::String(s) => s.parts.iter().any(|p| match p {
             StringPart::Literal(_) => false,
             StringPart::Expr(e) => expr_mentions_any(e, param_names),

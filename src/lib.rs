@@ -33,7 +33,10 @@ pub use de::{from_eval, from_str, SparDeserError};
 pub use emit::{emit_to_json, emit_to_toml, emit_to_yaml, EmitFormat};
 pub use engine::{Engine, ExecutionOutcome};
 pub use error::{Span, SparError};
-pub use evaluator::{execute_shell_plan, ConfigValue, EvalResult, Evaluator, ShellPlanOutcome};
+pub use evaluator::{
+    execute_shell_plan, execute_shell_plan_with_options, ConfigValue, EvalResult, Evaluator,
+    ShellPlanOutcome,
+};
 pub use host::{HostError, HostFunction, HostRegistry};
 pub use lexer::Lexer;
 pub use parser::Parser;

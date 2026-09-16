@@ -763,10 +763,32 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'|') => {
                     self.advance();
+                    let token = if self.peek() == Some(b'|') {
+                        self.advance();
+                        Token::OrOr
+                    } else {
+                        Token::ShellPipe
+                    };
+                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
+                }
+                Some(b'&') => {
+                    self.advance();
+                    if self.peek() != Some(b'&') {
+                        return Err(SparError::LexError {
+                            message: "unexpected '&' — background jobs are not supported yet"
+                                .to_string(),
+                            span: self.span_at(start, line, col),
+                        });
+                    }
+                    self.advance();
                     tokens.push(SpannedToken::new(
-                        Token::ShellPipe,
+                        Token::AndAnd,
                         self.span_at(start, line, col),
                     ));
+                }
+                Some(b'<') => {
+                    self.advance();
+                    tokens.push(SpannedToken::new(Token::Lt, self.span_at(start, line, col)));
                 }
                 Some(b'>') => {
                     self.advance();
@@ -825,10 +847,32 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'|') => {
                     self.advance();
+                    let token = if self.peek() == Some(b'|') {
+                        self.advance();
+                        Token::OrOr
+                    } else {
+                        Token::ShellPipe
+                    };
+                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
+                }
+                Some(b'&') => {
+                    self.advance();
+                    if self.peek() != Some(b'&') {
+                        return Err(SparError::LexError {
+                            message: "unexpected '&' — background jobs are not supported yet"
+                                .to_string(),
+                            span: self.span_at(start, line, col),
+                        });
+                    }
+                    self.advance();
                     tokens.push(SpannedToken::new(
-                        Token::ShellPipe,
+                        Token::AndAnd,
                         self.span_at(start, line, col),
                     ));
+                }
+                Some(b'<') => {
+                    self.advance();
+                    tokens.push(SpannedToken::new(Token::Lt, self.span_at(start, line, col)));
                 }
                 Some(b'>') => {
                     self.advance();
@@ -900,7 +944,8 @@ impl<'a> Lexer<'a> {
         col: u32,
     ) {
         while let Some(byte) = self.peek() {
-            if byte.is_ascii_whitespace() || matches!(byte, b';' | b'|' | b'>' | b'{' | b'}' | b'"')
+            if byte.is_ascii_whitespace()
+                || matches!(byte, b';' | b'|' | b'&' | b'<' | b'>' | b'{' | b'}' | b'"')
             {
                 break;
             }

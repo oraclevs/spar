@@ -114,9 +114,7 @@ fn transitive_graph_supports_two_versions_of_same_package() {
     commit_all(&app_b, "initial");
     tag(&app_b, "v1.0.0");
 
-    let root_manifest_src = format!(
-        "[Package] {{\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n}};\n[Dependencies] {{\n    a: str = \"github:owner/app-a@1.0.0\";\n    b: str = \"github:owner/app-b@1.0.0\";\n}};\n",
-    );
+    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    a: str = \"github:owner/app-a@1.0.0\";\n    b: str = \"github:owner/app-b@1.0.0\";\n};\n".to_string();
     let root_manifest =
         PackageManifest::parse(&root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 

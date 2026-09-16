@@ -84,28 +84,7 @@ impl Engine {
         match self.compile_source(source) {
             Ok(program) => self
                 .emit_compiled(&program)
-                .unwrap_or_else(|errors| Compilation {
-                    program: Some(
-                        program.modules[program.entry.0 as usize]
-                            .checked
-                            .program
-                            .clone(),
-                    ),
-                    symbols: Some(
-                        program.modules[program.entry.0 as usize]
-                            .checked
-                            .symbols
-                            .clone(),
-                    ),
-                    imports: program.modules[program.entry.0 as usize]
-                        .checked
-                        .imports
-                        .clone(),
-                    result: None,
-                    tasks: None,
-                    task_exprs: Vec::new(),
-                    errors,
-                }),
+                .unwrap_or_else(|errors| program.compilation_with_errors(errors)),
             Err(_) => Compiler::new(CompileOptions {
                 evaluate: true,
                 ..self.options.clone()

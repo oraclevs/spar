@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::compiled::{FunctionId, LocalSlot, ModuleId};
+use crate::compiled::{FunctionId, LocalSlot, ModuleId, TypedOperation};
 use crate::{CompileOptions, Engine};
 
 #[test]
@@ -40,5 +40,18 @@ fn parameters_locals_loop_bindings_and_shadows_get_stable_slots() {
     assert_eq!(
         function.debug_slot_names(),
         ["input", "total", "total", "index", "value"]
+    );
+}
+
+#[test]
+fn primitive_operations_and_calls_are_resolved_during_lowering() {
+    let source = "function double(value: int) -> int { return value + value; }; function main() -> int { return double(value: 3); };";
+    let program = Engine::default().compile_source(source).unwrap();
+
+    assert!(program.debug_operations().contains(&TypedOperation::IntAdd));
+    assert_eq!(program.debug_direct_call_ids(), [FunctionId(0)]);
+    assert_eq!(
+        program.debug_local_read_slots(),
+        [LocalSlot(0), LocalSlot(0)]
     );
 }

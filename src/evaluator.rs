@@ -1425,6 +1425,26 @@ impl Evaluator {
                     span: span.clone(),
                 })
             }
+            ConfigValue::Error {
+                message,
+                kind,
+                code,
+                cause,
+            } => match field {
+                "message" => Ok(ConfigValue::Str(message)),
+                "kind" => Ok(ConfigValue::Str(kind)),
+                "code" => Ok(ConfigValue::Int(code)),
+                "cause" => cause
+                    .map(|value| *value)
+                    .ok_or_else(|| EvalErr::PathNotFound {
+                        path: "error.cause".into(),
+                        span: span.clone(),
+                    }),
+                _ => Err(EvalErr::PathNotFound {
+                    path: format!("error.{field}"),
+                    span: span.clone(),
+                }),
+            },
             _ => Err(EvalErr::CyclicRef {
                 name: field.to_string(),
                 span: span.clone(),
@@ -2018,10 +2038,51 @@ impl Evaluator {
                 }
                 FuncStmt::Break(_) => return Ok(StatementFlow::Break),
                 FuncStmt::Continue(_) => return Ok(StatementFlow::Continue),
-                FuncStmt::Try(_) => {
-                    return Err(EvalErr::Host {
-                        message: "try/catch is not supported by compatibility evaluator".into(),
-                    })
+                FuncStmt::Try(statement) => {
+                    let body_snapshot = local_scope.clone();
+                    match self.eval_func_stmts(&statement.body, local_scope) {
+                        Ok(flow) => {
+                            restore_block_scope(local_scope, &body_snapshot, &statement.body, None);
+                            if !matches!(flow, StatementFlow::Normal) {
+                                return Ok(flow);
+                            }
+                        }
+                        Err(error) => {
+                            restore_block_scope(local_scope, &body_snapshot, &statement.body, None);
+                            let handler_snapshot = local_scope.clone();
+                            if let Some(name) = &statement.catch_name {
+                                local_scope.insert(
+                                    name.clone(),
+                                    ConfigValue::Error {
+                                        message: error.into_kl_error().to_string(),
+                                        kind: "runtime".into(),
+                                        code: 1,
+                                        cause: None,
+                                    },
+                                );
+                            }
+                            let flow = self.eval_func_stmts(&statement.handler, local_scope)?;
+                            restore_block_scope(
+                                local_scope,
+                                &handler_snapshot,
+                                &statement.handler,
+                                None,
+                            );
+                            if let Some(name) = &statement.catch_name {
+                                match handler_snapshot.get(name) {
+                                    Some(value) => {
+                                        local_scope.insert(name.clone(), value.clone());
+                                    }
+                                    None => {
+                                        local_scope.remove(name);
+                                    }
+                                }
+                            }
+                            if !matches!(flow, StatementFlow::Normal) {
+                                return Ok(flow);
+                            }
+                        }
+                    }
                 }
                 FuncStmt::For(statement) => {
                     let items = match self.eval_expr(&statement.iterable, local_scope)? {
@@ -2574,5 +2635,20 @@ var endpoint: str = Config.host;
         "#,
         );
         assert_eq!(global(&r, "x"), ConfigValue::Int(99));
+    }
+
+    #[test]
+    fn compatibility_evaluator_catches_and_exposes_error_fields() {
+        let r = eval_ok(
+            r#"
+            function recover() -> str {
+                try { var impossible: int = 1 / 0; }
+                catch err { return err.kind; }
+                return "missed";
+            };
+            var kind: str = recover();
+        "#,
+        );
+        assert_eq!(global(&r, "kind"), ConfigValue::Str("runtime".into()));
     }
 }

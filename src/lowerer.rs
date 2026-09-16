@@ -183,6 +183,7 @@ impl<'a> LocalAllocator<'a> {
                     });
                 }
                 Statement::Break(_) | Statement::Continue(_) => {}
+                Statement::Try(_) => {}
             }
         }
     }
@@ -391,6 +392,18 @@ impl FunctionLowerer<'_> {
             }
             Statement::Break(span) => CompiledStatement::Break(span.clone()),
             Statement::Continue(span) => CompiledStatement::Continue(span.clone()),
+            Statement::Try(ts) => {
+                self.locals.scopes.push(HashMap::new());
+                let catch_slot = self.locals.allocate(ts.catch_name.clone(), SparType::Error);
+                let handler = self.lower_statements(&ts.handler)?;
+                self.locals.scopes.pop();
+                CompiledStatement::Try {
+                    body: self.lower_statements(&ts.body)?,
+                    catch_slot,
+                    handler,
+                    span: ts.span.clone(),
+                }
+            }
         })
     }
 

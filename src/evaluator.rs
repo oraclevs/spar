@@ -18,6 +18,12 @@ pub enum ConfigValue {
     List(Vec<ConfigValue>),
     Section(HashMap<String, ConfigValue>),
     Shell(spar_command::ShellPlan),
+    Error {
+        message: String,
+        kind: String,
+        code: i64,
+        cause: Option<Box<ConfigValue>>,
+    },
 }
 
 impl ConfigValue {
@@ -34,6 +40,7 @@ impl ConfigValue {
             ConfigValue::Shell(_) => {
                 unreachable!("shell plans cannot appear in string interpolation")
             }
+            ConfigValue::Error { message, .. } => message.clone(),
         }
     }
 
@@ -46,6 +53,7 @@ impl ConfigValue {
             ConfigValue::List(_) => "list",
             ConfigValue::Section(_) => "section",
             ConfigValue::Shell(_) => "shell",
+            ConfigValue::Error { .. } => "error",
         }
     }
 }
@@ -1961,6 +1969,11 @@ impl Evaluator {
                 }
                 FuncStmt::Break(_) => return Ok(StatementFlow::Break),
                 FuncStmt::Continue(_) => return Ok(StatementFlow::Continue),
+                FuncStmt::Try(_) => {
+                    return Err(EvalErr::Host {
+                        message: "try/catch is not supported by compatibility evaluator".into(),
+                    })
+                }
                 FuncStmt::For(statement) => {
                     let items = match self.eval_expr(&statement.iterable, local_scope)? {
                         ConfigValue::List(items) => items,

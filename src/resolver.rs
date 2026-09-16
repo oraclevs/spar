@@ -77,6 +77,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             }
             // A for-loop never guarantees execution (iterable may be empty).
             FuncStmt::For(_) => {}
+            FuncStmt::Try(_) => {}
         }
     }
     Some(scope)
@@ -95,6 +96,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For(statement) => statement.span.clone(),
         FuncStmt::Break(span) | FuncStmt::Continue(span) => span.clone(),
+        FuncStmt::Try(statement) => statement.span.clone(),
     }
 }
 
@@ -412,7 +414,8 @@ impl Resolver {
             | SparType::Bool
             | SparType::Section
             | SparType::Void
-            | SparType::Shell => Ok(()),
+            | SparType::Shell
+            | SparType::Error => Ok(()),
         }
     }
 
@@ -1361,6 +1364,7 @@ impl Resolver {
                     self.check_unreachable(&body);
                     // A for-loop never sets terminated — iterable may be empty.
                 }
+                FuncStmt::Try(_) => {}
             }
         }
     }
@@ -1606,7 +1610,8 @@ impl Resolver {
             | SparType::Bool
             | SparType::Section
             | SparType::Void
-            | SparType::Shell => {}
+            | SparType::Shell
+            | SparType::Error => {}
         }
     }
 
@@ -2199,6 +2204,7 @@ impl Resolver {
                         allow_exec_shell,
                     );
                 }
+                FuncStmt::Try(_) => {}
                 FuncStmt::If(if_stmt) => {
                     self.reject_module_exec_shell(&if_stmt.condition, allow_exec_shell);
                     if let Err(e) = self.resolve_expr_with_locals(&if_stmt.condition, local_names) {
@@ -2749,6 +2755,7 @@ impl Resolver {
                     self.collect_closure_deps_stmts(&if_stmt.then_stmts, &locals, deps);
                     self.collect_closure_deps_stmts(&if_stmt.else_stmts, &locals, deps);
                 }
+                FuncStmt::Try(_) => {}
             }
         }
     }

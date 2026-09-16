@@ -148,6 +148,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
             | Statement::Continue(span) => span.line,
             Statement::If(statement) => statement.span.line,
             Statement::For(statement) => statement.span.line,
+            Statement::Try(statement) => statement.span.line,
         },
     }
 }
@@ -674,6 +675,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Section => "section".to_string(),
         SparType::Void => "void".to_string(),
         SparType::Shell => "shell".to_string(),
+        SparType::Error => "error".to_string(),
         SparType::List(inner) => format!("[{}]", format_type(inner)),
         SparType::Named(name) => name.clone(),
         SparType::TypeParameter(name) => name.clone(),
@@ -1163,6 +1165,19 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
         FuncStmt::Continue(_) => {
             out.push_str(&ind);
             out.push_str("continue;\n");
+        }
+
+        FuncStmt::Try(ts) => {
+            out.push_str(&ind);
+            out.push_str("try {\n");
+            format_func_stmts(&ts.body, depth + 1, config, out);
+            out.push_str(&ind);
+            out.push_str("} catch ");
+            out.push_str(&ts.catch_name);
+            out.push_str(" {\n");
+            format_func_stmts(&ts.handler, depth + 1, config, out);
+            out.push_str(&ind);
+            out.push_str("}\n");
         }
 
         FuncStmt::Return(rv, _) => {

@@ -150,6 +150,17 @@ fn config_value_to_json(val: &ConfigValue) -> serde_json::Value {
             serde_json::Value::Object(obj)
         }
         ConfigValue::Shell(plan) => shell_plan_to_json(plan),
+        ConfigValue::Error {
+            message,
+            kind,
+            code,
+            cause,
+        } => serde_json::json!({
+            "message": message,
+            "kind": kind,
+            "code": code,
+            "cause": cause.as_deref().map(config_value_to_json),
+        }),
     }
 }
 

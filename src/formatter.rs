@@ -237,7 +237,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push(']');
             if let Some(binding) = &sd.type_binding {
                 out.push_str(" -> ");
-                out.push_str(&binding.name);
+                out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
                 out.push_str("{\n");
@@ -252,6 +252,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             }
             out.push_str("function ");
             out.push_str(&fd.name);
+            format_type_parameters(&fd.type_parameters, out);
             out.push('(');
             for (i, p) in fd.params.iter().enumerate() {
                 if i > 0 {
@@ -292,6 +293,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             }
             out.push_str("type [");
             out.push_str(&td.name);
+            format_type_parameters(&td.type_parameters, out);
             out.push_str("]{\n");
             for field in &td.fields {
                 format_type_field(field, 1, config, out);
@@ -331,6 +333,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 }
                 out.push_str("function ");
                 out.push_str(&f.name);
+                format_type_parameters(&f.type_parameters, out);
                 out.push('(');
                 for (i, p) in f.params.iter().enumerate() {
                     if i > 0 {
@@ -613,7 +616,7 @@ fn format_top_level_item_cx(
             out.push(']');
             if let Some(binding) = &sd.type_binding {
                 out.push_str(" -> ");
-                out.push_str(&binding.name);
+                out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
                 out.push_str("{\n");
@@ -673,7 +676,32 @@ fn format_type(ty: &SparType) -> String {
         SparType::Shell => "shell".to_string(),
         SparType::List(inner) => format!("[{}]", format_type(inner)),
         SparType::Named(name) => name.clone(),
+        SparType::TypeParameter(name) => name.clone(),
+        SparType::Applied { name, arguments } => format!(
+            "{}<{}>",
+            name,
+            arguments
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
+}
+
+fn format_type_parameters(parameters: &[TypeParameter], out: &mut String) {
+    if parameters.is_empty() {
+        return;
+    }
+    out.push('<');
+    out.push_str(
+        &parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    out.push('>');
 }
 
 fn binop_symbol(op: &BinOp) -> &'static str {
@@ -839,8 +867,24 @@ pub(crate) fn format_expr(
             out.push(')');
         }
 
-        Expr::Call { name, args, .. } => {
+        Expr::Call {
+            name,
+            type_arguments,
+            args,
+            ..
+        } => {
             out.push_str(name);
+            if !type_arguments.is_empty() {
+                out.push('<');
+                out.push_str(
+                    &type_arguments
+                        .iter()
+                        .map(format_type)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                out.push('>');
+            }
             out.push('(');
             for (i, arg) in args.iter().enumerate() {
                 if i > 0 {
@@ -1237,6 +1281,17 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
         }
         TypeFieldShape::Named(name) => {
             out.push_str(name);
+            out.push_str(";\n");
+        }
+        TypeFieldShape::TypeParameter(name) => {
+            out.push_str(name);
+            out.push_str(";\n");
+        }
+        TypeFieldShape::Applied { name, arguments } => {
+            out.push_str(&format_type(&SparType::Applied {
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }));
             out.push_str(";\n");
         }
         TypeFieldShape::Section(nested) => {
@@ -1723,6 +1778,25 @@ mod tests {
             fmt("var x: str = greet(name: \"world\");").trim(),
             "var x: str = greet(name: \"world\");"
         );
+    }
+
+    #[test]
+    fn generic_syntax_formats_canonically_and_idempotently() {
+        let source = "type [Pair<T,U,>]{left:T;right:U;};function pair<T,U,>(left:T,right:U)->Pair<T,U>{return {left:left;right:right;};};";
+        let once = fmt(source);
+        assert!(once.contains("type [Pair<T, U>]{"), "{once}");
+        assert!(
+            once.contains("function pair<T, U>(left: T, right: U) -> Pair<T, U>"),
+            "{once}"
+        );
+        assert_eq!(fmt(&once), once);
+    }
+
+    #[test]
+    fn explicit_generic_call_round_trips() {
+        let once = fmt("var value: int = identity<int>(value: 1);");
+        assert!(once.contains("identity<int>(value: 1)"), "{once}");
+        assert_eq!(fmt(&once), once);
     }
 
     #[test]

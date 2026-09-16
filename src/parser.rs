@@ -6,6 +6,7 @@ use crate::token::{SpannedToken, Token};
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    active_type_parameters: Vec<TypeParameter>,
 }
 
 fn statement_span(statement: &Statement) -> Span {
@@ -19,9 +20,30 @@ fn statement_span(statement: &Statement) -> Span {
     }
 }
 
+fn mark_type_parameters(ty: SparType, parameters: &[TypeParameter]) -> SparType {
+    match ty {
+        SparType::Named(name) if parameters.iter().any(|parameter| parameter.name == name) => {
+            SparType::TypeParameter(name)
+        }
+        SparType::List(inner) => SparType::List(Box::new(mark_type_parameters(*inner, parameters))),
+        SparType::Applied { name, arguments } => SparType::Applied {
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| mark_type_parameters(argument, parameters))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            active_type_parameters: Vec::new(),
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -797,17 +819,19 @@ impl Parser {
         self.advance(); // consume the 'type' ident
         self.expect(&Token::LBracket)?;
         let (name, name_span) = self.expect_ident()?;
+        let type_parameters = self.parse_type_parameters()?;
         self.expect(&Token::RBracket)?;
         self.expect(&Token::LBrace)?;
         let mut fields = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            fields.push(self.parse_type_field()?);
+            fields.push(self.parse_type_field(&type_parameters)?);
         }
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Semicolon)?;
         Ok(TypeDecl {
             name,
             name_span,
+            type_parameters,
             exported,
             fields,
             span,
@@ -816,7 +840,10 @@ impl Parser {
 
     /// Parse a single type field: `name: Type;`, `name?: Type;`,
     /// `name: OtherDeclaredType;`, or `name: section = { ... };`.
-    fn parse_type_field(&mut self) -> Result<TypeField, SparError> {
+    fn parse_type_field(
+        &mut self,
+        type_parameters: &[TypeParameter],
+    ) -> Result<TypeField, SparError> {
         let span = self.peek_span();
         let (name, _) = self.expect_ident()?;
 
@@ -828,7 +855,7 @@ impl Parser {
         };
 
         self.expect(&Token::Colon)?;
-        let shape = self.parse_type_field_shape()?;
+        let shape = self.parse_type_field_shape(type_parameters)?;
         self.expect(&Token::Semicolon)?;
         Ok(TypeField {
             name,
@@ -838,27 +865,30 @@ impl Parser {
         })
     }
 
-    fn parse_type_field_shape(&mut self) -> Result<TypeFieldShape, SparError> {
+    fn parse_type_field_shape(
+        &mut self,
+        type_parameters: &[TypeParameter],
+    ) -> Result<TypeFieldShape, SparError> {
         if self.at(&Token::TypeSection) {
             self.advance(); // consume 'section'
             self.expect(&Token::Eq)?;
             self.expect(&Token::LBrace)?;
             let mut nested = Vec::new();
             while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                nested.push(self.parse_type_field()?);
+                nested.push(self.parse_type_field(type_parameters)?);
             }
             self.expect(&Token::RBrace)?;
             Ok(TypeFieldShape::Section(nested))
-        } else if let Token::Ident(name) = self.peek() {
-            // 'str'/'int'/'float'/'bool'/'section' are their own dedicated
-            // tokens (see parse_scalar_type) — any Ident here is
-            // unambiguously a reference to another declared type.
-            let name = name.clone();
-            self.advance();
-            Ok(TypeFieldShape::Named(name))
         } else {
-            let ty = self.parse_type()?;
-            Ok(TypeFieldShape::Primitive(ty))
+            let ty = mark_type_parameters(self.parse_type()?, type_parameters);
+            Ok(match ty {
+                SparType::Named(name) => TypeFieldShape::Named(name),
+                SparType::TypeParameter(name) => TypeFieldShape::TypeParameter(name),
+                SparType::Applied { name, arguments } => {
+                    TypeFieldShape::Applied { name, arguments }
+                }
+                primitive => TypeFieldShape::Primitive(primitive),
+            })
         }
     }
 
@@ -904,9 +934,10 @@ impl Parser {
             return Ok(None);
         }
         self.advance(); // consume '->'
-        let (name, name_span) = self.expect_ident()?;
+        let name_span = self.peek_span();
+        let ty = self.parse_type()?;
         Ok(Some(TypeBinding {
-            name,
+            ty,
             span: name_span,
         }))
     }
@@ -941,6 +972,69 @@ impl Parser {
         self.parse_type()
     }
 
+    fn parse_type_parameters(&mut self) -> Result<Vec<TypeParameter>, SparError> {
+        if !self.at(&Token::Lt) {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        if self.at(&Token::Gt) {
+            return Err(self.error("generic parameter list cannot be empty"));
+        }
+        let mut parameters = Vec::new();
+        loop {
+            let span = self.peek_span();
+            let (name, _) = self.expect_ident()?;
+            parameters.push(TypeParameter { name, span });
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance();
+            if self.at(&Token::Gt) {
+                break;
+            }
+        }
+        self.expect(&Token::Gt)?;
+        Ok(parameters)
+    }
+
+    fn parse_type_arguments_required(&mut self) -> Result<Vec<SparType>, SparError> {
+        self.expect(&Token::Lt)?;
+        if self.at(&Token::Gt) {
+            return Err(self.error("generic argument list cannot be empty"));
+        }
+        let mut arguments = Vec::new();
+        loop {
+            let argument = self.parse_type()?;
+            arguments.push(mark_type_parameters(argument, &self.active_type_parameters));
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance();
+            if self.at(&Token::Gt) {
+                break;
+            }
+        }
+        self.expect(&Token::Gt)?;
+        Ok(arguments)
+    }
+
+    fn try_parse_call_type_arguments(&mut self) -> Result<Option<Vec<SparType>>, SparError> {
+        if !self.at(&Token::Lt) {
+            return Ok(None);
+        }
+        if self.tokens.get(self.pos + 1).map(|token| &token.token) == Some(&Token::Gt) {
+            return Err(self.error("generic argument list cannot be empty"));
+        }
+        let checkpoint = self.pos;
+        match self.parse_type_arguments_required() {
+            Ok(arguments) if self.at(&Token::LParen) => Ok(Some(arguments)),
+            Ok(_) | Err(_) => {
+                self.pos = checkpoint;
+                Ok(None)
+            }
+        }
+    }
+
     fn parse_type(&mut self) -> Result<SparType, SparError> {
         if self.at(&Token::LBracket) {
             self.advance();
@@ -963,6 +1057,17 @@ impl Parser {
             // (inside `type [X]{...}` field shapes).
             let name = name.clone();
             self.advance();
+            if self.at(&Token::Lt) {
+                let arguments = self.parse_type_arguments_required()?;
+                return Ok(SparType::Applied { name, arguments });
+            }
+            if self
+                .active_type_parameters
+                .iter()
+                .any(|parameter| parameter.name == name)
+            {
+                return Ok(SparType::TypeParameter(name));
+            }
             return Ok(SparType::Named(name));
         }
         let ty = match self.peek() {
@@ -1314,11 +1419,15 @@ impl Parser {
         let span = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
 
+        if let Some(type_arguments) = self.try_parse_call_type_arguments()? {
+            return self.parse_user_call(name, name_span, type_arguments);
+        }
+
         if self.at(&Token::LParen) {
             if name == "env" || name == "str" {
                 return self.parse_fn_call(name, span);
             } else {
-                return self.parse_user_call(name, name_span);
+                return self.parse_user_call(name, name_span, Vec::new());
             }
         }
 
@@ -1326,10 +1435,14 @@ impl Parser {
         while self.at(&Token::ColonColon) {
             self.advance();
             let (seg, seg_span) = self.expect_ident()?;
+            if let Some(type_arguments) = self.try_parse_call_type_arguments()? {
+                let qualified = format!("{}::{}", segments.join("::"), seg);
+                return self.parse_user_call(qualified, seg_span, type_arguments);
+            }
             if self.at(&Token::LParen) {
                 // cross-file call: alias::fn(args)
                 let qualified = format!("{}::{}", segments.join("::"), seg);
-                return self.parse_user_call(qualified, seg_span);
+                return self.parse_user_call(qualified, seg_span, Vec::new());
             }
             segments.push(seg);
         }
@@ -1356,7 +1469,12 @@ impl Parser {
         Ok(Expr::FnCall(FnCall { name, args, span }))
     }
 
-    fn parse_user_call(&mut self, name: String, name_span: Span) -> Result<Expr, SparError> {
+    fn parse_user_call(
+        &mut self,
+        name: String,
+        name_span: Span,
+        type_arguments: Vec<SparType>,
+    ) -> Result<Expr, SparError> {
         let span = name_span.clone();
         self.expect(&Token::LParen)?;
         let mut args = Vec::new();
@@ -1379,6 +1497,7 @@ impl Parser {
         Ok(Expr::Call {
             name,
             name_span,
+            type_arguments,
             args,
             span,
         })
@@ -1406,6 +1525,9 @@ impl Parser {
         let span = self.peek_span();
         self.expect(&Token::KwFunction)?;
         let (name, name_span) = self.expect_ident()?;
+        let type_parameters = self.parse_type_parameters()?;
+        let previous_type_parameters =
+            std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         let mut saw_default = false;
@@ -1413,7 +1535,7 @@ impl Parser {
             let param_span = self.peek_span();
             let (param_name, _) = self.expect_ident()?;
             self.expect(&Token::Colon)?;
-            let ty = self.parse_type()?;
+            let ty = mark_type_parameters(self.parse_type()?, &type_parameters);
             let default = if self.at(&Token::Eq) {
                 self.advance();
                 Some(self.parse_expr()?)
@@ -1439,7 +1561,7 @@ impl Parser {
         self.expect(&Token::RParen)?;
         self.expect(&Token::Arrow)?;
         let ret_span = self.peek_span();
-        let ret = self.parse_function_return_type()?;
+        let ret = mark_type_parameters(self.parse_function_return_type()?, &type_parameters);
         self.expect(&Token::LBrace)?;
         let mut stmts = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -1447,9 +1569,11 @@ impl Parser {
         }
         let body_span = self.peek_span();
         self.expect(&Token::RBrace)?;
+        self.active_type_parameters = previous_type_parameters;
         Ok(FunctionDecl {
             name,
             name_span,
+            type_parameters,
             params,
             ret,
             ret_span,

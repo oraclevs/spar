@@ -123,7 +123,7 @@ pub struct SectionEntry {
     /// their shape comes from the enclosing binding's `TypeFieldShape`).
     /// Lets the typechecker resolve a spread source's declared shape
     /// without needing to walk back through the raw `Program` AST.
-    pub type_binding: Option<String>,
+    pub type_binding: Option<SparType>,
     pub span: Span,
 }
 
@@ -144,6 +144,7 @@ pub struct ImportEntry {
 
 #[derive(Debug, Clone)]
 pub struct FunctionEntry {
+    pub type_parameters: Vec<TypeParameter>,
     pub params: Vec<(String, SparType)>,
     pub default_params: HashSet<String>,
     pub ret: SparType,
@@ -154,6 +155,7 @@ pub struct FunctionEntry {
 
 #[derive(Debug, Clone)]
 pub struct TypeEntry {
+    pub type_parameters: Vec<TypeParameter>,
     pub fields: Vec<TypeField>,
     pub exported: bool,
     pub span: Span,
@@ -187,6 +189,7 @@ pub struct SymbolTable {
     pub sections: HashMap<Vec<String>, SectionEntry>,
     pub imports: HashMap<String, ImportEntry>,
     pub functions: HashMap<String, FunctionEntry>,
+    pub imported_functions: HashMap<String, FunctionEntry>,
     pub types: HashMap<String, TypeEntry>,
     pub enums: HashMap<String, EnumEntry>,
     pub function_groups: HashMap<String, FunctionGroupEntry>,
@@ -278,12 +281,141 @@ pub struct Resolver {
     function_groups: HashMap<String, FunctionGroupEntry>,
     tasks: HashMap<String, TaskEntry>,
     loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
+    imported_functions: HashMap<String, FunctionEntry>,
     hosts: crate::host::HostRegistry,
     errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
+    current_type_parameters: Vec<TypeParameter>,
 }
 
 impl Resolver {
+    fn function_entry_for_call(&self, name: &str) -> Option<FunctionEntry> {
+        let segments: Vec<&str> = name.split("::").collect();
+        match segments.as_slice() {
+            [function] => self.functions.get(*function).cloned(),
+            [group, function] => self
+                .function_groups
+                .get(*group)
+                .and_then(|entry| entry.functions.get(*function))
+                .cloned()
+                .or_else(|| self.imported_functions.get(name).cloned()),
+            _ => None,
+        }
+    }
+
+    fn resolve_call_type_arguments(
+        &self,
+        name: &str,
+        arguments: &[SparType],
+        span: &Span,
+    ) -> Result<(), SparError> {
+        for argument in arguments {
+            self.validate_explicit_type_argument(argument, span)?;
+        }
+        if let Some(entry) = self.function_entry_for_call(name) {
+            let arity = entry.type_parameters.len();
+            if arity == 0 && !arguments.is_empty() {
+                return Err(SparError::ResolveError {
+                    message: format!("function '{name}' does not accept type arguments"),
+                    hint: None,
+                    span: span.clone(),
+                });
+            } else if arguments.len() > arity {
+                return Err(SparError::ResolveError {
+                    message: format!(
+                        "function '{name}' accepts at most {arity} type argument{}, found {}",
+                        if arity == 1 { "" } else { "s" },
+                        arguments.len()
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+            return Ok(());
+        }
+
+        let segments: Vec<&str> = name.split("::").collect();
+        if segments.len() == 2
+            && self.hosts.get(segments[0], segments[1]).is_some()
+            && !arguments.is_empty()
+        {
+            return Err(SparError::ResolveError {
+                message: format!("host function '{name}' does not accept type arguments"),
+                hint: None,
+                span: span.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_explicit_type_argument(&self, ty: &SparType, span: &Span) -> Result<(), SparError> {
+        match ty {
+            SparType::TypeParameter(name) => {
+                if self
+                    .current_type_parameters
+                    .iter()
+                    .any(|parameter| parameter.name == *name)
+                {
+                    Ok(())
+                } else {
+                    Err(SparError::ResolveError {
+                        message: format!("unknown type parameter '{name}'"),
+                        hint: None,
+                        span: span.clone(),
+                    })
+                }
+            }
+            SparType::Named(name) => {
+                if self.types.contains_key(name) || self.enums.contains_key(name) {
+                    Ok(())
+                } else {
+                    Err(SparError::ResolveError {
+                        message: format!("undefined type: `{name}` is not declared"),
+                        hint: None,
+                        span: span.clone(),
+                    })
+                }
+            }
+            SparType::Applied { name, arguments } => {
+                let Some(entry) = self.types.get(name) else {
+                    return Err(SparError::ResolveError {
+                        message: format!("undefined type: `{name}` is not declared"),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                };
+                if entry.type_parameters.len() != arguments.len() {
+                    return Err(SparError::ResolveError {
+                        message: format!(
+                            "type '{name}' expects {} type argument{}, found {}",
+                            entry.type_parameters.len(),
+                            if entry.type_parameters.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            },
+                            arguments.len()
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                for argument in arguments {
+                    self.validate_explicit_type_argument(argument, span)?;
+                }
+                Ok(())
+            }
+            SparType::List(inner) => self.validate_explicit_type_argument(inner, span),
+            SparType::Str
+            | SparType::Int
+            | SparType::Float
+            | SparType::Bool
+            | SparType::Section
+            | SparType::Void
+            | SparType::Shell => Ok(()),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             globals: HashMap::new(),
@@ -295,9 +427,11 @@ impl Resolver {
             function_groups: HashMap::new(),
             tasks: HashMap::new(),
             loaded_exports: HashMap::new(),
+            imported_functions: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             errors: Vec::new(),
             current_section: None,
+            current_type_parameters: Vec::new(),
         }
     }
 
@@ -320,9 +454,11 @@ impl Resolver {
             function_groups: HashMap::new(),
             tasks: HashMap::new(),
             loaded_exports: exports,
+            imported_functions: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             errors: Vec::new(),
             current_section: None,
+            current_type_parameters: Vec::new(),
         }
     }
 
@@ -343,6 +479,20 @@ impl Resolver {
                 .trim_end_matches(".spar")
                 .to_string();
             self.loaded_exports.insert(alias, li.exports.clone());
+            for (name, declaration) in &li.functions {
+                let entry = self.build_function_entry(declaration);
+                self.imported_functions.insert(
+                    format!(
+                        "{}::{name}",
+                        li.path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&li.path)
+                            .trim_end_matches(".spar")
+                    ),
+                    entry,
+                );
+            }
         }
         self.register(program);
         self.check_function_group_import_collisions();
@@ -354,6 +504,7 @@ impl Resolver {
                 sections: self.sections,
                 imports: self.imports,
                 functions: self.functions,
+                imported_functions: self.imported_functions,
                 types: self.types,
                 enums: self.enums,
                 function_groups: self.function_groups,
@@ -385,6 +536,13 @@ impl Resolver {
 
         let mut r = Resolver::with_loaded(exports);
         r.hosts = hosts;
+        for (alias, loaded_import) in loaded {
+            for (name, declaration) in &loaded_import.functions {
+                let entry = r.build_function_entry(declaration);
+                r.imported_functions
+                    .insert(format!("{alias}::{name}"), entry);
+            }
+        }
         r.register(program);
         r.check_function_group_import_collisions();
         r.resolve_program(program);
@@ -395,6 +553,7 @@ impl Resolver {
                 sections: r.sections,
                 imports: r.imports,
                 functions: r.functions,
+                imported_functions: r.imported_functions,
                 types: r.types,
                 enums: r.enums,
                 function_groups: r.function_groups,
@@ -548,6 +707,7 @@ impl Resolver {
         self.types.insert(
             decl.name.clone(),
             TypeEntry {
+                type_parameters: decl.type_parameters.clone(),
                 fields: decl.fields.clone(),
                 exported: decl.exported,
                 span: decl.span.clone(),
@@ -615,6 +775,7 @@ impl Resolver {
     /// different maps and different duplicate-detection scopes) and does NOT
     /// insert into any map — callers own that.
     fn build_function_entry(&mut self, decl: &FunctionDecl) -> FunctionEntry {
+        self.validate_type_parameters(&decl.type_parameters);
         if !naming::is_camel_case(&decl.name) {
             self.push_error_hint(
                 format!(
@@ -651,6 +812,7 @@ impl Resolver {
             params.push((param.name.clone(), param.ty.clone()));
         }
         FunctionEntry {
+            type_parameters: decl.type_parameters.clone(),
             params,
             default_params: decl
                 .params
@@ -918,7 +1080,7 @@ impl Resolver {
             decl.path.clone(),
             SectionEntry {
                 fields,
-                type_binding: decl.type_binding.as_ref().map(|b| b.name.clone()),
+                type_binding: decl.type_binding.as_ref().map(|b| b.ty.clone()),
                 exported: decl.exported,
                 private: decl.private,
                 span: decl.span.clone(),
@@ -1063,9 +1225,9 @@ impl Resolver {
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
                 TopLevelItem::Function(f) => {
                     for p in &f.params {
-                        self.check_named_type_exists(&p.ty, &p.span);
+                        self.resolve_type_reference(&p.ty, &f.type_parameters, &p.span);
                     }
-                    self.check_named_type_exists(&f.ret, &f.ret_span);
+                    self.resolve_type_reference(&f.ret, &f.type_parameters, &f.ret_span);
                 } // function BODIES still handled in resolve_function_bodies
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.resolve_type(decl),
@@ -1073,9 +1235,9 @@ impl Resolver {
                 TopLevelItem::FunctionGroup(g) => {
                     for f in &g.functions {
                         for p in &f.params {
-                            self.check_named_type_exists(&p.ty, &p.span);
+                            self.resolve_type_reference(&p.ty, &f.type_parameters, &p.span);
                         }
-                        self.check_named_type_exists(&f.ret, &f.ret_span);
+                        self.resolve_type_reference(&f.ret, &f.type_parameters, &f.ret_span);
                     }
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
@@ -1126,6 +1288,8 @@ impl Resolver {
     /// functionGroup. Returns the computed closure deps; the caller decides
     /// which map to store them in.
     fn resolve_one_function_body(&mut self, f: &FunctionDecl) -> HashSet<DeclId> {
+        let previous_type_parameters =
+            std::mem::replace(&mut self.current_type_parameters, f.type_parameters.clone());
         let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         let mut local_names = param_names.clone();
         let mut mutable_names = HashSet::new();
@@ -1160,6 +1324,7 @@ impl Resolver {
             }
         }
         self.collect_closure_deps_stmts(&f.body.stmts, &param_names, &mut deps);
+        self.current_type_parameters = previous_type_parameters;
         deps
     }
 
@@ -1275,15 +1440,7 @@ impl Resolver {
     fn resolve_section(&mut self, decl: &SectionDecl) {
         let prev_section = self.current_section.replace(decl.path.clone());
         if let Some(binding) = &decl.type_binding {
-            if !self.types.contains_key(&binding.name) {
-                let candidates: Vec<String> = self.types.keys().cloned().collect();
-                let hint = suggest(&binding.name, candidates.iter().map(|s| s.as_str()));
-                self.push_error_hint(
-                    format!("undefined type: `{}` is not declared", binding.name),
-                    hint,
-                    binding.span.clone(),
-                );
-            }
+            self.resolve_type_reference(&binding.ty, &[], &binding.span);
         }
         for item in &decl.items {
             match item {
@@ -1324,31 +1481,132 @@ impl Resolver {
     }
 
     fn resolve_type(&mut self, decl: &TypeDecl) {
-        self.resolve_type_fields(&decl.fields);
+        self.validate_type_parameters(&decl.type_parameters);
+        self.resolve_type_fields(&decl.fields, &decl.type_parameters);
     }
 
-    fn resolve_type_fields(&mut self, fields: &[TypeField]) {
+    fn resolve_type_fields(&mut self, fields: &[TypeField], parameters: &[TypeParameter]) {
         for field in fields {
             match &field.shape {
-                TypeFieldShape::Primitive(_) => {}
-                TypeFieldShape::Named(name) => {
-                    if !self.types.contains_key(name) && !self.enums.contains_key(name) {
-                        let candidates: Vec<String> = self
-                            .types
-                            .keys()
-                            .chain(self.enums.keys())
-                            .cloned()
-                            .collect();
-                        let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
-                        self.push_error_hint(
-                            format!("undefined type: `{name}` is not declared"),
-                            hint,
-                            field.span.clone(),
+                TypeFieldShape::Primitive(ty) => {
+                    self.resolve_type_reference(ty, parameters, &field.span)
+                }
+                TypeFieldShape::Named(name) => self.resolve_type_reference(
+                    &SparType::Named(name.clone()),
+                    parameters,
+                    &field.span,
+                ),
+                TypeFieldShape::TypeParameter(name) => self.resolve_type_reference(
+                    &SparType::TypeParameter(name.clone()),
+                    parameters,
+                    &field.span,
+                ),
+                TypeFieldShape::Applied { name, arguments } => self.resolve_type_reference(
+                    &SparType::Applied {
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                    parameters,
+                    &field.span,
+                ),
+                TypeFieldShape::Section(nested) => self.resolve_type_fields(nested, parameters),
+            }
+        }
+    }
+
+    fn validate_type_parameters(&mut self, parameters: &[TypeParameter]) {
+        let mut seen = HashSet::new();
+        for parameter in parameters {
+            if !naming::is_pascal_case(&parameter.name) {
+                self.push_error_hint(
+                    format!("type parameter '{}' must be PascalCase", parameter.name),
+                    Some(naming::pascal_case_hint(&parameter.name)),
+                    parameter.span.clone(),
+                );
+            }
+            if !seen.insert(parameter.name.as_str()) {
+                self.push_error(
+                    format!("duplicate type parameter '{}'", parameter.name),
+                    parameter.span.clone(),
+                );
+            }
+        }
+    }
+
+    fn resolve_type_reference(&mut self, ty: &SparType, parameters: &[TypeParameter], span: &Span) {
+        match ty {
+            SparType::TypeParameter(name) => {
+                if !parameters.iter().any(|parameter| parameter.name == *name) {
+                    self.push_error(format!("unknown type parameter '{name}'"), span.clone());
+                }
+            }
+            SparType::Named(name) => {
+                if let Some(entry) = self.types.get(name) {
+                    if !entry.type_parameters.is_empty() {
+                        self.push_error(
+                            format!(
+                                "type '{name}' expects {} type argument{}",
+                                entry.type_parameters.len(),
+                                if entry.type_parameters.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            ),
+                            span.clone(),
                         );
                     }
+                } else if !self.enums.contains_key(name) {
+                    let candidates: Vec<String> = self
+                        .types
+                        .keys()
+                        .chain(self.enums.keys())
+                        .cloned()
+                        .collect();
+                    let hint = suggest(name, candidates.iter().map(|candidate| candidate.as_str()));
+                    self.push_error_hint(
+                        format!("undefined type: `{name}` is not declared"),
+                        hint,
+                        span.clone(),
+                    );
                 }
-                TypeFieldShape::Section(nested) => self.resolve_type_fields(nested),
             }
+            SparType::Applied { name, arguments } => {
+                if let Some(entry) = self.types.get(name) {
+                    let expected = entry.type_parameters.len();
+                    if expected != arguments.len() {
+                        self.push_error(
+                            format!(
+                                "type '{name}' expects {expected} type argument{}, found {}",
+                                if expected == 1 { "" } else { "s" },
+                                arguments.len()
+                            ),
+                            span.clone(),
+                        );
+                    }
+                } else if self.enums.contains_key(name) {
+                    self.push_error(
+                        format!("type '{name}' does not accept type arguments"),
+                        span.clone(),
+                    );
+                } else {
+                    self.push_error(
+                        format!("undefined type: `{name}` is not declared"),
+                        span.clone(),
+                    );
+                }
+                for argument in arguments {
+                    self.resolve_type_reference(argument, parameters, span);
+                }
+            }
+            SparType::List(inner) => self.resolve_type_reference(inner, parameters, span),
+            SparType::Str
+            | SparType::Int
+            | SparType::Float
+            | SparType::Bool
+            | SparType::Section
+            | SparType::Void
+            | SparType::Shell => {}
         }
     }
 
@@ -1357,26 +1615,7 @@ impl Resolver {
     /// `SparType` variant. Mirrors the "undefined type" error
     /// `resolve_type_fields` already raises for `TypeFieldShape::Named`.
     fn check_named_type_exists(&mut self, ty: &SparType, span: &Span) {
-        match ty {
-            SparType::Named(name) => {
-                if !self.types.contains_key(name) && !self.enums.contains_key(name) {
-                    let candidates: Vec<String> = self
-                        .types
-                        .keys()
-                        .chain(self.enums.keys())
-                        .cloned()
-                        .collect();
-                    let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
-                    self.push_error_hint(
-                        format!("undefined type: `{}` is not declared", name),
-                        hint,
-                        span.clone(),
-                    );
-                }
-            }
-            SparType::List(inner) => self.check_named_type_exists(inner, span),
-            _ => {}
-        }
+        self.resolve_type_reference(ty, &[], span);
     }
 
     fn resolve_expr(&mut self, expr: &Expr) {
@@ -1412,9 +1651,15 @@ impl Resolver {
             Expr::Call {
                 name,
                 name_span,
+                type_arguments,
                 args,
                 ..
             } => {
+                if let Err(error) =
+                    self.resolve_call_type_arguments(name, type_arguments, name_span)
+                {
+                    self.errors.push(error);
+                }
                 let segments: Vec<&str> = name.split("::").collect();
                 match segments.len() {
                     3 => {
@@ -2055,9 +2300,11 @@ impl Resolver {
             Expr::Call {
                 name,
                 name_span,
+                type_arguments,
                 args,
                 ..
             } => {
+                self.resolve_call_type_arguments(name, type_arguments, name_span)?;
                 let segments: Vec<&str> = name.split("::").collect();
                 match segments.len() {
                     3 => {

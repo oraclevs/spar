@@ -293,6 +293,8 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         SparType::List(_)
         | SparType::Section
         | SparType::Named(_)
+        | SparType::TypeParameter(_)
+        | SparType::Applied { .. }
         | SparType::Void
         | SparType::Shell => ScalarKind::Str,
     }

@@ -16,6 +16,78 @@ fn parse_err(src: &str) -> String {
 }
 
 #[test]
+fn parses_generic_function_type_and_explicit_call() {
+    use crate::ast::{Expr, SparType, TopLevelItem, TypeFieldShape};
+
+    let program = parse_ok(
+        "type [Pair<T, U>] { left: T; right: U; }; \
+         function identity<T>(value: T) -> T { return value; }; \
+         var answer: int = identity<int>(value: 7);",
+    );
+
+    let TopLevelItem::Type(pair) = &program.items[0] else {
+        panic!("expected generic type")
+    };
+    assert_eq!(
+        pair.type_parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>(),
+        ["T", "U"]
+    );
+    assert!(matches!(pair.fields[0].shape, TypeFieldShape::TypeParameter(ref name) if name == "T"));
+
+    let TopLevelItem::Function(identity) = &program.items[1] else {
+        panic!("expected generic function")
+    };
+    assert_eq!(identity.type_parameters[0].name, "T");
+    assert_eq!(identity.params[0].ty, SparType::TypeParameter("T".into()));
+    assert_eq!(identity.ret, SparType::TypeParameter("T".into()));
+
+    let TopLevelItem::Var(answer) = &program.items[2] else {
+        panic!("expected variable")
+    };
+    let Some(Expr::Call { type_arguments, .. }) = &answer.value else {
+        panic!("expected explicit generic call")
+    };
+    assert_eq!(type_arguments, &[SparType::Int]);
+}
+
+#[test]
+fn nested_applied_types_and_comparisons_are_unambiguous() {
+    use crate::ast::{BinOp, Expr, SparType, TopLevelItem};
+
+    let program = parse_ok(
+        "function wrap<T>(value: T) -> Box<Pair<T, str>> { return { value: value; }; }; \
+         var less: bool = 1 < 2; var greater: bool = 3 > 2;",
+    );
+    let TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function")
+    };
+    assert!(matches!(
+        function.ret,
+        SparType::Applied { ref name, ref arguments }
+            if name == "Box" && matches!(arguments.as_slice(), [SparType::Applied { name, .. }] if name == "Pair")
+    ));
+    let TopLevelItem::Var(less) = &program.items[1] else {
+        panic!()
+    };
+    assert!(matches!(less.value, Some(Expr::BinaryOp(ref op)) if op.op == BinOp::Lt));
+    let TopLevelItem::Var(greater) = &program.items[2] else {
+        panic!()
+    };
+    assert!(matches!(greater.value, Some(Expr::BinaryOp(ref op)) if op.op == BinOp::Gt));
+}
+
+#[test]
+fn empty_generic_parameter_list_is_rejected() {
+    assert!(
+        parse_err("function identity<>(value: int) -> int { return value; };")
+            .contains("generic parameter list cannot be empty")
+    );
+}
+
+#[test]
 fn parse_function_decl_str_return() {
     let src = r#"
         function greet(name: str) -> str {
@@ -708,7 +780,10 @@ fn parse_section_with_type_binding() {
     match &prog.items[1] {
         crate::ast::TopLevelItem::Section(s) => {
             let binding = s.type_binding.as_ref().expect("expected a type_binding");
-            assert_eq!(binding.name, "PostgresType");
+            assert_eq!(
+                binding.ty,
+                crate::ast::SparType::Named("PostgresType".into())
+            );
         }
         other => panic!("expected TopLevelItem::Section, got {:?}", other),
     }

@@ -181,6 +181,7 @@ pub struct EnumDecl {
 pub struct TypeDecl {
     pub name: String,
     pub name_span: Span,
+    pub type_parameters: Vec<TypeParameter>,
     pub exported: bool,
     pub fields: Vec<TypeField>,
     pub span: Span,
@@ -198,11 +199,22 @@ pub struct TypeField {
 pub enum TypeFieldShape {
     Primitive(SparType),
     Named(String),
+    TypeParameter(String),
+    Applied {
+        name: String,
+        arguments: Vec<SparType>,
+    },
     Section(Vec<TypeField>),
 }
 
 #[derive(Debug, Clone)]
 pub struct TypeBinding {
+    pub ty: SparType,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParameter {
     pub name: String,
     pub span: Span,
 }
@@ -341,6 +353,11 @@ pub enum SparType {
     Shell,
     List(Box<SparType>),
     Named(String), // a declared `type [X]{...}`, referenced by name
+    TypeParameter(String),
+    Applied {
+        name: String,
+        arguments: Vec<SparType>,
+    },
 }
 
 /// The right-hand side of a field declaration.
@@ -367,6 +384,7 @@ pub enum Expr {
     Call {
         name: String,
         name_span: Span,
+        type_arguments: Vec<SparType>,
         args: Vec<CallArg>,
         span: Span,
     },
@@ -480,6 +498,7 @@ pub struct CallArg {
 pub struct FunctionDecl {
     pub name: String,
     pub name_span: Span,
+    pub type_parameters: Vec<TypeParameter>,
     pub params: Vec<Param>,
     pub ret: SparType,
     pub ret_span: Span,

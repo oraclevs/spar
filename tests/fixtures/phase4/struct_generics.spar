@@ -1,0 +1,24 @@
+type Pair<T, V> {
+    left: T;
+    right: V;
+};
+
+type Container<T> {
+    values: List<T>;
+};
+
+struct Example: Pair<str, int> {
+    left = "hello";
+    right = 42;
+};
+
+struct Names: Container<str> {
+    values = ["a", "b"];
+};
+
+function main() -> int {
+    if Example.left == "hello" {
+        return Example.right;
+    }
+    return 1;
+};

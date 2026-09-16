@@ -111,6 +111,21 @@ fn canonical_structs_conform_to_generic_types_and_lists() {
 }
 
 #[test]
+fn structural_type_defaults_are_checked_and_satisfy_required_fields() {
+    check_ok(
+        r#"
+        type ServerConfig { host: str = "localhost"; port: int = 8080; debug: bool = false; };
+        struct Development: ServerConfig { debug = true; };
+        "#,
+    );
+    let error = check_err(
+        r#"type ServerConfig { port: int = "wrong"; }; struct Development: ServerConfig { };"#,
+    );
+    assert!(error.contains("port"), "{error}");
+    assert!(error.contains("int"), "{error}");
+}
+
+#[test]
 fn caught_error_binding_has_error_fields_and_ignored_catch_is_valid() {
     check_ok(
         r#"

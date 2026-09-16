@@ -1,0 +1,12 @@
+function main() -> int {
+    try {
+        var broken: int = 1 / 0;
+    } catch err {
+        var message: str = err.message;
+        if err.kind == "runtime" {
+            return 7;
+        }
+        return 1;
+    }
+    return 0;
+};

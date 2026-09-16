@@ -1001,6 +1001,12 @@ impl Parser {
         let span = self.peek_span();
         self.expect(&Token::KwStruct)?;
         let (name, _) = self.expect_ident()?;
+        if self.at(&Token::Lt) {
+            return Err(self.error(
+                "structs are concrete values and cannot declare type parameters; \
+                 declare a generic `type` and instantiate it from the struct",
+            ));
+        }
         let type_binding = if self.at(&Token::Colon) {
             self.advance();
             let type_span = self.peek_span();

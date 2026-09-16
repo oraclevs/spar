@@ -1421,3 +1421,13 @@ fn parses_legacy_sections_and_list_types_to_compatibility_nodes() {
     };
     assert_eq!(field.ty, Some(SparType::List(Box::new(SparType::Int))));
 }
+
+#[test]
+fn rejects_generic_struct_declarations_with_actionable_message() {
+    let error = parse_err("struct BoxValue<T> { value: T; };");
+    assert!(
+        error.contains("structs are concrete values and cannot declare type parameters"),
+        "{error}"
+    );
+    assert!(error.contains("generic `type`"), "{error}");
+}

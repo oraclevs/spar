@@ -1,6 +1,5 @@
 task [Build] {
     default: true;
-
     run {
         echo "build";
     };
@@ -8,7 +7,6 @@ task [Build] {
 
 task [Deploy] {
     default: true;
-
     run {
         echo "deploy";
     };

@@ -1,6 +1,5 @@
 task [Fails] {
     default: true;
-
     run {
         false;
     };

@@ -62,6 +62,7 @@ pub(crate) enum TypedOperation {
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
+#[derive(Clone)]
 pub(crate) enum CompiledExpression {
     Constant(crate::ConfigValue, Span),
     Local(LocalSlot, Span),
@@ -111,6 +112,7 @@ pub(crate) enum CompiledExpression {
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
+#[derive(Clone)]
 pub(crate) enum CompiledObjectItem {
     Field {
         name: String,
@@ -120,12 +122,14 @@ pub(crate) enum CompiledObjectItem {
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
+#[derive(Clone)]
 pub(crate) enum CompiledStringPart {
     Literal(String),
     Expression(CompiledExpression),
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
+#[derive(Clone)]
 pub(crate) enum CompiledStatement {
     StoreLocal {
         slot: LocalSlot,

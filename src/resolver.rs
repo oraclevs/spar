@@ -2204,7 +2204,29 @@ impl Resolver {
                         allow_exec_shell,
                     );
                 }
-                FuncStmt::Try(_) => {}
+                FuncStmt::Try(statement) => {
+                    let mut body_scope = local_names.clone();
+                    let mut body_mutable = mutable_names.clone();
+                    self.resolve_func_stmts(
+                        &statement.body,
+                        &mut body_scope,
+                        &mut body_mutable,
+                        loop_depth,
+                        allow_exec_shell,
+                    );
+                    let mut catch_scope = local_names.clone();
+                    let mut catch_mutable = mutable_names.clone();
+                    if let Some(name) = &statement.catch_name {
+                        catch_scope.insert(name.clone());
+                    }
+                    self.resolve_func_stmts(
+                        &statement.handler,
+                        &mut catch_scope,
+                        &mut catch_mutable,
+                        loop_depth,
+                        allow_exec_shell,
+                    );
+                }
                 FuncStmt::If(if_stmt) => {
                     self.reject_module_exec_shell(&if_stmt.condition, allow_exec_shell);
                     if let Err(e) = self.resolve_expr_with_locals(&if_stmt.condition, local_names) {

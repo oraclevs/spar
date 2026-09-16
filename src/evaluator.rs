@@ -1686,9 +1686,16 @@ fn lower_shell_command(command: &ShellCommandExpr) -> spar_command::CommandPlan 
     spar_command::CommandPlan {
         program: command.program.text.clone(),
         args: command.args.iter().map(|word| word.text.clone()).collect(),
-        env: Vec::new(),
+        env: command
+            .environment
+            .iter()
+            .map(|entry| spar_command::EnvironmentOverride {
+                key: entry.name.clone(),
+                value: entry.value.clone(),
+            })
+            .collect(),
         cwd: None,
-        stdin: None,
+        stdin: command.stdin.as_ref().map(lower_shell_redirect),
         stdout: command.stdout.as_ref().map(lower_shell_redirect),
         stderr: command.stderr.as_ref().map(lower_shell_redirect),
     }
@@ -1708,38 +1715,19 @@ pub struct ShellPlanOutcome {
 }
 
 pub fn execute_shell_plan(plan: &spar_command::ShellPlan) -> std::io::Result<ShellPlanOutcome> {
-    let mut outcome = ShellPlanOutcome {
-        success: true,
-        exit_code: 0,
-    };
     let options = spar_process::ExecutionOptions::default();
+    execute_shell_plan_with_options(plan, &options)
+}
 
-    for (join, step) in &plan.steps {
-        let should_run = match join {
-            spar_command::Join::Always => true,
-            spar_command::Join::OnSuccess => outcome.success,
-            spar_command::Join::OnFailure => !outcome.success,
-        };
-        if !should_run {
-            continue;
-        }
-
-        let command_output = match step {
-            spar_command::Step::Command(command) => spar_process::run_command(command, &options)?,
-            spar_command::Step::Pipeline(pipeline) => {
-                spar_process::run_pipeline(pipeline, &options)?
-            }
-        };
-        outcome = ShellPlanOutcome {
-            success: command_output.status.success,
-            exit_code: command_output
-                .status
-                .code
-                .unwrap_or(if command_output.status.success { 0 } else { 1 }),
-        };
-    }
-
-    Ok(outcome)
+pub fn execute_shell_plan_with_options(
+    plan: &spar_command::ShellPlan,
+    options: &spar_process::ExecutionOptions,
+) -> std::io::Result<ShellPlanOutcome> {
+    let mut executor = spar_process::ExternalExecutor::new(options);
+    spar_process::run_plan(plan, &mut executor).map(|outcome| ShellPlanOutcome {
+        success: outcome.success,
+        exit_code: outcome.exit_code,
+    })
 }
 
 // ── Function call evaluation ──────────────────────────────────────────────────

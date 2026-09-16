@@ -139,10 +139,19 @@ pub enum ShellStep {
 
 #[derive(Debug, Clone)]
 pub struct ShellCommandExpr {
+    pub environment: Vec<ShellEnvironmentEntry>,
     pub program: ShellWord,
     pub args: Vec<ShellWord>,
+    pub stdin: Option<ShellRedirect>,
     pub stdout: Option<ShellRedirect>,
     pub stderr: Option<ShellRedirect>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellEnvironmentEntry {
+    pub name: String,
+    pub value: String,
     pub span: Span,
 }
 

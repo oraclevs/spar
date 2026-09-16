@@ -3091,7 +3091,7 @@ mod tests {
         let src = "var x: section;";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         match crate::parser::Parser::new(tokens).parse() {
-            Err(_) => return, // parser rejection is fine
+            Err(_) => (), // parser rejection is fine
             Ok(program) => {
                 let symbols = crate::resolver::Resolver::new()
                     .resolve(&program, &[])
@@ -3119,7 +3119,7 @@ mod tests {
         // But if parse succeeds, type checker must catch it
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         match crate::parser::Parser::new(tokens).parse() {
-            Err(_) => return, // parse rejection is fine
+            Err(_) => (), // parse rejection is fine
             Ok(program) => {
                 let symbols = crate::resolver::Resolver::new()
                     .resolve(&program, &[])

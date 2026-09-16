@@ -558,8 +558,8 @@ fn parses_optional_schema_field() {
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
         crate::ast::TopLevelItem::SchemaSection(s) => {
-            assert_eq!(s.fields[0].optional, false);
-            assert_eq!(s.fields[1].optional, true);
+            assert!(!s.fields[0].optional);
+            assert!(s.fields[1].optional);
         }
         _ => panic!("expected SchemaSection"),
     }

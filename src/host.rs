@@ -174,6 +174,22 @@ impl HostRegistry {
     }
 }
 
+impl std::fmt::Debug for HostRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut names: Vec<&(String, String)> = self.functions.keys().collect();
+        names.sort();
+        f.debug_struct("HostRegistry")
+            .field(
+                "functions",
+                &names
+                    .iter()
+                    .map(|(ns, name)| format!("{ns}::{name}"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,21 +248,5 @@ mod tests {
                 .unwrap(),
             ConfigValue::Int(42)
         );
-    }
-}
-
-impl std::fmt::Debug for HostRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut names: Vec<&(String, String)> = self.functions.keys().collect();
-        names.sort();
-        f.debug_struct("HostRegistry")
-            .field(
-                "functions",
-                &names
-                    .iter()
-                    .map(|(ns, name)| format!("{ns}::{name}"))
-                    .collect::<Vec<_>>(),
-            )
-            .finish()
     }
 }

@@ -1,4 +1,7 @@
-use crate::ast::{ShellCommandExpr, ShellExpr, ShellJoin, ShellRedirect, ShellStep, ShellWord};
+use crate::ast::{
+    ShellCommandExpr, ShellEnvironmentEntry, ShellExpr, ShellJoin, ShellRedirect, ShellStep,
+    ShellWord,
+};
 use crate::error::{Span, SparError};
 use crate::token::{SpannedToken, Token};
 use spar_command::RedirectMode;
@@ -95,20 +98,37 @@ impl<'a> BodyParser<'a> {
 
     fn parse(mut self) -> Result<Vec<(ShellJoin, ShellStep)>, SparError> {
         let mut steps = Vec::new();
+        let mut join = ShellJoin::Always;
         while self.pos < self.tokens.len() {
-            if self.at(&Token::Semicolon) {
-                return Err(self.error("expected a command before ';'"));
+            if self.at(&Token::Semicolon) || self.at(&Token::AndAnd) || self.at(&Token::OrOr) {
+                return Err(self.error("expected a command before control operator"));
             }
             let step = self.parse_pipeline()?;
-            let join = if steps.is_empty() {
-                ShellJoin::Always
-            } else {
-                ShellJoin::OnSuccess
-            };
             steps.push((join, step));
 
-            if self.pos < self.tokens.len() {
-                self.expect(&Token::Semicolon)?;
+            if self.pos == self.tokens.len() {
+                break;
+            }
+            let separator = self.advance().clone();
+            join = match separator.token {
+                Token::Semicolon => ShellJoin::OnSuccess,
+                Token::AndAnd => ShellJoin::OnSuccess,
+                Token::OrOr => ShellJoin::OnFailure,
+                token => {
+                    return Err(parse_error(
+                        format!("unexpected {} after command", token.human_name()),
+                        separator.span,
+                    ));
+                }
+            };
+            if self.pos == self.tokens.len() {
+                if separator.token == Token::Semicolon {
+                    break;
+                }
+                return Err(parse_error(
+                    format!("expected a command after {}", separator.token.human_name()),
+                    separator.span,
+                ));
             }
         }
         Ok(steps)
@@ -128,14 +148,63 @@ impl<'a> BodyParser<'a> {
                 commands.pop().expect("one command"),
             )))
         } else {
+            if commands
+                .iter()
+                .skip(1)
+                .any(|command| command.stdin.is_some())
+            {
+                return Err(self.error("pipeline input already comes from previous stage"));
+            }
             Ok(ShellStep::Pipeline(commands))
         }
     }
 
     fn parse_command(&mut self) -> Result<ShellCommandExpr, SparError> {
+        let mut environment = Vec::new();
+        while let Some(Token::ShellWord(text)) = self.tokens.get(self.pos).map(|token| &token.token)
+        {
+            let Some((name, value)) = text.split_once('=') else {
+                break;
+            };
+            let token = self.tokens[self.pos].clone();
+            if !valid_environment_name(name) {
+                return Err(parse_error(
+                    format!("invalid environment assignment: `{text}`"),
+                    token.span,
+                ));
+            }
+            self.pos += 1;
+            environment.push(ShellEnvironmentEntry {
+                name: name.to_string(),
+                value: value.to_string(),
+                span: token.span,
+            });
+        }
+        if self.pos == self.tokens.len()
+            || self.at(&Token::Semicolon)
+            || self.at(&Token::AndAnd)
+            || self.at(&Token::OrOr)
+            || self.at(&Token::ShellPipe)
+        {
+            let assignment = environment
+                .first()
+                .map(|entry| format!("{}={}", entry.name, entry.value))
+                .unwrap_or_default();
+            let variable = environment
+                .first()
+                .map(|entry| entry.name.to_ascii_lowercase())
+                .unwrap_or_else(|| "name".to_string());
+            return Err(self.error(format!(
+                "environment assignment requires a command; use `export {assignment}` or Spar `var {variable}: str = \"...\";`"
+            )));
+        }
         let program = self.expect_word("expected an executable name")?;
-        let start_span = program.span.clone();
+        let start_span = environment
+            .first()
+            .map(|entry| entry.span.clone())
+            .unwrap_or_else(|| program.span.clone());
         let mut args = Vec::new();
+        let mut stdin = None;
         let mut stdout = None;
         let mut stderr = None;
         let mut end_span = start_span.clone();
@@ -143,6 +212,8 @@ impl<'a> BodyParser<'a> {
         while self.pos < self.tokens.len()
             && !self.at(&Token::Semicolon)
             && !self.at(&Token::ShellPipe)
+            && !self.at(&Token::AndAnd)
+            && !self.at(&Token::OrOr)
         {
             match self.peek() {
                 Token::ShellWord(_) => {
@@ -150,7 +221,7 @@ impl<'a> BodyParser<'a> {
                     end_span = word.span.clone();
                     args.push(word);
                 }
-                Token::Gt | Token::ShellRedirectAppend | Token::ShellRedirectStderr => {
+                Token::Lt | Token::Gt | Token::ShellRedirectAppend | Token::ShellRedirectStderr => {
                     let operator = self.advance().clone();
                     let target = self.expect_word("expected a redirect target")?;
                     end_span = target.span.clone();
@@ -163,7 +234,14 @@ impl<'a> BodyParser<'a> {
                         },
                         span: joined_span(&operator.span, &end_span),
                     };
-                    if operator.token == Token::ShellRedirectStderr {
+                    if operator.token == Token::Lt {
+                        if stdin.replace(redirect).is_some() {
+                            return Err(parse_error(
+                                "stdin may only be redirected once per command",
+                                operator.span,
+                            ));
+                        }
+                    } else if operator.token == Token::ShellRedirectStderr {
                         if stderr.replace(redirect).is_some() {
                             return Err(parse_error(
                                 "stderr may only be redirected once per command",
@@ -187,8 +265,10 @@ impl<'a> BodyParser<'a> {
         }
 
         Ok(ShellCommandExpr {
+            environment,
             program,
             args,
+            stdin,
             stdout,
             stderr,
             span: joined_span(&start_span, &end_span),
@@ -209,22 +289,6 @@ impl<'a> BodyParser<'a> {
         let token = &self.tokens[self.pos];
         self.pos += 1;
         token
-    }
-
-    fn expect(&mut self, expected: &Token) -> Result<(), SparError> {
-        if self.at(expected) {
-            self.pos += 1;
-            Ok(())
-        } else {
-            Err(self.error(format!(
-                "expected {}, found {}",
-                expected.human_name(),
-                self.tokens
-                    .get(self.pos)
-                    .map(|token| token.token.human_name())
-                    .unwrap_or("end of shell block")
-            )))
-        }
     }
 
     fn expect_word(&mut self, message: &str) -> Result<ShellWord, SparError> {
@@ -250,6 +314,15 @@ impl<'a> BodyParser<'a> {
             .unwrap_or_else(Span::dummy);
         parse_error(message, span)
     }
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 fn joined_span(start: &Span, end: &Span) -> Span {

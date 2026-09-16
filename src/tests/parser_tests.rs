@@ -1332,3 +1332,21 @@ fn parse_dot_after_index_and_index_after_dot() {
     };
     assert!(matches!(source.as_ref(), crate::ast::Expr::FieldAccess { field, .. } if field == "b"));
 }
+
+#[test]
+fn parses_try_catch_with_binding() {
+    let program =
+        parse_ok("function main() -> int { try { return 1; } catch error { return 7; } };");
+    let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!()
+    };
+    assert!(matches!(
+        function.body.stmts[0],
+        crate::ast::FuncStmt::Try(_)
+    ));
+}
+
+#[test]
+fn rejects_malformed_try_catch() {
+    parse_err("function f() -> void { try { return; } catch { return; } };");
+}

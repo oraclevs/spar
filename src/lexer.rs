@@ -1383,6 +1383,8 @@ mod tests {
             ("in", Token::KwIn),
             ("break", Token::KwBreak),
             ("continue", Token::KwContinue),
+            ("try", Token::KwTry),
+            ("catch", Token::KwCatch),
         ];
         for (src, expected) in cases {
             let tokens = Lexer::new(src).tokenize().unwrap();

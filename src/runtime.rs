@@ -265,6 +265,24 @@ impl Runtime<'_> {
                 }),
                 CompiledStatement::Break(_) => RuntimeFlow::Break,
                 CompiledStatement::Continue(_) => RuntimeFlow::Continue,
+                CompiledStatement::Try {
+                    body,
+                    catch_slot,
+                    handler,
+                    span,
+                } => match self.execute_statements(body, frame, module) {
+                    Ok(flow) => flow,
+                    Err(error) => {
+                        let caught = ConfigValue::Error {
+                            message: error.to_string(),
+                            kind: "runtime".into(),
+                            code: 1,
+                            cause: None,
+                        };
+                        frame.write(*catch_slot, caught, span)?;
+                        self.execute_statements(handler, frame, module)?
+                    }
+                },
             };
             if !matches!(flow, RuntimeFlow::Normal) {
                 return Ok(flow);

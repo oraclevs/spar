@@ -6,6 +6,7 @@ use crate::compiler::Compiler;
 use crate::compiler::{Compilation, CompileOptions};
 use crate::error::{Span, SparError};
 use crate::loader::LoadedImport;
+use crate::lowerer::allocate_local_layout;
 use crate::resolver::SymbolTable;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -13,6 +14,16 @@ pub struct ModuleId(pub(crate) u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub(crate) u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LocalSlot(pub(crate) u32);
+
+pub(crate) struct LocalLayout {
+    pub parameter_slots: Vec<LocalSlot>,
+    pub names: Vec<String>,
+    #[allow(dead_code)] // Consumed by typed expression lowering in the next task.
+    pub types: Vec<crate::ast::SparType>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FunctionKey {
@@ -33,6 +44,16 @@ pub(crate) struct CompiledFunction {
     pub id: FunctionId,
     pub key: FunctionKey,
     pub name: String,
+    pub parameter_slots: Vec<LocalSlot>,
+    pub slot_count: usize,
+    pub local_layout: LocalLayout,
+}
+
+impl CompiledFunction {
+    #[cfg(test)]
+    pub(crate) fn debug_slot_names(&self) -> Vec<&str> {
+        self.local_layout.names.iter().map(String::as_str).collect()
+    }
 }
 
 #[allow(dead_code)] // Graph fields become active when imports are lowered.
@@ -177,7 +198,7 @@ impl ModuleGraphBuilder {
 
         let id = ModuleId(self.modules.len() as u32);
         self.identities.insert(cache_identity, id);
-        let functions = self.compile_function_headers(id, &checked.program);
+        let functions = self.compile_function_headers(id, &checked.program, &checked.symbols);
         let mut imports: Vec<(String, PathBuf)> = checked
             .imports
             .iter()
@@ -231,19 +252,21 @@ impl ModuleGraphBuilder {
         &mut self,
         module: ModuleId,
         program: &Program,
+        symbols: &SymbolTable,
     ) -> Vec<CompiledFunction> {
         let mut functions = Vec::new();
         for item in &program.items {
             match item {
                 TopLevelItem::Function(function) => {
-                    functions.push(self.function_header(module, None, &function.name));
+                    functions.push(self.function_header(module, None, function, symbols));
                 }
                 TopLevelItem::FunctionGroup(group) => {
                     for function in &group.functions {
                         functions.push(self.function_header(
                             module,
                             Some(group.name.clone()),
-                            &function.name,
+                            function,
+                            symbols,
                         ));
                     }
                 }
@@ -257,18 +280,23 @@ impl ModuleGraphBuilder {
         &mut self,
         module: ModuleId,
         group: Option<String>,
-        name: &str,
+        function: &crate::ast::FunctionDecl,
+        symbols: &SymbolTable,
     ) -> CompiledFunction {
         let id = FunctionId(self.next_function);
         self.next_function += 1;
+        let local_layout = allocate_local_layout(function, symbols);
         CompiledFunction {
             id,
             key: FunctionKey {
                 module,
                 group,
-                name: name.to_string(),
+                name: function.name.clone(),
             },
-            name: name.to_string(),
+            name: function.name.clone(),
+            parameter_slots: local_layout.parameter_slots.clone(),
+            slot_count: local_layout.names.len(),
+            local_layout,
         }
     }
 }

@@ -18,6 +18,20 @@ pub fn display_type(ty: &SparType) -> String {
     }
 }
 
+pub(crate) fn infer_expression_with_locals(
+    expr: &Expr,
+    symbols: &SymbolTable,
+    locals: &HashMap<String, SparType>,
+) -> Option<SparType> {
+    TypeChecker {
+        symbols,
+        errors: Vec::new(),
+        schema_bindings: HashMap::new(),
+        current_section: None,
+    }
+    .infer_type_with_locals(expr, locals)
+}
+
 /// A `TypeFieldShape` expanded one level — `Named(X)` resolved to `X`'s own
 /// fields, so shape comparison only ever has to handle two cases.
 enum ShapeKind {

@@ -1548,11 +1548,15 @@ impl<'a> TypeChecker<'a> {
             }
         }
         let base_ty = self.infer_type(base)?;
+        self.infer_field_access_from_type(&base_ty, field)
+    }
+
+    fn infer_field_access_from_type(&self, base_ty: &SparType, field: &str) -> Option<SparType> {
         match base_ty {
             SparType::Named(type_name) => self
                 .symbols
                 .types
-                .get(&type_name)
+                .get(type_name)
                 .and_then(|te| te.fields.iter().find(|f| f.name == field))
                 .map(|f| self.field_shape_to_type(&f.shape)),
             applied @ SparType::Applied { .. } => self
@@ -3149,7 +3153,8 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                 }
-                self.infer_field_access(base, field)
+                let base_ty = self.infer_type_with_locals(base, locals)?;
+                self.infer_field_access_from_type(&base_ty, field)
             }
             Expr::Call {
                 name,

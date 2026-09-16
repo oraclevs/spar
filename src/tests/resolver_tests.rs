@@ -16,6 +16,54 @@ fn resolve_err(src: &str) -> String {
 }
 
 #[test]
+fn generic_type_parameters_are_lexical_and_have_arity() {
+    resolve_ok(
+        "type [Box<T>] { value: T; }; function unbox<T>(value: Box<T>) -> T { return value.value; };",
+    );
+
+    let duplicate = resolve_err("function bad<T, T>(value: T) -> T { return value; };");
+    assert!(
+        duplicate.contains("duplicate type parameter 'T'"),
+        "{duplicate}"
+    );
+
+    let bare = resolve_err("type [Box<T>] { value: T; }; var value: Box = { value: 1; };");
+    assert!(bare.contains("expects 1 type argument"), "{bare}");
+
+    let excess =
+        resolve_err("type [Box<T>] { value: T; }; var value: Box<int, str> = { value: 1; };");
+    assert!(excess.contains("expects 1 type argument"), "{excess}");
+}
+
+#[test]
+fn generic_call_type_argument_arity_is_resolved() {
+    resolve_ok(
+        "function identity<T>(value: T) -> T { return value; }; var value: int = identity<int>(value: 1);",
+    );
+
+    let non_generic = resolve_err(
+        "function value(input: int) -> int { return input; }; var x: int = value<int>(input: 1);",
+    );
+    assert!(
+        non_generic.contains("does not accept type arguments"),
+        "{non_generic}"
+    );
+
+    let excess = resolve_err(
+        "function identity<T>(value: T) -> T { return value; }; var x: int = identity<int, str>(value: 1);",
+    );
+    assert!(excess.contains("at most 1 type argument"), "{excess}");
+
+    let unknown = resolve_err(
+        "function identity<T>(value: T) -> T { return value; }; var x: int = identity<Ghost>(value: 1);",
+    );
+    assert!(
+        unknown.contains("undefined type") && unknown.contains("Ghost"),
+        "{unknown}"
+    );
+}
+
+#[test]
 fn exec_shell_at_module_scope_is_rejected() {
     let errors = resolve_err(
         "type [ExecResult]{ success: bool; exitCode: int; }; var x: ExecResult = exec shell { true; };",

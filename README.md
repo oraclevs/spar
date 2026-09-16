@@ -11,20 +11,20 @@ Write your configuration in `.spar` files — with types, computed values, cross
 var host: str = env("HOST") ?? "localhost";
 var port: int = 8080;
 
-[Server] {
+struct Server {
     host:  str  = host;
     port:  int  = port;
     debug: bool = false;
 };
 
-private [Defaults] {
+private struct Defaults {
     timeout: int = 5000;
     retries: int = 3;
 };
 
-[Database] {
+struct Database {
     url:     str = env("DATABASE_URL") ?? "postgres://localhost:5432/myapp";
-    timeout: int = Defaults::timeout;
+    timeout: int = Defaults.timeout;
 };
 ```
 
@@ -63,8 +63,8 @@ $ spar emit server.spar
 - [Why Spar](#why-spar)
 - [Language Tour](#language-tour)
   - [Variables and types](#variables-and-types)
-  - [Sections](#sections)
-  - [Private sections](#private-sections)
+  - [Structs](#structs)
+  - [Private structs](#private-structs)
   - [Cross-section references](#cross-section-references)
   - [Spread operator](#spread-operator)
   - [Environment variables with fallback](#environment-variables-with-fallback)
@@ -112,6 +112,8 @@ Spar is designed around a different idea: config files should behave more like c
 
 ## Language Tour
 
+Canonical v1 syntax and migration behavior are specified in [Struct, Type, List, and Error Model](docs/struct-type-list-error-model.md).
+
 ### Variables and types
 
 ```spar
@@ -119,11 +121,11 @@ var name:    str   = "myapp";
 var workers: int   = 4;
 var ratio:   float = 0.75;
 var enabled: bool  = true;
-var tags:    [str] = ["web", "api", "v2"];
+var tags:    List<str> = ["web", "api", "v2"];
 ```
 
 Scalar types: `str`, `int`, `float`, `bool`.  
-List types: `[str]`, `[int]`, `[float]`, `[bool]`.
+List types: `List<str>`, `List<int>`, `List<float>`, `List<bool>`.
 
 Plain `var` is internal — it will not appear in `spar emit` output. To expose a scalar at the JSON root, use `export`:
 
@@ -132,12 +134,12 @@ export var version: str = "1.4.2";   // appears in output
 var secret:         str = "hidden";  // does not appear in output
 ```
 
-### Sections
+### Structs
 
-Sections produce top-level objects in the JSON output:
+Structs are named concrete configuration values and produce top-level objects in JSON output:
 
 ```spar
-[Http] {
+struct Http {
     host:    str  = "0.0.0.0";
     port:    int  = 8080;
     timeout: int  = 30;
@@ -148,27 +150,27 @@ Sections produce top-level objects in the JSON output:
 { "Http": { "host": "0.0.0.0", "port": 8080, "timeout": 30 } }
 ```
 
-### Private sections
+### Private structs
 
-A `private` section is visible within the file for reference and spread, but is excluded from `spar emit` output. Use it for shared defaults:
+A `private` struct is visible within the file for reference and spread, but is excluded from `spar emit` output. Use it for shared defaults:
 
 ```spar
-private [Defaults] {
+private struct Defaults {
     timeout:   int  = 5000;
     retries:   int  = 3;
     keepalive: bool = true;
 };
 
-[ApiClient] {
+struct ApiClient {
     endpoint: str  = "https://api.example.com";
-    timeout:  int  = Defaults::timeout;
-    retries:  int  = Defaults::retries;
+    timeout:  int  = Defaults.timeout;
+    retries:  int  = Defaults.retries;
 };
 
-[CacheClient] {
+struct CacheClient {
     endpoint:  str  = "redis://localhost:6379";
-    timeout:   int  = Defaults::timeout;
-    keepalive: bool = Defaults::keepalive;
+    timeout:   int  = Defaults.timeout;
+    keepalive: bool = Defaults.keepalive;
 };
 ```
 
@@ -176,16 +178,16 @@ private [Defaults] {
 
 ### Cross-section references
 
-Reference any field in any section with `Section::field`:
+Reference any struct field with `Struct.field`:
 
 ```spar
-[Build] {
+struct Build {
     version: str = "2.1.0";
 };
 
-[Deploy] {
-    image: str = "myapp:${Build::version}";
-    tag:   str = Build::version;
+struct Deploy {
+    image: str = "myapp:${Build.version}";
+    tag:   str = Build.version;
 };
 ```
 
@@ -194,19 +196,19 @@ Reference any field in any section with `Section::field`:
 Pull all fields from a section with `...`:
 
 ```spar
-private [CommonHttp] {
+private struct CommonHttp {
     timeout:    int  = 10000;
     keep_alive: bool = true;
     max_conns:  int  = 100;
 };
 
-[Frontend] {
+struct Frontend {
     host: str = "0.0.0.0";
     port: int = 3000;
     ...CommonHttp;
 };
 
-[Backend] {
+struct Backend {
     host: str = "0.0.0.0";
     port: int = 8080;
     ...CommonHttp;
@@ -237,7 +239,7 @@ Embed any expression inside a string with `${}`:
 var major: int = 2;
 var minor: int = 1;
 
-[Build] {
+struct Build {
     version: str = "${major}.${minor}.0";
     tag:     str = "v${major}.${minor}";
     image:   str = "myapp:${major}.${minor}.0";
@@ -253,13 +255,13 @@ var minor: int = 1;
 Lists are homogeneous. Any scalar type can form a list:
 
 ```spar
-var hosts:   [str] = ["web-1", "web-2", "web-3"];
-var ports:   [int] = [8080, 8081, 8082];
-var allowed: [str] = [env("EXTRA_HOST") ?? "localhost", "127.0.0.1"];
+var hosts:   List<str> = ["web-1", "web-2", "web-3"];
+var ports:   List<int> = [8080, 8081, 8082];
+var allowed: List<str> = [env("EXTRA_HOST") ?? "localhost", "127.0.0.1"];
 
-[Cluster] {
-    hosts: [str] = hosts;
-    ports: [int] = ports;
+struct Cluster {
+    hosts: List<str> = hosts;
+    ports: List<int> = ports;
 };
 ```
 
@@ -268,7 +270,7 @@ var allowed: [str] = [env("EXTRA_HOST") ?? "localhost", "127.0.0.1"];
 A field may hold an inline nested section using the `section` type:
 
 ```spar
-[Config] {
+struct Config {
     name: str = "myapp";
     db: section = {
         host: str = "localhost";
@@ -318,12 +320,12 @@ function service(name: str, port: int) -> section {
     };
 };
 
-[Frontend] {
+struct Frontend {
     ...service(name: "web", port: 3000);
     image: str = "nginx:alpine";
 };
 
-[Backend] {
+struct Backend {
     ...service(name: "api", port: 8080);
     image: str = "myapp:latest";
 };
@@ -347,7 +349,7 @@ Split config across files and import by alias:
 export var connect: int = 3000;
 export var read:    int = 15000;
 
-[Retry] {
+export struct Retry {
     max:     int = 3;
     backoff: int = 500;
 };
@@ -357,7 +359,7 @@ export var read:    int = 15000;
 // api.spar
 import "shared/timeouts.spar" as t;
 
-[Api] {
+struct Api {
     endpoint:       str = "https://api.example.com/v2";
     connect_timeout: int = t::connect;
     read_timeout:    int = t::read;
@@ -402,13 +404,13 @@ Declare the required shape of a config in a schema file, then validate any confi
 // production.spar
 import schema "schema/server.spar";
 
-[Server] {
+struct Server {
     host: str = "0.0.0.0";
     port: int = 443;
     ssl:  bool = true;
 };
 
-[Database] {
+struct Database {
     url:  str = env("DATABASE_URL") ?? "postgres://db:5432/prod";
     pool: int = 20;
 };
@@ -420,7 +422,7 @@ import schema "schema/server.spar";
 error[schema]: section `Server` is missing required field `port`
   --> production.spar:3:1
   |
-3 | [Server] {
+3 | struct Server {
   | ^
 ```
 
@@ -447,7 +449,7 @@ Reassigning a plain `var`, or a name that was never declared, is a resolve-time 
 
 ```spar
 var mut total: int = 0;
-var values: [int] = [1, 2, 3];
+var values: List<int> = [1, 2, 3];
 
 for value in values {
     if value > 1 {
@@ -557,7 +559,7 @@ fn main() -> Result<(), spar::SparDeserError> {
 }
 ```
 
-Section names map to struct fields via `#[serde(rename = "SectionName")]` (or rename-all conventions). `export var` values appear as top-level fields alongside sections. Inline nested sections map to nested structs. Lists map to `Vec<T>`. Optional fields use `Option<T>`.
+Spar struct names map to Rust struct fields via `#[serde(rename = "StructName")]` (or rename-all conventions). `export var` values appear as top-level fields alongside structs. Anonymous nested objects map to nested Rust structs. Lists map to `Vec<T>`. Optional fields use `Option<T>`.
 
 ### Error handling
 
@@ -655,14 +657,14 @@ example.
 Reusable Spar code, versioned and shared via GitHub or a local path — declared in a manifest written in Spar itself, `spar.package.spar`:
 
 ```spar
-[Package] -> SparPackage {
-    name: "my-app";
-    version: "1.0.0";
-    kind: "application";
-    entry: "src/main.spar";
+struct Package: SparPackage {
+    name = "my-app";
+    version = "1.0.0";
+    kind = "application";
+    entry = "src/main.spar";
 };
 
-[Dependencies] {
+struct Dependencies {
     http: str = "github:owner/spar-http@1.4.0";
 };
 ```
@@ -674,7 +676,7 @@ import "http" as http;
 import { get, post } from "http";
 ```
 
-The exact filename activates Spar's built-in `SparPackage` schema: `spar check` and `spar-ls` validate required fields and offer field/kind completions without copying a schema into each project. `[Dependencies]` and `[Overrides]` remain open alias maps, but every value is validated as a literal package request; overrides must use `path:`.
+The exact filename activates Spar's built-in `SparPackage` type: `spar check` and `spar-ls` validate required fields and offer field/kind completions without copying a type into each project. `Dependencies` and `Overrides` remain open alias maps, but every value is validated as a literal package request; overrides must use `path:`.
 
 `spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.package.lock.spar`. The generated lock is typed Spar source (`[Lock] -> SparPackageLock`), not TOML, and records exact graph edges, remote commits, and integrity identities. Commit it to version control; don't hand-edit it.
 

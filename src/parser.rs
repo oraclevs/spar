@@ -17,6 +17,7 @@ fn statement_span(statement: &Statement) -> Span {
         Statement::Break(span) | Statement::Continue(span) => span.clone(),
         Statement::If(statement) => statement.span.clone(),
         Statement::For(statement) => statement.span.clone(),
+        Statement::Try(statement) => statement.span.clone(),
     }
 }
 
@@ -1624,6 +1625,9 @@ impl Parser {
     }
 
     fn parse_func_stmt(&mut self) -> Result<FuncStmt, SparError> {
+        if self.at(&Token::KwTry) {
+            return self.parse_try_stmt();
+        }
         if self.at(&Token::KwIf) {
             return Ok(FuncStmt::If(self.parse_if_stmt()?));
         }
@@ -1700,6 +1704,32 @@ impl Parser {
         }
         self.expect(&Token::Semicolon)?;
         Ok(FuncStmt::Expression(expression, span))
+    }
+
+    fn parse_try_stmt(&mut self) -> Result<FuncStmt, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::KwTry)?;
+        self.expect(&Token::LBrace)?;
+        let mut body = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            body.push(self.parse_func_stmt()?);
+        }
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::KwCatch)?;
+        let (catch_name, catch_span) = self.expect_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut handler = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            handler.push(self.parse_func_stmt()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(FuncStmt::Try(TryStmt {
+            body,
+            catch_name,
+            catch_span,
+            handler,
+            span,
+        }))
     }
 
     fn parse_for_stmt(&mut self) -> Result<FuncStmt, SparError> {

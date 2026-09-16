@@ -296,7 +296,8 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         | SparType::TypeParameter(_)
         | SparType::Applied { .. }
         | SparType::Void
-        | SparType::Shell => ScalarKind::Str,
+        | SparType::Shell
+        | SparType::Error => ScalarKind::Str,
     }
 }
 

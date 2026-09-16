@@ -13,6 +13,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Section => "section".into(),
         SparType::Void => "void".into(),
         SparType::Shell => "shell".into(),
+        SparType::Error => "error".into(),
         SparType::List(inner) => format!("[{}]", display_type(inner)),
         SparType::Named(name) => name.clone(),
         SparType::TypeParameter(name) => name.clone(),
@@ -2892,6 +2893,7 @@ impl<'a> TypeChecker<'a> {
                     let if_stmt = if_stmt.clone();
                     self.check_if_stmt(&if_stmt, ret_ty, local_types);
                 }
+                FuncStmt::Try(_) => {}
             }
         }
     }

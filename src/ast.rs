@@ -351,6 +351,7 @@ pub enum SparType {
     /// reach storage positions.
     Void,
     Shell,
+    Error,
     List(Box<SparType>),
     Named(String), // a declared `type [X]{...}`, referenced by name
     TypeParameter(String),
@@ -549,10 +550,20 @@ pub enum Statement {
     For(ForStmt),
     Break(Span),
     Continue(Span),
+    Try(TryStmt),
 }
 
 /// Backward-compatible name retained for embedders that inspect the public AST.
 pub type FuncStmt = Statement;
+
+#[derive(Debug, Clone)]
+pub struct TryStmt {
+    pub body: Vec<Statement>,
+    pub catch_name: String,
+    pub catch_span: Span,
+    pub handler: Vec<Statement>,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone)]
 pub struct ForStmt {

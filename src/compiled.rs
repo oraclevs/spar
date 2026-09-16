@@ -158,6 +158,12 @@ pub(crate) enum CompiledStatement {
     Return(Option<CompiledExpression>, Span),
     Break(Span),
     Continue(Span),
+    Try {
+        body: Vec<CompiledStatement>,
+        catch_slot: LocalSlot,
+        handler: Vec<CompiledStatement>,
+        span: Span,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -374,6 +380,7 @@ fn visit_statements(statements: &[CompiledStatement], visit: &mut impl FnMut(&Co
                 }
             }
             CompiledStatement::Break(_) | CompiledStatement::Continue(_) => {}
+            CompiledStatement::Try { .. } => {}
         }
     }
 }

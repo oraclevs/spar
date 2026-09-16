@@ -102,7 +102,9 @@ impl<'a> LocalAllocator<'a> {
         let slot = LocalSlot(self.names.len() as u32);
         self.names.push(name.clone());
         self.types.push(ty.clone());
-        self.scopes.last_mut().unwrap().insert(name, (slot, ty));
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, (slot, ty));
+        }
         slot
     }
 

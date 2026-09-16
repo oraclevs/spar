@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Activated when compiled execution is installed in Task 5.
-
 use std::collections::HashMap;
 
 use crate::compiled::{
@@ -52,6 +50,7 @@ fn internal_slot_error(slot: LocalSlot, detail: &str, span: &Span) -> SparError 
 
 const MAX_CALL_DEPTH: usize = 20;
 
+#[cfg(test)]
 pub(crate) fn execute_self_contained_entry(
     program: &CompiledProgram,
 ) -> Result<ConfigValue, Vec<SparError>> {
@@ -85,7 +84,10 @@ struct ModuleState {
 
 impl ModuleState {
     fn initialize(program: &CompiledProgram) -> Result<Self, Vec<SparError>> {
-        let entry = &program.modules[program.entry.0 as usize];
+        let entry = program
+            .modules
+            .get(program.entry.0 as usize)
+            .ok_or_else(|| vec![runtime_error("entry module is unavailable", &Span::dummy())])?;
         let result = crate::Evaluator::evaluate_with_imports_base_and_effects(
             &entry.checked.program,
             &entry.checked.symbols,
@@ -351,9 +353,15 @@ impl Runtime<'_> {
                 span,
             } => {
                 if *operation == TypedOperation::Fallback {
+                    let [left, right] = operands.as_slice() else {
+                        return Err(runtime_error(
+                            "checked fallback operation has invalid arity",
+                            span,
+                        ));
+                    };
                     return self
-                        .eval_expression(&operands[0], frame, module)
-                        .or_else(|_| self.eval_expression(&operands[1], frame, module));
+                        .eval_expression(left, frame, module)
+                        .or_else(|_| self.eval_expression(right, frame, module));
                 }
                 let values = operands
                     .iter()
@@ -752,5 +760,38 @@ mod tests {
         assert!(uninitialized.to_string().contains("uninitialized"));
         assert!(invalid.to_string().contains("internal runtime error:"));
         assert!(invalid.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn internal_unknown_function_and_operation_mismatch_are_diagnostics() {
+        let program = crate::Engine::default()
+            .compile_source("function main() -> int { return 0; };")
+            .unwrap();
+        let unknown = Runtime {
+            program: &program,
+            call_depth: 0,
+            state: None,
+        }
+        .call_function(FunctionId(999), Vec::new())
+        .unwrap_err();
+        assert!(unknown.to_string().contains("internal runtime error:"));
+        assert!(unknown.to_string().contains("unknown function ID"));
+
+        let span = Span::new(4, 8, 2, 3);
+        let mismatch = eval_operation(
+            TypedOperation::IntAdd,
+            &[ConfigValue::Bool(true), ConfigValue::Bool(false)],
+            &span,
+        )
+        .unwrap_err();
+        let SparError::EvalError {
+            message,
+            span: actual_span,
+        } = mismatch
+        else {
+            panic!("expected runtime diagnostic")
+        };
+        assert!(message.contains("internal runtime error:"));
+        assert_eq!(actual_span, span);
     }
 }

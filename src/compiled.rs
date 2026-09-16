@@ -225,7 +225,15 @@ impl CompiledProgram {
         let mut builder = ModuleGraphBuilder::new(options.clone());
         builder.add_entry(entry_checked)?;
         builder.lower_functions().map_err(|error| vec![error])?;
-        let entry_main = builder.modules[0]
+        let entry_main = builder
+            .modules
+            .first()
+            .ok_or_else(|| {
+                vec![SparError::EvalError {
+                    message: "internal lowering error: entry module is unavailable".into(),
+                    span: Span::dummy(),
+                }]
+            })?
             .functions
             .iter()
             .find(|function| function.key.group.is_none() && function.name == "main")
@@ -248,6 +256,21 @@ impl CompiledProgram {
             .iter()
             .map(|module| module.functions.len())
             .sum()
+    }
+
+    pub(crate) fn compilation_with_errors(&self, errors: Vec<SparError>) -> Compilation {
+        let entry = self.modules.get(self.entry.0 as usize);
+        Compilation {
+            program: entry.map(|module| module.checked.program.clone()),
+            symbols: entry.map(|module| module.checked.symbols.clone()),
+            imports: entry
+                .map(|module| module.checked.imports.clone())
+                .unwrap_or_default(),
+            result: None,
+            tasks: None,
+            task_exprs: Vec::new(),
+            errors,
+        }
     }
 
     #[cfg(test)]
@@ -508,7 +531,14 @@ impl ModuleGraphBuilder {
                 let imported = checked_from_compilation(compilation)?;
                 self.add_module(path, imported)?
             };
-            self.modules[id.0 as usize]
+            self.modules
+                .get_mut(id.0 as usize)
+                .ok_or_else(|| {
+                    vec![SparError::EvalError {
+                        message: format!("internal lowering error: unknown module ID {}", id.0),
+                        span: Span::dummy(),
+                    }]
+                })?
                 .import_modules
                 .insert(alias, module_id);
         }

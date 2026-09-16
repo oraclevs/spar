@@ -1347,8 +1347,8 @@ fn parses_try_catch_with_binding() {
 }
 
 #[test]
-fn rejects_malformed_try_catch() {
-    parse_err("function f() -> void { try { return; } catch { return; } };");
+fn parses_try_catch_without_binding() {
+    parse_ok("function f() -> void { try { return; } catch { return; } };");
 }
 
 #[test]

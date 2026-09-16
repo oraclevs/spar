@@ -1350,3 +1350,74 @@ fn parses_try_catch_with_binding() {
 fn rejects_malformed_try_catch() {
     parse_err("function f() -> void { try { return; } catch { return; } };");
 }
+
+#[test]
+fn parses_canonical_struct_and_list_types() {
+    use crate::ast::{SparType, TopLevelItem};
+
+    let program = parse_ok(
+        "type Pair<T, V> { left: T; right: V; }; \
+         struct Example: Pair<str, int> { left = \"hello\"; right = 42; }; \
+         var values: List<str> = [\"a\", \"b\"];",
+    );
+
+    let TopLevelItem::Type(pair) = &program.items[0] else {
+        panic!("expected type")
+    };
+    assert_eq!(pair.name, "Pair");
+    let TopLevelItem::Section(example) = &program.items[1] else {
+        panic!("expected unified struct section")
+    };
+    assert_eq!(example.path, ["Example"]);
+    assert_eq!(
+        example.type_binding.as_ref().map(|binding| &binding.ty),
+        Some(&SparType::Applied {
+            name: "Pair".into(),
+            arguments: vec![SparType::Str, SparType::Int],
+        })
+    );
+    let TopLevelItem::Var(values) = &program.items[2] else {
+        panic!("expected var")
+    };
+    assert_eq!(values.ty, SparType::List(Box::new(SparType::Str)));
+}
+
+#[test]
+fn parses_private_export_struct_and_ignored_catch() {
+    use crate::ast::TopLevelItem;
+
+    let program = parse_ok(
+        "private struct Internal { debug: bool = true; }; \
+         export struct Public { name: str = \"spar\"; }; \
+         function main() -> void { try { return; } catch { return; } };",
+    );
+    let TopLevelItem::Section(internal) = &program.items[0] else {
+        panic!()
+    };
+    assert!(internal.private);
+    let TopLevelItem::Section(public) = &program.items[1] else {
+        panic!()
+    };
+    assert!(public.exported);
+    let TopLevelItem::Function(main) = &program.items[2] else {
+        panic!()
+    };
+    let crate::ast::FuncStmt::Try(try_stmt) = &main.body.stmts[0] else {
+        panic!()
+    };
+    assert_eq!(try_stmt.catch_name, None);
+}
+
+#[test]
+fn parses_legacy_sections_and_list_types_to_compatibility_nodes() {
+    use crate::ast::{SparType, TopLevelItem};
+
+    let program = parse_ok("[Legacy] { ports: [int] = [1, 2]; };");
+    let TopLevelItem::Section(section) = &program.items[0] else {
+        panic!()
+    };
+    let crate::ast::SectionItem::Field(field) = &section.items[0] else {
+        panic!()
+    };
+    assert_eq!(field.ty, Some(SparType::List(Box::new(SparType::Int))));
+}

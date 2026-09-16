@@ -233,11 +233,16 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if sd.private {
                 out.push_str("private ");
             }
-            out.push('[');
-            out.push_str(&sd.path.join("."));
-            out.push(']');
+            if sd.canonical {
+                out.push_str("struct ");
+                out.push_str(&sd.path.join("."));
+            } else {
+                out.push('[');
+                out.push_str(&sd.path.join("."));
+                out.push(']');
+            }
             if let Some(binding) = &sd.type_binding {
-                out.push_str(" -> ");
+                out.push_str(if sd.canonical { ": " } else { " -> " });
                 out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
@@ -292,10 +297,10 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if td.exported {
                 out.push_str("export ");
             }
-            out.push_str("type [");
+            out.push_str("type ");
             out.push_str(&td.name);
             format_type_parameters(&td.type_parameters, out);
-            out.push_str("]{\n");
+            out.push_str(" {\n");
             for field in &td.fields {
                 format_type_field(field, 1, config, out);
             }
@@ -612,11 +617,16 @@ fn format_top_level_item_cx(
             if sd.private {
                 out.push_str("private ");
             }
-            out.push('[');
-            out.push_str(&sd.path.join("."));
-            out.push(']');
+            if sd.canonical {
+                out.push_str("struct ");
+                out.push_str(&sd.path.join("."));
+            } else {
+                out.push('[');
+                out.push_str(&sd.path.join("."));
+                out.push(']');
+            }
             if let Some(binding) = &sd.type_binding {
-                out.push_str(" -> ");
+                out.push_str(if sd.canonical { ": " } else { " -> " });
                 out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
@@ -676,7 +686,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Void => "void".to_string(),
         SparType::Shell => "shell".to_string(),
         SparType::Error => "error".to_string(),
-        SparType::List(inner) => format!("[{}]", format_type(inner)),
+        SparType::List(inner) => format!("List<{}>", format_type(inner)),
         SparType::Named(name) => name.clone(),
         SparType::TypeParameter(name) => name.clone(),
         SparType::Applied { name, arguments } => format!(
@@ -1172,8 +1182,11 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str("try {\n");
             format_func_stmts(&ts.body, depth + 1, config, out);
             out.push_str(&ind);
-            out.push_str("} catch ");
-            out.push_str(&ts.catch_name);
+            out.push_str("} catch");
+            if let Some(name) = &ts.catch_name {
+                out.push(' ');
+                out.push_str(name);
+            }
             out.push_str(" {\n");
             format_func_stmts(&ts.handler, depth + 1, config, out);
             out.push_str(&ind);
@@ -1962,6 +1975,7 @@ function pick(flag: bool) -> int {
             items: vec![TopLevelItem::Section(SectionDecl {
                 exported: false,
                 private: false,
+                canonical: false,
                 path: vec!["A".to_string(), "B".to_string()],
                 items: vec![],
                 type_binding: None,

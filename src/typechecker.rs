@@ -151,6 +151,7 @@ fn substitute_type_field(field: &TypeField, substitution: &TypeSubstitution) -> 
         name: field.name.clone(),
         optional: field.optional,
         shape: substitute_field_shape(&field.shape, substitution),
+        default: field.default.clone(),
         span: field.span.clone(),
     }
 }
@@ -1299,6 +1300,7 @@ impl<'a> TypeChecker<'a> {
                     name: name.clone(),
                     optional: fe.optional,
                     shape,
+                    default: None,
                     span: fe.span.clone(),
                 }
             })

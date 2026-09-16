@@ -71,6 +71,7 @@ pub enum Token {
     KwContinue,
     KwTry,
     KwCatch,
+    KwStruct,
     KwCommand,
     KwExec,
 
@@ -185,6 +186,7 @@ impl Token {
             Token::KwContinue => "'continue'",
             Token::KwTry => "'try'",
             Token::KwCatch => "'catch'",
+            Token::KwStruct => "'struct'",
             Token::KwCommand => "'command'",
             Token::KwExec => "'exec'",
             Token::Arrow => "'->'",
@@ -238,6 +240,7 @@ pub fn keyword_or_ident(s: String) -> Token {
         "continue" => Token::KwContinue,
         "try" => Token::KwTry,
         "catch" => Token::KwCatch,
+        "struct" => Token::KwStruct,
         "command" => Token::KwCommand,
         "exec" => Token::KwExec,
         _ => Token::Ident(s),

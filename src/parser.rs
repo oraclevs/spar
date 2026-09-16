@@ -258,6 +258,7 @@ impl Parser {
             Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
             Token::LBracket   => self.parse_section(false, false),
+            Token::KwStruct   => self.parse_struct(false, false),
             Token::KwFunction => Ok(TopLevelItem::Function(
                 self.parse_top_level_function_decl(false)?,
             )),
@@ -280,6 +281,7 @@ impl Parser {
                 match self.peek() {
                     Token::Var      => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
                     Token::LBracket => self.parse_section(true, false),
+                    Token::KwStruct => self.parse_struct(true, false),
                     Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(true)?)),
                     Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(true)?)),
                     _ => Err(self.error(format!("expected 'var', 'type', 'enum', or '[' after 'export', found {}", self.peek().human_name()))),
@@ -301,6 +303,7 @@ impl Parser {
                         let item = self.parse_section(false, true)?;
                         Ok(item)
                     }
+                    Token::KwStruct => self.parse_struct(false, true),
                     Token::KwFunction => {
                         Ok(TopLevelItem::Function(
                             self.parse_top_level_function_decl(true)?,
@@ -627,6 +630,31 @@ impl Parser {
             false
         };
 
+        // Canonical structs use `field = value;` when a target type supplies
+        // field types. Legacy sections retain the colon-based forms below.
+        if self.at(&Token::Eq) {
+            self.advance();
+            let value = if self.at(&Token::LBrace) {
+                self.expect(&Token::LBrace)?;
+                let mut items = Vec::new();
+                while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                    items.push(self.parse_section_item()?);
+                }
+                self.expect(&Token::RBrace)?;
+                FieldValue::Nested(items)
+            } else {
+                FieldValue::Expr(self.parse_expr()?)
+            };
+            self.expect(&Token::Semicolon)?;
+            return Ok(FieldDecl {
+                name,
+                optional,
+                ty: None,
+                value: Some(value),
+                span,
+            });
+        }
+
         self.expect(&Token::Colon)?;
 
         if self.at_type_start() {
@@ -818,10 +846,15 @@ impl Parser {
     fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'type' ident
-        self.expect(&Token::LBracket)?;
+        let legacy = self.at(&Token::LBracket);
+        if legacy {
+            self.advance();
+        }
         let (name, name_span) = self.expect_ident()?;
         let type_parameters = self.parse_type_parameters()?;
-        self.expect(&Token::RBracket)?;
+        if legacy {
+            self.expect(&Token::RBracket)?;
+        }
         self.expect(&Token::LBrace)?;
         let mut fields = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -857,11 +890,18 @@ impl Parser {
 
         self.expect(&Token::Colon)?;
         let shape = self.parse_type_field_shape(type_parameters)?;
+        let default = if self.at(&Token::Eq) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         self.expect(&Token::Semicolon)?;
         Ok(TypeField {
             name,
             optional,
             shape,
+            default,
             span,
         })
     }
@@ -920,6 +960,33 @@ impl Parser {
         Ok(TopLevelItem::Section(SectionDecl {
             exported,
             private,
+            canonical: false,
+            path: vec![name],
+            items,
+            type_binding,
+            span,
+        }))
+    }
+
+    fn parse_struct(&mut self, exported: bool, private: bool) -> Result<TopLevelItem, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::KwStruct)?;
+        let (name, _) = self.expect_ident()?;
+        let type_binding = if self.at(&Token::Colon) {
+            self.advance();
+            let type_span = self.peek_span();
+            Some(TypeBinding {
+                ty: self.parse_type()?,
+                span: type_span,
+            })
+        } else {
+            None
+        };
+        let items = self.parse_regular_section_items()?;
+        Ok(TopLevelItem::Section(SectionDecl {
+            exported,
+            private,
+            canonical: true,
             path: vec![name],
             items,
             type_binding,
@@ -1060,6 +1127,12 @@ impl Parser {
             self.advance();
             if self.at(&Token::Lt) {
                 let arguments = self.parse_type_arguments_required()?;
+                if name == "List" {
+                    let [inner] = arguments.as_slice() else {
+                        return Err(self.error("List expects exactly one type argument"));
+                    };
+                    return Ok(SparType::List(Box::new(inner.clone())));
+                }
                 return Ok(SparType::Applied { name, arguments });
             }
             if self
@@ -1716,7 +1789,12 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         self.expect(&Token::KwCatch)?;
-        let (catch_name, catch_span) = self.expect_ident()?;
+        let (catch_name, catch_span) = if self.at(&Token::LBrace) {
+            (None, self.peek_span())
+        } else {
+            let (name, span) = self.expect_ident()?;
+            (Some(name), span)
+        };
         self.expect(&Token::LBrace)?;
         let mut handler = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {

@@ -160,7 +160,7 @@ pub(crate) enum CompiledStatement {
     Continue(Span),
     Try {
         body: Vec<CompiledStatement>,
-        catch_slot: LocalSlot,
+        catch_slot: Option<LocalSlot>,
         handler: Vec<CompiledStatement>,
         span: Span,
     },

@@ -1,8 +1,8 @@
-function borderRadiusCircular(all: int) -> [int] {
+function borderRadiusCircular(all: int) -> List<int> {
     return [all, all, all, all];
 };
 
-function paddingAll(all: int) -> [int] {
+function paddingAll(all: int) -> List<int> {
     return [all, all, all, all];
 };
 
@@ -10,6 +10,6 @@ function colorWithAlpha(color: str, alpha: float) -> str {
     return color;
 };
 
-export [Colors] {
+export struct Colors {
     red: str = "red";
 };

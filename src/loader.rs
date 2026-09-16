@@ -510,6 +510,7 @@ fn collect_spar_type_refs(ty: &crate::ast::SparType, out: &mut Vec<String>) {
         | SparType::Section
         | SparType::Void
         | SparType::Shell
+        | SparType::Error
         | SparType::TypeParameter(_) => {}
     }
 }
@@ -1239,6 +1240,7 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
         crate::ast::SparType::Section => "section".to_string(),
         crate::ast::SparType::Void => "void".to_string(),
         crate::ast::SparType::Shell => "shell".to_string(),
+        crate::ast::SparType::Error => "error".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
         crate::ast::SparType::Named(name) => name.clone(),
         crate::ast::SparType::TypeParameter(name) => name.clone(),

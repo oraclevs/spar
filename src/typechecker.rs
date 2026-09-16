@@ -1560,7 +1560,7 @@ impl<'a> TypeChecker<'a> {
                 .and_then(|te| te.fields.iter().find(|f| f.name == field))
                 .map(|f| self.field_shape_to_type(&f.shape)),
             applied @ SparType::Applied { .. } => self
-                .type_fields_for(&applied)
+                .type_fields_for(applied)
                 .and_then(|(_, fields)| {
                     fields.into_iter().find(|candidate| candidate.name == field)
                 })

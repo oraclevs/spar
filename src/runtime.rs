@@ -279,7 +279,9 @@ impl Runtime<'_> {
                             code: 1,
                             cause: None,
                         };
-                        frame.write(*catch_slot, caught, span)?;
+                        if let Some(catch_slot) = catch_slot {
+                            frame.write(*catch_slot, caught, span)?;
+                        }
                         self.execute_statements(handler, frame, module)?
                     }
                 },

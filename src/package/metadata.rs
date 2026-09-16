@@ -116,6 +116,7 @@ fn primitive(name: &str, optional: bool, ty: SparType) -> TypeField {
         name: name.into(),
         optional,
         shape: TypeFieldShape::Primitive(ty),
+        default: None,
         span: builtin_span(),
     }
 }

@@ -394,7 +394,10 @@ impl FunctionLowerer<'_> {
             Statement::Continue(span) => CompiledStatement::Continue(span.clone()),
             Statement::Try(ts) => {
                 self.locals.scopes.push(HashMap::new());
-                let catch_slot = self.locals.allocate(ts.catch_name.clone(), SparType::Error);
+                let catch_slot = ts
+                    .catch_name
+                    .as_ref()
+                    .map(|name| self.locals.allocate(name.clone(), SparType::Error));
                 let handler = self.lower_statements(&ts.handler)?;
                 self.locals.scopes.pop();
                 CompiledStatement::Try {

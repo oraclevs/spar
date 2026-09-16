@@ -192,6 +192,7 @@ pub struct TypeField {
     pub name: String,
     pub optional: bool,
     pub shape: TypeFieldShape,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
@@ -308,6 +309,8 @@ pub struct DynamicDecl {
 pub struct SectionDecl {
     pub exported: bool,
     pub private: bool,
+    /// True when source used canonical `struct`; false means legacy section syntax.
+    pub canonical: bool,
     pub path: Vec<String>,
     pub items: Vec<SectionItem>,
     pub type_binding: Option<TypeBinding>,
@@ -559,7 +562,7 @@ pub type FuncStmt = Statement;
 #[derive(Debug, Clone)]
 pub struct TryStmt {
     pub body: Vec<Statement>,
-    pub catch_name: String,
+    pub catch_name: Option<String>,
     pub catch_span: Span,
     pub handler: Vec<Statement>,
     pub span: Span,

@@ -44,3 +44,30 @@ fn compile_path_retains_source_identity() {
 
     assert_eq!(compiled.source_path(), Some(path.as_path()));
 }
+
+#[test]
+fn one_compiled_program_executes_repeatedly() {
+    let engine = Engine::default();
+    let compiled = engine
+        .compile_source("function main() -> int { return 12; };")
+        .unwrap();
+
+    assert_eq!(engine.execute_compiled(&compiled).unwrap().exit_status, 12);
+    assert_eq!(engine.execute_compiled(&compiled).unwrap().exit_status, 12);
+}
+
+#[test]
+fn emit_compiled_does_not_call_main() {
+    let calls = Arc::new(Mutex::new(0));
+    let engine = engine_with_probe(calls.clone());
+    let compiled = engine
+        .compile_source("export var answer: int = 42; function main() -> void { probe::touch(); };")
+        .unwrap();
+
+    let emitted = engine.emit_compiled(&compiled).unwrap();
+    assert_eq!(
+        emitted.result.unwrap().globals["answer"],
+        ConfigValue::Int(42)
+    );
+    assert_eq!(*calls.lock().unwrap(), 0);
+}

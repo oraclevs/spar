@@ -65,6 +65,7 @@ pub(crate) fn execute_self_contained_entry(
     Runtime {
         program,
         call_depth: 0,
+        state: None,
     }
     .call_function(entry, Vec::new())
     .map_err(|error| vec![error])
@@ -73,6 +74,50 @@ pub(crate) fn execute_self_contained_entry(
 pub(crate) struct Runtime<'a> {
     program: &'a CompiledProgram,
     call_depth: usize,
+    state: Option<ModuleState>,
+}
+
+struct ModuleState {
+    results: HashMap<crate::compiled::ModuleId, crate::evaluator::EvalResult>,
+    hosts: crate::HostRegistry,
+    effect_ledger: Option<crate::session::EffectLedger>,
+}
+
+impl ModuleState {
+    fn initialize(program: &CompiledProgram) -> Result<Self, Vec<SparError>> {
+        let entry = &program.modules[program.entry.0 as usize];
+        let result = crate::Evaluator::evaluate_with_imports_base_and_effects(
+            &entry.checked.program,
+            &entry.checked.symbols,
+            &entry.checked.imports,
+            &program.options.base_dir,
+            program.options.hosts.clone(),
+            program.options.effect_ledger.clone(),
+        )?;
+        Ok(Self {
+            results: HashMap::from([(program.entry, result)]),
+            hosts: program.options.hosts.clone(),
+            effect_ledger: program.options.effect_ledger.clone(),
+        })
+    }
+}
+
+pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, Vec<SparError>> {
+    let entry = program.entry_main.ok_or_else(|| {
+        vec![SparError::ResolveError {
+            message: "no 'main' function found — Execute mode requires a zero-argument 'main' returning 'int' or 'void'".into(),
+            hint: None,
+            span: Span::dummy(),
+        }]
+    })?;
+    let state = ModuleState::initialize(program)?;
+    Runtime {
+        program,
+        call_depth: 0,
+        state: Some(state),
+    }
+    .call_function(entry, Vec::new())
+    .map_err(|error| vec![error])
 }
 
 enum RuntimeFlow {
@@ -104,6 +149,7 @@ impl Runtime<'_> {
                 runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy())
             })?;
         let parameter_slots = function.parameter_slots.clone();
+        let module = function.key.module;
         let default_values = function.default_values.clone();
         let slot_count = function.slot_count;
         let body = function.body.clone();
@@ -133,10 +179,10 @@ impl Runtime<'_> {
                     .ok_or_else(|| {
                         runtime_error("missing required direct-call argument", &function_span)
                     })?;
-                let value = self.eval_expression(default, &mut frame)?;
+                let value = self.eval_expression(default, &mut frame, module)?;
                 frame.write(slot, value, &function_span)?;
             }
-            match self.execute_statements(&body, &mut frame)? {
+            match self.execute_statements(&body, &mut frame, module)? {
                 RuntimeFlow::Return(value) => Ok(value),
                 RuntimeFlow::Normal => Ok(ConfigValue::Int(0)),
                 RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(
@@ -153,19 +199,22 @@ impl Runtime<'_> {
         &mut self,
         statements: &[CompiledStatement],
         frame: &mut Frame,
+        module: crate::compiled::ModuleId,
     ) -> Result<RuntimeFlow, SparError> {
         for statement in statements {
             let flow = match statement {
                 CompiledStatement::StoreLocal { slot, value, span } => {
-                    let value = self.eval_expression(value, frame)?;
+                    let value = self.eval_expression(value, frame, module)?;
                     frame.write(*slot, value, span)?;
                     RuntimeFlow::Normal
                 }
-                CompiledStatement::StoreGlobal { span, .. } => {
-                    return Err(module_state_error(span));
+                CompiledStatement::StoreGlobal { name, value, span } => {
+                    let value = self.eval_expression(value, frame, module)?;
+                    self.write_global(module, name, value, span)?;
+                    RuntimeFlow::Normal
                 }
                 CompiledStatement::Expression(expression, _) => {
-                    self.eval_expression(expression, frame)?;
+                    self.eval_expression(expression, frame, module)?;
                     RuntimeFlow::Normal
                 }
                 CompiledStatement::If {
@@ -173,9 +222,11 @@ impl Runtime<'_> {
                     then_body,
                     else_body,
                     span,
-                } => match self.eval_expression(condition, frame)? {
-                    ConfigValue::Bool(true) => self.execute_statements(then_body, frame)?,
-                    ConfigValue::Bool(false) => self.execute_statements(else_body, frame)?,
+                } => match self.eval_expression(condition, frame, module)? {
+                    ConfigValue::Bool(true) => self.execute_statements(then_body, frame, module)?,
+                    ConfigValue::Bool(false) => {
+                        self.execute_statements(else_body, frame, module)?
+                    }
                     value => return Err(type_error("bool", &value, span)),
                 },
                 CompiledStatement::For {
@@ -185,7 +236,8 @@ impl Runtime<'_> {
                     body,
                     span,
                 } => {
-                    let ConfigValue::List(items) = self.eval_expression(iterable, frame)? else {
+                    let ConfigValue::List(items) = self.eval_expression(iterable, frame, module)?
+                    else {
                         return Err(runtime_error("checked loop received a non-list", span));
                     };
                     let mut loop_flow = RuntimeFlow::Normal;
@@ -194,7 +246,7 @@ impl Runtime<'_> {
                             frame.write(*index_slot, ConfigValue::Int(index as i64), span)?;
                         }
                         frame.write(*value_slot, value, span)?;
-                        match self.execute_statements(body, frame)? {
+                        match self.execute_statements(body, frame, module)? {
                             RuntimeFlow::Normal | RuntimeFlow::Continue => {}
                             RuntimeFlow::Break => break,
                             flow @ RuntimeFlow::Return(_) => {
@@ -206,7 +258,7 @@ impl Runtime<'_> {
                     loop_flow
                 }
                 CompiledStatement::Return(value, _) => RuntimeFlow::Return(match value {
-                    Some(value) => self.eval_expression(value, frame)?,
+                    Some(value) => self.eval_expression(value, frame, module)?,
                     None => ConfigValue::Int(0),
                 }),
                 CompiledStatement::Break(_) => RuntimeFlow::Break,
@@ -223,16 +275,36 @@ impl Runtime<'_> {
         &mut self,
         expression: &CompiledExpression,
         frame: &mut Frame,
+        module: crate::compiled::ModuleId,
     ) -> Result<ConfigValue, SparError> {
         match expression {
             CompiledExpression::Constant(value, _) => Ok(value.clone()),
             CompiledExpression::Local(slot, span) => Ok(frame.read(*slot, span)?.clone()),
-            CompiledExpression::Global(_, span)
-            | CompiledExpression::ImportedValue { span, .. }
-            | CompiledExpression::HostCall { span, .. }
-            | CompiledExpression::ExecShell(crate::ast::ShellExpr { span, .. }) => {
-                Err(module_state_error(span))
+            CompiledExpression::Global(name, span) => self.read_global(module, name, span),
+            CompiledExpression::ImportedValue { module, path, span } => {
+                self.read_path(*module, path, span)
             }
+            CompiledExpression::HostCall {
+                namespace,
+                name,
+                arguments,
+                span,
+            } => {
+                let values = arguments
+                    .iter()
+                    .map(|argument| self.eval_expression(argument, frame, module))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.state
+                    .as_ref()
+                    .ok_or_else(|| module_state_error(span))?
+                    .hosts
+                    .call(namespace, name, &values)
+                    .map_err(|error| SparError::EvalError {
+                        message: error.to_string(),
+                        span: span.clone(),
+                    })
+            }
+            CompiledExpression::ExecShell(shell) => self.execute_shell(shell),
             CompiledExpression::DirectCall {
                 function,
                 arguments,
@@ -240,14 +312,14 @@ impl Runtime<'_> {
             } => {
                 let values = arguments
                     .iter()
-                    .map(|argument| self.eval_expression(argument, frame))
+                    .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.call_function(*function, values)
             }
             CompiledExpression::List(items, _) => Ok(ConfigValue::List(
                 items
                     .iter()
-                    .map(|item| self.eval_expression(item, frame))
+                    .map(|item| self.eval_expression(item, frame, module))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             CompiledExpression::Object(items, span) => {
@@ -255,11 +327,12 @@ impl Runtime<'_> {
                 for item in items {
                     match item {
                         CompiledObjectItem::Field { name, value } => {
-                            object.insert(name.clone(), self.eval_expression(value, frame)?);
+                            object
+                                .insert(name.clone(), self.eval_expression(value, frame, module)?);
                         }
                         CompiledObjectItem::Spread(value) => {
                             let ConfigValue::Section(fields) =
-                                self.eval_expression(value, frame)?
+                                self.eval_expression(value, frame, module)?
                             else {
                                 return Err(runtime_error(
                                     "checked object spread received a non-object",
@@ -279,12 +352,12 @@ impl Runtime<'_> {
             } => {
                 if *operation == TypedOperation::Fallback {
                     return self
-                        .eval_expression(&operands[0], frame)
-                        .or_else(|_| self.eval_expression(&operands[1], frame));
+                        .eval_expression(&operands[0], frame, module)
+                        .or_else(|_| self.eval_expression(&operands[1], frame, module));
                 }
                 let values = operands
                     .iter()
-                    .map(|operand| self.eval_expression(operand, frame))
+                    .map(|operand| self.eval_expression(operand, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 eval_operation(*operation, &values, span)
             }
@@ -293,8 +366,8 @@ impl Runtime<'_> {
                 index,
                 span,
             } => {
-                let source = self.eval_expression(source, frame)?;
-                let index = self.eval_expression(index, frame)?;
+                let source = self.eval_expression(source, frame, module)?;
+                let index = self.eval_expression(index, frame, module)?;
                 match (source, index) {
                     (ConfigValue::List(items), ConfigValue::Int(index)) if index >= 0 => items
                         .get(index as usize)
@@ -311,7 +384,7 @@ impl Runtime<'_> {
                 }
             }
             CompiledExpression::Field { base, field, span } => {
-                let base = self.eval_expression(base, frame)?;
+                let base = self.eval_expression(base, frame, module)?;
                 let ConfigValue::Section(fields) = base else {
                     return Err(type_error("object", &base, span));
                 };
@@ -326,7 +399,7 @@ impl Runtime<'_> {
                     match part {
                         CompiledStringPart::Literal(value) => output.push_str(value),
                         CompiledStringPart::Expression(value) => {
-                            let value = self.eval_expression(value, frame)?;
+                            let value = self.eval_expression(value, frame, module)?;
                             match value {
                                 ConfigValue::Str(value) => output.push_str(&value),
                                 ConfigValue::Int(value) => output.push_str(&value.to_string()),
@@ -345,7 +418,7 @@ impl Runtime<'_> {
                 body,
                 span,
             } => {
-                let ConfigValue::List(items) = self.eval_expression(source, frame)? else {
+                let ConfigValue::List(items) = self.eval_expression(source, frame, module)? else {
                     return Err(runtime_error(
                         "checked comprehension received a non-list",
                         span,
@@ -354,13 +427,137 @@ impl Runtime<'_> {
                 let mut output = Vec::with_capacity(items.len());
                 for item in items {
                     frame.write(*binding, item, span)?;
-                    output.push(self.eval_expression(body, frame)?);
+                    output.push(self.eval_expression(body, frame, module)?);
                 }
                 Ok(ConfigValue::List(output))
             }
             CompiledExpression::Shell(shell) => Ok(ConfigValue::Shell(
                 crate::evaluator::lower_shell_expr(shell),
             )),
+        }
+    }
+
+    fn ensure_module(&mut self, module: crate::compiled::ModuleId) -> Result<(), SparError> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| module_state_error(&Span::dummy()))?;
+        if state.results.contains_key(&module) {
+            return Ok(());
+        }
+        let compiled = self.program.modules.get(module.0 as usize).ok_or_else(|| {
+            runtime_error(&format!("unknown module ID {}", module.0), &Span::dummy())
+        })?;
+        let base_dir = compiled
+            .identity
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let result = crate::Evaluator::evaluate_with_imports_base_and_effects(
+            &compiled.checked.program,
+            &compiled.checked.symbols,
+            &compiled.checked.imports,
+            base_dir,
+            state.hosts.clone(),
+            state.effect_ledger.clone(),
+        )
+        .map_err(|mut errors| {
+            errors
+                .pop()
+                .unwrap_or_else(|| runtime_error("module initialization failed", &Span::dummy()))
+        })?;
+        self.state
+            .as_mut()
+            .ok_or_else(|| module_state_error(&Span::dummy()))?
+            .results
+            .insert(module, result);
+        Ok(())
+    }
+
+    fn read_global(
+        &mut self,
+        module: crate::compiled::ModuleId,
+        name: &str,
+        span: &Span,
+    ) -> Result<ConfigValue, SparError> {
+        self.ensure_module(module)?;
+        self.state
+            .as_ref()
+            .and_then(|state| state.results.get(&module))
+            .and_then(|result| result.globals.get(name))
+            .cloned()
+            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))
+    }
+
+    fn write_global(
+        &mut self,
+        module: crate::compiled::ModuleId,
+        name: &str,
+        value: ConfigValue,
+        span: &Span,
+    ) -> Result<(), SparError> {
+        self.ensure_module(module)?;
+        let result = self
+            .state
+            .as_mut()
+            .and_then(|state| state.results.get_mut(&module))
+            .ok_or_else(|| module_state_error(span))?;
+        result.globals.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    fn read_path(
+        &mut self,
+        module: crate::compiled::ModuleId,
+        path: &[String],
+        span: &Span,
+    ) -> Result<ConfigValue, SparError> {
+        self.ensure_module(module)?;
+        let result = self
+            .state
+            .as_ref()
+            .and_then(|state| state.results.get(&module))
+            .ok_or_else(|| module_state_error(span))?;
+        match path {
+            [name] => result.globals.get(name).cloned(),
+            [section @ .., field] => result
+                .sections
+                .get(section)
+                .and_then(|fields| fields.get(field))
+                .cloned(),
+            [] => None,
+        }
+        .ok_or_else(|| {
+            runtime_error(
+                &format!("imported path '{}' is unavailable", path.join("::")),
+                span,
+            )
+        })
+    }
+
+    fn execute_shell(&self, shell: &crate::ast::ShellExpr) -> Result<ConfigValue, SparError> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| module_state_error(&shell.span))?;
+        let run = || {
+            crate::evaluator::execute_shell_plan(&crate::evaluator::lower_shell_expr(shell))
+                .map(|outcome| {
+                    ConfigValue::Section(HashMap::from([
+                        ("success".into(), ConfigValue::Bool(outcome.success)),
+                        (
+                            "exitCode".into(),
+                            ConfigValue::Int(i64::from(outcome.exit_code)),
+                        ),
+                    ]))
+                })
+                .map_err(|error| SparError::EvalError {
+                    message: format!("could not execute shell plan: {error}"),
+                    span: shell.span.clone(),
+                })
+        };
+        match &state.effect_ledger {
+            Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
+            None => run(),
         }
     }
 }

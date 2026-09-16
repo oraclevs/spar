@@ -3,7 +3,7 @@ use crate::error::SparError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LoadedImport {
     pub path: String,
     pub exports: HashSet<String>,

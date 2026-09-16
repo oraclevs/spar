@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use crate::ast::{Program, TopLevelItem};
+use crate::compiled::CompiledProgram;
 use crate::compiler::{validate_entry_signature, Compilation, CompileOptions, Compiler};
 use crate::error::{Span, SparError};
 use crate::evaluator::{execute_shell_plan, ConfigValue, Evaluator};
@@ -47,6 +48,20 @@ impl Engine {
     /// hosts and options — see `session::Session`.
     pub fn session(&self) -> crate::session::Session {
         crate::session::Session::new(self.options.clone())
+    }
+
+    /// Compile and type-check source without evaluating it.
+    pub fn compile_source(&self, source: &str) -> Result<CompiledProgram, Vec<SparError>> {
+        let options = CompileOptions {
+            evaluate: false,
+            ..self.options.clone()
+        };
+        let compilation = Compiler::new(options.clone()).compile(source);
+        CompiledProgram::from_compilation(compilation, options)
+    }
+
+    pub fn compile_path(&self, path: &Path) -> Result<CompiledProgram, Vec<SparError>> {
+        self.with_path(path).compile_source(&read_source(path)?)
     }
 
     /// Check mode: lex, parse, resolve, and type-check only. Never
@@ -142,6 +157,7 @@ impl Engine {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
+            source_path: Some(path.to_path_buf()),
             ..self.options.clone()
         })
     }

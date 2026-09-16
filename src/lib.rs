@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod command;
+pub mod compiled;
 pub mod compiler;
 pub mod de;
 pub mod depgraph;
@@ -28,6 +29,7 @@ pub mod typechecker;
 
 pub use ast::Program;
 pub use command::parse_shell_plan;
+pub use compiled::CompiledProgram;
 pub use compiler::{Compilation, CompileOptions, Compiler};
 pub use de::{from_eval, from_str, SparDeserError};
 pub use emit::{emit_to_json, emit_to_toml, emit_to_yaml, EmitFormat};

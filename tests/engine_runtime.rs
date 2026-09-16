@@ -3,6 +3,25 @@ use std::fs;
 use spar::Engine;
 
 #[test]
+fn phase4_language_fixtures_execute() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase4");
+    let struct_outcome = Engine::default()
+        .execute_path(&root.join("struct_generics.spar"))
+        .expect("generic struct fixture should execute");
+    assert_eq!(struct_outcome.exit_status, 42);
+
+    let catch_outcome = Engine::default()
+        .execute_path(&root.join("try_catch.spar"))
+        .expect("try/catch fixture should execute");
+    assert_eq!(catch_outcome.exit_status, 7);
+
+    let imported_outcome = Engine::default()
+        .execute_path(&root.join("imported_struct.spar"))
+        .expect("imported generic type fixture should execute");
+    assert_eq!(imported_outcome.exit_status, 23);
+}
+
+#[test]
 fn canonical_struct_uses_generic_defaults_and_field_access() {
     let outcome = Engine::default()
         .execute_source(

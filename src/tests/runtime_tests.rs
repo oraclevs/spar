@@ -50,6 +50,15 @@ fn compiled_try_catch_exposes_error_and_supports_ignored_binding() {
 }
 
 #[test]
+fn compiled_try_catch_without_binding_executes_handler() {
+    let value = execute(
+        "function main() -> int { try { var broken: int = 1 / 0; } catch { return 9; } return 0; };",
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(9));
+}
+
+#[test]
 fn compiled_generic_functions_are_erased_and_reusable() {
     let value = execute(
         r#"

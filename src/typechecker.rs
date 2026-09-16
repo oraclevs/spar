@@ -14,7 +14,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Void => "void".into(),
         SparType::Shell => "shell".into(),
         SparType::Error => "error".into(),
-        SparType::List(inner) => format!("[{}]", display_type(inner)),
+        SparType::List(inner) => format!("List<{}>", display_type(inner)),
         SparType::Named(name) => name.clone(),
         SparType::TypeParameter(name) => name.clone(),
         SparType::Applied { name, arguments } => format!(
@@ -321,7 +321,7 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Section(decl) => self.check_section(decl),
                 TopLevelItem::Function(f) => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
-                TopLevelItem::Type(_) => {} // Task 4 replaces this with real validation
+                TopLevelItem::Type(decl) => self.check_type_decl(decl),
                 TopLevelItem::Enum(_) => {} // nothing to typecheck — resolver already validated the declaration
                 TopLevelItem::FunctionGroup(g) => {
                     for f in &g.functions {
@@ -379,6 +379,27 @@ impl<'a> TypeChecker<'a> {
                 None,
                 decl.span.clone(),
             );
+        }
+    }
+
+    fn check_type_decl(&mut self, decl: &TypeDecl) {
+        for field in &decl.fields {
+            let Some(default) = &field.default else {
+                continue;
+            };
+            let expected = match &field.shape {
+                TypeFieldShape::Primitive(ty) => Some(ty.clone()),
+                TypeFieldShape::Named(name) => Some(SparType::Named(name.clone())),
+                TypeFieldShape::TypeParameter(name) => Some(SparType::TypeParameter(name.clone())),
+                TypeFieldShape::Applied { name, arguments } => Some(SparType::Applied {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                }),
+                TypeFieldShape::Section(_) => None,
+            };
+            if let Some(expected) = expected {
+                self.check_expr_type(default, &expected, &field.name, &field.span);
+            }
         }
     }
 

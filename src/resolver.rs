@@ -77,7 +77,13 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             }
             // A for-loop never guarantees execution (iterable may be empty).
             FuncStmt::For(_) => {}
-            FuncStmt::Try(_) => {}
+            FuncStmt::Try(statement) => {
+                let body_exit = sequence_exit_scope(&statement.body);
+                let handler_exit = sequence_exit_scope(&statement.handler);
+                if body_exit.is_none() && handler_exit.is_none() {
+                    return None;
+                }
+            }
         }
     }
     Some(scope)
@@ -1364,7 +1370,15 @@ impl Resolver {
                     self.check_unreachable(&body);
                     // A for-loop never sets terminated — iterable may be empty.
                 }
-                FuncStmt::Try(_) => {}
+                FuncStmt::Try(statement) => {
+                    self.check_unreachable(&statement.body);
+                    self.check_unreachable(&statement.handler);
+                    if stmts_always_return(&statement.body)
+                        && stmts_always_return(&statement.handler)
+                    {
+                        terminated = true;
+                    }
+                }
             }
         }
     }
@@ -1514,6 +1528,9 @@ impl Resolver {
                     &field.span,
                 ),
                 TypeFieldShape::Section(nested) => self.resolve_type_fields(nested, parameters),
+            }
+            if let Some(default) = &field.default {
+                self.resolve_expr(default);
             }
         }
     }

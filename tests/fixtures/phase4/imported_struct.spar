@@ -1,0 +1,10 @@
+import type { Pair } from "types.spar";
+
+struct Imported: Pair<str, int> {
+    left = "imported";
+    right = 23;
+};
+
+function main() -> int {
+    return Imported.right;
+};

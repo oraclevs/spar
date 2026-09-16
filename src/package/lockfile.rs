@@ -135,7 +135,10 @@ impl Lockfile {
             || section
                 .type_binding
                 .as_ref()
-                .map(|binding| binding.name.as_str())
+                .and_then(|binding| match &binding.ty {
+                    crate::ast::SparType::Named(name) => Some(name.as_str()),
+                    _ => None,
+                })
                 != Some("SparPackageLock")
         {
             return Err(lock_err(

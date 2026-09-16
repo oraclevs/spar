@@ -104,6 +104,7 @@ fn type_decl(name: &str, fields: Vec<TypeField>) -> TypeDecl {
     TypeDecl {
         name: name.into(),
         name_span: span.clone(),
+        type_parameters: Vec::new(),
         exported: false,
         fields,
         span,

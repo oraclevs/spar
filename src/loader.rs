@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct LoadedImport {
     pub path: String,
     pub exports: HashSet<String>,
+    pub functions: HashMap<String, crate::ast::FunctionDecl>,
     /// Where `path` actually resolved to on disk — a plain
     /// `base_dir.join(path)` for a filesystem import, or a store
     /// snapshot path for a package-aware bare import resolved through a
@@ -428,7 +429,7 @@ fn splice_selective(
                 let parent_name = s.path.first().cloned().unwrap_or_default();
                 let mut type_refs = Vec::new();
                 if let Some(tb) = &s.type_binding {
-                    type_refs.push(tb.name.clone());
+                    collect_spar_type_refs(&tb.ty, &mut type_refs);
                 }
                 let mut section_refs = Vec::new();
                 collect_section_item_refs(&s.items, &mut section_refs);
@@ -479,8 +480,37 @@ fn collect_named_type_refs(fields: &[crate::ast::TypeField], out: &mut Vec<Strin
         match &f.shape {
             TypeFieldShape::Primitive(_) => {}
             TypeFieldShape::Named(name) => out.push(name.clone()),
+            TypeFieldShape::TypeParameter(_) => {}
+            TypeFieldShape::Applied { name, arguments } => {
+                out.push(name.clone());
+                for argument in arguments {
+                    collect_spar_type_refs(argument, out);
+                }
+            }
             TypeFieldShape::Section(nested) => collect_named_type_refs(nested, out),
         }
+    }
+}
+
+fn collect_spar_type_refs(ty: &crate::ast::SparType, out: &mut Vec<String>) {
+    use crate::ast::SparType;
+    match ty {
+        SparType::Named(name) => out.push(name.clone()),
+        SparType::Applied { name, arguments } => {
+            out.push(name.clone());
+            for argument in arguments {
+                collect_spar_type_refs(argument, out);
+            }
+        }
+        SparType::List(inner) => collect_spar_type_refs(inner, out),
+        SparType::Str
+        | SparType::Int
+        | SparType::Float
+        | SparType::Bool
+        | SparType::Section
+        | SparType::Void
+        | SparType::Shell
+        | SparType::TypeParameter(_) => {}
     }
 }
 
@@ -701,6 +731,7 @@ pub fn collect_imports(
 
         // Collect exported symbol names
         let mut exports = HashSet::new();
+        let mut functions = HashMap::new();
         for item in &imported_program.items {
             match item {
                 TopLevelItem::Var(v) if v.exported => {
@@ -713,6 +744,7 @@ pub fn collect_imports(
                 }
                 TopLevelItem::Function(f) if !f.is_private => {
                     exports.insert(f.name.clone());
+                    functions.insert(f.name.clone(), f.clone());
                 }
                 TopLevelItem::Type(t) if t.exported => {
                     exports.insert(t.name.clone());
@@ -729,6 +761,7 @@ pub fn collect_imports(
             LoadedImport {
                 path: decl.path.clone(),
                 exports,
+                functions,
                 resolved_path: full_path.clone(),
             },
         );
@@ -781,6 +814,15 @@ fn type_fields_to_schema_fields(
                             .unwrap_or_default();
                         SchemaFieldShape::Section(expanded)
                     }
+                }
+                TypeFieldShape::TypeParameter(name) => {
+                    SchemaFieldShape::Primitive(crate::ast::SparType::TypeParameter(name.clone()))
+                }
+                TypeFieldShape::Applied { name, arguments } => {
+                    SchemaFieldShape::Primitive(crate::ast::SparType::Applied {
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    })
                 }
             };
             SchemaField {
@@ -1199,6 +1241,16 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
         crate::ast::SparType::Shell => "shell".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
         crate::ast::SparType::Named(name) => name.clone(),
+        crate::ast::SparType::TypeParameter(name) => name.clone(),
+        crate::ast::SparType::Applied { name, arguments } => format!(
+            "{}<{}>",
+            name,
+            arguments
+                .iter()
+                .map(kl_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -1917,6 +1969,7 @@ mod tests {
             shebang: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
+                    type_parameters: Vec::new(),
                     name: "PostgresType".into(),
                     name_span: crate::error::Span::dummy(),
                     exported: true,
@@ -1983,6 +2036,7 @@ mod tests {
             shebang: None,
             items: vec![
                 TopLevelItem::Type(crate::ast::TypeDecl {
+                    type_parameters: Vec::new(),
                     name: "Border".into(),
                     name_span: crate::error::Span::dummy(),
                     exported: true,
@@ -1995,6 +2049,7 @@ mod tests {
                     span: crate::error::Span::dummy(),
                 }),
                 TopLevelItem::Type(crate::ast::TypeDecl {
+                    type_parameters: Vec::new(),
                     name: "Decoration".into(),
                     name_span: crate::error::Span::dummy(),
                     exported: true,

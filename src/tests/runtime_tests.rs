@@ -29,3 +29,84 @@ fn compiled_integer_division_by_zero_is_an_error() {
     let errors = execute("function main() -> int { return 1 / 0; };").unwrap_err();
     assert!(errors[0].to_string().contains("division by zero"));
 }
+
+#[test]
+fn compiled_generic_functions_are_erased_and_reusable() {
+    let value = execute(
+        r#"
+        function identity<T>(value: T) -> T { return value; };
+        function main() -> int {
+            var number: int = identity(value: 7);
+            var word: str = identity<str>(value: "spar");
+            if word == "spar" { return number; }
+            return 0;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(7));
+}
+
+#[test]
+fn compiled_generic_named_types_substitute_nested_fields() {
+    let value = execute(
+        r#"
+        type [Box<T>] { value: T; };
+        function unbox<T>(box: Box<T>) -> T { return box.value; };
+        function main() -> int {
+            var boxed: Box<int> = { value: 9; };
+            return unbox(box: boxed);
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(9));
+}
+
+#[test]
+fn compiled_generic_function_can_construct_applied_return_type() {
+    let value = execute(
+        r#"
+        type [Box<T>] { value: T; };
+        function box<T>(value: T) -> Box<T> { return { value: value; }; };
+        function main() -> int {
+            var boxed: Box<int> = box(value: 13);
+            return boxed.value;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(13));
+}
+
+#[test]
+fn compiled_function_group_member_can_be_generic() {
+    let value = execute(
+        r#"
+        functionGroup Values {
+            function identity<T>(value: T) -> T { return value; }
+        };
+        function main() -> int { return Values::identity(value: 17); };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(17));
+}
+
+#[test]
+fn compiled_generic_calls_specialize_callers_and_recurse_erased() {
+    let value = execute(
+        r#"
+        function identity<T>(value: T) -> T { return value; };
+        function repeat<T>(value: T, count: int) -> T {
+            if count == 0 { return value; }
+            return repeat(value: value, count: count - 1);
+        };
+        function main() -> int {
+            return identity(value: 4) + repeat(value: 5, count: 2);
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(9));
+}

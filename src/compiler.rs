@@ -249,6 +249,7 @@ fn inject_exec_result_type(program: &mut Program) {
     program.items.push(TopLevelItem::Type(TypeDecl {
         name: "ExecResult".to_string(),
         name_span: span.clone(),
+        type_parameters: Vec::new(),
         exported: false,
         fields: vec![
             TypeField {

@@ -584,10 +584,39 @@ impl Parser {
             | Token::TypeSection => true,
             // A bare Ident is only a type-start when immediately followed by
             // `=` — otherwise it's the type-omitted value form (`name: someVar;`).
-            Token::Ident(_) => matches!(
-                self.tokens.get(self.pos + 1).map(|st| &st.token),
-                Some(Token::Eq)
-            ),
+            Token::Ident(_) => {
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|st| &st.token),
+                    Some(Token::Eq)
+                ) {
+                    true
+                } else if matches!(
+                    self.tokens.get(self.pos + 1).map(|st| &st.token),
+                    Some(Token::Lt)
+                ) {
+                    let mut depth = 0usize;
+                    let mut index = self.pos + 1;
+                    loop {
+                        match self.tokens.get(index).map(|token| &token.token) {
+                            Some(Token::Lt) => depth += 1,
+                            Some(Token::Gt) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break matches!(
+                                        self.tokens.get(index + 1).map(|token| &token.token),
+                                        Some(Token::Eq) | Some(Token::Semicolon)
+                                    );
+                                }
+                            }
+                            Some(Token::Eof) | None => break false,
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                } else {
+                    false
+                }
+            }
             Token::LBracket => {
                 matches!(
                     self.tokens.get(self.pos + 1).map(|st| &st.token),

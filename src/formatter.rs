@@ -233,7 +233,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if sd.private {
                 out.push_str("private ");
             }
-            if sd.canonical {
+            if sd.path.len() == 1 {
                 out.push_str("struct ");
                 out.push_str(&sd.path.join("."));
             } else {
@@ -242,13 +242,13 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push(']');
             }
             if let Some(binding) = &sd.type_binding {
-                out.push_str(if sd.canonical { ": " } else { " -> " });
+                out.push_str(if sd.path.len() == 1 { ": " } else { " -> " });
                 out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
-                out.push_str("{\n");
+                out.push_str(if sd.path.len() == 1 { " {\n" } else { "{\n" });
             }
-            format_section_items(&sd.items, 1, config, out);
+            format_section_items(&sd.items, 1, config, out, sd.path.len() == 1);
             out.push_str("};\n");
         }
 
@@ -617,7 +617,7 @@ fn format_top_level_item_cx(
             if sd.private {
                 out.push_str("private ");
             }
-            if sd.canonical {
+            if sd.path.len() == 1 {
                 out.push_str("struct ");
                 out.push_str(&sd.path.join("."));
             } else {
@@ -626,13 +626,13 @@ fn format_top_level_item_cx(
                 out.push(']');
             }
             if let Some(binding) = &sd.type_binding {
-                out.push_str(if sd.canonical { ": " } else { " -> " });
+                out.push_str(if sd.path.len() == 1 { ": " } else { " -> " });
                 out.push_str(&format_type(&binding.ty));
                 out.push_str(" {\n");
             } else {
-                out.push_str("{\n");
+                out.push_str(if sd.path.len() == 1 { " {\n" } else { "{\n" });
             }
-            format_section_items_cx(&sd.items, 1, config, cx, out);
+            format_section_items_cx(&sd.items, 1, config, cx, out, sd.path.len() == 1);
             out.push_str("};\n");
         }
         TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out),
@@ -647,12 +647,13 @@ fn format_section_items_cx(
     config: &FormatConfig,
     cx: &mut CommentCursor,
     out: &mut String,
+    canonical: bool,
 ) {
     for item in items {
         match item {
             SectionItem::Field(fd) => {
                 cx.emit_before_line(fd.span.line, depth, config, out);
-                format_field_decl(fd, depth, config, out);
+                format_field_decl(fd, depth, config, out, canonical);
                 // Append trailing comment for this line if present
                 if let Some(trailing) = cx.take_trailing(fd.span.line) {
                     // Insert before the last \n
@@ -1305,22 +1306,18 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
     match &field.shape {
         TypeFieldShape::Primitive(ty) => {
             out.push_str(&format_type(ty));
-            out.push_str(";\n");
         }
         TypeFieldShape::Named(name) => {
             out.push_str(name);
-            out.push_str(";\n");
         }
         TypeFieldShape::TypeParameter(name) => {
             out.push_str(name);
-            out.push_str(";\n");
         }
         TypeFieldShape::Applied { name, arguments } => {
             out.push_str(&format_type(&SparType::Applied {
                 name: name.clone(),
                 arguments: arguments.clone(),
             }));
-            out.push_str(";\n");
         }
         TypeFieldShape::Section(nested) => {
             out.push_str("section = {\n");
@@ -1329,18 +1326,34 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
             }
             out.push_str(&indent);
             out.push_str("};\n");
+            return;
         }
     }
+    if let Some(default) = &field.default {
+        out.push_str(" = ");
+        format_expr(default, 0, depth, config, out);
+    }
+    out.push_str(";\n");
 }
 
-fn format_field_decl(fd: &FieldDecl, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_field_decl(
+    fd: &FieldDecl,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+    canonical: bool,
+) {
     let ind = indent(depth, config);
     out.push_str(&ind);
     out.push_str(&fd.name);
     if fd.optional {
         out.push('?');
     }
-    out.push_str(": ");
+    if fd.ty.is_some() || !canonical {
+        out.push_str(": ");
+    } else {
+        out.push_str(" = ");
+    }
     match &fd.ty {
         Some(ty) => {
             out.push_str(&format_type(ty));
@@ -1395,7 +1408,7 @@ fn format_nested_section_item(
     out: &mut String,
 ) {
     match item {
-        SectionItem::Field(f) => format_field_decl(f, depth, config, out),
+        SectionItem::Field(f) => format_field_decl(f, depth, config, out, false),
         SectionItem::Spread(ss) => {
             out.push_str(&indent(depth, config));
             out.push_str("...");
@@ -1410,10 +1423,11 @@ fn format_section_items(
     depth: usize,
     config: &FormatConfig,
     out: &mut String,
+    canonical: bool,
 ) {
     for item in items {
         match item {
-            SectionItem::Field(fd) => format_field_decl(fd, depth, config, out),
+            SectionItem::Field(fd) => format_field_decl(fd, depth, config, out, canonical),
             SectionItem::Spread(ss) => {
                 let ind = indent(depth, config);
                 out.push_str(&ind);
@@ -1563,7 +1577,7 @@ mod tests {
             "no line should exceed the width budget once real indentation is counted, got: {formatted}"
         );
         assert!(
-            formatted.contains("ports: [Port] = [\n"),
+            formatted.contains("ports: List<Port> = [\n"),
             "the ports list must wrap onto its own lines, got: {formatted}"
         );
         let reformatted = fmt(&formatted);
@@ -1641,21 +1655,34 @@ mod tests {
     #[test]
     fn section_with_one_field() {
         let out = fmt("[Server]{ port: int = 8080; };");
-        assert!(out.contains("[Server]{"));
+        assert!(out.contains("struct Server {"));
         assert!(out.contains("    port: int = 8080;"));
         assert!(out.contains("};"));
     }
 
     #[test]
+    fn formats_canonical_struct_generic_type_list_and_catch() {
+        let out = fmt(
+            r#"type Pair<T, V> { left: T; right: V; }; struct Example: Pair<str, int> { left = "hello"; right = 42; }; function main() -> void { var values: List<str> = ["a", "b"]; try { return; } catch err { return; } };"#,
+        );
+        assert!(out.contains("type Pair<T, V> {"), "{out}");
+        assert!(out.contains("struct Example: Pair<str, int> {"), "{out}");
+        assert!(out.contains("left = \"hello\";"), "{out}");
+        assert!(out.contains("List<str>"), "{out}");
+        assert!(out.contains("catch err {"), "{out}");
+        assert_eq!(fmt(&out), out);
+    }
+
+    #[test]
     fn private_section_has_private_prefix() {
         let out = fmt("private [S]{ x: int = 1; };");
-        assert!(out.trim_start().starts_with("private [S]{"));
+        assert!(out.trim_start().starts_with("private struct S {"));
     }
 
     #[test]
     fn export_section_has_export_prefix() {
         let out = fmt("export [S]{ x: int = 1; };");
-        assert!(out.trim_start().starts_with("export [S]{"));
+        assert!(out.trim_start().starts_with("export struct S {"));
     }
 
     #[test]
@@ -1664,7 +1691,7 @@ mod tests {
         // parse time). The formatter uses .join(".") on the Vec<String> path, which is correct
         // for the AST representation. This test verifies the bracket-wrapping with a valid input.
         let out = fmt("[A]{ x: int = 1; };");
-        assert!(out.contains("[A]{"));
+        assert!(out.contains("struct A {"));
     }
 
     #[test]
@@ -1783,7 +1810,7 @@ mod tests {
     fn list_literal_formatted() {
         assert_eq!(
             fmt("var xs: [int] = [1, 2, 3];").trim(),
-            "var xs: [int] = [1, 2, 3];"
+            "var xs: List<int> = [1, 2, 3];"
         );
     }
 
@@ -1812,7 +1839,7 @@ mod tests {
     fn generic_syntax_formats_canonically_and_idempotently() {
         let source = "type [Pair<T,U,>]{left:T;right:U;};function pair<T,U,>(left:T,right:U)->Pair<T,U>{return {left:left;right:right;};};";
         let once = fmt(source);
-        assert!(once.contains("type [Pair<T, U>]{"), "{once}");
+        assert!(once.contains("type Pair<T, U> {"), "{once}");
         assert!(
             once.contains("function pair<T, U>(left: T, right: U) -> Pair<T, U>"),
             "{once}"
@@ -1841,7 +1868,10 @@ mod tests {
 
     #[test]
     fn list_type_nested_formatted() {
-        assert_eq!(fmt("var x: [[int]] = [];").trim(), "var x: [[int]] = [];");
+        assert_eq!(
+            fmt("var x: [[int]] = [];").trim(),
+            "var x: List<List<int>> = [];"
+        );
     }
 
     #[test]
@@ -2114,7 +2144,7 @@ function pick(flag: bool) -> int {
         let src = "type [Border]{\n    width?: int;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
-            formatted.contains("type [Border]{"),
+            formatted.contains("type Border {"),
             "must contain type header: {}",
             formatted
         );
@@ -2131,7 +2161,7 @@ function pick(flag: bool) -> int {
         let src = "type [Border]{\n    width?: int;\n};\nexport type [Decoration]{\n    border?: Border;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
-            formatted.contains("export type [Decoration]{"),
+            formatted.contains("export type Decoration {"),
             "must contain export type header: {}",
             formatted
         );
@@ -2147,7 +2177,7 @@ function pick(flag: bool) -> int {
         let src = "type [PostgresType]{\n    image: str;\n};\n[Postgres] -> PostgresType {\n    image: str = \"postgres:16\";\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
-            formatted.contains("[Postgres] -> PostgresType {"),
+            formatted.contains("struct Postgres: PostgresType {"),
             "must round-trip the type binding: {}",
             formatted
         );

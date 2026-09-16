@@ -85,3 +85,56 @@ fn execute_path_reports_import_cycles_the_same_way_check_does() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn execute_path_runs_imported_generic_functions() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("generic.spar"),
+        "function identity<T>(value: T) -> T { return value; };\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("main.spar"),
+        concat!(
+            "import \"generic.spar\" as generic;\n",
+            "function main() -> int { return generic::identity<int>(value: 11); };\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = Engine::default()
+        .execute_path(&temp.path().join("main.spar"))
+        .expect("imported generic should execute");
+    assert_eq!(outcome.exit_status, 11);
+}
+
+#[test]
+fn execute_path_preserves_generics_through_selective_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("generic.spar"),
+        concat!(
+            "export type [Box<T>] { value: T; };\n",
+            "function identity<T>(value: T) -> T { return value; };\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("main.spar"),
+        concat!(
+            "import { identity } from \"generic.spar\";\n",
+            "import type { Box } from \"generic.spar\";\n",
+            "function main() -> int {\n",
+            "    var boxed: Box<int> = { value: identity(value: 19); };\n",
+            "    return boxed.value;\n",
+            "};\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = Engine::default()
+        .execute_path(&temp.path().join("main.spar"))
+        .expect("selectively imported generics should execute");
+    assert_eq!(outcome.exit_status, 19);
+}

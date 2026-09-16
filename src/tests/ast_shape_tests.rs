@@ -15,6 +15,7 @@ fn ast_new_types_compile() {
     let _fd = FunctionDecl {
         name: "f".into(),
         name_span: Span::dummy(),
+        type_parameters: vec![],
         params: vec![],
         ret: SparType::Bool,
         ret_span: Span::dummy(),
@@ -27,6 +28,14 @@ fn ast_new_types_compile() {
         },
         is_private: false,
         span: Span::dummy(),
+    };
+    let _parameter = TypeParameter {
+        name: "T".into(),
+        span: Span::dummy(),
+    };
+    let _applied = SparType::Applied {
+        name: "Box".into(),
+        arguments: vec![SparType::Int],
     };
     let _ = _fd;
 }

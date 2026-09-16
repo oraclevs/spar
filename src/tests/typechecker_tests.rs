@@ -21,6 +21,93 @@ fn check_err(src: &str) -> String {
 }
 
 #[test]
+fn generic_function_calls_infer_and_accept_explicit_types() {
+    check_ok(
+        r#"
+        function identity<T>(value: T) -> T { return value; };
+        var inferred: int = identity(value: 7);
+        var explicit: str = identity<str>(value: "seven");
+        "#,
+    );
+}
+
+#[test]
+fn generic_calls_support_multiple_nested_and_partial_explicit_arguments() {
+    check_ok(
+        r#"
+        function first<T, U>(left: T, right: U) -> T { return left; };
+        function passthrough<T>(values: [T]) -> [T] { return values; };
+        var partial: int = first<int>(left: 1, right: "ignored");
+        var nested: [str] = passthrough(values: ["a", "b"]);
+        "#,
+    );
+}
+
+#[test]
+fn generic_type_parameter_can_be_forwarded_explicitly() {
+    check_ok(
+        r#"
+        function identity<T>(value: T) -> T { return value; };
+        function forward<T>(value: T) -> T { return identity<T>(value: value); };
+        var result: int = forward(value: 5);
+        "#,
+    );
+}
+
+#[test]
+fn generic_inference_rejects_conflicts_and_unresolved_parameters() {
+    let conflict = check_err(
+        "function same<T>(left: T, right: T) -> T { return left; }; var x: int = same(left: 1, right: \"one\");",
+    );
+    assert!(conflict.contains("conflicting inference"), "{conflict}");
+
+    let unresolved = check_err("function make<T>() -> T { return 1; }; var x: int = make();");
+    assert!(
+        unresolved.contains("explicit type argument"),
+        "{unresolved}"
+    );
+}
+
+#[test]
+fn unconstrained_generic_parameters_reject_primitive_operations() {
+    let addition = check_err("function add<T>(left: T, right: T) -> T { return left + right; };");
+    assert!(addition.contains("binary expression"), "{addition}");
+
+    let equality =
+        check_err("function equal<T>(left: T, right: T) -> bool { return left == right; };");
+    assert!(equality.contains("binary expression"), "{equality}");
+}
+
+#[test]
+fn applied_generic_type_substitutes_fields() {
+    check_ok(
+        r#"
+        type [Box<T>] { value: T; };
+        var boxed: Box<int> = { value: 7; };
+        var value: int = boxed.value;
+        "#,
+    );
+
+    let mismatch =
+        check_err("type [Box<T>] { value: T; }; var boxed: Box<int> = { value: \"bad\"; };");
+    assert!(mismatch.contains("int"), "{mismatch}");
+}
+
+#[test]
+fn nested_applied_generic_fields_are_instantiated_recursively() {
+    check_ok(
+        r#"
+        type [Pair<T, U>] { left: T; right: U; };
+        type [Box<T>] { value: T; };
+        var nested: Box<Pair<int, str>> = {
+            value: { left: 1; right: "one"; };
+        };
+        var left: int = nested.value.left;
+        "#,
+    );
+}
+
+#[test]
 fn shell_block_has_shell_type() {
     check_ok("var x: shell = shell { echo hi; };");
 }

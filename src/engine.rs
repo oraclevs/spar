@@ -81,11 +81,37 @@ impl Engine {
     /// Still never calls `main` — nothing auto-invokes a top-level function
     /// by name outside of Execute mode.
     pub fn emit_source(&self, source: &str) -> Compilation {
-        let options = CompileOptions {
-            evaluate: true,
-            ..self.options.clone()
-        };
-        Compiler::new(options).compile(source)
+        match self.compile_source(source) {
+            Ok(program) => self
+                .emit_compiled(&program)
+                .unwrap_or_else(|errors| Compilation {
+                    program: Some(
+                        program.modules[program.entry.0 as usize]
+                            .checked
+                            .program
+                            .clone(),
+                    ),
+                    symbols: Some(
+                        program.modules[program.entry.0 as usize]
+                            .checked
+                            .symbols
+                            .clone(),
+                    ),
+                    imports: program.modules[program.entry.0 as usize]
+                        .checked
+                        .imports
+                        .clone(),
+                    result: None,
+                    tasks: None,
+                    task_exprs: Vec::new(),
+                    errors,
+                }),
+            Err(_) => Compiler::new(CompileOptions {
+                evaluate: true,
+                ..self.options.clone()
+            })
+            .compile(source),
+        }
     }
 
     pub fn emit_path(&self, path: &Path) -> Result<Compilation, Vec<SparError>> {
@@ -96,27 +122,62 @@ impl Engine {
     /// returning `int` or `void`, evaluate the module exactly once, call
     /// `main`, and translate its result into a process exit status.
     pub fn execute_source(&self, source: &str) -> Result<ExecutionOutcome, Vec<SparError>> {
-        let checked = self.check_compile(source)?;
-        let program = checked
-            .program
-            .as_ref()
-            .expect("a successful check always records the parsed program");
-        let symbols = checked
-            .symbols
-            .as_ref()
-            .expect("a successful check always records resolved symbols");
+        let program = self.compile_source(source)?;
+        self.execute_compiled(&program)
+    }
 
-        require_entry_signature(program).map_err(|e| vec![e])?;
-
-        let (_, result) = Evaluator::evaluate_and_call_entry_with_imports_base_and_effects(
-            program,
-            symbols,
-            &checked.imports,
-            &self.options.base_dir,
-            "main",
-            self.options.hosts.clone(),
-            self.options.effect_ledger.clone(),
+    pub fn emit_compiled(&self, program: &CompiledProgram) -> Result<Compilation, Vec<SparError>> {
+        let entry = program
+            .modules
+            .get(program.entry.0 as usize)
+            .ok_or_else(|| {
+                vec![SparError::EvalError {
+                    message: "internal runtime error: entry module is unavailable".into(),
+                    span: Span::dummy(),
+                }]
+            })?;
+        let result = Evaluator::evaluate_with_imports_base_and_effects(
+            &entry.checked.program,
+            &entry.checked.symbols,
+            &entry.checked.imports,
+            &program.options.base_dir,
+            program.options.hosts.clone(),
+            program.options.effect_ledger.clone(),
         )?;
+        let mut task_exprs = Vec::new();
+        let tasks = crate::task_lowering::lower_tasks(
+            &entry.checked.program,
+            &entry.checked.symbols,
+            &result,
+            &program.options.base_dir,
+            &mut task_exprs,
+        )?;
+        Ok(Compilation {
+            program: Some(entry.checked.program.clone()),
+            symbols: Some(entry.checked.symbols.clone()),
+            imports: entry.checked.imports.clone(),
+            result: Some(result),
+            tasks,
+            task_exprs,
+            errors: Vec::new(),
+        })
+    }
+
+    pub fn execute_compiled(
+        &self,
+        program: &CompiledProgram,
+    ) -> Result<ExecutionOutcome, Vec<SparError>> {
+        let entry = program
+            .modules
+            .get(program.entry.0 as usize)
+            .ok_or_else(|| {
+                vec![SparError::EvalError {
+                    message: "internal runtime error: entry module is unavailable".into(),
+                    span: Span::dummy(),
+                }]
+            })?;
+        require_entry_signature(&entry.checked.program).map_err(|error| vec![error])?;
+        let result = crate::runtime::execute_program(program)?;
 
         let exit_status = match result {
             ConfigValue::Int(status) => status as i32,

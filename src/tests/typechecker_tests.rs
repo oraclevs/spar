@@ -94,6 +94,38 @@ fn applied_generic_type_substitutes_fields() {
 }
 
 #[test]
+fn canonical_structs_conform_to_generic_types_and_lists() {
+    check_ok(
+        r#"
+        type Pair<T, V> { left: T; right: V; };
+        struct Example: Pair<str, int> { left = "hello"; right = 42; };
+        var names: List<str> = ["Obi", "Ada"];
+        "#,
+    );
+
+    let mismatch = check_err(
+        r#"type Pair<T, V> { left: T; right: V; }; struct Broken: Pair<str, int> { left = 42; right = "wrong"; };"#,
+    );
+    assert!(mismatch.contains("expects"), "{mismatch}");
+    assert!(mismatch.contains("str"), "{mismatch}");
+}
+
+#[test]
+fn caught_error_binding_has_error_fields_and_ignored_catch_is_valid() {
+    check_ok(
+        r#"
+        function main() -> void {
+            try { return; } catch err {
+                var message: str = err.message;
+                var kind: str = err.kind;
+            }
+            try { return; } catch { return; }
+        };
+        "#,
+    );
+}
+
+#[test]
 fn nested_applied_generic_fields_are_instantiated_recursively() {
     check_ok(
         r#"

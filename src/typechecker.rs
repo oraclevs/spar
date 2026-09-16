@@ -711,7 +711,7 @@ impl<'a> TypeChecker<'a> {
             let spread_covers = covered_by_spread.is_some_and(|names| names.contains(&tf.name));
             match cf {
                 None if spread_covers => {} // a mixed-in spread supplies this field
-                None if !tf.optional => {
+                None if !tf.optional && tf.default.is_none() => {
                     self.push_type_error(
                         format!(
                             "section `[{}]` is missing required field `{}` (required by type `{}`)",
@@ -2895,7 +2895,15 @@ impl<'a> TypeChecker<'a> {
                     let if_stmt = if_stmt.clone();
                     self.check_if_stmt(&if_stmt, ret_ty, local_types);
                 }
-                FuncStmt::Try(_) => {}
+                FuncStmt::Try(statement) => {
+                    let mut body_types = local_types.clone();
+                    self.check_func_stmts(&statement.body, ret_ty, &mut body_types);
+                    let mut catch_types = local_types.clone();
+                    if let Some(name) = &statement.catch_name {
+                        catch_types.insert(name.clone(), SparType::Error);
+                    }
+                    self.check_func_stmts(&statement.handler, ret_ty, &mut catch_types);
+                }
             }
         }
     }
@@ -3138,6 +3146,7 @@ impl<'a> TypeChecker<'a> {
                     if nr.segments.len() == 1 {
                         if let Some(ty) = locals.get(&nr.segments[0]) {
                             return match ty {
+                                SparType::Error => Some(SparType::Str),
                                 SparType::Named(type_name) => self
                                     .symbols
                                     .types

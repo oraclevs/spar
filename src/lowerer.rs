@@ -440,6 +440,17 @@ impl FunctionLowerer<'_> {
                 if reference.segments.len() == 1 {
                     if let Some(slot) = self.locals.lookup(&reference.segments[0]) {
                         CompiledExpression::Local(slot, reference.span.clone())
+                    } else if self
+                        .locals
+                        .symbols
+                        .lookup_section(&reference.segments)
+                        .is_some()
+                    {
+                        CompiledExpression::ImportedValue {
+                            module: self.context.module,
+                            path: reference.segments.clone(),
+                            span: reference.span.clone(),
+                        }
                     } else {
                         CompiledExpression::Global(
                             reference.segments[0].clone(),

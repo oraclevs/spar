@@ -413,13 +413,29 @@ impl Runtime<'_> {
             }
             CompiledExpression::Field { base, field, span } => {
                 let base = self.eval_expression(base, frame, module)?;
-                let ConfigValue::Section(fields) = base else {
-                    return Err(type_error("object", &base, span));
-                };
-                fields
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| runtime_error(&format!("object has no field '{field}'"), span))
+                match base {
+                    ConfigValue::Section(fields) => fields.get(field).cloned().ok_or_else(|| {
+                        runtime_error(&format!("object has no field '{field}'"), span)
+                    }),
+                    ConfigValue::Error {
+                        message,
+                        kind,
+                        code,
+                        cause,
+                    } => match field.as_str() {
+                        "message" => Ok(ConfigValue::Str(message)),
+                        "kind" => Ok(ConfigValue::Str(kind)),
+                        "code" => Ok(ConfigValue::Int(code)),
+                        "cause" => cause
+                            .map(|value| *value)
+                            .ok_or_else(|| runtime_error("error has no cause", span)),
+                        _ => Err(runtime_error(
+                            &format!("error has no field '{field}'"),
+                            span,
+                        )),
+                    },
+                    value => Err(type_error("object", &value, span)),
+                }
             }
             CompiledExpression::Interpolation(parts, span) => {
                 let mut output = String::new();
@@ -546,7 +562,13 @@ impl Runtime<'_> {
             .and_then(|state| state.results.get(&module))
             .ok_or_else(|| module_state_error(span))?;
         match path {
-            [name] => result.globals.get(name).cloned(),
+            [name] => result.globals.get(name).cloned().or_else(|| {
+                result
+                    .sections
+                    .get(std::slice::from_ref(name))
+                    .cloned()
+                    .map(ConfigValue::Section)
+            }),
             [section @ .., field] => result
                 .sections
                 .get(section)

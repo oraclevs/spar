@@ -146,7 +146,10 @@ fn substitute_field_shape(
     }
 }
 
-fn substitute_type_field(field: &TypeField, substitution: &TypeSubstitution) -> TypeField {
+pub(crate) fn substitute_type_field(
+    field: &TypeField,
+    substitution: &TypeSubstitution,
+) -> TypeField {
     TypeField {
         name: field.name.clone(),
         optional: field.optional,
@@ -1547,7 +1550,18 @@ impl<'a> TypeChecker<'a> {
             // to `infer_type`, which only knows about `SparType::Named`
             // type instances, not sections.
             if let Some(section) = self.symbols.lookup_section(&nr.segments) {
-                return section.fields.get(field).and_then(|f| f.ty.clone());
+                if let Some(ty) = section.fields.get(field).and_then(|f| f.ty.clone()) {
+                    return Some(ty);
+                }
+                if let Some(binding) = &section.type_binding {
+                    return self
+                        .type_fields_for(binding)
+                        .and_then(|(_, fields)| {
+                            fields.into_iter().find(|candidate| candidate.name == field)
+                        })
+                        .map(|field| self.field_shape_to_type(&field.shape));
+                }
+                return None;
             }
         }
         let base_ty = self.infer_type(base)?;
@@ -1556,6 +1570,7 @@ impl<'a> TypeChecker<'a> {
 
     fn infer_field_access_from_type(&self, base_ty: &SparType, field: &str) -> Option<SparType> {
         match base_ty {
+            SparType::Error if matches!(field, "message" | "kind") => Some(SparType::Str),
             SparType::Named(type_name) => self
                 .symbols
                 .types
@@ -3163,6 +3178,9 @@ impl<'a> TypeChecker<'a> {
                                     .map(|field| self.field_shape_to_type(&field.shape)),
                                 _ => None,
                             };
+                        }
+                        if self.symbols.lookup_section(&nr.segments).is_some() {
+                            return self.infer_field_access(base, field);
                         }
                     }
                 }

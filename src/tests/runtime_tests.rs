@@ -31,6 +31,25 @@ fn compiled_integer_division_by_zero_is_an_error() {
 }
 
 #[test]
+fn compiled_try_catch_exposes_error_and_supports_ignored_binding() {
+    let value = execute(
+        r#"
+        function main() -> int {
+            try { var broken: int = 1 / 0; }
+            catch err {
+                if err.kind == "runtime" { return 7; }
+                return 1;
+            }
+            try { var broken: int = 1 / 0; } catch { return 9; }
+            return 0;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(7));
+}
+
+#[test]
 fn compiled_generic_functions_are_erased_and_reusable() {
     let value = execute(
         r#"

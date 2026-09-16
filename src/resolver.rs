@@ -1927,6 +1927,19 @@ impl Resolver {
             || self.globals.contains_key(name)
     }
 
+    fn section_has_field(&self, entry: &SectionEntry, field: &str) -> bool {
+        if entry.fields.contains_key(field) {
+            return true;
+        }
+        let type_name = match entry.type_binding.as_ref() {
+            Some(SparType::Named(name)) | Some(SparType::Applied { name, .. }) => name,
+            _ => return false,
+        };
+        self.types
+            .get(type_name)
+            .is_some_and(|decl| decl.fields.iter().any(|candidate| candidate.name == field))
+    }
+
     fn resolve_field_access(&mut self, base: &Expr, field: &str, span: &Span) {
         if let Expr::NamespaceRef(nr) = base {
             // An import alias is a valid dot-access base (`shared.port`).
@@ -1943,7 +1956,7 @@ impl Resolver {
                     return;
                 };
                 if let Some(entry) = self.sections.get(&section_path) {
-                    if !entry.fields.contains_key(field) {
+                    if !self.section_has_field(entry, field) {
                         let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
                         self.push_error_hint(
                             format!(
@@ -1979,7 +1992,7 @@ impl Resolver {
             let key = vec![nr.segments.first().cloned().unwrap_or_default()];
             if nr.segments.len() == 1 && self.sections.contains_key(&key) {
                 let entry = &self.sections[&key];
-                if !entry.fields.contains_key(field) {
+                if !self.section_has_field(entry, field) {
                     let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
                     self.push_error_hint(
                         format!(
@@ -2020,7 +2033,7 @@ impl Resolver {
                     });
                 };
                 if let Some(entry) = self.sections.get(&section_path) {
-                    if !entry.fields.contains_key(field) {
+                    if !self.section_has_field(entry, field) {
                         let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
                         return Err(SparError::ResolveError {
                             message: format!(
@@ -2051,7 +2064,7 @@ impl Resolver {
             if nr.segments.len() == 1 && !locals.contains(&nr.segments[0]) {
                 let key = vec![nr.segments[0].clone()];
                 if let Some(entry) = self.sections.get(&key) {
-                    if !entry.fields.contains_key(field) {
+                    if !self.section_has_field(entry, field) {
                         let hint = suggest(field, entry.fields.keys().map(|s| s.as_str()));
                         return Err(SparError::ResolveError {
                             message: format!(

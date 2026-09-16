@@ -788,7 +788,56 @@ impl Evaluator {
 
     fn eval_section_decl(&mut self, decl: &SectionDecl) -> HashMap<String, ConfigValue> {
         let path = decl.path.clone();
-        self.eval_section_fields(&decl.items.clone(), &path, &HashMap::new())
+        let mut items = decl.items.clone();
+        if let Some(binding) = &decl.type_binding {
+            if let Some((_, fields)) = self.type_fields_for_binding(&binding.ty) {
+                for field in fields {
+                    if field.default.is_some()
+                        && !items.iter().any(|item| {
+                            matches!(item, SectionItem::Field(existing) if existing.name == field.name)
+                        })
+                    {
+                        items.push(SectionItem::Field(FieldDecl {
+                            name: field.name,
+                            optional: field.optional,
+                            ty: None,
+                            value: field.default.map(FieldValue::Expr),
+                            span: field.span,
+                        }));
+                    }
+                }
+            }
+        }
+        self.eval_section_fields(&items, &path, &HashMap::new())
+    }
+
+    fn type_fields_for_binding(
+        &self,
+        ty: &SparType,
+    ) -> Option<(String, Vec<crate::ast::TypeField>)> {
+        let (name, arguments) = match ty {
+            SparType::Named(name) => (name, None),
+            SparType::Applied { name, arguments } => (name, Some(arguments)),
+            _ => return None,
+        };
+        let entry = self.symbols.types.get(name)?;
+        let fields = match arguments {
+            Some(arguments) => {
+                let substitution: std::collections::HashMap<_, _> = entry
+                    .type_parameters
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(parameter, argument)| (parameter.name.clone(), argument.clone()))
+                    .collect();
+                entry
+                    .fields
+                    .iter()
+                    .map(|field| crate::typechecker::substitute_type_field(field, &substitution))
+                    .collect()
+            }
+            None => entry.fields.clone(),
+        };
+        Some((crate::typechecker::display_type(ty), fields))
     }
 
     fn eval_section_fields(

@@ -3,6 +3,23 @@ use std::fs;
 use spar::Engine;
 
 #[test]
+fn canonical_struct_uses_generic_defaults_and_field_access() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            type Config<T> { name: str = "default"; value: T; };
+            struct App: Config<int> { value = 7; };
+            function main() -> int {
+                if App.name == "default" { return App.value; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("canonical struct should execute");
+    assert_eq!(outcome.exit_status, 7);
+}
+
+#[test]
 fn execute_path_runs_a_multi_file_projects_main() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(

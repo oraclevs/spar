@@ -2744,7 +2744,7 @@ impl Resolver {
     ) -> Result<(), SparError> {
         match nr.segments.as_slice() {
             [name] => {
-                if name == "status" {
+                if name == "status" || name == "lastJob" {
                     return Ok(());
                 }
                 if locals.contains(name) {

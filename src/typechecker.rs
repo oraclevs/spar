@@ -1559,6 +1559,7 @@ impl<'a> TypeChecker<'a> {
                 .and_then(|ty| promise_inner(&ty).cloned()),
             Expr::Index { source, .. } => match self.infer_type(source)? {
                 SparType::List(elem) => Some(*elem),
+                SparType::Named(name) if name == "Bytes" => Some(SparType::Int),
                 _ => None,
             },
             Expr::Comprehension { source, .. } => {
@@ -1579,6 +1580,7 @@ impl<'a> TypeChecker<'a> {
     fn infer_namespace_type(&self, nr: &NamespaceRef) -> Option<SparType> {
         match nr.segments.as_slice() {
             [name] if name == "status" => Some(SparType::Named("ProcessStatus".into())),
+            [name] if name == "lastJob" => Some(SparType::Named("Job".into())),
             [name] => self.lookup_global_type(name),
             [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
                 Some(SparType::Named(ns.clone()))
@@ -2929,7 +2931,13 @@ impl<'a> TypeChecker<'a> {
                     } else {
                         let actual = self.infer_type_with_locals(&lv.value, local_types);
                         match (lv.ty.as_ref(), actual) {
-                            (Some(declared), Some(ref actual)) if actual == declared => {
+                            (Some(declared), Some(ref actual))
+                                if actual == declared
+                                    || matches!((declared, actual),
+                                        (SparType::Named(left), SparType::Named(right))
+                                            if (left == "ExecResult" && right == "ProcessResult")
+                                                || (left == "ProcessResult" && right == "ExecResult")) =>
+                            {
                                 local_types.insert(lv.name.clone(), declared.clone());
                             }
                             (Some(declared), Some(actual)) => {
@@ -3360,6 +3368,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 match self.infer_type_with_locals(source, locals)? {
                     SparType::List(elem) => Some(*elem),
+                    SparType::Named(name) if name == "Bytes" => Some(SparType::Int),
                     _ => None,
                 }
             }

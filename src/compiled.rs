@@ -144,6 +144,20 @@ pub(crate) struct CompiledShellCommand {
     pub stdin: Option<CompiledShellRedirect>,
     pub stdout: Option<CompiledShellRedirect>,
     pub stderr: Option<CompiledShellRedirect>,
+    pub redirections: Vec<CompiledShellFdRedirect>,
+    pub background: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellFdRedirect {
+    pub fd: u32,
+    pub target: CompiledShellFdRedirectTarget,
+}
+
+#[derive(Clone)]
+pub(crate) enum CompiledShellFdRedirectTarget {
+    File(CompiledShellRedirect),
+    Duplicate(u32),
 }
 
 #[derive(Clone)]

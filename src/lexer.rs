@@ -819,7 +819,11 @@ impl<'a> Lexer<'a> {
             .pop()
             .expect("shell mode is entered immediately after emitting TypeShell");
         tokens.push(SpannedToken::new(
-            Token::ShellBlockStart,
+            if foreign_bash {
+                Token::ShellForeignBlockStart("bash".into())
+            } else {
+                Token::ShellBlockStart
+            },
             Span::new(shell.span.start, self.pos, shell.span.line, shell.span.col),
         ));
         if foreign_bash {
@@ -1034,20 +1038,77 @@ impl<'a> Lexer<'a> {
                     };
                     tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
                 }
+                Some(byte) if byte.is_ascii_digit() => {
+                    let mut offset = 0usize;
+                    while self.peek_at(offset).is_some_and(|b| b.is_ascii_digit()) {
+                        offset += 1;
+                    }
+                    if self.peek_at(offset) != Some(b'>') {
+                        self.lex_bare_shell_word(tokens, start, line, col);
+                        continue;
+                    }
+                    let fd = self.source[start..start + offset]
+                        .parse::<u32>()
+                        .map_err(|_| SparError::LexError {
+                            message: "file descriptor is too large".into(),
+                            span: Span::new(start, start + offset, line, col),
+                        })?;
+                    for _ in 0..=offset {
+                        self.advance();
+                    }
+                    let token = if self.peek() == Some(b'&') {
+                        self.advance();
+                        let target_start = self.pos;
+                        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                            self.advance();
+                        }
+                        if target_start == self.pos {
+                            return Err(SparError::LexError {
+                                message: "expected target fd after '>&'".into(),
+                                span: self.span_at(start, line, col),
+                            });
+                        }
+                        let target =
+                            self.source[target_start..self.pos]
+                                .parse::<u32>()
+                                .map_err(|_| SparError::LexError {
+                                    message: "file descriptor is too large".into(),
+                                    span: self.span_at(start, line, col),
+                                })?;
+                        Token::ShellFdDuplicate { fd, target }
+                    } else {
+                        let append = if self.peek() == Some(b'>') {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        if fd == 2 && !append {
+                            Token::ShellRedirectStderr
+                        } else {
+                            Token::ShellFdRedirect { fd, append }
+                        }
+                    };
+                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
+                }
                 Some(b'&') => {
                     self.advance();
-                    if self.peek() != Some(b'&') {
-                        return Err(SparError::LexError {
-                            message: "unexpected '&' — background jobs are not supported yet"
-                                .to_string(),
-                            span: self.span_at(start, line, col),
-                        });
-                    }
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::AndAnd,
-                        self.span_at(start, line, col),
-                    ));
+                    let token = if self.peek() == Some(b'&') {
+                        self.advance();
+                        Token::AndAnd
+                    } else if self.peek() == Some(b'>') {
+                        self.advance();
+                        let append = if self.peek() == Some(b'>') {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        Token::ShellRedirectBoth { append }
+                    } else {
+                        Token::ShellBackground
+                    };
+                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
                 }
                 Some(b'<') => {
                     self.advance();
@@ -1062,14 +1123,6 @@ impl<'a> Lexer<'a> {
                         Token::Gt
                     };
                     tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
-                }
-                Some(b'2') if self.peek_at(1) == Some(b'>') => {
-                    self.advance();
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::ShellRedirectStderr,
-                        self.span_at(start, line, col),
-                    ));
                 }
                 Some(b'"') => self.lex_quoted_shell_word(tokens, start, line, col)?,
                 Some(b'\'') => self.lex_literal_shell_word(tokens, start, line, col)?,

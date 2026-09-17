@@ -92,7 +92,6 @@ mod tests {
             ("BAD-NAME=value", "invalid environment assignment"),
             ("echo ok &&", "expected a command after '&&'"),
             ("echo ok ||", "expected a command after '||'"),
-            ("cat < one < two", "stdin may only be redirected once"),
             (
                 "printf x | cat < input",
                 "pipeline input already comes from previous stage",

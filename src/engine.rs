@@ -384,22 +384,20 @@ mod tests {
     }
 
     #[test]
-    fn exec_shell_sequence_continues_after_failure_by_default() {
+    fn shell_sequence_continues_after_failure_by_default() {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("created-after-failure");
         let source = format!(
             r#"
-            function main() -> int {{
-                var r = exec shell {{ false; printf x > "{}"; }};
-                if r.success {{ return 0; }}
-                return 1;
+            function main() -> shell {{
+                return shell {{ false; printf x > "{}"; }};
             }};
             "#,
             marker.display()
         );
         let outcome = Engine::default()
             .execute_source(&source)
-            .expect("program handles child failure");
+            .expect("ordinary shell sequence handles child failure");
         assert_eq!(outcome.exit_status, 0);
         assert!(marker.exists(), "a command after ';' must run");
     }
@@ -534,6 +532,26 @@ mod tests {
     }
 
     #[test]
+    fn native_status_exposes_pid_signal_and_pipeline_stages() {
+        let outcome = Engine::default()
+            .execute_source(
+                r#"
+                function main() -> shell {
+                    return shell {
+                        true | sh -c "kill -TERM $$";
+                        if status.code == 143 && !status.success && status.signal == 15 && status.pid > 0 && status.pipeline[0].success && !status.pipeline[1].success {
+                            exit 0;
+                        }
+                        exit 1;
+                    };
+                };
+                "#,
+            )
+            .unwrap();
+        assert_eq!(outcome.exit_status, 0);
+    }
+
+    #[test]
     fn explicit_bash_block_runs_as_foreign_source() {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("bash");
@@ -566,6 +584,89 @@ mod tests {
             )
             .expect("nonzero structured capture must return data");
         assert_eq!(outcome.exit_status, 7);
+    }
+
+    #[test]
+    fn process_result_exposes_pipeline_status_and_raw_bytes() {
+        let outcome = Engine::default()
+            .execute_source(
+                r#"
+                function main() -> int {
+                    var result: ProcessResult = exec { sh -c "printf '\377'; exit 9"; };
+                    if result.status.processes[0].code == 9 && result.stdout[0] == 255 {
+                        return 0;
+                    }
+                    return 1;
+                };
+                "#,
+            )
+            .expect("structured process result");
+        assert_eq!(outcome.exit_status, 0);
+    }
+
+    #[test]
+    fn background_command_sets_last_job_and_is_owned_until_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("finished");
+        let pid_file = temp.path().join("pid");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    sh -c "sleep 0.02; printf done > '{}'" &;
+                    printf "%s:%s" "$!" "${{lastJob.pid}}" > "{}";
+                }};
+            }};
+            "#,
+            marker.display(),
+            pid_file.display()
+        );
+        let outcome = Engine::default().execute_source(&source).unwrap();
+        assert_eq!(outcome.exit_status, 0);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "done");
+        let pids = std::fs::read_to_string(pid_file).unwrap();
+        let (short, native) = pids.split_once(':').unwrap();
+        assert_eq!(short, native);
+        assert!(native.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn native_redirections_support_generic_fds_order_and_both_streams() {
+        let temp = tempfile::tempdir().unwrap();
+        let stdout = temp.path().join("stdout");
+        let stderr = temp.path().join("stderr");
+        let both = temp.path().join("both");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    sh -c "printf out; printf err >&2" 3> "{}" 2>&3 > "{}";
+                    sh -c "printf a; printf b >&2" &> "{}";
+                    sh -c "printf c; printf d >&2" &>> "{}";
+                }};
+            }};
+            "#,
+            stderr.display(),
+            stdout.display(),
+            both.display(),
+            both.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(stdout).unwrap(), "out");
+        assert_eq!(std::fs::read_to_string(stderr).unwrap(), "err");
+        let both = std::fs::read_to_string(both).unwrap();
+        assert!(both.contains('a') && both.contains('b'));
+        assert!(both.contains('c') && both.contains('d'));
+    }
+
+    #[test]
+    fn native_command_runtime_error_keeps_source_line() {
+        let errors = Engine::default()
+            .execute_source(
+                "function main() -> shell {\n    return shell {\n        var x: int = 1;\n        definitely-not-a-real-command-xyz;\n    };\n};\n",
+            )
+            .unwrap_err();
+        assert!(format!("{errors:?}").contains("line: 4"), "{errors:?}");
     }
 
     #[test]

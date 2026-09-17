@@ -157,6 +157,33 @@ fn exec_imports_a_sibling_module() {
 }
 
 #[test]
+fn fmt_then_exec_preserves_native_shell_loops_and_local_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("loop.spar"),
+        r#"function main() -> shell {
+    var files: [str] = ["one", "two"];
+    return shell {
+        var mut count: int = 0;
+        for file in files {
+            echo "${file}";
+            count += 1;
+        }
+        echo "${count}";
+    };
+};
+"#,
+    )
+    .unwrap();
+
+    let formatted = spar_in(&["fmt", "loop.spar"], dir.path());
+    assert!(formatted.status.success(), "{formatted:?}");
+    let output = spar_in(&["exec", "loop.spar"], dir.path());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"one\ntwo\n2\n");
+}
+
+#[test]
 fn repl_evaluates_fragments_and_exits_zero_on_eof() {
     let output = spar_with_input(
         &["repl"],

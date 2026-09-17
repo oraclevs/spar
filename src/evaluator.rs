@@ -1854,6 +1854,20 @@ fn lower_shell_command(command: &ShellCommandExpr) -> spar_command::CommandPlan 
         stdin: command.stdin.as_ref().map(lower_shell_redirect),
         stdout: command.stdout.as_ref().map(lower_shell_redirect),
         stderr: command.stderr.as_ref().map(lower_shell_redirect),
+        redirections: command
+            .redirections
+            .iter()
+            .map(|redirect| spar_command::OrderedRedirection {
+                fd: redirect.fd,
+                target: match &redirect.target {
+                    ShellFdRedirectTarget::File(file) => lower_shell_redirect(file),
+                    ShellFdRedirectTarget::Duplicate(fd) => {
+                        spar_command::Redirection::DuplicateFd(*fd)
+                    }
+                },
+            })
+            .collect(),
+        background: command.background,
     }
 }
 
@@ -1864,10 +1878,13 @@ fn lower_shell_redirect(redirect: &ShellRedirect) -> spar_command::Redirection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellPlanOutcome {
     pub success: bool,
     pub exit_code: i32,
+    pub signal: Option<i32>,
+    pub pid: u32,
+    pub pipeline: Vec<spar_process::ProcessStatus>,
 }
 
 pub fn execute_shell_plan(plan: &spar_command::ShellPlan) -> std::io::Result<ShellPlanOutcome> {
@@ -1882,6 +1899,7 @@ pub fn execute_shell_plan_with_options(
     struct NativeExecutor<'a> {
         options: &'a spar_process::ExecutionOptions,
         stop: bool,
+        last_status: Option<spar_process::PipelineStatus>,
     }
 
     impl spar_process::StepExecutor for NativeExecutor<'_> {
@@ -1905,14 +1923,18 @@ pub fn execute_shell_plan_with_options(
                     code: Some(code),
                 });
             }
-            spar_process::run_command(command, self.options).map(|output| output.status)
+            let output = spar_process::run_command(command, self.options)?;
+            self.last_status = output.pipeline_status;
+            Ok(output.status)
         }
 
         fn run_pipeline(
             &mut self,
             pipeline: &spar_command::PipelinePlan,
         ) -> Result<spar_process::ExitStatus, Self::Error> {
-            spar_process::run_pipeline(pipeline, self.options).map(|output| output.status)
+            let output = spar_process::run_pipeline(pipeline, self.options)?;
+            self.last_status = output.pipeline_status;
+            Ok(output.status)
         }
 
         fn should_stop(&self) -> bool {
@@ -1923,10 +1945,24 @@ pub fn execute_shell_plan_with_options(
     let mut executor = NativeExecutor {
         options,
         stop: false,
+        last_status: None,
     };
-    spar_process::run_plan(plan, &mut executor).map(|outcome| ShellPlanOutcome {
-        success: outcome.success,
-        exit_code: outcome.exit_code,
+    spar_process::run_plan(plan, &mut executor).map(|outcome| {
+        let status = executor
+            .last_status
+            .unwrap_or(spar_process::PipelineStatus {
+                code: outcome.exit_code,
+                success: outcome.success,
+                processes: vec![],
+            });
+        let last = status.processes.last();
+        ShellPlanOutcome {
+            success: status.success,
+            exit_code: status.code,
+            signal: last.and_then(|process| process.signal),
+            pid: last.map_or(0, |process| process.pid),
+            pipeline: status.processes,
+        }
     })
 }
 

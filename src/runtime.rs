@@ -95,6 +95,9 @@ pub(crate) fn execute_self_contained_entry(
         tasks: TaskTable::default(),
         shell_depth: 0,
         shell_outcome: None,
+        jobs: Vec::new(),
+        last_job: None,
+        shell_exit: false,
     }
     .run_entry(entry)
     .map_err(|fault| vec![fault.into_error()])
@@ -107,6 +110,9 @@ pub(crate) struct Runtime<'a> {
     tasks: TaskTable,
     shell_depth: usize,
     shell_outcome: Option<crate::evaluator::ShellPlanOutcome>,
+    jobs: Vec<spar_process::Job>,
+    last_job: Option<ConfigValue>,
+    shell_exit: bool,
 }
 
 impl Drop for Runtime<'_> {
@@ -146,6 +152,9 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
         tasks: TaskTable::default(),
         shell_depth: 0,
         shell_outcome: None,
+        jobs: Vec::new(),
+        last_job: None,
+        shell_exit: false,
     };
     let value = runtime
         .ensure_module(program.entry)
@@ -333,18 +342,13 @@ impl Runtime<'_> {
                     self.write_global(module, name, value, span)?;
                     RuntimeFlow::Normal
                 }
-                CompiledStatement::Expression(expression, _) => {
+                CompiledStatement::Expression(expression, statement_span) => {
                     let value = self.eval_expression(expression, frame, module)?;
                     if self.shell_depth > 0 {
                         let outcome = match value {
-                            ConfigValue::Shell(plan) => Some(
-                                crate::evaluator::execute_shell_plan(&plan).map_err(|error| {
-                                    runtime_error(
-                                        &format!("could not execute native command: {error}"),
-                                        &Span::dummy(),
-                                    )
-                                })?,
-                            ),
+                            ConfigValue::Shell(plan) => {
+                                Some(self.execute_native_shell_plan(&plan, statement_span)?)
+                            }
                             ConfigValue::ShellProgram(program) => {
                                 Some(self.execute_shell_program(&program)?)
                             }
@@ -424,6 +428,9 @@ impl Runtime<'_> {
                     Err(fatal @ RuntimeFault::Fatal(_)) => return Err(fatal),
                 },
             };
+            if self.shell_exit && self.shell_depth > 0 {
+                return Ok(RuntimeFlow::Normal);
+            }
             if !matches!(flow, RuntimeFlow::Normal) {
                 return Ok(flow);
             }
@@ -696,11 +703,137 @@ impl Runtime<'_> {
         }
     }
 
+    fn execute_native_shell_plan(
+        &mut self,
+        plan: &spar_command::ShellPlan,
+        span: &Span,
+    ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
+        let mut outcome = crate::evaluator::ShellPlanOutcome {
+            success: true,
+            exit_code: 0,
+            signal: None,
+            pid: 0,
+            pipeline: vec![],
+        };
+        let options = spar_process::ExecutionOptions::default();
+        for (join, step) in &plan.steps {
+            let should_run = match join {
+                spar_command::Join::Always => true,
+                spar_command::Join::OnSuccess => outcome.success,
+                spar_command::Join::OnFailure => !outcome.success,
+            };
+            if !should_run {
+                continue;
+            }
+            let output = match step {
+                spar_command::Step::Command(command) if command.program == "exit" => {
+                    let code = command
+                        .args
+                        .first()
+                        .map(|value| value.parse::<i32>())
+                        .transpose()
+                        .map_err(|_| runtime_error("exit status must be an integer", span))?
+                        .unwrap_or(0);
+                    outcome = crate::evaluator::ShellPlanOutcome {
+                        success: code == 0,
+                        exit_code: code,
+                        signal: None,
+                        pid: 0,
+                        pipeline: vec![],
+                    };
+                    self.shell_exit = true;
+                    break;
+                }
+                spar_command::Step::Command(command) if command.background => {
+                    let job = spar_process::spawn_background(command).map_err(|error| {
+                        runtime_error(
+                            &format!("could not start background command: {error}"),
+                            span,
+                        )
+                    })?;
+                    let pid = job.pid();
+                    let id = self.jobs.len() + 1;
+                    self.last_job = Some(ConfigValue::Section(HashMap::from([
+                        ("id".into(), ConfigValue::Int(id as i64)),
+                        ("pid".into(), ConfigValue::Int(i64::from(pid))),
+                        ("processGroup".into(), ConfigValue::Int(i64::from(pid))),
+                        ("state".into(), ConfigValue::Str("running".into())),
+                    ])));
+                    self.jobs.push(job);
+                    outcome = crate::evaluator::ShellPlanOutcome {
+                        success: true,
+                        exit_code: 0,
+                        signal: None,
+                        pid,
+                        pipeline: vec![],
+                    };
+                    continue;
+                }
+                spar_command::Step::Pipeline(pipeline)
+                    if pipeline
+                        .commands
+                        .last()
+                        .is_some_and(|command| command.background) =>
+                {
+                    let job =
+                        spar_process::spawn_pipeline_background(pipeline).map_err(|error| {
+                            runtime_error(
+                                &format!("could not start background pipeline: {error}"),
+                                span,
+                            )
+                        })?;
+                    let pid = job.pid();
+                    let id = self.jobs.len() + 1;
+                    self.last_job = Some(ConfigValue::Section(HashMap::from([
+                        ("id".into(), ConfigValue::Int(id as i64)),
+                        ("pid".into(), ConfigValue::Int(i64::from(pid))),
+                        ("processGroup".into(), ConfigValue::Int(i64::from(pid))),
+                        ("state".into(), ConfigValue::Str("running".into())),
+                    ])));
+                    self.jobs.push(job);
+                    outcome = crate::evaluator::ShellPlanOutcome {
+                        success: true,
+                        exit_code: 0,
+                        signal: None,
+                        pid,
+                        pipeline: vec![],
+                    };
+                    continue;
+                }
+                spar_command::Step::Command(command) => {
+                    spar_process::run_command(command, &options)
+                }
+                spar_command::Step::Pipeline(pipeline) => {
+                    spar_process::run_pipeline(pipeline, &options)
+                }
+            }
+            .map_err(|error| {
+                runtime_error(&format!("could not execute native command: {error}"), span)
+            })?;
+            let status = output
+                .pipeline_status
+                .unwrap_or(spar_process::PipelineStatus {
+                    code: output.status.code.unwrap_or(1),
+                    success: output.status.success,
+                    processes: vec![],
+                });
+            let last = status.processes.last();
+            outcome = crate::evaluator::ShellPlanOutcome {
+                success: status.success,
+                exit_code: status.code,
+                signal: last.and_then(|process| process.signal),
+                pid: last.map_or(0, |process| process.pid),
+                pipeline: status.processes,
+            };
+        }
+        Ok(outcome)
+    }
+
     fn execute_shell_program(
         &mut self,
         program: &ShellProgramValue,
     ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
-        let prior_outcome = self.shell_outcome;
+        let prior_outcome = self.shell_outcome.take();
         self.shell_outcome = None;
         self.shell_depth += 1;
         let mut frame = program.captured.clone();
@@ -712,6 +845,9 @@ impl Runtime<'_> {
             .unwrap_or(crate::evaluator::ShellPlanOutcome {
                 success: true,
                 exit_code: 0,
+                signal: None,
+                pid: 0,
+                pipeline: vec![],
             });
         self.shell_outcome = prior_outcome;
         match execution? {
@@ -795,6 +931,27 @@ impl Runtime<'_> {
             stdin: self.eval_shell_redirect(command.stdin.as_ref(), frame, module)?,
             stdout: self.eval_shell_redirect(command.stdout.as_ref(), frame, module)?,
             stderr: self.eval_shell_redirect(command.stderr.as_ref(), frame, module)?,
+            redirections: command
+                .redirections
+                .iter()
+                .map(|redirect| {
+                    Ok(spar_command::OrderedRedirection {
+                        fd: redirect.fd,
+                        target: match &redirect.target {
+                            crate::compiled::CompiledShellFdRedirectTarget::File(file) => {
+                                spar_command::Redirection::File {
+                                    path: self.eval_shell_word(&file.target, frame, module)?,
+                                    mode: file.mode.clone(),
+                                }
+                            }
+                            crate::compiled::CompiledShellFdRedirectTarget::Duplicate(fd) => {
+                                spar_command::Redirection::DuplicateFd(*fd)
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeFault>>()?,
+            background: command.background,
         })
     }
 
@@ -825,7 +982,33 @@ impl Runtime<'_> {
             match part {
                 CompiledShellWordPart::Literal(value) => output.push_str(value),
                 CompiledShellWordPart::Environment(name) => {
-                    output.push_str(&std::env::var(name).unwrap_or_default())
+                    if name == "!" {
+                        let pid = self
+                            .last_job
+                            .as_ref()
+                            .and_then(|job| match job {
+                                ConfigValue::Section(fields) => fields.get("pid"),
+                                _ => None,
+                            })
+                            .and_then(|pid| match pid {
+                                ConfigValue::Int(pid) => Some(*pid),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                runtime_error("$! used before a background job", &word.span)
+                            })?;
+                        output.push_str(&pid.to_string());
+                    } else if name == "?" {
+                        output.push_str(
+                            &self
+                                .shell_outcome
+                                .as_ref()
+                                .map_or(0, |status| status.exit_code)
+                                .to_string(),
+                        );
+                    } else {
+                        output.push_str(&std::env::var(name).unwrap_or_default())
+                    }
                 }
                 CompiledShellWordPart::Expression(expression) => {
                     let value = self.eval_expression(expression, frame, module)?;
@@ -918,19 +1101,47 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<ConfigValue, RuntimeFault> {
         if name == "status" && self.shell_depth > 0 {
-            let outcome = self
-                .shell_outcome
-                .unwrap_or(crate::evaluator::ShellPlanOutcome {
-                    success: true,
-                    exit_code: 0,
-                });
-            return Ok(ConfigValue::Section(HashMap::from([
+            let outcome =
+                self.shell_outcome
+                    .clone()
+                    .unwrap_or(crate::evaluator::ShellPlanOutcome {
+                        success: true,
+                        exit_code: 0,
+                        signal: None,
+                        pid: 0,
+                        pipeline: vec![],
+                    });
+            let process_value = |process: spar_process::ProcessStatus| {
+                let mut fields = HashMap::from([
+                    ("code".into(), ConfigValue::Int(i64::from(process.code))),
+                    ("success".into(), ConfigValue::Bool(process.success)),
+                    ("pid".into(), ConfigValue::Int(i64::from(process.pid))),
+                ]);
+                if let Some(signal) = process.signal {
+                    fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
+                }
+                ConfigValue::Section(fields)
+            };
+            let pipeline = outcome.pipeline.into_iter().map(process_value).collect();
+            let mut fields = HashMap::from([
                 (
                     "code".into(),
                     ConfigValue::Int(i64::from(outcome.exit_code)),
                 ),
                 ("success".into(), ConfigValue::Bool(outcome.success)),
-            ])));
+                ("pid".into(), ConfigValue::Int(i64::from(outcome.pid))),
+                ("pipeline".into(), ConfigValue::List(pipeline)),
+            ]);
+            if let Some(signal) = outcome.signal {
+                fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
+            }
+            return Ok(ConfigValue::Section(fields));
+        }
+        if name == "lastJob" && self.shell_depth > 0 {
+            return self
+                .last_job
+                .clone()
+                .ok_or_else(|| runtime_error("no background job has been started", span).into());
         }
         self.ensure_module(module)?;
         Ok(self
@@ -1010,6 +1221,7 @@ impl Runtime<'_> {
             let mut exit_code = 0;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
+            let mut structured_status = None;
             for (join, step) in &plan.steps {
                 let should_run = match join {
                     spar_command::Join::Always => true,
@@ -1035,6 +1247,7 @@ impl Runtime<'_> {
                 exit_code = output.status.code.unwrap_or(if success { 0 } else { 1 });
                 stdout = output.stdout.unwrap_or_default();
                 stderr = output.stderr.unwrap_or_default();
+                structured_status = output.pipeline_status;
             }
             let bytes = |values: Vec<u8>| {
                 ConfigValue::List(
@@ -1044,9 +1257,34 @@ impl Runtime<'_> {
                         .collect(),
                 )
             };
+            let process_value = |process: spar_process::ProcessStatus| {
+                let mut fields = HashMap::from([
+                    ("code".into(), ConfigValue::Int(i64::from(process.code))),
+                    ("success".into(), ConfigValue::Bool(process.success)),
+                    ("pid".into(), ConfigValue::Int(i64::from(process.pid))),
+                ]);
+                if let Some(signal) = process.signal {
+                    fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
+                }
+                ConfigValue::Section(fields)
+            };
+            let status = structured_status.unwrap_or(spar_process::PipelineStatus {
+                code: exit_code,
+                success,
+                processes: vec![],
+            });
+            let status_value = ConfigValue::Section(HashMap::from([
+                ("code".into(), ConfigValue::Int(i64::from(status.code))),
+                ("success".into(), ConfigValue::Bool(status.success)),
+                (
+                    "processes".into(),
+                    ConfigValue::List(status.processes.into_iter().map(process_value).collect()),
+                ),
+            ]));
             Ok::<ConfigValue, SparError>(ConfigValue::Section(HashMap::from([
                 ("success".into(), ConfigValue::Bool(success)),
                 ("exitCode".into(), ConfigValue::Int(i64::from(exit_code))),
+                ("status".into(), status_value),
                 ("stdout".into(), bytes(stdout)),
                 ("stderr".into(), bytes(stderr)),
             ])))
@@ -1320,6 +1558,9 @@ mod tests {
             tasks: TaskTable::default(),
             shell_depth: 0,
             shell_outcome: None,
+            jobs: Vec::new(),
+            last_job: None,
+            shell_exit: false,
         }
         .call_function(FunctionId(999), Vec::new())
         .unwrap_err();

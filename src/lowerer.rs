@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::ast::{
     BinOp, Expr, FieldValue, ForBinding, FunctionDecl, Literal, ReturnValue, SectionItem,
-    ShellCommandExpr, ShellExpr, ShellRedirect, ShellStep, ShellWord, ShellWordPart, SparType,
-    Statement, StringPart, UnOp,
+    ShellCommandExpr, ShellExpr, ShellFdRedirectTarget, ShellRedirect, ShellStep, ShellWord,
+    ShellWordPart, SparType, Statement, StringPart, UnOp,
 };
 use crate::compiled::{
     CompiledExpression, CompiledObjectItem, CompiledShellCommand, CompiledShellExpr,
@@ -647,6 +647,26 @@ impl FunctionLowerer<'_> {
                 .as_ref()
                 .map(|redirect| self.lower_shell_redirect(redirect))
                 .transpose()?,
+            redirections: command
+                .redirections
+                .iter()
+                .map(|redirect| {
+                    Ok(crate::compiled::CompiledShellFdRedirect {
+                        fd: redirect.fd,
+                        target: match &redirect.target {
+                            ShellFdRedirectTarget::File(file) => {
+                                crate::compiled::CompiledShellFdRedirectTarget::File(
+                                    self.lower_shell_redirect(file)?,
+                                )
+                            }
+                            ShellFdRedirectTarget::Duplicate(fd) => {
+                                crate::compiled::CompiledShellFdRedirectTarget::Duplicate(*fd)
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, SparError>>()?,
+            background: command.background,
         })
     }
 

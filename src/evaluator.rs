@@ -38,6 +38,7 @@ pub enum ConfigValue {
     List(Vec<ConfigValue>),
     Section(HashMap<String, ConfigValue>),
     Shell(spar_command::ShellPlan),
+    ShellProgram(crate::runtime::ShellProgramValue),
     Promise(PromiseHandle),
     Error {
         message: String,
@@ -61,6 +62,9 @@ impl ConfigValue {
             ConfigValue::Shell(_) => {
                 unreachable!("shell plans cannot appear in string interpolation")
             }
+            ConfigValue::ShellProgram(_) => {
+                unreachable!("shell programs cannot appear in string interpolation")
+            }
             ConfigValue::Promise(_) => "<promise>".into(),
             ConfigValue::Error { message, .. } => message.clone(),
         }
@@ -75,6 +79,7 @@ impl ConfigValue {
             ConfigValue::List(_) => "list",
             ConfigValue::Section(_) => "section",
             ConfigValue::Shell(_) => "shell",
+            ConfigValue::ShellProgram(_) => "shell",
             ConfigValue::Promise(_) => "Promise",
             ConfigValue::Error { .. } => "error",
         }
@@ -737,7 +742,10 @@ impl Evaluator {
                 self.collect_expr_deps(index, deps);
             }
             Expr::FieldAccess { base, .. } => self.collect_expr_deps(base, deps),
-            Expr::Shell(_) | Expr::ExecShell(_) | Expr::Literal(_) => {}
+            Expr::Shell(_)
+            | Expr::ExecShell(_)
+            | Expr::CommandSubstitution(_)
+            | Expr::Literal(_) => {}
         }
     }
 }
@@ -1191,6 +1199,9 @@ impl Evaluator {
                     None => run(),
                 }
             }
+            Expr::CommandSubstitution(_) => Err(EvalErr::Host {
+                message: "command substitution requires the compiled shell runtime".into(),
+            }),
         }
     }
 
@@ -1868,7 +1879,51 @@ pub fn execute_shell_plan_with_options(
     plan: &spar_command::ShellPlan,
     options: &spar_process::ExecutionOptions,
 ) -> std::io::Result<ShellPlanOutcome> {
-    let mut executor = spar_process::ExternalExecutor::new(options);
+    struct NativeExecutor<'a> {
+        options: &'a spar_process::ExecutionOptions,
+        stop: bool,
+    }
+
+    impl spar_process::StepExecutor for NativeExecutor<'_> {
+        type Error = std::io::Error;
+
+        fn run_command(
+            &mut self,
+            command: &spar_command::CommandPlan,
+        ) -> Result<spar_process::ExitStatus, Self::Error> {
+            if command.program == "exit" {
+                let code = command
+                    .args
+                    .first()
+                    .map(|value| value.parse::<i32>())
+                    .transpose()
+                    .map_err(|_| std::io::Error::other("exit status must be an integer"))?
+                    .unwrap_or(0);
+                self.stop = true;
+                return Ok(spar_process::ExitStatus {
+                    success: code == 0,
+                    code: Some(code),
+                });
+            }
+            spar_process::run_command(command, self.options).map(|output| output.status)
+        }
+
+        fn run_pipeline(
+            &mut self,
+            pipeline: &spar_command::PipelinePlan,
+        ) -> Result<spar_process::ExitStatus, Self::Error> {
+            spar_process::run_pipeline(pipeline, self.options).map(|output| output.status)
+        }
+
+        fn should_stop(&self) -> bool {
+            self.stop
+        }
+    }
+
+    let mut executor = NativeExecutor {
+        options,
+        stop: false,
+    };
     spar_process::run_plan(plan, &mut executor).map(|outcome| ShellPlanOutcome {
         success: outcome.success,
         exit_code: outcome.exit_code,

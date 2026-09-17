@@ -120,6 +120,10 @@ pub enum ShellTemplatePart {
 /// needs a dedicated sub-grammar" section.
 #[derive(Debug, Clone)]
 pub struct ShellExpr {
+    /// Ordinary Spar statements retained for deferred execution. Native
+    /// commands inside a mixed block are represented as shell-valued
+    /// expression statements, so nested `if`/`for` reuse the normal AST.
+    pub statements: Vec<Statement>,
     pub steps: Vec<(ShellJoin, ShellStep)>,
     pub span: Span,
 }
@@ -158,7 +162,15 @@ pub struct ShellEnvironmentEntry {
 #[derive(Debug, Clone)]
 pub struct ShellWord {
     pub text: String,
+    pub parts: Vec<ShellWordPart>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellWordPart {
+    Literal(String),
+    Expr(Expr),
+    Environment(String),
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +441,7 @@ pub enum Expr {
     Object(Vec<SectionItem>, Span),
     Shell(ShellExpr),
     ExecShell(ShellExpr),
+    CommandSubstitution(ShellExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

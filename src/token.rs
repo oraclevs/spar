@@ -33,6 +33,8 @@ pub enum Token {
     StringFragment(String),
     InterpolStart,
     InterpolEnd,
+    CommandSubStart,
+    CommandSubEnd,
     StringEnd,
 
     // Identifiers
@@ -40,6 +42,7 @@ pub enum Token {
 
     // Arithmetic operators
     Plus,
+    PlusEq,
     Minus,
     Star,
     Slash,
@@ -93,6 +96,7 @@ pub enum Token {
     ShellBlockStart,
     ShellBlockEnd,
     ShellWord(String),
+    ShellLiteralWord(String),
     ShellPipe,
     ShellRedirectAppend,
     ShellRedirectStderr,
@@ -149,6 +153,7 @@ impl Token {
             Token::DotDotDot => "'...'",
             Token::ColonColon => "'::'",
             Token::Plus => "'+'",
+            Token::PlusEq => "'+='",
             Token::Minus => "'-'",
             Token::Star => "'*'",
             Token::Slash => "'/'",
@@ -200,6 +205,8 @@ impl Token {
             Token::StringEnd => "end of string",
             Token::InterpolStart => "'${'",
             Token::InterpolEnd => "'}'",
+            Token::CommandSubStart => "'$('",
+            Token::CommandSubEnd => "')'",
             Token::IntLit(_) => "integer literal",
             Token::FloatLit(_) => "float literal",
             Token::RunStart => "'{'",
@@ -208,6 +215,7 @@ impl Token {
             Token::ShellBlockStart => "'shell {'",
             Token::ShellBlockEnd => "end of shell block",
             Token::ShellWord(_) => "shell word",
+            Token::ShellLiteralWord(_) => "literal shell word",
             Token::ShellPipe => "'|'",
             Token::ShellRedirectAppend => "'>>'",
             Token::ShellRedirectStderr => "'2>'",

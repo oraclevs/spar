@@ -2,14 +2,40 @@ use std::collections::HashMap;
 
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus, TaskTable};
 use crate::compiled::{
-    CompiledExpression, CompiledObjectItem, CompiledProgram, CompiledStatement, CompiledStringPart,
-    FunctionId, LocalSlot, TypedOperation,
+    CompiledExpression, CompiledObjectItem, CompiledProgram, CompiledShellCommand,
+    CompiledShellExpr, CompiledShellRedirect, CompiledShellStep, CompiledShellWord,
+    CompiledShellWordPart, CompiledStatement, CompiledStringPart, FunctionId, LocalSlot,
+    TypedOperation,
 };
 use crate::error::{Span, SparError};
 use crate::evaluator::ConfigValue;
 
+#[derive(Clone)]
 pub(crate) struct Frame {
     slots: Vec<Option<ConfigValue>>,
+}
+
+#[derive(Clone)]
+pub struct ShellProgramValue {
+    body: Vec<CompiledStatement>,
+    captured: Frame,
+    module: crate::compiled::ModuleId,
+    span: Span,
+}
+
+impl std::fmt::Debug for ShellProgramValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellProgram")
+            .field("span", &self.span)
+            .finish()
+    }
+}
+
+impl PartialEq for ShellProgramValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.span == other.span
+    }
 }
 
 impl Frame {
@@ -67,6 +93,8 @@ pub(crate) fn execute_self_contained_entry(
         call_depth: 0,
         state: None,
         tasks: TaskTable::default(),
+        shell_depth: 0,
+        shell_outcome: None,
     }
     .run_entry(entry)
     .map_err(|fault| vec![fault.into_error()])
@@ -77,6 +105,8 @@ pub(crate) struct Runtime<'a> {
     call_depth: usize,
     state: Option<ModuleState>,
     tasks: TaskTable,
+    shell_depth: usize,
+    shell_outcome: Option<crate::evaluator::ShellPlanOutcome>,
 }
 
 impl Drop for Runtime<'_> {
@@ -114,11 +144,20 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
         call_depth: 0,
         state: Some(ModuleState::new(program)),
         tasks: TaskTable::default(),
+        shell_depth: 0,
+        shell_outcome: None,
     };
-    runtime
+    let value = runtime
         .ensure_module(program.entry)
         .and_then(|()| runtime.run_entry(entry))
-        .map_err(|fault| vec![fault.into_error()])
+        .map_err(|fault| vec![fault.into_error()])?;
+    match value {
+        ConfigValue::ShellProgram(program) => runtime
+            .execute_shell_program(&program)
+            .map(|outcome| ConfigValue::Int(i64::from(outcome.exit_code)))
+            .map_err(|fault| vec![fault.into_error()]),
+        other => Ok(other),
+    }
 }
 
 enum RuntimeFlow {
@@ -295,7 +334,26 @@ impl Runtime<'_> {
                     RuntimeFlow::Normal
                 }
                 CompiledStatement::Expression(expression, _) => {
-                    self.eval_expression(expression, frame, module)?;
+                    let value = self.eval_expression(expression, frame, module)?;
+                    if self.shell_depth > 0 {
+                        let outcome = match value {
+                            ConfigValue::Shell(plan) => Some(
+                                crate::evaluator::execute_shell_plan(&plan).map_err(|error| {
+                                    runtime_error(
+                                        &format!("could not execute native command: {error}"),
+                                        &Span::dummy(),
+                                    )
+                                })?,
+                            ),
+                            ConfigValue::ShellProgram(program) => {
+                                Some(self.execute_shell_program(&program)?)
+                            }
+                            _ => None,
+                        };
+                        if let Some(outcome) = outcome {
+                            self.shell_outcome = Some(outcome);
+                        }
+                    }
                     RuntimeFlow::Normal
                 }
                 CompiledStatement::If {
@@ -579,9 +637,209 @@ impl Runtime<'_> {
                 Ok(ConfigValue::List(output))
             }
             CompiledExpression::Shell(shell) => Ok(ConfigValue::Shell(
-                crate::evaluator::lower_shell_expr(shell),
+                self.eval_shell_plan(shell, frame, module)?,
             )),
+            CompiledExpression::CommandSubstitution(shell) => {
+                let plan = self.eval_shell_plan(shell, frame, module)?;
+                let Some((_, step)) = plan.steps.first() else {
+                    return Err(runtime_error("empty command substitution", &shell.span).into());
+                };
+                let options = spar_process::ExecutionOptions {
+                    capture_stdout: true,
+                    capture_stderr: false,
+                    environment: None,
+                };
+                let output = match step {
+                    spar_command::Step::Command(command) => {
+                        spar_process::run_command(command, &options)
+                    }
+                    spar_command::Step::Pipeline(pipeline) => {
+                        spar_process::run_pipeline(pipeline, &options)
+                    }
+                }
+                .map_err(|error| {
+                    runtime_error(
+                        &format!("command substitution failed to start: {error}"),
+                        &shell.span,
+                    )
+                })?;
+                if !output.status.success {
+                    return Err(runtime_error(
+                        &format!(
+                            "command substitution exited with status {}",
+                            output.status.code.unwrap_or(1)
+                        ),
+                        &shell.span,
+                    )
+                    .into());
+                }
+                let bytes = output.stdout.unwrap_or_default();
+                let mut text = String::from_utf8(bytes).map_err(|_| {
+                    runtime_error(
+                        "command substitution output is not valid UTF-8",
+                        &shell.span,
+                    )
+                })?;
+                while text.ends_with('\n') || text.ends_with('\r') {
+                    text.pop();
+                }
+                Ok(ConfigValue::Str(text))
+            }
+            CompiledExpression::ShellProgram { body, span } => {
+                Ok(ConfigValue::ShellProgram(ShellProgramValue {
+                    body: body.clone(),
+                    captured: frame.clone(),
+                    module,
+                    span: span.clone(),
+                }))
+            }
         }
+    }
+
+    fn execute_shell_program(
+        &mut self,
+        program: &ShellProgramValue,
+    ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
+        let prior_outcome = self.shell_outcome;
+        self.shell_outcome = None;
+        self.shell_depth += 1;
+        let mut frame = program.captured.clone();
+        let execution = self.execute_statements(&program.body, &mut frame, program.module);
+        self.shell_depth -= 1;
+        let outcome = self
+            .shell_outcome
+            .take()
+            .unwrap_or(crate::evaluator::ShellPlanOutcome {
+                success: true,
+                exit_code: 0,
+            });
+        self.shell_outcome = prior_outcome;
+        match execution? {
+            RuntimeFlow::Normal | RuntimeFlow::Return(_) => Ok(outcome),
+            RuntimeFlow::Break | RuntimeFlow::Continue => {
+                Err(runtime_error("loop control escaped a shell program", &program.span).into())
+            }
+        }
+    }
+
+    fn eval_shell_plan(
+        &mut self,
+        shell: &CompiledShellExpr,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+    ) -> Result<spar_command::ShellPlan, RuntimeFault> {
+        let mut steps = Vec::with_capacity(shell.steps.len());
+        for (join, step) in &shell.steps {
+            let join = match join {
+                crate::ast::ShellJoin::Always => spar_command::Join::Always,
+                crate::ast::ShellJoin::OnSuccess => spar_command::Join::OnSuccess,
+                crate::ast::ShellJoin::OnFailure => spar_command::Join::OnFailure,
+            };
+            let step = match step {
+                CompiledShellStep::Command(command) => {
+                    spar_command::Step::Command(self.eval_shell_command(command, frame, module)?)
+                }
+                CompiledShellStep::Pipeline(commands) => {
+                    let mut lowered = Vec::with_capacity(commands.len());
+                    for command in commands {
+                        lowered.push(self.eval_shell_command(command, frame, module)?);
+                    }
+                    spar_command::Step::Pipeline(spar_command::PipelinePlan { commands: lowered })
+                }
+            };
+            steps.push((join, step));
+        }
+        Ok(spar_command::ShellPlan { steps })
+    }
+
+    fn eval_shell_command(
+        &mut self,
+        command: &CompiledShellCommand,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+    ) -> Result<spar_command::CommandPlan, RuntimeFault> {
+        let mut args = Vec::with_capacity(command.args.len());
+        for argument in &command.args {
+            let expansion = match argument.parts.as_slice() {
+                [CompiledShellWordPart::Literal(prefix), CompiledShellWordPart::Expression(expression)]
+                    if prefix == "..." =>
+                {
+                    Some(expression)
+                }
+                _ => None,
+            };
+            if let Some(expression) = expansion {
+                let value = self.eval_expression(expression, frame, module)?;
+                let ConfigValue::List(values) = value else {
+                    return Err(type_error("list", &value, &argument.span).into());
+                };
+                for value in values {
+                    args.push(shell_primitive_to_string(value, &argument.span)?);
+                }
+            } else {
+                args.push(self.eval_shell_word(argument, frame, module)?);
+            }
+        }
+        Ok(spar_command::CommandPlan {
+            program: self.eval_shell_word(&command.program, frame, module)?,
+            args,
+            env: command
+                .environment
+                .iter()
+                .map(|(key, value)| spar_command::EnvironmentOverride {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            cwd: None,
+            stdin: self.eval_shell_redirect(command.stdin.as_ref(), frame, module)?,
+            stdout: self.eval_shell_redirect(command.stdout.as_ref(), frame, module)?,
+            stderr: self.eval_shell_redirect(command.stderr.as_ref(), frame, module)?,
+        })
+    }
+
+    fn eval_shell_redirect(
+        &mut self,
+        redirect: Option<&CompiledShellRedirect>,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+    ) -> Result<Option<spar_command::Redirection>, RuntimeFault> {
+        redirect
+            .map(|redirect| {
+                Ok(spar_command::Redirection::File {
+                    path: self.eval_shell_word(&redirect.target, frame, module)?,
+                    mode: redirect.mode.clone(),
+                })
+            })
+            .transpose()
+    }
+
+    fn eval_shell_word(
+        &mut self,
+        word: &CompiledShellWord,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+    ) -> Result<String, RuntimeFault> {
+        let mut output = String::new();
+        for part in &word.parts {
+            match part {
+                CompiledShellWordPart::Literal(value) => output.push_str(value),
+                CompiledShellWordPart::Environment(name) => {
+                    output.push_str(&std::env::var(name).unwrap_or_default())
+                }
+                CompiledShellWordPart::Expression(expression) => {
+                    let value = self.eval_expression(expression, frame, module)?;
+                    match value {
+                        ConfigValue::Str(value) => output.push_str(&value),
+                        ConfigValue::Int(value) => output.push_str(&value.to_string()),
+                        ConfigValue::Float(value) => output.push_str(&value.to_string()),
+                        ConfigValue::Bool(value) => output.push_str(&value.to_string()),
+                        other => return Err(type_error("primitive", &other, &word.span).into()),
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 
     fn ensure_module(&mut self, module: crate::compiled::ModuleId) -> Result<(), RuntimeFault> {
@@ -659,6 +917,21 @@ impl Runtime<'_> {
         name: &str,
         span: &Span,
     ) -> Result<ConfigValue, RuntimeFault> {
+        if name == "status" && self.shell_depth > 0 {
+            let outcome = self
+                .shell_outcome
+                .unwrap_or(crate::evaluator::ShellPlanOutcome {
+                    success: true,
+                    exit_code: 0,
+                });
+            return Ok(ConfigValue::Section(HashMap::from([
+                (
+                    "code".into(),
+                    ConfigValue::Int(i64::from(outcome.exit_code)),
+                ),
+                ("success".into(), ConfigValue::Bool(outcome.success)),
+            ])));
+        }
         self.ensure_module(module)?;
         Ok(self
             .state
@@ -727,25 +1000,71 @@ impl Runtime<'_> {
             .as_ref()
             .ok_or_else(|| module_state_error(&shell.span))?;
         let run = || {
-            crate::evaluator::execute_shell_plan(&crate::evaluator::lower_shell_expr(shell))
-                .map(|outcome| {
-                    ConfigValue::Section(HashMap::from([
-                        ("success".into(), ConfigValue::Bool(outcome.success)),
-                        (
-                            "exitCode".into(),
-                            ConfigValue::Int(i64::from(outcome.exit_code)),
-                        ),
-                    ]))
-                })
+            let plan = crate::evaluator::lower_shell_expr(shell);
+            let options = spar_process::ExecutionOptions {
+                capture_stdout: true,
+                capture_stderr: true,
+                environment: None,
+            };
+            let mut success = true;
+            let mut exit_code = 0;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            for (join, step) in &plan.steps {
+                let should_run = match join {
+                    spar_command::Join::Always => true,
+                    spar_command::Join::OnSuccess => success,
+                    spar_command::Join::OnFailure => !success,
+                };
+                if !should_run {
+                    continue;
+                }
+                let output = match step {
+                    spar_command::Step::Command(command) => {
+                        spar_process::run_command(command, &options)
+                    }
+                    spar_command::Step::Pipeline(pipeline) => {
+                        spar_process::run_pipeline(pipeline, &options)
+                    }
+                }
                 .map_err(|error| SparError::EvalError {
                     message: format!("could not execute shell plan: {error}"),
                     span: shell.span.clone(),
-                })
+                })?;
+                success = output.status.success;
+                exit_code = output.status.code.unwrap_or(if success { 0 } else { 1 });
+                stdout = output.stdout.unwrap_or_default();
+                stderr = output.stderr.unwrap_or_default();
+            }
+            let bytes = |values: Vec<u8>| {
+                ConfigValue::List(
+                    values
+                        .into_iter()
+                        .map(|value| ConfigValue::Int(i64::from(value)))
+                        .collect(),
+                )
+            };
+            Ok::<ConfigValue, SparError>(ConfigValue::Section(HashMap::from([
+                ("success".into(), ConfigValue::Bool(success)),
+                ("exitCode".into(), ConfigValue::Int(i64::from(exit_code))),
+                ("stdout".into(), bytes(stdout)),
+                ("stderr".into(), bytes(stderr)),
+            ])))
         };
         Ok(match &state.effect_ledger {
             Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
             None => run(),
         }?)
+    }
+}
+
+fn shell_primitive_to_string(value: ConfigValue, span: &Span) -> Result<String, RuntimeFault> {
+    match value {
+        ConfigValue::Str(value) => Ok(value),
+        ConfigValue::Int(value) => Ok(value.to_string()),
+        ConfigValue::Float(value) => Ok(value.to_string()),
+        ConfigValue::Bool(value) => Ok(value.to_string()),
+        other => Err(type_error("primitive", &other, span).into()),
     }
 }
 
@@ -792,7 +1111,8 @@ fn remap_promises(
         | ConfigValue::Int(_)
         | ConfigValue::Float(_)
         | ConfigValue::Bool(_)
-        | ConfigValue::Shell(_) => {}
+        | ConfigValue::Shell(_)
+        | ConfigValue::ShellProgram(_) => {}
     }
 }
 
@@ -998,6 +1318,8 @@ mod tests {
             call_depth: 0,
             state: None,
             tasks: TaskTable::default(),
+            shell_depth: 0,
+            shell_outcome: None,
         }
         .call_function(FunctionId(999), Vec::new())
         .unwrap_err();

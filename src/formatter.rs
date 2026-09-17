@@ -1027,6 +1027,23 @@ pub(crate) fn format_expr(
 
         Expr::Shell(shell) => format_shell_expr(shell, false, depth, config, out),
         Expr::ExecShell(shell) => format_shell_expr(shell, true, depth, config, out),
+        Expr::CommandSubstitution(shell) => {
+            out.push_str("$(");
+            if let Some((_, step)) = shell.steps.first() {
+                match step {
+                    ShellStep::Command(command) => format_shell_command(command, out),
+                    ShellStep::Pipeline(commands) => {
+                        for (index, command) in commands.iter().enumerate() {
+                            if index > 0 {
+                                out.push_str(" | ");
+                            }
+                            format_shell_command(command, out);
+                        }
+                    }
+                }
+            }
+            out.push(')');
+        }
     }
 }
 
@@ -1041,6 +1058,13 @@ fn format_shell_expr(
         out.push_str("exec ");
     }
     out.push_str("shell {");
+    if !shell.statements.is_empty() {
+        out.push('\n');
+        format_func_stmts(&shell.statements, depth + 1, config, out);
+        out.push_str(&indent(depth, config));
+        out.push('}');
+        return;
+    }
     if shell.steps.is_empty() {
         out.push('}');
         return;

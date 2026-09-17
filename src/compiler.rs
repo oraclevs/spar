@@ -266,6 +266,44 @@ fn inject_exec_result_type(program: &mut Program) {
                 default: None,
                 span: span.clone(),
             },
+            TypeField {
+                name: "stdout".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
+                default: None,
+                span: span.clone(),
+            },
+            TypeField {
+                name: "stderr".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
+                default: None,
+                span: span.clone(),
+            },
+        ],
+        span,
+    }));
+    let span = crate::Span::new(0, 0, 1, 1);
+    program.items.push(TopLevelItem::Type(TypeDecl {
+        name: "ProcessStatus".to_string(),
+        name_span: span.clone(),
+        type_parameters: Vec::new(),
+        exported: false,
+        fields: vec![
+            TypeField {
+                name: "code".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::Int),
+                default: None,
+                span: span.clone(),
+            },
+            TypeField {
+                name: "success".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::Bool),
+                default: None,
+                span: span.clone(),
+            },
         ],
         span,
     }));

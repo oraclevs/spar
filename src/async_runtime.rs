@@ -118,4 +118,12 @@ mod tests {
         tasks.cancel_pending();
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Cancelled)));
     }
+
+    #[test]
+    fn starting_a_running_task_reports_a_cycle_candidate() {
+        let mut tasks = TaskTable::default();
+        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        assert!(tasks.start(handle).is_ok());
+        assert!(matches!(tasks.start(handle), Err(TaskStatus::Running)));
+    }
 }

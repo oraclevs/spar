@@ -32,7 +32,7 @@ fn compile_for_emit(src: &str) -> Result<serde_json::Value, Vec<String>> {
     if !compilation.errors.is_empty() {
         return Err(compilation.errors.iter().map(ToString::to_string).collect());
     }
-    Ok(build_emit_json(
+    build_emit_json(
         compilation
             .result
             .as_ref()
@@ -41,7 +41,8 @@ fn compile_for_emit(src: &str) -> Result<serde_json::Value, Vec<String>> {
             .symbols
             .as_ref()
             .expect("successful compilation resolves"),
-    ))
+    )
+    .map_err(|error| vec![error])
 }
 
 /// Compile a single Spar source string to pretty-printed JSON, with no
@@ -68,7 +69,10 @@ pub fn emit_to_toml(src: &str) -> Result<String, Vec<String>> {
 
 /// Build the emitted JSON value: exported globals, then public top-level
 /// sections (private sections excluded), all keys sorted.
-pub fn build_emit_json(result: &EvalResult, symbols: &SymbolTable) -> serde_json::Value {
+pub fn build_emit_json(
+    result: &EvalResult,
+    symbols: &SymbolTable,
+) -> Result<serde_json::Value, String> {
     let mut root = serde_json::Map::new();
 
     // Exported globals only
@@ -82,7 +86,7 @@ pub fn build_emit_json(result: &EvalResult, symbols: &SymbolTable) -> serde_json
             })
             .unwrap_or(false);
         if exported {
-            root.insert(name.clone(), config_value_to_json(value));
+            root.insert(name.clone(), config_value_to_json(value)?);
         }
     }
 
@@ -99,21 +103,21 @@ pub fn build_emit_json(result: &EvalResult, symbols: &SymbolTable) -> serde_json
             .unwrap_or(false);
         if !private {
             let name = &path[0];
-            root.insert(name.clone(), build_section_value(path, result));
+            root.insert(name.clone(), build_section_value(path, result)?);
         }
     }
 
-    serde_json::Value::Object(root)
+    Ok(serde_json::Value::Object(root))
 }
 
-fn build_section_value(path: &[String], result: &EvalResult) -> serde_json::Value {
+fn build_section_value(path: &[String], result: &EvalResult) -> Result<serde_json::Value, String> {
     let mut map = serde_json::Map::new();
 
     if let Some(fields) = result.sections.get(path) {
         let mut pairs: Vec<_> = fields.iter().collect();
         pairs.sort_by_key(|(k, _)| k.as_str());
         for (field_name, value) in pairs {
-            map.insert(field_name.clone(), config_value_to_json(value));
+            map.insert(field_name.clone(), config_value_to_json(value)?);
         }
     }
 
@@ -125,31 +129,36 @@ fn build_section_value(path: &[String], result: &EvalResult) -> serde_json::Valu
     nested.sort();
     for nested_path in nested {
         let nested_name = nested_path.last().unwrap().clone();
-        map.insert(nested_name, build_section_value(nested_path, result));
+        map.insert(nested_name, build_section_value(nested_path, result)?);
     }
 
-    serde_json::Value::Object(map)
+    Ok(serde_json::Value::Object(map))
 }
 
-fn config_value_to_json(val: &ConfigValue) -> serde_json::Value {
-    match val {
+fn config_value_to_json(val: &ConfigValue) -> Result<serde_json::Value, String> {
+    Ok(match val {
         ConfigValue::Str(s) => serde_json::Value::String(s.clone()),
         ConfigValue::Int(i) => serde_json::json!(i),
         ConfigValue::Float(f) => serde_json::json!(f),
         ConfigValue::Bool(b) => serde_json::Value::Bool(*b),
-        ConfigValue::List(vs) => {
-            serde_json::Value::Array(vs.iter().map(config_value_to_json).collect())
-        }
+        ConfigValue::List(vs) => serde_json::Value::Array(
+            vs.iter()
+                .map(config_value_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         ConfigValue::Section(map) => {
             let mut obj = serde_json::Map::new();
             let mut pairs: Vec<_> = map.iter().collect();
             pairs.sort_by_key(|(k, _)| k.as_str());
             for (k, v) in pairs {
-                obj.insert(k.clone(), config_value_to_json(v));
+                obj.insert(k.clone(), config_value_to_json(v)?);
             }
             serde_json::Value::Object(obj)
         }
         ConfigValue::Shell(plan) => shell_plan_to_json(plan),
+        ConfigValue::Promise(_) => {
+            return Err("promise values cannot be emitted as configuration data".into())
+        }
         ConfigValue::Error {
             message,
             kind,
@@ -159,9 +168,9 @@ fn config_value_to_json(val: &ConfigValue) -> serde_json::Value {
             "message": message,
             "kind": kind,
             "code": code,
-            "cause": cause.as_deref().map(config_value_to_json),
+            "cause": cause.as_deref().map(config_value_to_json).transpose()?,
         }),
-    }
+    })
 }
 
 fn shell_plan_to_json(plan: &spar_command::ShellPlan) -> serde_json::Value {
@@ -222,6 +231,17 @@ fn redirection_to_json(redirection: &spar_command::Redirection) -> serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promise_values_cannot_be_emitted() {
+        let errors = emit_to_json(
+            "async function value() -> int { return 1; }; export var pending: Promise<int> = value();",
+        )
+        .unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("promise values cannot be emitted")));
+    }
 
     const SRC: &str = r#"
 export var name: str = "spar";

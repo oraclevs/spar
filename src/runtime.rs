@@ -327,6 +327,9 @@ impl Runtime<'_> {
                     })
             }
             CompiledExpression::ExecShell(shell) => self.execute_shell(shell),
+            CompiledExpression::Await { span, .. } => {
+                Err(runtime_error("await requires the async runtime", span))
+            }
             CompiledExpression::DirectCall {
                 function,
                 arguments,

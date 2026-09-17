@@ -4,6 +4,34 @@ use crate::compiled::FunctionId;
 use crate::{ConfigValue, PromiseHandle, SparError};
 
 #[derive(Clone, Debug)]
+pub(crate) enum RuntimeFault {
+    Raised(SparError),
+    Fatal(SparError),
+}
+
+impl RuntimeFault {
+    pub(crate) fn into_error(self) -> SparError {
+        match self {
+            Self::Raised(error) | Self::Fatal(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raised(error) | Self::Fatal(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl From<SparError> for RuntimeFault {
+    fn from(error: SparError) -> Self {
+        Self::Raised(error)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct TaskInvocation {
     pub(crate) function: FunctionId,
     pub(crate) arguments: Vec<ConfigValue>,
@@ -12,7 +40,7 @@ pub(crate) struct TaskInvocation {
 enum TaskState {
     Pending(TaskInvocation),
     Running,
-    Ready(Result<ConfigValue, SparError>),
+    Ready(Result<ConfigValue, RuntimeFault>),
     Cancelled,
 }
 
@@ -67,17 +95,27 @@ impl TaskTable {
         None
     }
 
+    pub(crate) fn status(&self, handle: PromiseHandle) -> TaskStatus {
+        match self.states.get(&handle) {
+            Some(TaskState::Pending(_)) => TaskStatus::Pending,
+            Some(TaskState::Running) => TaskStatus::Running,
+            Some(TaskState::Ready(result)) => TaskStatus::Ready(result.clone()),
+            Some(TaskState::Cancelled) => TaskStatus::Cancelled,
+            None => TaskStatus::Unknown,
+        }
+    }
+
     pub(crate) fn complete(
         &mut self,
         handle: PromiseHandle,
-        result: Result<ConfigValue, SparError>,
+        result: Result<ConfigValue, RuntimeFault>,
     ) {
         self.states.insert(handle, TaskState::Ready(result));
     }
 
     pub(crate) fn cancel_pending(&mut self) {
         for state in self.states.values_mut() {
-            if matches!(state, TaskState::Pending(_)) {
+            if matches!(state, TaskState::Pending(_) | TaskState::Running) {
                 *state = TaskState::Cancelled;
             }
         }
@@ -88,8 +126,9 @@ impl TaskTable {
 #[derive(Debug)]
 pub(crate) enum TaskStatus {
     Unknown,
+    Pending,
     Running,
-    Ready(Result<ConfigValue, SparError>),
+    Ready(Result<ConfigValue, RuntimeFault>),
     Cancelled,
 }
 
@@ -120,10 +159,28 @@ mod tests {
     }
 
     #[test]
+    fn running_tasks_are_cancelled_at_shutdown() {
+        let mut tasks = TaskTable::default();
+        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        tasks.start(handle).unwrap();
+        tasks.cancel_pending();
+        assert!(matches!(tasks.status(handle), TaskStatus::Cancelled));
+    }
+
+    #[test]
     fn starting_a_running_task_reports_a_cycle_candidate() {
         let mut tasks = TaskTable::default();
         let handle = tasks.spawn(FunctionId(1), Vec::new());
         assert!(tasks.start(handle).is_ok());
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Running)));
+    }
+
+    #[test]
+    fn queued_task_reports_pending_until_the_scheduler_starts_it() {
+        let mut tasks = TaskTable::default();
+        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        assert!(matches!(tasks.status(handle), TaskStatus::Pending));
+        assert!(tasks.next_pending().is_some());
+        assert!(matches!(tasks.status(handle), TaskStatus::Running));
     }
 }

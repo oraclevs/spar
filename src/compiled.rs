@@ -78,6 +78,10 @@ pub(crate) enum CompiledExpression {
         arguments: Vec<CompiledExpression>,
         span: Span,
     },
+    Panic {
+        message: Box<CompiledExpression>,
+        span: Span,
+    },
     ImportedValue {
         module: ModuleId,
         path: Vec<String>,
@@ -415,6 +419,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
             }
         }
         CompiledExpression::Await { promise, .. } => visit_expression(promise, visit),
+        CompiledExpression::Panic { message, .. } => visit_expression(message, visit),
         CompiledExpression::Index { source, index, .. } => {
             visit_expression(source, visit);
             visit_expression(index, visit);

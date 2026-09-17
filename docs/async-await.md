@@ -40,6 +40,8 @@ async function recover() -> int {
 };
 ```
 
+`panic(message: "...")` is different from an ordinary runtime error: it is unrecoverable, bypasses `try`/`catch`, and aborts execution even when raised by an unawaited task.
+
 `main` may be synchronous or async and may return `void`, `int`, or `shell`. `spar exec` automatically drives an async main to completion, then maps its eventual result in the same way as a synchronous main.
 
 Promises are runtime resources, not configuration data. `spar emit`, Rust deserialization, and WASM serialization reject unresolved Promise values without exposing their internal identity.

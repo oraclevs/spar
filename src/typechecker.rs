@@ -2078,6 +2078,9 @@ impl<'a> TypeChecker<'a> {
         locals: Option<&HashMap<String, SparType>>,
         span: &Span,
     ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
+        if name == "panic" {
+            return Ok((SparType::Void, vec![("message".to_string(), SparType::Str)]));
+        }
         let Some(entry) = self.call_entry(name) else {
             return self
                 .call_return_type(name)

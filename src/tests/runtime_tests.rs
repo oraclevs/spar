@@ -76,6 +76,62 @@ fn unawaited_failure_does_not_replace_main_result() {
 }
 
 #[test]
+fn panic_in_async_task_bypasses_try_catch() {
+    let errors = execute(
+        r#"
+        async function broken() -> int { panic(message: "stop"); };
+        async function main() -> int {
+            try {
+                return await broken();
+            } catch error {
+                return 1;
+            }
+        };
+        "#,
+    )
+    .unwrap_err();
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("stop")));
+}
+
+#[test]
+fn panic_in_sync_function_bypasses_try_catch() {
+    let errors = execute(
+        r#"
+        function main() -> int {
+            try {
+                panic(message: "fatal-stop");
+            } catch error {
+                return 1;
+            }
+        };
+        "#,
+    )
+    .unwrap_err();
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("fatal-stop")));
+}
+
+#[test]
+fn unawaited_async_panic_aborts_the_runtime() {
+    let errors = execute(
+        r#"
+        async function broken() -> int { panic(message: "detached-stop"); };
+        async function main() -> int {
+            var pending: Promise<int> = broken();
+            return 0;
+        };
+        "#,
+    )
+    .unwrap_err();
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("detached-stop")));
+}
+
+#[test]
 fn compiled_function_uses_slots_across_nested_control_flow() {
     let value = execute("function main() -> int { var mut total: int = 0; for (index, value) in [2, 4, 6] { if index == 1 { continue; } total = total + value; } return total; };").unwrap();
     assert_eq!(value, ConfigValue::Int(8));

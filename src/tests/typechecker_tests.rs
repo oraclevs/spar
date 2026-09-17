@@ -92,6 +92,12 @@ fn awaiting_non_promise_is_rejected() {
 }
 
 #[test]
+fn panic_requires_a_string_message() {
+    let errors = check_err("async function main() -> int { panic(message: 1); };");
+    assert!(errors.contains("expects str"), "{errors}");
+}
+
+#[test]
 fn top_level_await_is_rejected() {
     let errors =
         check_err("async function value() -> int { return 1; }; var answer: int = await value();");

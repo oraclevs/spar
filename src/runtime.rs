@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::async_runtime::{TaskInvocation, TaskStatus, TaskTable};
+use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus, TaskTable};
 use crate::compiled::{
     CompiledExpression, CompiledObjectItem, CompiledProgram, CompiledStatement, CompiledStringPart,
     FunctionId, LocalSlot, TypedOperation,
@@ -69,7 +69,7 @@ pub(crate) fn execute_self_contained_entry(
         tasks: TaskTable::default(),
     }
     .run_entry(entry)
-    .map_err(|error| vec![error])
+    .map_err(|fault| vec![fault.into_error()])
 }
 
 pub(crate) struct Runtime<'a> {
@@ -77,6 +77,12 @@ pub(crate) struct Runtime<'a> {
     call_depth: usize,
     state: Option<ModuleState>,
     tasks: TaskTable,
+}
+
+impl Drop for Runtime<'_> {
+    fn drop(&mut self) {
+        self.tasks.cancel_pending();
+    }
 }
 
 struct ModuleState {
@@ -112,7 +118,7 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
     runtime
         .ensure_module(program.entry)
         .and_then(|()| runtime.run_entry(entry))
-        .map_err(|error| vec![error])
+        .map_err(|fault| vec![fault.into_error()])
 }
 
 enum RuntimeFlow {
@@ -123,7 +129,7 @@ enum RuntimeFlow {
 }
 
 impl Runtime<'_> {
-    fn run_entry(&mut self, entry: FunctionId) -> Result<ConfigValue, SparError> {
+    fn run_entry(&mut self, entry: FunctionId) -> Result<ConfigValue, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
             let handle = self.tasks.spawn(entry, Vec::new());
             self.drive_promise(handle, &Span::dummy())
@@ -134,44 +140,75 @@ impl Runtime<'_> {
         result
     }
 
-    fn function_is_async(&self, id: FunctionId) -> Result<bool, SparError> {
+    fn function_is_async(&self, id: FunctionId) -> Result<bool, RuntimeFault> {
         self.program
             .modules
             .iter()
             .flat_map(|module| module.functions.iter())
             .find(|function| function.id == id)
             .map(|function| function.is_async)
-            .ok_or_else(|| runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy()))
+            .ok_or_else(|| {
+                RuntimeFault::Fatal(runtime_error(
+                    &format!("unknown function ID {}", id.0),
+                    &Span::dummy(),
+                ))
+            })
     }
 
-    fn run_task(&mut self, handle: crate::PromiseHandle, invocation: TaskInvocation) {
+    fn run_task(
+        &mut self,
+        handle: crate::PromiseHandle,
+        invocation: TaskInvocation,
+    ) -> Result<(), RuntimeFault> {
         let result = self.call_function(invocation.function, invocation.arguments);
+        let fatal = match &result {
+            Err(RuntimeFault::Fatal(error)) => Some(RuntimeFault::Fatal(error.clone())),
+            _ => None,
+        };
         self.tasks.complete(handle, result);
+        match fatal {
+            Some(fatal) => Err(fatal),
+            None => Ok(()),
+        }
     }
 
-    fn tick_one(&mut self) {
+    fn tick_one(&mut self) -> Result<(), RuntimeFault> {
         if let Some((handle, invocation)) = self.tasks.next_pending() {
-            self.run_task(handle, invocation);
+            self.run_task(handle, invocation)?;
         }
+        Ok(())
     }
 
     fn drive_promise(
         &mut self,
         handle: crate::PromiseHandle,
         span: &Span,
-    ) -> Result<ConfigValue, SparError> {
-        match self.tasks.start(handle) {
-            Ok(invocation) => {
-                self.run_task(handle, invocation);
-                match self.tasks.start(handle) {
-                    Err(TaskStatus::Ready(result)) => result,
-                    _ => Err(runtime_error("promise did not complete", span)),
+    ) -> Result<ConfigValue, RuntimeFault> {
+        loop {
+            match self.tasks.status(handle) {
+                TaskStatus::Pending => {
+                    let Some((next_handle, invocation)) = self.tasks.next_pending() else {
+                        return Err(RuntimeFault::Fatal(runtime_error(
+                            "promise scheduler made no progress",
+                            span,
+                        )));
+                    };
+                    self.run_task(next_handle, invocation)?;
+                }
+                TaskStatus::Ready(result) => return result,
+                TaskStatus::Running => {
+                    return Err(runtime_error("promise await cycle detected", span).into());
+                }
+                TaskStatus::Cancelled => {
+                    return Err(runtime_error("promise was cancelled", span).into());
+                }
+                TaskStatus::Unknown => {
+                    return Err(RuntimeFault::Fatal(runtime_error(
+                        "unknown promise handle",
+                        span,
+                    )));
                 }
             }
-            Err(TaskStatus::Ready(result)) => result,
-            Err(TaskStatus::Running) => Err(runtime_error("promise await cycle detected", span)),
-            Err(TaskStatus::Cancelled) => Err(runtime_error("promise was cancelled", span)),
-            Err(TaskStatus::Unknown) => Err(runtime_error("unknown promise handle", span)),
         }
     }
 
@@ -179,12 +216,11 @@ impl Runtime<'_> {
         &mut self,
         id: FunctionId,
         arguments: Vec<ConfigValue>,
-    ) -> Result<ConfigValue, SparError> {
+    ) -> Result<ConfigValue, RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(runtime_error(
-                "maximum function call depth exceeded",
-                &Span::dummy(),
-            ));
+            return Err(
+                runtime_error("maximum function call depth exceeded", &Span::dummy()).into(),
+            );
         }
         let function = self
             .program
@@ -202,13 +238,10 @@ impl Runtime<'_> {
         let body = function.body.clone();
         let function_span = function.span.clone();
         if arguments.len() > parameter_slots.len() {
-            return Err(runtime_error(
-                "too many direct-call arguments",
-                &function_span,
-            ));
+            return Err(runtime_error("too many direct-call arguments", &function_span).into());
         }
         self.call_depth += 1;
-        let result = (|| {
+        let result: Result<ConfigValue, RuntimeFault> = (|| {
             let mut frame = Frame::new(slot_count);
             let supplied_count = arguments.len();
             for (slot, value) in parameter_slots.iter().copied().zip(arguments) {
@@ -235,7 +268,8 @@ impl Runtime<'_> {
                 RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(
                     "loop control escaped a compiled function",
                     &function_span,
-                )),
+                )
+                .into()),
             }
         })();
         self.call_depth -= 1;
@@ -247,7 +281,7 @@ impl Runtime<'_> {
         statements: &[CompiledStatement],
         frame: &mut Frame,
         module: crate::compiled::ModuleId,
-    ) -> Result<RuntimeFlow, SparError> {
+    ) -> Result<RuntimeFlow, RuntimeFault> {
         for statement in statements {
             let flow = match statement {
                 CompiledStatement::StoreLocal { slot, value, span } => {
@@ -274,7 +308,7 @@ impl Runtime<'_> {
                     ConfigValue::Bool(false) => {
                         self.execute_statements(else_body, frame, module)?
                     }
-                    value => return Err(type_error("bool", &value, span)),
+                    value => return Err(type_error("bool", &value, span).into()),
                 },
                 CompiledStatement::For {
                     index_slot,
@@ -285,7 +319,7 @@ impl Runtime<'_> {
                 } => {
                     let ConfigValue::List(items) = self.eval_expression(iterable, frame, module)?
                     else {
-                        return Err(runtime_error("checked loop received a non-list", span));
+                        return Err(runtime_error("checked loop received a non-list", span).into());
                     };
                     let mut loop_flow = RuntimeFlow::Normal;
                     for (index, value) in items.into_iter().enumerate() {
@@ -317,7 +351,7 @@ impl Runtime<'_> {
                     span,
                 } => match self.execute_statements(body, frame, module) {
                     Ok(flow) => flow,
-                    Err(error) => {
+                    Err(RuntimeFault::Raised(error)) => {
                         let caught = ConfigValue::Error {
                             message: error.to_string(),
                             kind: "runtime".into(),
@@ -329,12 +363,13 @@ impl Runtime<'_> {
                         }
                         self.execute_statements(handler, frame, module)?
                     }
+                    Err(fatal @ RuntimeFault::Fatal(_)) => return Err(fatal),
                 },
             };
             if !matches!(flow, RuntimeFlow::Normal) {
                 return Ok(flow);
             }
-            self.tick_one();
+            self.tick_one()?;
         }
         Ok(RuntimeFlow::Normal)
     }
@@ -344,7 +379,7 @@ impl Runtime<'_> {
         expression: &CompiledExpression,
         frame: &mut Frame,
         module: crate::compiled::ModuleId,
-    ) -> Result<ConfigValue, SparError> {
+    ) -> Result<ConfigValue, RuntimeFault> {
         match expression {
             CompiledExpression::Constant(value, _) => Ok(value.clone()),
             CompiledExpression::Local(slot, span) => Ok(frame.read(*slot, span)?.clone()),
@@ -371,12 +406,20 @@ impl Runtime<'_> {
                         message: error.to_string(),
                         span: span.clone(),
                     })
+                    .map_err(Into::into)
+            }
+            CompiledExpression::Panic { message, span } => {
+                let message = self.eval_expression(message, frame, module)?;
+                let ConfigValue::Str(message) = message else {
+                    return Err(type_error("str", &message, span).into());
+                };
+                Err(RuntimeFault::Fatal(runtime_error(&message, span)))
             }
             CompiledExpression::ExecShell(shell) => self.execute_shell(shell),
             CompiledExpression::Await { promise, span } => {
                 let value = self.eval_expression(promise, frame, module)?;
                 let ConfigValue::Promise(handle) = value else {
-                    return Err(type_error("Promise", &value, span));
+                    return Err(type_error("Promise", &value, span).into());
                 };
                 self.drive_promise(handle, span)
             }
@@ -416,7 +459,8 @@ impl Runtime<'_> {
                                 return Err(runtime_error(
                                     "checked object spread received a non-object",
                                     span,
-                                ));
+                                )
+                                .into());
                             };
                             object.extend(fields);
                         }
@@ -434,7 +478,8 @@ impl Runtime<'_> {
                         return Err(runtime_error(
                             "checked fallback operation has invalid arity",
                             span,
-                        ));
+                        )
+                        .into());
                     };
                     return self
                         .eval_expression(left, frame, module)
@@ -444,7 +489,7 @@ impl Runtime<'_> {
                     .iter()
                     .map(|operand| self.eval_expression(operand, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
-                eval_operation(*operation, &values, span)
+                Ok(eval_operation(*operation, &values, span)?)
             }
             CompiledExpression::Index {
                 source,
@@ -454,10 +499,10 @@ impl Runtime<'_> {
                 let source = self.eval_expression(source, frame, module)?;
                 let index = self.eval_expression(index, frame, module)?;
                 match (source, index) {
-                    (ConfigValue::List(items), ConfigValue::Int(index)) if index >= 0 => items
+                    (ConfigValue::List(items), ConfigValue::Int(index)) if index >= 0 => Ok(items
                         .get(index as usize)
                         .cloned()
-                        .ok_or_else(|| runtime_error("list index is out of bounds", span)),
+                        .ok_or_else(|| runtime_error("list index is out of bounds", span))?),
                     (source, index) => Err(runtime_error(
                         &format!(
                             "checked index received {} and {}",
@@ -465,15 +510,18 @@ impl Runtime<'_> {
                             index.type_name()
                         ),
                         span,
-                    )),
+                    )
+                    .into()),
                 }
             }
             CompiledExpression::Field { base, field, span } => {
                 let base = self.eval_expression(base, frame, module)?;
                 match base {
-                    ConfigValue::Section(fields) => fields.get(field).cloned().ok_or_else(|| {
-                        runtime_error(&format!("object has no field '{field}'"), span)
-                    }),
+                    ConfigValue::Section(fields) => {
+                        Ok(fields.get(field).cloned().ok_or_else(|| {
+                            runtime_error(&format!("object has no field '{field}'"), span)
+                        })?)
+                    }
                     ConfigValue::Error {
                         message,
                         kind,
@@ -483,15 +531,14 @@ impl Runtime<'_> {
                         "message" => Ok(ConfigValue::Str(message)),
                         "kind" => Ok(ConfigValue::Str(kind)),
                         "code" => Ok(ConfigValue::Int(code)),
-                        "cause" => cause
+                        "cause" => Ok(cause
                             .map(|value| *value)
-                            .ok_or_else(|| runtime_error("error has no cause", span)),
-                        _ => Err(runtime_error(
-                            &format!("error has no field '{field}'"),
-                            span,
-                        )),
+                            .ok_or_else(|| runtime_error("error has no cause", span))?),
+                        _ => Err(
+                            runtime_error(&format!("error has no field '{field}'"), span).into(),
+                        ),
                     },
-                    value => Err(type_error("object", &value, span)),
+                    value => Err(type_error("object", &value, span).into()),
                 }
             }
             CompiledExpression::Interpolation(parts, span) => {
@@ -506,7 +553,7 @@ impl Runtime<'_> {
                                 ConfigValue::Int(value) => output.push_str(&value.to_string()),
                                 ConfigValue::Float(value) => output.push_str(&value.to_string()),
                                 ConfigValue::Bool(value) => output.push_str(&value.to_string()),
-                                other => return Err(type_error("primitive", &other, span)),
+                                other => return Err(type_error("primitive", &other, span).into()),
                             }
                         }
                     }
@@ -520,10 +567,9 @@ impl Runtime<'_> {
                 span,
             } => {
                 let ConfigValue::List(items) = self.eval_expression(source, frame, module)? else {
-                    return Err(runtime_error(
-                        "checked comprehension received a non-list",
-                        span,
-                    ));
+                    return Err(
+                        runtime_error("checked comprehension received a non-list", span).into(),
+                    );
                 };
                 let mut output = Vec::with_capacity(items.len());
                 for item in items {
@@ -538,7 +584,7 @@ impl Runtime<'_> {
         }
     }
 
-    fn ensure_module(&mut self, module: crate::compiled::ModuleId) -> Result<(), SparError> {
+    fn ensure_module(&mut self, module: crate::compiled::ModuleId) -> Result<(), RuntimeFault> {
         let state = self
             .state
             .as_ref()
@@ -612,14 +658,15 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
         name: &str,
         span: &Span,
-    ) -> Result<ConfigValue, SparError> {
+    ) -> Result<ConfigValue, RuntimeFault> {
         self.ensure_module(module)?;
-        self.state
+        Ok(self
+            .state
             .as_ref()
             .and_then(|state| state.results.get(&module))
             .and_then(|result| result.globals.get(name))
             .cloned()
-            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))
+            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?)
     }
 
     fn write_global(
@@ -628,7 +675,7 @@ impl Runtime<'_> {
         name: &str,
         value: ConfigValue,
         span: &Span,
-    ) -> Result<(), SparError> {
+    ) -> Result<(), RuntimeFault> {
         self.ensure_module(module)?;
         let result = self
             .state
@@ -644,14 +691,14 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
         path: &[String],
         span: &Span,
-    ) -> Result<ConfigValue, SparError> {
+    ) -> Result<ConfigValue, RuntimeFault> {
         self.ensure_module(module)?;
         let result = self
             .state
             .as_ref()
             .and_then(|state| state.results.get(&module))
             .ok_or_else(|| module_state_error(span))?;
-        match path {
+        Ok(match path {
             [name] => result.globals.get(name).cloned().or_else(|| {
                 result
                     .sections
@@ -671,10 +718,10 @@ impl Runtime<'_> {
                 &format!("imported path '{}' is unavailable", path.join("::")),
                 span,
             )
-        })
+        })?)
     }
 
-    fn execute_shell(&self, shell: &crate::ast::ShellExpr) -> Result<ConfigValue, SparError> {
+    fn execute_shell(&self, shell: &crate::ast::ShellExpr) -> Result<ConfigValue, RuntimeFault> {
         let state = self
             .state
             .as_ref()
@@ -695,10 +742,10 @@ impl Runtime<'_> {
                     span: shell.span.clone(),
                 })
         };
-        match &state.effect_ledger {
+        Ok(match &state.effect_ledger {
             Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
             None => run(),
-        }
+        }?)
     }
 }
 

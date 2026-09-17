@@ -24,6 +24,7 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
             .iter()
             .find_map(|argument| find_exec_shell_span(&argument.value)),
         Expr::Unary { operand, .. } => find_exec_shell_span(operand),
+        Expr::Await { value, .. } => find_exec_shell_span(value),
         Expr::Index { source, index, .. } => {
             find_exec_shell_span(source).or_else(|| find_exec_shell_span(index))
         }
@@ -1808,6 +1809,7 @@ impl Resolver {
                 }
             }
             Expr::Unary { operand, .. } => self.resolve_expr(operand),
+            Expr::Await { value, .. } => self.resolve_expr(value),
             Expr::Index { source, index, .. } => {
                 self.resolve_expr(source);
                 self.resolve_expr(index);
@@ -2521,6 +2523,7 @@ impl Resolver {
                 }
             }
             Expr::Unary { operand, .. } => self.resolve_expr_with_locals(operand, locals),
+            Expr::Await { value, .. } => self.resolve_expr_with_locals(value, locals),
             Expr::Index { source, index, .. } => {
                 self.resolve_expr_with_locals(source, locals)?;
                 self.resolve_expr_with_locals(index, locals)
@@ -2689,6 +2692,9 @@ impl Resolver {
             }
             Expr::Unary { operand, .. } => {
                 self.collect_closure_deps_expr(operand, local_names, deps);
+            }
+            Expr::Await { value, .. } => {
+                self.collect_closure_deps_expr(value, local_names, deps);
             }
             Expr::Comprehension {
                 var_name,

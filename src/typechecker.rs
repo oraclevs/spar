@@ -1524,6 +1524,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             },
+            Expr::Await { .. } => None,
             Expr::Index { source, .. } => match self.infer_type(source)? {
                 SparType::List(elem) => Some(*elem),
                 _ => None,
@@ -1954,6 +1955,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
+            Expr::Await { value, .. } => self.check_expr_internal(value),
             Expr::Index {
                 source,
                 index,
@@ -2528,6 +2530,7 @@ impl<'a> TypeChecker<'a> {
                 Ok(())
             }
             Expr::Unary { operand, .. } => self.check_expr_with_locals(operand, locals),
+            Expr::Await { value, .. } => self.check_expr_with_locals(value, locals),
             Expr::Index { source, index, .. } => {
                 self.check_expr_with_locals(source, locals)?;
                 self.check_expr_with_locals(index, locals)
@@ -3235,6 +3238,7 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             },
+            Expr::Await { .. } => None,
             Expr::Index { source, index, .. } => {
                 let idx_ty = self.infer_type_with_locals(index, locals)?;
                 if idx_ty != SparType::Int {

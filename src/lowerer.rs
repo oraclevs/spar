@@ -234,7 +234,9 @@ impl<'a> LocalAllocator<'a> {
                     self.visit_expression(item);
                 }
             }
-            Expr::Grouped(inner, _) | Expr::Unary { operand: inner, .. } => {
+            Expr::Grouped(inner, _)
+            | Expr::Unary { operand: inner, .. }
+            | Expr::Await { value: inner, .. } => {
                 self.visit_expression(inner);
             }
             Expr::Call { args, .. } => {
@@ -510,6 +512,12 @@ impl FunctionLowerer<'_> {
                     span: span.clone(),
                 }
             }
+            Expr::Await { span, .. } => {
+                return Err(internal_lowering(
+                    "await support is not available in the compiled runtime",
+                    span,
+                ));
+            }
             Expr::List(items, span) => CompiledExpression::List(
                 items
                     .iter()
@@ -730,6 +738,7 @@ fn expression_span(expression: &Expr) -> Span {
         | Expr::Grouped(_, span)
         | Expr::Call { span, .. }
         | Expr::Unary { span, .. }
+        | Expr::Await { span, .. }
         | Expr::Comprehension { span, .. }
         | Expr::Index { span, .. }
         | Expr::FieldAccess { span, .. }

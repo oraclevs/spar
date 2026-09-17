@@ -7,6 +7,44 @@ fn parse_ok(src: &str) -> crate::ast::Program {
     program
 }
 
+#[test]
+fn parses_async_function_and_await_expression() {
+    use crate::ast::{Expr, ReturnValue, Statement, TopLevelItem};
+
+    let program = parse_ok(
+        "async function main() -> int { var pending: Promise<int> = value(); return await pending; };",
+    );
+    let TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected function");
+    };
+    assert!(function.is_async);
+    let Statement::Return(ReturnValue::Expr(Expr::Await { value, .. }), _) =
+        &function.body.stmts[1]
+    else {
+        panic!("expected awaited return");
+    };
+    assert!(matches!(
+        value.as_ref(),
+        Expr::NamespaceRef(path) if path.segments == ["pending"]
+    ));
+}
+
+#[test]
+fn parses_async_function_group_member() {
+    use crate::ast::TopLevelItem;
+
+    let program = parse_ok("functionGroup Work { async function value() -> int { return 1; } };");
+    let TopLevelItem::FunctionGroup(group) = &program.items[0] else {
+        panic!("expected function group");
+    };
+    assert!(group.functions[0].is_async);
+}
+
+#[test]
+fn rejects_async_without_function() {
+    assert!(parse_err("async var value: int = 1;").contains("'function'"));
+}
+
 fn parse_err(src: &str) -> String {
     let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
     match crate::parser::Parser::new(tokens).parse() {

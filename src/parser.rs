@@ -260,7 +260,10 @@ impl Parser {
             Token::LBracket   => self.parse_section(false, false),
             Token::KwStruct   => self.parse_struct(false, false),
             Token::KwFunction => Ok(TopLevelItem::Function(
-                self.parse_top_level_function_decl(false)?,
+                self.parse_top_level_function_decl(false, false)?,
+            )),
+            Token::KwAsync => Ok(TopLevelItem::Function(
+                self.parse_top_level_function_decl(false, true)?,
             )),
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
             Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
@@ -306,9 +309,12 @@ impl Parser {
                     Token::KwStruct => self.parse_struct(false, true),
                     Token::KwFunction => {
                         Ok(TopLevelItem::Function(
-                            self.parse_top_level_function_decl(true)?,
+                            self.parse_top_level_function_decl(true, false)?,
                         ))
                     }
+                    Token::KwAsync => Ok(TopLevelItem::Function(
+                        self.parse_top_level_function_decl(true, true)?,
+                    )),
                     Token::Ident(s) if s == "functionGroup" => {
                         Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(true)?))
                     }
@@ -1312,6 +1318,15 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, SparError> {
+        if self.at(&Token::KwAwait) {
+            let span = self.peek_span();
+            self.advance();
+            let value = self.parse_unary()?;
+            return Ok(Expr::Await {
+                value: Box::new(value),
+                span,
+            });
+        }
         if self.at(&Token::Bang) {
             let span = self.peek_span();
             self.advance();
@@ -1630,8 +1645,15 @@ impl Parser {
         })
     }
 
-    fn parse_function_decl(&mut self, is_private: bool) -> Result<FunctionDecl, SparError> {
+    fn parse_function_decl(
+        &mut self,
+        is_private: bool,
+        is_async: bool,
+    ) -> Result<FunctionDecl, SparError> {
         let span = self.peek_span();
+        if is_async {
+            self.expect(&Token::KwAsync)?;
+        }
         self.expect(&Token::KwFunction)?;
         let (name, name_span) = self.expect_ident()?;
         let type_parameters = self.parse_type_parameters()?;
@@ -1690,6 +1712,7 @@ impl Parser {
                 stmts,
                 span: body_span,
             },
+            is_async,
             is_private,
             span,
         })
@@ -1698,8 +1721,9 @@ impl Parser {
     fn parse_top_level_function_decl(
         &mut self,
         is_private: bool,
+        is_async: bool,
     ) -> Result<FunctionDecl, SparError> {
-        let decl = self.parse_function_decl(is_private)?;
+        let decl = self.parse_function_decl(is_private, is_async)?;
         self.expect(&Token::Semicolon)?;
         Ok(decl)
     }
@@ -1713,12 +1737,14 @@ impl Parser {
         let (name, name_span) = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
         let mut functions = Vec::new();
-        while self.at(&Token::KwFunction) || self.at(&Token::Private) {
+        while self.at(&Token::KwFunction) || self.at(&Token::KwAsync) || self.at(&Token::Private) {
             if self.at(&Token::Private) {
                 self.advance();
-                functions.push(self.parse_function_decl(true)?);
+                let is_async = self.at(&Token::KwAsync);
+                functions.push(self.parse_function_decl(true, is_async)?);
             } else {
-                functions.push(self.parse_function_decl(false)?);
+                let is_async = self.at(&Token::KwAsync);
+                functions.push(self.parse_function_decl(false, is_async)?);
             }
         }
         self.expect(&Token::RBrace)?;

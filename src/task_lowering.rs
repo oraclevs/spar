@@ -354,6 +354,7 @@ fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
             .iter()
             .any(|a| expr_mentions_any(&a.value, param_names)),
         Expr::Unary { operand, .. } => expr_mentions_any(operand, param_names),
+        Expr::Await { value, .. } => expr_mentions_any(value, param_names),
         Expr::Index { source, index, .. } => {
             expr_mentions_any(source, param_names) || expr_mentions_any(index, param_names)
         }

@@ -26,7 +26,16 @@ fn ast_new_types_compile() {
             )],
             span: Span::dummy(),
         },
+        is_async: false,
         is_private: false,
+        span: Span::dummy(),
+    };
+
+    let _await = Expr::Await {
+        value: Box::new(Expr::NamespaceRef(NamespaceRef {
+            segments: vec!["pending".into()],
+            span: Span::dummy(),
+        })),
         span: Span::dummy(),
     };
     let _parameter = TypeParameter {

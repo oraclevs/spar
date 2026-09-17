@@ -29,6 +29,35 @@ pub fn display_type(ty: &SparType) -> String {
     }
 }
 
+fn promise_type(inner: SparType) -> SparType {
+    SparType::Applied {
+        name: "Promise".to_string(),
+        arguments: vec![inner],
+    }
+}
+
+fn promise_inner(ty: &SparType) -> Option<&SparType> {
+    match ty {
+        SparType::Applied { name, arguments } if name == "Promise" && arguments.len() == 1 => {
+            arguments.first()
+        }
+        _ => None,
+    }
+}
+
+fn callable_return_type(entry: &FunctionEntry) -> SparType {
+    if entry.is_async {
+        promise_type(entry.ret.clone())
+    } else {
+        entry.ret.clone()
+    }
+}
+
+fn await_hint(expected: &SparType, actual: &SparType) -> Option<String> {
+    (promise_inner(actual) == Some(expected))
+        .then(|| "use `await` to obtain the promise result".to_string())
+}
+
 pub(crate) type TypeSubstitution = HashMap<String, SparType>;
 
 pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) -> SparType {
@@ -334,6 +363,7 @@ impl<'a> TypeChecker<'a> {
                     std::slice::from_ref(statement),
                     &SparType::Int,
                     &mut module_locals,
+                    false,
                 ),
             }
         }
@@ -1524,7 +1554,9 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             },
-            Expr::Await { .. } => None,
+            Expr::Await { value, .. } => self
+                .infer_type(value)
+                .and_then(|ty| promise_inner(&ty).cloned()),
             Expr::Index { source, .. } => match self.infer_type(source)? {
                 SparType::List(elem) => Some(*elem),
                 _ => None,
@@ -1623,14 +1655,14 @@ impl<'a> TypeChecker<'a> {
                 .function_groups
                 .get(segments[0])
                 .and_then(|g| g.functions.get(segments[1]))
-                .map(|fe| fe.ret.clone())
+                .map(callable_return_type)
                 .or_else(|| {
                     self.symbols
                         .hosts
                         .get(&(segments[0].to_string(), segments[1].to_string()))
                         .map(|host_fn| host_fn.ret.clone())
                 }),
-            1 => self.symbols.functions.get(name).map(|fe| fe.ret.clone()),
+            1 => self.symbols.functions.get(name).map(callable_return_type),
             _ => None,
         }
     }
@@ -1955,7 +1987,14 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            Expr::Await { value, .. } => self.check_expr_internal(value),
+            Expr::Await { value, span } => {
+                self.check_expr_internal(value);
+                self.push_type_error(
+                    "`await` is only valid inside an async function",
+                    Some("move `await` into an `async function`".into()),
+                    span.clone(),
+                );
+            }
             Expr::Index {
                 source,
                 index,
@@ -2087,8 +2126,14 @@ impl<'a> TypeChecker<'a> {
             });
         }
 
+        let eventual_return = substitute_type(&entry.ret, &substitution);
+        let call_return = if entry.is_async {
+            promise_type(eventual_return)
+        } else {
+            eventual_return
+        };
         Ok((
-            substitute_type(&entry.ret, &substitution),
+            call_return,
             entry
                 .params
                 .iter()
@@ -2471,23 +2516,34 @@ impl<'a> TypeChecker<'a> {
         expr: &Expr,
         locals: &HashMap<String, SparType>,
     ) -> Result<(), SparError> {
+        self.check_expr_with_locals_in_context(expr, locals, false)
+    }
+
+    fn check_expr_with_locals_in_context(
+        &self,
+        expr: &Expr,
+        locals: &HashMap<String, SparType>,
+        is_async: bool,
+    ) -> Result<(), SparError> {
         match expr {
             Expr::Object(items, _) => {
                 for item in items {
                     match item {
                         SectionItem::Field(f) => {
                             if let Some(FieldValue::Expr(e)) = &f.value {
-                                self.check_expr_with_locals(e, locals)?;
+                                self.check_expr_with_locals_in_context(e, locals, is_async)?;
                             }
                         }
-                        SectionItem::Spread(sp) => self.check_expr_with_locals(&sp.expr, locals)?,
+                        SectionItem::Spread(sp) => {
+                            self.check_expr_with_locals_in_context(&sp.expr, locals, is_async)?
+                        }
                     }
                 }
                 Ok(())
             }
             Expr::BinaryOp(op) => {
-                self.check_expr_with_locals(&op.lhs, locals)?;
-                self.check_expr_with_locals(&op.rhs, locals)?;
+                self.check_expr_with_locals_in_context(&op.lhs, locals, is_async)?;
+                self.check_expr_with_locals_in_context(&op.rhs, locals, is_async)?;
                 // Validate operator type constraints
                 if self.infer_binary_type_with_locals(op, locals).is_none() {
                     return Err(SparError::TypeError {
@@ -2503,46 +2559,76 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
-                    self.check_expr_with_locals(arg, locals)?;
+                    self.check_expr_with_locals_in_context(arg, locals, is_async)?;
                 }
                 Ok(())
             }
             Expr::String(s) => {
                 for part in &s.parts {
                     if let StringPart::Expr(e) = part {
-                        self.check_expr_with_locals(e, locals)?;
+                        self.check_expr_with_locals_in_context(e, locals, is_async)?;
                     }
                 }
                 Ok(())
             }
             Expr::List(items, _) => {
                 for item in items {
-                    self.check_expr_with_locals(item, locals)?;
+                    self.check_expr_with_locals_in_context(item, locals, is_async)?;
                 }
                 Ok(())
             }
-            Expr::Grouped(inner, _) => self.check_expr_with_locals(inner, locals),
+            Expr::Grouped(inner, _) => {
+                self.check_expr_with_locals_in_context(inner, locals, is_async)
+            }
             Expr::Call { args, .. } => {
                 for arg in args {
-                    self.check_expr_with_locals(&arg.value, locals)?;
+                    self.check_expr_with_locals_in_context(&arg.value, locals, is_async)?;
                 }
                 self.check_call_with_locals(expr, locals)?;
                 Ok(())
             }
-            Expr::Unary { operand, .. } => self.check_expr_with_locals(operand, locals),
-            Expr::Await { value, .. } => self.check_expr_with_locals(value, locals),
+            Expr::Unary { operand, .. } => {
+                self.check_expr_with_locals_in_context(operand, locals, is_async)
+            }
+            Expr::Await { value, span } => {
+                if !is_async {
+                    return Err(SparError::TypeError {
+                        message: "`await` is only valid inside an async function".into(),
+                        hint: Some("mark the containing function `async` or remove `await`".into()),
+                        span: span.clone(),
+                    });
+                }
+                self.check_expr_with_locals_in_context(value, locals, is_async)?;
+                let operand_type = self.infer_type_with_locals(value, locals);
+                if operand_type.as_ref().and_then(promise_inner).is_none() {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "cannot await `{}`; expected `Promise<T>`",
+                            operand_type
+                                .as_ref()
+                                .map(display_type)
+                                .unwrap_or_else(|| "unknown".into())
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                Ok(())
+            }
             Expr::Index { source, index, .. } => {
-                self.check_expr_with_locals(source, locals)?;
-                self.check_expr_with_locals(index, locals)
+                self.check_expr_with_locals_in_context(source, locals, is_async)?;
+                self.check_expr_with_locals_in_context(index, locals, is_async)
             }
             Expr::Comprehension { source, body, .. } => {
-                self.check_expr_with_locals(source, locals)?;
-                self.check_expr_with_locals(body, locals)?;
+                self.check_expr_with_locals_in_context(source, locals, is_async)?;
+                self.check_expr_with_locals_in_context(body, locals, is_async)?;
                 Ok(())
             }
             Expr::Literal(_) => Ok(()),
             Expr::NamespaceRef(_) => Ok(()),
-            Expr::FieldAccess { base, .. } => self.check_expr_with_locals(base, locals),
+            Expr::FieldAccess { base, .. } => {
+                self.check_expr_with_locals_in_context(base, locals, is_async)
+            }
             Expr::Shell(_) | Expr::ExecShell(_) => Ok(()),
         }
     }
@@ -2747,7 +2833,7 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| (p.name.clone(), p.ty.clone()))
             .collect();
-        self.check_func_stmts(&f.body.stmts, &f.ret, &mut local_types);
+        self.check_func_stmts(&f.body.stmts, &f.ret, &mut local_types, f.is_async);
     }
 
     fn check_func_stmts(
@@ -2755,11 +2841,14 @@ impl<'a> TypeChecker<'a> {
         stmts: &[FuncStmt],
         ret_ty: &SparType,
         local_types: &mut HashMap<String, SparType>,
+        is_async: bool,
     ) {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
-                    if let Err(e) = self.check_expr_with_locals(&lv.value, local_types) {
+                    if let Err(e) =
+                        self.check_expr_with_locals_in_context(&lv.value, local_types, is_async)
+                    {
                         self.errors.push(e);
                     }
 
@@ -2844,7 +2933,7 @@ impl<'a> TypeChecker<'a> {
                                     "local variable '{}' declared as '{}' but assigned a value of type '{}'",
                                     lv.name, display_type(declared), display_type(&actual)
                                 ),
-                                hint: None,
+                                hint: await_hint(declared, &actual),
                                 span: lv.span.clone(),
                             })
                             }
@@ -2860,12 +2949,16 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
                 FuncStmt::Expression(expr, _) => {
-                    if let Err(error) = self.check_expr_with_locals(expr, local_types) {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(expr, local_types, is_async)
+                    {
                         self.errors.push(error);
                     }
                 }
                 FuncStmt::Assignment { name, value, span } => {
-                    if let Err(error) = self.check_expr_with_locals(value, local_types) {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(value, local_types, is_async)
+                    {
                         self.errors.push(error);
                     }
                     let expected = local_types
@@ -2881,7 +2974,7 @@ impl<'a> TypeChecker<'a> {
                                     display_type(&expected),
                                     display_type(&actual)
                                 ),
-                                hint: None,
+                                hint: await_hint(&expected, &actual),
                                 span: span.clone(),
                             });
                         }
@@ -2889,7 +2982,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
                 FuncStmt::Return(ret_value, span) => {
-                    self.check_return_value(ret_value, ret_ty, local_types, span);
+                    self.check_return_value(ret_value, ret_ty, local_types, span, is_async);
                 }
                 FuncStmt::For(statement) => {
                     let iterable_ty = self.infer_type_with_locals(&statement.iterable, local_types);
@@ -2908,7 +3001,11 @@ impl<'a> TypeChecker<'a> {
                         }
                         None => None,
                     };
-                    if let Err(e) = self.check_expr_with_locals(&statement.iterable, local_types) {
+                    if let Err(e) = self.check_expr_with_locals_in_context(
+                        &statement.iterable,
+                        local_types,
+                        is_async,
+                    ) {
                         self.errors.push(e);
                     }
                     let mut loop_types = local_types.clone();
@@ -2928,20 +3025,20 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     let body = statement.body.clone();
-                    self.check_func_stmts(&body, ret_ty, &mut loop_types);
+                    self.check_func_stmts(&body, ret_ty, &mut loop_types, is_async);
                 }
                 FuncStmt::If(if_stmt) => {
                     let if_stmt = if_stmt.clone();
-                    self.check_if_stmt(&if_stmt, ret_ty, local_types);
+                    self.check_if_stmt(&if_stmt, ret_ty, local_types, is_async);
                 }
                 FuncStmt::Try(statement) => {
                     let mut body_types = local_types.clone();
-                    self.check_func_stmts(&statement.body, ret_ty, &mut body_types);
+                    self.check_func_stmts(&statement.body, ret_ty, &mut body_types, is_async);
                     let mut catch_types = local_types.clone();
                     if let Some(name) = &statement.catch_name {
                         catch_types.insert(name.clone(), SparType::Error);
                     }
-                    self.check_func_stmts(&statement.handler, ret_ty, &mut catch_types);
+                    self.check_func_stmts(&statement.handler, ret_ty, &mut catch_types, is_async);
                 }
             }
         }
@@ -2953,6 +3050,7 @@ impl<'a> TypeChecker<'a> {
         ret_ty: &SparType,
         local_types: &HashMap<String, SparType>,
         span: &Span,
+        is_async: bool,
     ) {
         match (ret_ty, ret_value) {
             (SparType::Void, ReturnValue::Void) => {}
@@ -2977,7 +3075,9 @@ impl<'a> TypeChecker<'a> {
             }
             (SparType::Section, ReturnValue::SectionBlock(fields)) => {
                 for field in fields {
-                    if let Err(e) = self.check_expr_with_locals(&field.value, local_types) {
+                    if let Err(e) =
+                        self.check_expr_with_locals_in_context(&field.value, local_types, is_async)
+                    {
                         self.errors.push(e);
                     }
                     let Some(field_ty) = &field.ty else {
@@ -3029,7 +3129,9 @@ impl<'a> TypeChecker<'a> {
                     return;
                 };
                 for rf in fields {
-                    if let Err(e) = self.check_expr_with_locals(&rf.value, local_types) {
+                    if let Err(e) =
+                        self.check_expr_with_locals_in_context(&rf.value, local_types, is_async)
+                    {
                         self.errors.push(e);
                     }
                 }
@@ -3063,7 +3165,9 @@ impl<'a> TypeChecker<'a> {
                 };
                 for item in items {
                     if let Expr::Object(obj_items, _) = item {
-                        if let Err(e) = self.check_expr_with_locals(item, local_types) {
+                        if let Err(e) =
+                            self.check_expr_with_locals_in_context(item, local_types, is_async)
+                        {
                             self.errors.push(e);
                         }
                         let config_fields: Vec<&FieldDecl> = obj_items
@@ -3096,7 +3200,7 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             (ty, ReturnValue::Expr(e)) => {
-                if let Err(err) = self.check_expr_with_locals(e, local_types) {
+                if let Err(err) = self.check_expr_with_locals_in_context(e, local_types, is_async) {
                     self.errors.push(err);
                 }
                 let actual = self.infer_type_with_locals(e, local_types);
@@ -3110,7 +3214,7 @@ impl<'a> TypeChecker<'a> {
                                 .map(display_type)
                                 .unwrap_or_else(|| "unknown".into()),
                         ),
-                        hint: None,
+                        hint: actual.as_ref().and_then(|actual| await_hint(ty, actual)),
                         span: span.clone(),
                     });
                 }
@@ -3134,8 +3238,11 @@ impl<'a> TypeChecker<'a> {
         if_stmt: &IfStmt,
         ret_ty: &SparType,
         local_types: &mut HashMap<String, SparType>,
+        is_async: bool,
     ) {
-        if let Err(e) = self.check_expr_with_locals(&if_stmt.condition, local_types) {
+        if let Err(e) =
+            self.check_expr_with_locals_in_context(&if_stmt.condition, local_types, is_async)
+        {
             self.errors.push(e);
         }
         let cond_ty = self.infer_type_with_locals(&if_stmt.condition, local_types);
@@ -3154,9 +3261,9 @@ impl<'a> TypeChecker<'a> {
         }
 
         let mut then_types = local_types.clone();
-        self.check_func_stmts(&if_stmt.then_stmts, ret_ty, &mut then_types);
+        self.check_func_stmts(&if_stmt.then_stmts, ret_ty, &mut then_types, is_async);
         let mut else_types = local_types.clone();
-        self.check_func_stmts(&if_stmt.else_stmts, ret_ty, &mut else_types);
+        self.check_func_stmts(&if_stmt.else_stmts, ret_ty, &mut else_types, is_async);
     }
 
     // ── Type inference with local variable scope ──────────────────────────────
@@ -3238,7 +3345,9 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             },
-            Expr::Await { .. } => None,
+            Expr::Await { value, .. } => self
+                .infer_type_with_locals(value, locals)
+                .and_then(|ty| promise_inner(&ty).cloned()),
             Expr::Index { source, index, .. } => {
                 let idx_ty = self.infer_type_with_locals(index, locals)?;
                 if idx_ty != SparType::Int {

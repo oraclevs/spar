@@ -157,6 +157,7 @@ pub struct FunctionEntry {
     pub params: Vec<(String, SparType)>,
     pub default_params: HashSet<String>,
     pub ret: SparType,
+    pub is_async: bool,
     pub span: Span,
     pub closure_deps: HashSet<DeclId>,
     pub is_private: bool,
@@ -375,7 +376,13 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if self.types.contains_key(name) || self.enums.contains_key(name) {
+                if name == "Promise" {
+                    Err(SparError::ResolveError {
+                        message: "type 'Promise' expects 1 type argument".into(),
+                        hint: None,
+                        span: span.clone(),
+                    })
+                } else if self.types.contains_key(name) || self.enums.contains_key(name) {
                     Ok(())
                 } else {
                     Err(SparError::ResolveError {
@@ -386,6 +393,19 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
+                if name == "Promise" {
+                    if arguments.len() != 1 {
+                        return Err(SparError::ResolveError {
+                            message: format!(
+                                "type 'Promise' expects 1 type argument, found {}",
+                                arguments.len()
+                            ),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    }
+                    return self.validate_explicit_type_argument(&arguments[0], span);
+                }
                 let Some(entry) = self.types.get(name) else {
                     return Err(SparError::ResolveError {
                         message: format!("undefined type: `{name}` is not declared"),
@@ -831,6 +851,7 @@ impl Resolver {
                 .map(|param| param.name.clone())
                 .collect(),
             ret: decl.ret.clone(),
+            is_async: decl.is_async,
             span: decl.name_span.clone(),
             closure_deps: HashSet::new(), // computed in Pass 3
             is_private: decl.is_private,
@@ -1563,7 +1584,9 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if let Some(entry) = self.types.get(name) {
+                if name == "Promise" {
+                    self.push_error("type 'Promise' expects 1 type argument", span.clone());
+                } else if let Some(entry) = self.types.get(name) {
                     if !entry.type_parameters.is_empty() {
                         self.push_error(
                             format!(
@@ -1594,7 +1617,17 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
-                if let Some(entry) = self.types.get(name) {
+                if name == "Promise" {
+                    if arguments.len() != 1 {
+                        self.push_error(
+                            format!(
+                                "type 'Promise' expects 1 type argument, found {}",
+                                arguments.len()
+                            ),
+                            span.clone(),
+                        );
+                    }
+                } else if let Some(entry) = self.types.get(name) {
                     let expected = entry.type_parameters.len();
                     if expected != arguments.len() {
                         self.push_error(

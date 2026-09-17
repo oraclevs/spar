@@ -13,6 +13,38 @@ fn execute_source_drives_async_main_to_completion() {
 }
 
 #[test]
+fn execute_source_drives_promise_created_during_module_initialization() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            async function answer() -> int { return 29; };
+            var pending: Promise<int> = answer();
+            async function main() -> int { return await pending; };
+            "#,
+        )
+        .expect("module promise should belong to the execution runtime");
+    assert_eq!(outcome.exit_status, 29);
+}
+
+#[test]
+fn module_initialization_preserves_dependencies_between_promises() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            async function value() -> int { return 3; };
+            async function increment(pending: Promise<int>) -> int {
+                return await pending + 1;
+            };
+            var first: Promise<int> = value();
+            var second: Promise<int> = increment(pending: first);
+            async function main() -> int { return await second; };
+            "#,
+        )
+        .expect("module promise dependency should execute");
+    assert_eq!(outcome.exit_status, 4);
+}
+
+#[test]
 fn async_main_preserves_void_and_shell_result_mapping() {
     let void_outcome = Engine::default()
         .execute_source("async function main() -> void { return; };")
@@ -46,6 +78,30 @@ fn execute_path_awaits_an_imported_async_function() {
         .execute_path(&temp.path().join("main.spar"))
         .expect("imported async function should execute");
     assert_eq!(outcome.exit_status, 31);
+}
+
+#[test]
+fn execute_path_drives_imported_promise_created_during_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("values.spar"),
+        "async function answer() -> int { return 37; };\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("main.spar"),
+        concat!(
+            "import \"values.spar\" as values;\n",
+            "var pending: Promise<int> = values::answer();\n",
+            "async function main() -> int { return await pending; };\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = Engine::default()
+        .execute_path(&temp.path().join("main.spar"))
+        .expect("imported module promise should execute");
+    assert_eq!(outcome.exit_status, 37);
 }
 
 #[test]

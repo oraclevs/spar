@@ -88,6 +88,15 @@ pub struct EvalResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingPromise {
+    pub(crate) handle: PromiseHandle,
+    pub(crate) import_alias: Option<String>,
+    pub(crate) group: Option<String>,
+    pub(crate) function: String,
+    pub(crate) arguments: Vec<ConfigValue>,
+}
+
 // ── Internal error type ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -225,6 +234,7 @@ pub struct Evaluator {
     hosts: crate::host::HostRegistry,
     effect_ledger: Option<crate::session::EffectLedger>,
     next_promise_id: u64,
+    pending_promises: Vec<PendingPromise>,
 }
 
 fn build_imported_programs(
@@ -341,6 +351,7 @@ impl Evaluator {
             hosts: crate::host::HostRegistry::default(),
             effect_ledger: None,
             next_promise_id: 1,
+            pending_promises: Vec::new(),
         }
     }
 
@@ -403,6 +414,29 @@ impl Evaluator {
                 let mut errs = vec![first_err];
                 errs.extend(std::mem::take(&mut ev.errors));
                 Err(errs)
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_for_runtime(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        hosts: crate::host::HostRegistry,
+        effect_ledger: Option<crate::session::EffectLedger>,
+    ) -> Result<(EvalResult, Vec<PendingPromise>), Vec<SparError>> {
+        let imported = build_imported_programs(loaded, base_dir)?;
+        let mut evaluator = Evaluator::new(symbols.clone(), program.clone())
+            .with_hosts(hosts)
+            .with_effect_ledger(effect_ledger);
+        evaluator.imported_programs = imported;
+        match evaluator.run() {
+            Ok(result) => Ok((result, evaluator.pending_promises)),
+            Err(first_error) => {
+                let mut errors = vec![first_error];
+                errors.extend(std::mem::take(&mut evaluator.errors));
+                Err(errors)
             }
         }
     }
@@ -1839,7 +1873,14 @@ pub fn execute_shell_plan_with_options(
 // ── Function call evaluation ──────────────────────────────────────────────────
 
 impl Evaluator {
-    fn allocate_opaque_promise(&mut self) -> EvalResult_ {
+    fn allocate_opaque_promise(
+        &mut self,
+        import_alias: Option<String>,
+        group: Option<String>,
+        function: String,
+        declaration: &FunctionDecl,
+        bound_arguments: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         let id = self.next_promise_id;
         self.next_promise_id =
             self.next_promise_id
@@ -1847,7 +1888,20 @@ impl Evaluator {
                 .ok_or_else(|| EvalErr::Host {
                     message: "promise identity space exhausted".into(),
                 })?;
-        Ok(ConfigValue::Promise(PromiseHandle::new(id)))
+        let handle = PromiseHandle::new(id);
+        let arguments = declaration
+            .params
+            .iter()
+            .filter_map(|parameter| bound_arguments.get(&parameter.name).cloned())
+            .collect();
+        self.pending_promises.push(PendingPromise {
+            handle,
+            import_alias,
+            group,
+            function,
+            arguments,
+        });
+        Ok(ConfigValue::Promise(handle))
     }
 
     fn eval_call(
@@ -1887,7 +1941,13 @@ impl Evaluator {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     if fd.is_async {
                         self.call_depth -= 1;
-                        return self.allocate_opaque_promise();
+                        return self.allocate_opaque_promise(
+                            Some(alias.to_string()),
+                            Some(group.to_string()),
+                            fn_name.to_string(),
+                            &fd,
+                            &local_scope,
+                        );
                     }
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
@@ -1926,7 +1986,13 @@ impl Evaluator {
                 let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                 if fd.is_async {
                     self.call_depth -= 1;
-                    return self.allocate_opaque_promise();
+                    return self.allocate_opaque_promise(
+                        None,
+                        Some(ns.to_string()),
+                        fn_name.to_string(),
+                        &fd,
+                        &local_scope,
+                    );
                 }
                 self.eval_default_args(&fd, &mut local_scope)?;
                 let result = self
@@ -1951,7 +2017,13 @@ impl Evaluator {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
                     if fd.is_async {
                         self.call_depth -= 1;
-                        return self.allocate_opaque_promise();
+                        return self.allocate_opaque_promise(
+                            Some(ns.to_string()),
+                            None,
+                            fn_name.to_string(),
+                            &fd,
+                            &local_scope,
+                        );
                     }
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
@@ -2005,7 +2077,13 @@ impl Evaluator {
         let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
         if func_decl.is_async {
             self.call_depth -= 1;
-            return self.allocate_opaque_promise();
+            return self.allocate_opaque_promise(
+                None,
+                None,
+                name.to_string(),
+                &func_decl,
+                &local_scope,
+            );
         }
         self.eval_default_args(&func_decl, &mut local_scope)?;
 

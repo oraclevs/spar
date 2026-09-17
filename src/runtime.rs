@@ -86,24 +86,12 @@ struct ModuleState {
 }
 
 impl ModuleState {
-    fn initialize(program: &CompiledProgram) -> Result<Self, Vec<SparError>> {
-        let entry = program
-            .modules
-            .get(program.entry.0 as usize)
-            .ok_or_else(|| vec![runtime_error("entry module is unavailable", &Span::dummy())])?;
-        let result = crate::Evaluator::evaluate_with_imports_base_and_effects(
-            &entry.checked.program,
-            &entry.checked.symbols,
-            &entry.checked.imports,
-            &program.options.base_dir,
-            program.options.hosts.clone(),
-            program.options.effect_ledger.clone(),
-        )?;
-        Ok(Self {
-            results: HashMap::from([(program.entry, result)]),
+    fn new(program: &CompiledProgram) -> Self {
+        Self {
+            results: HashMap::new(),
             hosts: program.options.hosts.clone(),
             effect_ledger: program.options.effect_ledger.clone(),
-        })
+        }
     }
 }
 
@@ -115,15 +103,16 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
             span: Span::dummy(),
         }]
     })?;
-    let state = ModuleState::initialize(program)?;
-    Runtime {
+    let mut runtime = Runtime {
         program,
         call_depth: 0,
-        state: Some(state),
+        state: Some(ModuleState::new(program)),
         tasks: TaskTable::default(),
-    }
-    .run_entry(entry)
-    .map_err(|error| vec![error])
+    };
+    runtime
+        .ensure_module(program.entry)
+        .and_then(|()| runtime.run_entry(entry))
+        .map_err(|error| vec![error])
 }
 
 enum RuntimeFlow {
@@ -564,7 +553,7 @@ impl Runtime<'_> {
             .identity
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let result = crate::Evaluator::evaluate_with_imports_base_and_effects(
+        let (mut result, pending_promises) = crate::Evaluator::evaluate_for_runtime(
             &compiled.checked.program,
             &compiled.checked.symbols,
             &compiled.checked.imports,
@@ -577,6 +566,39 @@ impl Runtime<'_> {
                 .pop()
                 .unwrap_or_else(|| runtime_error("module initialization failed", &Span::dummy()))
         })?;
+        let mut replacements = HashMap::new();
+        for mut pending in pending_promises {
+            let target_module = match pending.import_alias.as_deref() {
+                Some(alias) => compiled.import_modules.get(alias).copied().ok_or_else(|| {
+                    runtime_error(
+                        &format!("unknown import alias '{alias}' for pending promise"),
+                        &Span::dummy(),
+                    )
+                })?,
+                None => module,
+            };
+            let function = self
+                .program
+                .modules
+                .get(target_module.0 as usize)
+                .and_then(|module| {
+                    module.functions.iter().find(|function| {
+                        function.key.group == pending.group && function.name == pending.function
+                    })
+                })
+                .ok_or_else(|| {
+                    runtime_error(
+                        &format!("unknown async function '{}'", pending.function),
+                        &Span::dummy(),
+                    )
+                })?;
+            for argument in &mut pending.arguments {
+                remap_promises(argument, &replacements);
+            }
+            let handle = self.tasks.spawn(function.id, pending.arguments);
+            replacements.insert(pending.handle, handle);
+        }
+        remap_promises_in_result(&mut result, &replacements);
         self.state
             .as_mut()
             .ok_or_else(|| module_state_error(&Span::dummy()))?
@@ -677,6 +699,53 @@ impl Runtime<'_> {
             Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
             None => run(),
         }
+    }
+}
+
+fn remap_promises_in_result(
+    result: &mut crate::evaluator::EvalResult,
+    replacements: &HashMap<crate::PromiseHandle, crate::PromiseHandle>,
+) {
+    for value in result.globals.values_mut() {
+        remap_promises(value, replacements);
+    }
+    for fields in result.sections.values_mut() {
+        for value in fields.values_mut() {
+            remap_promises(value, replacements);
+        }
+    }
+}
+
+fn remap_promises(
+    value: &mut ConfigValue,
+    replacements: &HashMap<crate::PromiseHandle, crate::PromiseHandle>,
+) {
+    match value {
+        ConfigValue::Promise(handle) => {
+            if let Some(replacement) = replacements.get(handle) {
+                *handle = *replacement;
+            }
+        }
+        ConfigValue::List(values) => {
+            for value in values {
+                remap_promises(value, replacements);
+            }
+        }
+        ConfigValue::Section(fields) => {
+            for value in fields.values_mut() {
+                remap_promises(value, replacements);
+            }
+        }
+        ConfigValue::Error { cause, .. } => {
+            if let Some(cause) = cause {
+                remap_promises(cause, replacements);
+            }
+        }
+        ConfigValue::Str(_)
+        | ConfigValue::Int(_)
+        | ConfigValue::Float(_)
+        | ConfigValue::Bool(_)
+        | ConfigValue::Shell(_) => {}
     }
 }
 

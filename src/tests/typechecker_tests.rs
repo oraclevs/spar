@@ -20,6 +20,87 @@ fn check_err(src: &str) -> String {
     }
 }
 
+fn resolve_or_type_err(src: &str) -> String {
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let prog = crate::parser::Parser::new(tokens).parse().expect("parse");
+    let symbols = match crate::resolver::Resolver::new().resolve(&prog, &[]) {
+        Ok(symbols) => symbols,
+        Err(errors) => return format!("{errors:?}"),
+    };
+    match crate::typechecker::TypeChecker::check(&prog, &symbols) {
+        Ok(_) => panic!("expected resolve or type error"),
+        Err(errors) => format!("{errors:?}"),
+    }
+}
+
+#[test]
+fn async_call_returns_promise_and_await_unwraps_it() {
+    check_ok(
+        r#"
+        async function identity<T>(value: T) -> T { return value; };
+        async function main() -> int {
+            var pending: Promise<int> = identity(value: 7);
+            var answer: int = await pending;
+            return answer;
+        };
+        "#,
+    );
+}
+
+#[test]
+fn await_in_sync_function_is_rejected() {
+    let errors = check_err(
+        "async function value() -> int { return 1; }; function main() -> int { return await value(); };",
+    );
+    assert!(
+        errors.contains("only valid inside an async function"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn missing_await_has_actionable_hint() {
+    let errors = check_err(
+        "async function value() -> int { return 1; }; async function main() -> int { var answer: int = value(); return answer; };",
+    );
+    assert!(errors.contains("await"), "{errors}");
+}
+
+#[test]
+fn promise_requires_exactly_one_type_argument() {
+    let no_argument = resolve_or_type_err(
+        "async function value() -> int { return 1; }; async function main() -> int { var pending: Promise = value(); return await pending; };",
+    );
+    assert!(
+        no_argument.contains("expects 1 type argument"),
+        "{no_argument}"
+    );
+
+    let two_arguments = resolve_or_type_err(
+        "async function value() -> int { return 1; }; async function main() -> int { var pending: Promise<int, str> = value(); return await pending; };",
+    );
+    assert!(
+        two_arguments.contains("expects 1 type argument"),
+        "{two_arguments}"
+    );
+}
+
+#[test]
+fn awaiting_non_promise_is_rejected() {
+    let errors = check_err("async function main() -> int { return await 1; };");
+    assert!(errors.contains("expected `Promise<T>`"), "{errors}");
+}
+
+#[test]
+fn top_level_await_is_rejected() {
+    let errors =
+        check_err("async function value() -> int { return 1; }; var answer: int = await value();");
+    assert!(
+        errors.contains("only valid inside an async function"),
+        "{errors}"
+    );
+}
+
 #[test]
 fn generic_function_calls_infer_and_accept_explicit_types() {
     check_ok(

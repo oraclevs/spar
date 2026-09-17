@@ -3,6 +3,52 @@ use std::fs;
 use spar::Engine;
 
 #[test]
+fn execute_source_drives_async_main_to_completion() {
+    let outcome = Engine::default()
+        .execute_source(
+            "async function answer() -> int { return 27; }; async function main() -> int { return await answer(); };",
+        )
+        .expect("async main should execute");
+    assert_eq!(outcome.exit_status, 27);
+}
+
+#[test]
+fn async_main_preserves_void_and_shell_result_mapping() {
+    let void_outcome = Engine::default()
+        .execute_source("async function main() -> void { return; };")
+        .expect("async void main should execute");
+    assert_eq!(void_outcome.exit_status, 0);
+
+    let shell_outcome = Engine::default()
+        .execute_source("async function main() -> shell { return shell { false; }; };")
+        .expect("async shell main should execute");
+    assert_ne!(shell_outcome.exit_status, 0);
+}
+
+#[test]
+fn execute_path_awaits_an_imported_async_function() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("values.spar"),
+        "async function answer() -> int { return 31; };\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("main.spar"),
+        concat!(
+            "import \"values.spar\" as values;\n",
+            "async function main() -> int { return await values::answer(); };\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = Engine::default()
+        .execute_path(&temp.path().join("main.spar"))
+        .expect("imported async function should execute");
+    assert_eq!(outcome.exit_status, 31);
+}
+
+#[test]
 fn phase4_language_fixtures_execute() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase4");
     let struct_outcome = Engine::default()

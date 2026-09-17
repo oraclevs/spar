@@ -101,6 +101,10 @@ pub(crate) struct PendingPromise {
 
 #[derive(Debug)]
 enum EvalErr {
+    Fatal {
+        message: String,
+        span: Span,
+    },
     EnvVarMissing(String),
     CyclicRef {
         name: String,
@@ -150,6 +154,7 @@ impl StatementFlow {
 impl EvalErr {
     fn into_kl_error(self) -> SparError {
         match self {
+            EvalErr::Fatal { message, span } => SparError::EvalError { message, span },
             EvalErr::CyclicRef { name, span } => SparError::EvalError {
                 message: format!(
                     "cyclic reference: `{name}` depends on itself — \
@@ -1910,6 +1915,24 @@ impl Evaluator {
         args: &[CallArg],
         caller_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
+        if name == "panic" {
+            let message = args
+                .iter()
+                .find(|argument| argument.param_name == "message")
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "panic message argument is unavailable".into(),
+                    span: Span::dummy(),
+                })?;
+            let span = message.span.clone();
+            let value = self.eval_expr(&message.value, caller_scope)?;
+            let ConfigValue::Str(message) = value else {
+                return Err(EvalErr::Fatal {
+                    message: "panic message must be str".into(),
+                    span,
+                });
+            };
+            return Err(EvalErr::Fatal { message, span });
+        }
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(EvalErr::MaxCallDepth {
                 name: name.to_string(),
@@ -2181,6 +2204,7 @@ impl Evaluator {
                                 return Ok(flow);
                             }
                         }
+                        Err(error @ EvalErr::Fatal { .. }) => return Err(error),
                         Err(error) => {
                             restore_block_scope(local_scope, &body_snapshot, &statement.body, None);
                             let handler_snapshot = local_scope.clone();

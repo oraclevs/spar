@@ -580,6 +580,16 @@ impl FunctionLowerer<'_> {
         arguments: &[crate::ast::CallArg],
         span: &Span,
     ) -> Result<CompiledExpression, SparError> {
+        if name == "panic" {
+            let message = arguments
+                .iter()
+                .find(|argument| argument.param_name == "message")
+                .ok_or_else(|| internal_lowering("panic message argument is unavailable", span))?;
+            return Ok(CompiledExpression::Panic {
+                message: Box::new(self.lower_expression(&message.value)?),
+                span: span.clone(),
+            });
+        }
         let segments: Vec<&str> = name.split("::").collect();
         let key = match segments.as_slice() {
             [function] => Some(FunctionKey {

@@ -58,6 +58,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             FuncStmt::LocalVar(local) => {
                 scope.insert(local.name.clone(), local.ty.clone());
             }
+            FuncStmt::Expression(Expr::Call { name, .. }, _) if name == "panic" => return None,
             FuncStmt::Expression(_, _) => {}
             FuncStmt::Assignment { .. } => {}
             FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
@@ -1711,6 +1712,21 @@ impl Resolver {
                 args,
                 ..
             } => {
+                if name == "panic" {
+                    if !type_arguments.is_empty() {
+                        self.push_error("panic does not accept type arguments", name_span.clone());
+                    }
+                    if args.len() != 1 || args[0].param_name != "message" {
+                        self.push_error(
+                            "panic requires exactly one argument named 'message'",
+                            name_span.clone(),
+                        );
+                    }
+                    for argument in args {
+                        self.resolve_expr(&argument.value);
+                    }
+                    return;
+                }
                 if let Err(error) =
                     self.resolve_call_type_arguments(name, type_arguments, name_span)
                 {
@@ -2397,6 +2413,23 @@ impl Resolver {
                 args,
                 ..
             } => {
+                if name == "panic" {
+                    if !type_arguments.is_empty() {
+                        return Err(SparError::ResolveError {
+                            message: "panic does not accept type arguments".into(),
+                            hint: None,
+                            span: name_span.clone(),
+                        });
+                    }
+                    if args.len() != 1 || args[0].param_name != "message" {
+                        return Err(SparError::ResolveError {
+                            message: "panic requires exactly one argument named 'message'".into(),
+                            hint: None,
+                            span: name_span.clone(),
+                        });
+                    }
+                    return self.resolve_expr_with_locals(&args[0].value, locals);
+                }
                 self.resolve_call_type_arguments(name, type_arguments, name_span)?;
                 let segments: Vec<&str> = name.split("::").collect();
                 match segments.len() {

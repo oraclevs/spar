@@ -384,15 +384,15 @@ mod tests {
     }
 
     #[test]
-    fn exec_shell_sequence_stops_on_first_failure_by_default() {
+    fn exec_shell_sequence_continues_after_failure_by_default() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let marker = temp.path().join("must-not-exist");
+        let marker = temp.path().join("created-after-failure");
         let source = format!(
             r#"
             function main() -> int {{
                 var r = exec shell {{ false; printf x > "{}"; }};
-                if r.success {{ return 1; }}
-                return 0;
+                if r.success {{ return 0; }}
+                return 1;
             }};
             "#,
             marker.display()
@@ -401,7 +401,7 @@ mod tests {
             .execute_source(&source)
             .expect("program handles child failure");
         assert_eq!(outcome.exit_status, 0);
-        assert!(!marker.exists(), "later OnSuccess step must not run");
+        assert!(marker.exists(), "a command after ';' must run");
     }
 
     #[test]
@@ -414,5 +414,229 @@ mod tests {
             .expect("child failure should map to an outcome");
         assert_eq!(success.exit_status, 0);
         assert_ne!(failure.exit_status, 0);
+    }
+
+    #[test]
+    fn deferred_shell_runs_spar_loops_and_composes_shell_returning_calls() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("loop-output");
+        let source = format!(
+            r#"
+            function writeTwice(items: [str]) -> shell {{
+                return shell {{
+                    for item in items {{
+                        printf x >> "{}";
+                    }}
+                }};
+            }};
+
+            function main() -> shell {{
+                return shell {{
+                    writeTwice(items: ["a", "b"]);
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+
+        let outcome = Engine::default()
+            .execute_source(&source)
+            .expect("mixed shell program should execute");
+        assert_eq!(outcome.exit_status, 0);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "xx");
+    }
+
+    #[test]
+    fn deferred_shell_interpolation_captures_values_and_preserves_one_argument() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("captured");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                var mut name: str = "Obi Charles";
+                var plan: shell = shell {{
+                    printf "%s" "${{name}}" > "{}";
+                }};
+                name = "changed";
+                return plan;
+            }};
+            "#,
+            marker.display()
+        );
+
+        let outcome = Engine::default().execute_source(&source).unwrap();
+        assert_eq!(outcome.exit_status, 0);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "Obi Charles");
+    }
+
+    #[test]
+    fn shell_local_plus_equals_uses_normal_spar_mutation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("count");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    var mut count: int = 0;
+                    for item in ["a", "b"] {{
+                        count += 1;
+                    }}
+                    printf "%s" "${{count}}" > "{}";
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "2");
+    }
+
+    #[test]
+    fn command_substitution_returns_trimmed_utf8_text_at_shell_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("branch");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    var branch: str = $(printf "main\n\n");
+                    if branch == "main" {{
+                        printf yes > "{}";
+                    }}
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "yes");
+    }
+
+    #[test]
+    fn native_status_binding_exposes_last_nonzero_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("status");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    false;
+                    if !status.success {{
+                        printf "%s" "${{status.code}}" > "{}";
+                    }}
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "1");
+    }
+
+    #[test]
+    fn explicit_bash_block_runs_as_foreign_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("bash");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell bash {{
+                    value=foreign
+                    printf "%s" "$value" > "{}"
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "foreign");
+    }
+
+    #[test]
+    fn structured_exec_block_captures_raw_stdout_and_stderr_bytes() {
+        let outcome = Engine::default()
+            .execute_source(
+                r#"
+                function main() -> int {
+                    var result: ExecResult = exec { sh -c "printf A; printf B >&2; exit 7"; };
+                    if result.success { return 1; }
+                    return result.stdout[0] - 58;
+                };
+                "#,
+            )
+            .expect("nonzero structured capture must return data");
+        assert_eq!(outcome.exit_status, 7);
+    }
+
+    #[test]
+    fn deferred_shell_rejects_mutating_a_captured_binding() {
+        let errors = Engine::default()
+            .check_source(
+                r#"
+                function main() -> shell {
+                    var mut count: int = 0;
+                    return shell { count = count + 1; };
+                };
+                "#,
+            )
+            .expect_err("captured mutation must be diagnosed");
+        assert!(
+            format!("{errors:?}").contains("cannot mutate captured binding `count`"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn single_quoted_shell_word_is_literal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("literal");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                var name: str = "expanded";
+                return shell {{ printf "%s" '${{name}}' > "{}"; }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "${name}");
+    }
+
+    #[test]
+    fn explicit_list_expansion_preserves_each_argv_item() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("args");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                var files: [str] = ["one two", "three"];
+                return shell {{ printf "%s\n" ...${{files}} > "{}"; }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "one two\nthree\n");
+    }
+
+    #[test]
+    fn shell_exit_sets_status_and_stops_program() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("must-not-exist");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    exit 9;
+                    printf bad > "{}";
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        let outcome = Engine::default().execute_source(&source).unwrap();
+        assert_eq!(outcome.exit_status, 9);
+        assert!(!marker.exists());
     }
 }

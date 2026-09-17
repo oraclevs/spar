@@ -1572,11 +1572,13 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Shell(_) => Some(SparType::Shell),
             Expr::ExecShell(_) => Some(SparType::Named("ExecResult".to_string())),
+            Expr::CommandSubstitution(_) => Some(SparType::Str),
         }
     }
 
     fn infer_namespace_type(&self, nr: &NamespaceRef) -> Option<SparType> {
         match nr.segments.as_slice() {
+            [name] if name == "status" => Some(SparType::Named("ProcessStatus".into())),
             [name] => self.lookup_global_type(name),
             [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
                 Some(SparType::Named(ns.clone()))
@@ -2050,7 +2052,7 @@ impl<'a> TypeChecker<'a> {
             Expr::Literal(_) => {}
             Expr::NamespaceRef(_) => {}
             Expr::FieldAccess { base, .. } => self.check_expr_internal(base),
-            Expr::Shell(_) | Expr::ExecShell(_) => {}
+            Expr::Shell(_) | Expr::ExecShell(_) | Expr::CommandSubstitution(_) => {}
         }
     }
 
@@ -2632,7 +2634,7 @@ impl<'a> TypeChecker<'a> {
             Expr::FieldAccess { base, .. } => {
                 self.check_expr_with_locals_in_context(base, locals, is_async)
             }
-            Expr::Shell(_) | Expr::ExecShell(_) => Ok(()),
+            Expr::Shell(_) | Expr::ExecShell(_) | Expr::CommandSubstitution(_) => Ok(()),
         }
     }
 

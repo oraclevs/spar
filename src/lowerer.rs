@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BinOp, Expr, FieldValue, ForBinding, FunctionDecl, Literal, ReturnValue, SectionItem, SparType,
+    BinOp, Expr, FieldValue, ForBinding, FunctionDecl, Literal, ReturnValue, SectionItem,
+    ShellCommandExpr, ShellExpr, ShellRedirect, ShellStep, ShellWord, ShellWordPart, SparType,
     Statement, StringPart, UnOp,
 };
 use crate::compiled::{
-    CompiledExpression, CompiledObjectItem, CompiledStatement, CompiledStringPart, FunctionId,
-    FunctionKey, LocalLayout, LocalSlot, ModuleId, TypedOperation,
+    CompiledExpression, CompiledObjectItem, CompiledShellCommand, CompiledShellExpr,
+    CompiledShellRedirect, CompiledShellStep, CompiledShellWord, CompiledShellWordPart,
+    CompiledStatement, CompiledStringPart, FunctionId, FunctionKey, LocalLayout, LocalSlot,
+    ModuleId, TypedOperation,
 };
 use crate::error::{Span, SparError};
 use crate::resolver::SymbolTable;
@@ -267,7 +270,11 @@ impl<'a> LocalAllocator<'a> {
                     }
                 }
             }
-            Expr::Literal(_) | Expr::NamespaceRef(_) | Expr::Shell(_) | Expr::ExecShell(_) => {}
+            Expr::Literal(_)
+            | Expr::NamespaceRef(_)
+            | Expr::Shell(_)
+            | Expr::ExecShell(_)
+            | Expr::CommandSubstitution(_) => {}
         }
     }
 }
@@ -569,8 +576,108 @@ impl FunctionLowerer<'_> {
             Expr::Object(items, span) => {
                 CompiledExpression::Object(self.lower_object_items(items)?, span.clone())
             }
-            Expr::Shell(shell) => CompiledExpression::Shell(shell.clone()),
+            Expr::Shell(shell) if shell.statements.is_empty() => {
+                CompiledExpression::Shell(self.lower_shell(shell)?)
+            }
+            Expr::Shell(shell) => CompiledExpression::ShellProgram {
+                body: self.lower_block(&shell.statements)?,
+                span: shell.span.clone(),
+            },
             Expr::ExecShell(shell) => CompiledExpression::ExecShell(shell.clone()),
+            Expr::CommandSubstitution(shell) => {
+                CompiledExpression::CommandSubstitution(self.lower_shell(shell)?)
+            }
+        })
+    }
+
+    fn lower_shell(&mut self, shell: &ShellExpr) -> Result<CompiledShellExpr, SparError> {
+        Ok(CompiledShellExpr {
+            steps: shell
+                .steps
+                .iter()
+                .map(|(join, step)| {
+                    Ok((
+                        join.clone(),
+                        match step {
+                            ShellStep::Command(command) => CompiledShellStep::Command(Box::new(
+                                self.lower_shell_command(command)?,
+                            )),
+                            ShellStep::Pipeline(commands) => CompiledShellStep::Pipeline(
+                                commands
+                                    .iter()
+                                    .map(|command| self.lower_shell_command(command))
+                                    .collect::<Result<Vec<_>, SparError>>()?,
+                            ),
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, SparError>>()?,
+            span: shell.span.clone(),
+        })
+    }
+
+    fn lower_shell_command(
+        &mut self,
+        command: &ShellCommandExpr,
+    ) -> Result<CompiledShellCommand, SparError> {
+        Ok(CompiledShellCommand {
+            environment: command
+                .environment
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.value.clone()))
+                .collect(),
+            program: self.lower_shell_word(&command.program)?,
+            args: command
+                .args
+                .iter()
+                .map(|word| self.lower_shell_word(word))
+                .collect::<Result<Vec<_>, SparError>>()?,
+            stdin: command
+                .stdin
+                .as_ref()
+                .map(|redirect| self.lower_shell_redirect(redirect))
+                .transpose()?,
+            stdout: command
+                .stdout
+                .as_ref()
+                .map(|redirect| self.lower_shell_redirect(redirect))
+                .transpose()?,
+            stderr: command
+                .stderr
+                .as_ref()
+                .map(|redirect| self.lower_shell_redirect(redirect))
+                .transpose()?,
+        })
+    }
+
+    fn lower_shell_redirect(
+        &mut self,
+        redirect: &ShellRedirect,
+    ) -> Result<CompiledShellRedirect, SparError> {
+        Ok(CompiledShellRedirect {
+            target: self.lower_shell_word(&redirect.target)?,
+            mode: redirect.mode.clone(),
+        })
+    }
+
+    fn lower_shell_word(&mut self, word: &ShellWord) -> Result<CompiledShellWord, SparError> {
+        Ok(CompiledShellWord {
+            parts: word
+                .parts
+                .iter()
+                .map(|part| match part {
+                    ShellWordPart::Literal(value) => {
+                        Ok(CompiledShellWordPart::Literal(value.clone()))
+                    }
+                    ShellWordPart::Expr(expression) => Ok(CompiledShellWordPart::Expression(
+                        self.lower_expression(expression)?,
+                    )),
+                    ShellWordPart::Environment(name) => {
+                        Ok(CompiledShellWordPart::Environment(name.clone()))
+                    }
+                })
+                .collect::<Result<Vec<_>, SparError>>()?,
+            span: word.span.clone(),
         })
     }
 
@@ -751,7 +858,9 @@ fn expression_span(expression: &Expr) -> Span {
         | Expr::Index { span, .. }
         | Expr::FieldAccess { span, .. }
         | Expr::Object(_, span) => span.clone(),
-        Expr::Shell(value) | Expr::ExecShell(value) => value.span.clone(),
+        Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => {
+            value.span.clone()
+        }
     }
 }
 

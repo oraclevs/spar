@@ -156,6 +156,9 @@ fn config_value_to_json(val: &ConfigValue) -> Result<serde_json::Value, String> 
             serde_json::Value::Object(obj)
         }
         ConfigValue::Shell(plan) => shell_plan_to_json(plan),
+        ConfigValue::ShellProgram(_) => {
+            return Err("deferred shell programs cannot be emitted as configuration data".into())
+        }
         ConfigValue::Promise(_) => {
             return Err("promise values cannot be emitted as configuration data".into())
         }

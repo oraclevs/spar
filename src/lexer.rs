@@ -19,6 +19,89 @@ pub struct Lexer<'a> {
     shebang: Option<String>,
 }
 
+/// Turns command-looking lines in a native shell block into the existing
+/// `command ...;` expression form. Spar control-flow and declarations stay
+/// unchanged, which lets the ordinary parser own their semantics.
+fn normalize_shell_body(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with('#')
+                || is_spar_shell_line(trimmed)
+            {
+                line.to_string()
+            } else {
+                let indent_len = line.len() - trimmed.len();
+                format!(
+                    "{}{}",
+                    &line[..indent_len],
+                    prefix_native_command_segments(trimmed.trim_end())
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn prefix_native_command_segments(line: &str) -> String {
+    let mut output = String::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = if quote == Some(ch) {
+                None
+            } else if quote.is_none() {
+                Some(ch)
+            } else {
+                quote
+            };
+        }
+        if ch == ';' && quote.is_none() {
+            let segment = line[start..index].trim();
+            if !segment.is_empty() {
+                output.push_str("command ");
+                output.push_str(segment);
+                output.push(';');
+            }
+            start = index + 1;
+        }
+    }
+    let tail = line[start..].trim();
+    if !tail.is_empty() {
+        output.push_str("command ");
+        output.push_str(tail);
+        output.push(';');
+    }
+    output
+}
+
+fn is_spar_shell_line(line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "var ", "if ", "else", "for ", "try", "catch", "return", "break", "continue", "command ",
+        "}",
+    ];
+    if PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
+        return true;
+    }
+
+    let before_semicolon = line.split(';').next().unwrap_or(line);
+    let call = before_semicolon.find('(').is_some();
+    let assignment = before_semicolon.contains(" = ") || before_semicolon.contains(" += ");
+    call || assignment
+}
+
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
         let shebang = if source.starts_with("#!") {
@@ -329,7 +412,12 @@ impl<'a> Lexer<'a> {
         let tok = match c {
             b'+' => {
                 self.advance();
-                Token::Plus
+                if self.peek() == Some(b'=') {
+                    self.advance();
+                    Token::PlusEq
+                } else {
+                    Token::Plus
+                }
             }
             b'-' => {
                 if self.peek_at(1) == Some(b'>') {
@@ -706,11 +794,25 @@ impl<'a> Lexer<'a> {
         ) {
             offset += 1;
         }
-        if self.peek_at(offset) != Some(b'{') {
+        let mut brace_offset = offset;
+        let foreign_bash = self.source[self.pos + offset..].starts_with("bash")
+            && !self
+                .peek_at(offset + 4)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if foreign_bash {
+            brace_offset += 4;
+            while matches!(
+                self.peek_at(brace_offset),
+                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+            ) {
+                brace_offset += 1;
+            }
+        }
+        if self.peek_at(brace_offset) != Some(b'{') {
             return Ok(());
         }
 
-        for _ in 0..=offset {
+        for _ in 0..=brace_offset {
             self.advance();
         }
         let shell = tokens
@@ -720,98 +822,175 @@ impl<'a> Lexer<'a> {
             Token::ShellBlockStart,
             Span::new(shell.span.start, self.pos, shell.span.line, shell.span.col),
         ));
+        if foreign_bash {
+            self.lex_foreign_bash_block(tokens)
+        } else {
+            self.lex_shell_block(tokens)
+        }
+    }
+
+    fn maybe_enter_exec_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let mut offset = 0usize;
+        while matches!(
+            self.peek_at(offset),
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            offset += 1;
+        }
+        if self.peek_at(offset) != Some(b'{') {
+            return Ok(());
+        }
+        for _ in 0..=offset {
+            self.advance();
+        }
+        let exec = tokens
+            .last()
+            .expect("exec token was emitted before block lookahead");
+        tokens.push(SpannedToken::new(
+            Token::ShellBlockStart,
+            Span::new(exec.span.start, self.pos, exec.span.line, exec.span.col),
+        ));
         self.lex_shell_block(tokens)
     }
 
-    fn lex_shell_block(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
-        loop {
-            let start = self.pos;
-            let line = self.line;
-            let col = self.col;
-
-            match self.peek() {
-                None => {
-                    return Err(SparError::LexError {
-                        message: "unterminated shell block — expected '}'".to_string(),
-                        span: Span::new(start, self.pos, line, col),
-                    });
-                }
-                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') => {
-                    self.advance();
-                }
-                Some(b'}') => {
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::ShellBlockEnd,
-                        self.span_at(start, line, col),
-                    ));
-                    return Ok(());
-                }
-                Some(b'{') => {
-                    self.advance();
-                    return Err(SparError::LexError {
-                        message: "bare brace is not supported inside a shell command".to_string(),
-                        span: self.span_at(start, line, col),
-                    });
-                }
-                Some(b';') => {
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::Semicolon,
-                        self.span_at(start, line, col),
-                    ));
-                }
-                Some(b'|') => {
-                    self.advance();
-                    let token = if self.peek() == Some(b'|') {
-                        self.advance();
-                        Token::OrOr
-                    } else {
-                        Token::ShellPipe
-                    };
-                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
-                }
-                Some(b'&') => {
-                    self.advance();
-                    if self.peek() != Some(b'&') {
-                        return Err(SparError::LexError {
-                            message: "unexpected '&' — background jobs are not supported yet"
-                                .to_string(),
-                            span: self.span_at(start, line, col),
-                        });
-                    }
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::AndAnd,
-                        self.span_at(start, line, col),
-                    ));
-                }
-                Some(b'<') => {
-                    self.advance();
-                    tokens.push(SpannedToken::new(Token::Lt, self.span_at(start, line, col)));
-                }
-                Some(b'>') => {
-                    self.advance();
-                    let token = if self.peek() == Some(b'>') {
-                        self.advance();
-                        Token::ShellRedirectAppend
-                    } else {
-                        Token::Gt
-                    };
-                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
-                }
-                Some(b'2') if self.peek_at(1) == Some(b'>') => {
-                    self.advance();
-                    self.advance();
-                    tokens.push(SpannedToken::new(
-                        Token::ShellRedirectStderr,
-                        self.span_at(start, line, col),
-                    ));
-                }
-                Some(b'"') => self.lex_quoted_shell_word(tokens, start, line, col)?,
-                Some(_) => self.lex_bare_shell_word(tokens, start, line, col),
+    fn lex_foreign_bash_block(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let body_start = self.pos;
+        let body_line = self.line;
+        let body_col = self.col;
+        let mut depth = 1_u32;
+        let mut quote = None;
+        let mut escaped = false;
+        while let Some(byte) = self.peek() {
+            if escaped {
+                escaped = false;
+                self.advance_char();
+                continue;
             }
+            if byte == b'\\' {
+                escaped = true;
+                self.advance();
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = if quote == Some(byte) {
+                    None
+                } else if quote.is_none() {
+                    Some(byte)
+                } else {
+                    quote
+                };
+                self.advance();
+                continue;
+            }
+            if quote.is_none() {
+                if byte == b'{' {
+                    depth += 1;
+                } else if byte == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let body_end = self.pos;
+                        let close_line = self.line;
+                        let close_col = self.col;
+                        self.advance();
+                        let span = Span::new(body_start, body_end, body_line, body_col);
+                        tokens.push(SpannedToken::new(
+                            Token::ShellWord("bash".into()),
+                            span.clone(),
+                        ));
+                        tokens.push(SpannedToken::new(
+                            Token::ShellWord("-c".into()),
+                            span.clone(),
+                        ));
+                        tokens.push(SpannedToken::new(
+                            Token::ShellLiteralWord(self.source[body_start..body_end].to_string()),
+                            span,
+                        ));
+                        tokens.push(SpannedToken::new(
+                            Token::Semicolon,
+                            Span::new(body_end, body_end, close_line, close_col),
+                        ));
+                        tokens.push(SpannedToken::new(
+                            Token::ShellBlockEnd,
+                            Span::new(body_end, self.pos, close_line, close_col),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            self.advance_char();
         }
+        Err(SparError::LexError {
+            message: "unterminated foreign Bash block — expected '}'".into(),
+            span: Span::new(body_start, self.pos, body_line, body_col),
+        })
+    }
+
+    fn lex_shell_block(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let body_start = self.pos;
+        let body_line = self.line;
+        let body_col = self.col;
+        let mut depth = 1_u32;
+        let mut quote = None;
+        let mut escaped = false;
+
+        while let Some(byte) = self.peek() {
+            if escaped {
+                escaped = false;
+                self.advance_char();
+                continue;
+            }
+            if byte == b'\\' && quote.is_some() {
+                escaped = true;
+                self.advance();
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                if quote == Some(byte) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(byte);
+                }
+                self.advance();
+                continue;
+            }
+            if quote.is_none() {
+                if byte == b'{' {
+                    depth += 1;
+                } else if byte == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let body_end = self.pos;
+                        let close_line = self.line;
+                        let close_col = self.col;
+                        self.advance();
+                        let normalized = normalize_shell_body(&self.source[body_start..body_end]);
+                        let nested = Lexer::new(&normalized).tokenize()?;
+                        for mut token in nested.into_iter().filter(|token| {
+                            token.token != Token::Eof && token.token != Token::KwCommand
+                        }) {
+                            token.span.start += body_start;
+                            token.span.end += body_start;
+                            token.span.line += body_line.saturating_sub(1);
+                            if token.span.line == body_line {
+                                token.span.col += body_col.saturating_sub(1);
+                            }
+                            tokens.push(token);
+                        }
+                        tokens.push(SpannedToken::new(
+                            Token::ShellBlockEnd,
+                            Span::new(body_end, self.pos, close_line, close_col),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            self.advance_char();
+        }
+
+        Err(SparError::LexError {
+            message: "unterminated shell block — expected '}' (unbalanced brace)".to_string(),
+            span: Span::new(body_start, self.pos, body_line, body_col),
+        })
     }
 
     fn lex_command_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
@@ -893,6 +1072,7 @@ impl<'a> Lexer<'a> {
                     ));
                 }
                 Some(b'"') => self.lex_quoted_shell_word(tokens, start, line, col)?,
+                Some(b'\'') => self.lex_literal_shell_word(tokens, start, line, col)?,
                 Some(_) => self.lex_bare_shell_word(tokens, start, line, col),
             }
         }
@@ -936,6 +1116,33 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn lex_literal_shell_word(
+        &mut self,
+        tokens: &mut Vec<SpannedToken>,
+        start: usize,
+        line: u32,
+        col: u32,
+    ) -> Result<(), SparError> {
+        self.advance();
+        let content_start = self.pos;
+        while let Some(byte) = self.peek() {
+            if byte == b'\'' {
+                let text = self.source[content_start..self.pos].to_string();
+                self.advance();
+                tokens.push(SpannedToken::new(
+                    Token::ShellLiteralWord(text),
+                    self.span_at(start, line, col),
+                ));
+                return Ok(());
+            }
+            self.advance_char();
+        }
+        Err(SparError::LexError {
+            message: "unterminated single-quoted shell word".into(),
+            span: self.span_at(start, line, col),
+        })
+    }
+
     fn lex_bare_shell_word(
         &mut self,
         tokens: &mut Vec<SpannedToken>,
@@ -944,6 +1151,23 @@ impl<'a> Lexer<'a> {
         col: u32,
     ) {
         while let Some(byte) = self.peek() {
+            if byte == b'$' && self.peek_at(1) == Some(b'{') {
+                self.advance();
+                self.advance();
+                let mut depth = 1_u32;
+                while let Some(interpolation_byte) = self.peek() {
+                    self.advance_char();
+                    if interpolation_byte == b'{' {
+                        depth += 1;
+                    } else if interpolation_byte == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             if byte.is_ascii_whitespace()
                 || matches!(byte, b';' | b'|' | b'&' | b'<' | b'>' | b'{' | b'}' | b'"')
             {
@@ -994,6 +1218,16 @@ impl<'a> Lexer<'a> {
                     self.lex_string(&mut tokens, start, line, col)?;
                     self.last_token_line = line;
                 }
+                b'$' if self.peek_at(1) == Some(b'(') => {
+                    self.advance();
+                    self.advance();
+                    tokens.push(SpannedToken::new(
+                        Token::CommandSubStart,
+                        self.span_at(start, line, col),
+                    ));
+                    self.lex_command_substitution(&mut tokens, start, line, col)?;
+                    self.last_token_line = line;
+                }
                 b'{' => {
                     self.advance();
                     tokens.push(SpannedToken::new(
@@ -1019,6 +1253,7 @@ impl<'a> Lexer<'a> {
                         let is_shell =
                             matches!(&t.token, Token::TypeShell) && !is_shell_return_type;
                         let is_command = matches!(&t.token, Token::KwCommand);
+                        let is_exec = matches!(&t.token, Token::KwExec);
                         tokens.push(t);
                         if is_run {
                             self.maybe_enter_run_body(&mut tokens)?;
@@ -1026,6 +1261,8 @@ impl<'a> Lexer<'a> {
                             self.maybe_enter_shell_body(&mut tokens)?;
                         } else if is_command {
                             self.lex_command_body(&mut tokens)?;
+                        } else if is_exec {
+                            self.maybe_enter_exec_body(&mut tokens)?;
                         }
                     }
                 }
@@ -1038,6 +1275,84 @@ impl<'a> Lexer<'a> {
         ));
 
         Ok(tokens)
+    }
+
+    fn lex_command_substitution(
+        &mut self,
+        tokens: &mut Vec<SpannedToken>,
+        expression_start: usize,
+        expression_line: u32,
+        expression_col: u32,
+    ) -> Result<(), SparError> {
+        let body_start = self.pos;
+        let mut quote = None;
+        let mut escaped = false;
+        let mut depth = 1_u32;
+        while let Some(byte) = self.peek() {
+            if escaped {
+                escaped = false;
+                self.advance_char();
+                continue;
+            }
+            if byte == b'\\' && quote.is_some() {
+                escaped = true;
+                self.advance();
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = if quote == Some(byte) {
+                    None
+                } else if quote.is_none() {
+                    Some(byte)
+                } else {
+                    quote
+                };
+                self.advance();
+                continue;
+            }
+            if quote.is_none() {
+                if byte == b'(' {
+                    depth += 1;
+                } else if byte == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let body_end = self.pos;
+                        self.advance();
+                        let body = self.source[body_start..body_end].trim();
+                        let wrapped = format!("command {body};");
+                        let mut nested = Lexer::new(&wrapped).tokenize()?;
+                        nested.retain(|token| {
+                            token.token != Token::KwCommand && token.token != Token::Eof
+                        });
+                        if nested
+                            .last()
+                            .is_some_and(|token| token.token == Token::Semicolon)
+                        {
+                            nested.pop();
+                        }
+                        for mut token in nested {
+                            token.span = Span::new(
+                                body_start,
+                                body_end,
+                                expression_line,
+                                expression_col + 2,
+                            );
+                            tokens.push(token);
+                        }
+                        tokens.push(SpannedToken::new(
+                            Token::CommandSubEnd,
+                            Span::new(body_end, self.pos, self.line, self.col),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            self.advance_char();
+        }
+        Err(SparError::LexError {
+            message: "unterminated command substitution — expected ')'".into(),
+            span: Span::new(expression_start, self.pos, expression_line, expression_col),
+        })
     }
 }
 

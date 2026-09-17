@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Program, ShellExpr, SparType, TopLevelItem};
+use crate::ast::{Program, ShellExpr, ShellJoin, SparType, TopLevelItem};
 use crate::compiler::Compiler;
 use crate::compiler::{Compilation, CompileOptions};
 use crate::error::{Span, SparError};
@@ -115,8 +115,54 @@ pub(crate) enum CompiledExpression {
         body: Box<CompiledExpression>,
         span: Span,
     },
-    Shell(ShellExpr),
+    Shell(CompiledShellExpr),
+    ShellProgram {
+        body: Vec<CompiledStatement>,
+        span: Span,
+    },
     ExecShell(ShellExpr),
+    CommandSubstitution(CompiledShellExpr),
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellExpr {
+    pub steps: Vec<(ShellJoin, CompiledShellStep)>,
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub(crate) enum CompiledShellStep {
+    Command(Box<CompiledShellCommand>),
+    Pipeline(Vec<CompiledShellCommand>),
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellCommand {
+    pub environment: Vec<(String, String)>,
+    pub program: CompiledShellWord,
+    pub args: Vec<CompiledShellWord>,
+    pub stdin: Option<CompiledShellRedirect>,
+    pub stdout: Option<CompiledShellRedirect>,
+    pub stderr: Option<CompiledShellRedirect>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellRedirect {
+    pub target: CompiledShellWord,
+    pub mode: spar_command::RedirectMode,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellWord {
+    pub parts: Vec<CompiledShellWordPart>,
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub(crate) enum CompiledShellWordPart {
+    Literal(String),
+    Expression(CompiledExpression),
+    Environment(String),
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
@@ -436,12 +482,14 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
             visit_expression(source, visit);
             visit_expression(body, visit);
         }
+        CompiledExpression::ShellProgram { body, .. } => visit_statements(body, visit),
         CompiledExpression::Constant(_, _)
         | CompiledExpression::Local(_, _)
         | CompiledExpression::Global(_, _)
         | CompiledExpression::ImportedValue { .. }
         | CompiledExpression::Shell(_)
-        | CompiledExpression::ExecShell(_) => {}
+        | CompiledExpression::ExecShell(_)
+        | CompiledExpression::CommandSubstitution(_) => {}
     }
 }
 

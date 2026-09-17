@@ -1,6 +1,6 @@
 use crate::ast::{
     ShellCommandExpr, ShellEnvironmentEntry, ShellExpr, ShellJoin, ShellRedirect, ShellStep,
-    ShellWord,
+    ShellWord, ShellWordPart, TopLevelItem,
 };
 use crate::error::{Span, SparError};
 use crate::token::{SpannedToken, Token};
@@ -35,6 +35,7 @@ pub(crate) fn parse_shell_block(tokens: &[SpannedToken]) -> Result<(ShellExpr, u
     let steps = BodyParser::new(&tokens[1..end]).parse()?;
     Ok((
         ShellExpr {
+            statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &end_span),
         },
@@ -79,8 +80,62 @@ pub(crate) fn parse_command_expression(
     }
     Ok((
         ShellExpr {
+            statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &end_span),
+        },
+        end + 1,
+    ))
+}
+
+pub(crate) fn parse_bare_command_statement(
+    tokens: &[SpannedToken],
+) -> Result<(ShellExpr, usize), SparError> {
+    let Some(start) = tokens.first() else {
+        return Err(parse_error("expected a command", Span::dummy()));
+    };
+    let end = tokens
+        .iter()
+        .position(|token| token.token == Token::Semicolon)
+        .ok_or_else(|| parse_error("unterminated command — expected ';'", start.span.clone()))?;
+    let steps = BodyParser::new(&tokens[..end]).parse()?;
+    let end_span = tokens[end].span.clone();
+    Ok((
+        ShellExpr {
+            statements: Vec::new(),
+            steps,
+            span: joined_span(&start.span, &end_span),
+        },
+        end + 1,
+    ))
+}
+
+pub(crate) fn parse_command_substitution(
+    tokens: &[SpannedToken],
+) -> Result<(ShellExpr, usize), SparError> {
+    let Some(start) = tokens.first() else {
+        return Err(parse_error("expected command substitution", Span::dummy()));
+    };
+    if start.token != Token::CommandSubStart {
+        return Err(parse_error("expected '$('", start.span.clone()));
+    }
+    let end = tokens[1..]
+        .iter()
+        .position(|token| token.token == Token::CommandSubEnd)
+        .map(|position| position + 1)
+        .ok_or_else(|| parse_error("unterminated command substitution", start.span.clone()))?;
+    let steps = BodyParser::new(&tokens[1..end]).parse()?;
+    if steps.len() != 1 {
+        return Err(parse_error(
+            "command substitution must contain one command or pipeline",
+            start.span.clone(),
+        ));
+    }
+    Ok((
+        ShellExpr {
+            statements: Vec::new(),
+            steps,
+            span: joined_span(&start.span, &tokens[end].span),
         },
         end + 1,
     ))
@@ -101,7 +156,16 @@ impl<'a> BodyParser<'a> {
         let mut join = ShellJoin::Always;
         while self.pos < self.tokens.len() {
             if self.at(&Token::Semicolon) || self.at(&Token::AndAnd) || self.at(&Token::OrOr) {
-                return Err(self.error("expected a command before control operator"));
+                let message = match self
+                    .pos
+                    .checked_sub(1)
+                    .and_then(|position| self.tokens.get(position))
+                {
+                    Some(token) if token.token == Token::AndAnd => "expected a command after '&&'",
+                    Some(token) if token.token == Token::OrOr => "expected a command after '||'",
+                    _ => "expected a command before control operator",
+                };
+                return Err(self.error(message));
             }
             let step = self.parse_pipeline()?;
             steps.push((join, step));
@@ -111,7 +175,7 @@ impl<'a> BodyParser<'a> {
             }
             let separator = self.advance().clone();
             join = match separator.token {
-                Token::Semicolon => ShellJoin::OnSuccess,
+                Token::Semicolon => ShellJoin::Always,
                 Token::AndAnd => ShellJoin::OnSuccess,
                 Token::OrOr => ShellJoin::OnFailure,
                 token => {
@@ -216,7 +280,7 @@ impl<'a> BodyParser<'a> {
             && !self.at(&Token::OrOr)
         {
             match self.peek() {
-                Token::ShellWord(_) => {
+                Token::ShellWord(_) | Token::ShellLiteralWord(_) => {
                     let word = self.expect_word("expected an argument")?;
                     end_span = word.span.clone();
                     args.push(word);
@@ -295,12 +359,20 @@ impl<'a> BodyParser<'a> {
         let Some(token) = self.tokens.get(self.pos).cloned() else {
             return Err(self.error(message));
         };
-        let Token::ShellWord(text) = token.token else {
-            return Err(parse_error(message, token.span));
+        let (text, literal) = match token.token {
+            Token::ShellWord(text) => (text, false),
+            Token::ShellLiteralWord(text) => (text, true),
+            _ => return Err(parse_error(message, token.span)),
         };
         self.pos += 1;
+        let parts = if literal {
+            vec![ShellWordPart::Literal(text.clone())]
+        } else {
+            parse_word_parts(&text, &token.span)?
+        };
         Ok(ShellWord {
             text,
+            parts,
             span: token.span,
         })
     }
@@ -314,6 +386,67 @@ impl<'a> BodyParser<'a> {
             .unwrap_or_else(Span::dummy);
         parse_error(message, span)
     }
+}
+
+fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparError> {
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = text[cursor..].find('$') {
+        let dollar = cursor + relative;
+        if dollar > cursor {
+            parts.push(ShellWordPart::Literal(text[cursor..dollar].to_string()));
+        }
+        if text[dollar..].starts_with("${") {
+            let expression_start = dollar + 2;
+            let Some(relative_end) = text[expression_start..].find('}') else {
+                return Err(parse_error(
+                    "unterminated '${...}' interpolation",
+                    span.clone(),
+                ));
+            };
+            let expression_end = expression_start + relative_end;
+            parts.push(ShellWordPart::Expr(parse_word_expression(
+                &text[expression_start..expression_end],
+                span,
+            )?));
+            cursor = expression_end + 1;
+        } else {
+            let name_start = dollar + 1;
+            let name_len = text[name_start..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if name_len == 0 {
+                parts.push(ShellWordPart::Literal("$".into()));
+                cursor = name_start;
+            } else {
+                parts.push(ShellWordPart::Environment(
+                    text[name_start..name_start + name_len].to_string(),
+                ));
+                cursor = name_start + name_len;
+            }
+        }
+    }
+    if cursor < text.len() {
+        parts.push(ShellWordPart::Literal(text[cursor..].to_string()));
+    }
+    if parts.is_empty() {
+        parts.push(ShellWordPart::Literal(text.to_string()));
+    }
+    Ok(parts)
+}
+
+fn parse_word_expression(source: &str, span: &Span) -> Result<crate::ast::Expr, SparError> {
+    let wrapped = format!("var __shell_interpolation: str = {source};");
+    let tokens = crate::lexer::Lexer::new(&wrapped).tokenize()?;
+    let program = crate::parser::Parser::new(tokens).parse()?;
+    let Some(TopLevelItem::Var(variable)) = program.items.into_iter().next() else {
+        return Err(parse_error("invalid shell interpolation", span.clone()));
+    };
+    variable
+        .value
+        .ok_or_else(|| parse_error("empty shell interpolation", span.clone()))
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -363,12 +496,12 @@ mod tests {
     }
 
     #[test]
-    fn shell_lang_sequences_commands_with_fail_fast_joins() {
+    fn shell_lang_sequences_commands_unconditionally() {
         let expression = parse_block("shell { a; b; c; }");
         assert_eq!(expression.steps.len(), 3);
         assert!(matches!(expression.steps[0].0, ShellJoin::Always));
-        assert!(matches!(expression.steps[1].0, ShellJoin::OnSuccess));
-        assert!(matches!(expression.steps[2].0, ShellJoin::OnSuccess));
+        assert!(matches!(expression.steps[1].0, ShellJoin::Always));
+        assert!(matches!(expression.steps[2].0, ShellJoin::Always));
     }
 
     #[test]

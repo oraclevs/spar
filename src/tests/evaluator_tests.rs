@@ -1054,7 +1054,7 @@ fn eval_shell_plus_shell_composes_in_order() {
     };
     assert_eq!(plan.steps.len(), 2);
     assert_eq!(plan.steps[0].0, spar_command::Join::Always);
-    assert_eq!(plan.steps[1].0, spar_command::Join::OnSuccess);
+    assert_eq!(plan.steps[1].0, spar_command::Join::Always);
     let spar_command::Step::Command(second) = &plan.steps[1].1 else {
         panic!("expected command")
     };

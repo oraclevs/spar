@@ -9,7 +9,10 @@ use crate::naming;
 fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
     match expr {
         Expr::ExecShell(shell) => Some(shell.span.clone()),
-        Expr::Shell(_) | Expr::Literal(_) | Expr::NamespaceRef(_) => None,
+        Expr::Shell(_)
+        | Expr::CommandSubstitution(_)
+        | Expr::Literal(_)
+        | Expr::NamespaceRef(_) => None,
         Expr::String(string) => string.parts.iter().find_map(|part| match part {
             StringPart::Literal(_) => None,
             StringPart::Expr(expr) => find_exec_shell_span(expr),
@@ -1877,7 +1880,7 @@ impl Resolver {
                     self.errors.push(e);
                 }
             }
-            Expr::Shell(_) => {}
+            Expr::Shell(_) | Expr::CommandSubstitution(_) => {}
             Expr::ExecShell(shell) => self.push_error(
                 "'exec shell' cannot appear at module scope — move it inside a function body",
                 shell.span.clone(),
@@ -2605,8 +2608,132 @@ impl Resolver {
                 inner_locals.insert(var_name.clone());
                 self.resolve_expr_with_locals(body, &inner_locals)
             }
-            Expr::Shell(_) | Expr::ExecShell(_) => Ok(()),
+            Expr::Shell(shell) => self.resolve_shell_program(shell, locals),
+            Expr::ExecShell(_) | Expr::CommandSubstitution(_) => Ok(()),
         }
+    }
+
+    fn resolve_shell_program(
+        &self,
+        shell: &ShellExpr,
+        outer_locals: &HashSet<String>,
+    ) -> Result<(), SparError> {
+        let mut visible = outer_locals.clone();
+        let mut shell_locals = HashSet::new();
+        self.resolve_shell_statements(
+            &shell.statements,
+            outer_locals,
+            &mut visible,
+            &mut shell_locals,
+        )
+    }
+
+    fn resolve_shell_statements(
+        &self,
+        statements: &[Statement],
+        captured: &HashSet<String>,
+        visible: &mut HashSet<String>,
+        shell_locals: &mut HashSet<String>,
+    ) -> Result<(), SparError> {
+        for statement in statements {
+            match statement {
+                Statement::LocalVar(local) => {
+                    self.resolve_expr_with_locals(&local.value, visible)?;
+                    visible.insert(local.name.clone());
+                    shell_locals.insert(local.name.clone());
+                }
+                Statement::Assignment { name, value, span } => {
+                    if captured.contains(name) && !shell_locals.contains(name) {
+                        return Err(SparError::ResolveError {
+                            message: format!("cannot mutate captured binding `{name}` inside deferred shell program"),
+                            hint: Some("copy it into a local mutable shell variable first".into()),
+                            span: span.clone(),
+                        });
+                    }
+                    self.resolve_expr_with_locals(value, visible)?;
+                }
+                Statement::Expression(expression, _) => {
+                    self.resolve_expr_with_locals(expression, visible)?;
+                }
+                Statement::If(statement) => {
+                    self.resolve_expr_with_locals(&statement.condition, visible)?;
+                    let mut then_visible = visible.clone();
+                    let mut then_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.then_stmts,
+                        captured,
+                        &mut then_visible,
+                        &mut then_locals,
+                    )?;
+                    let mut else_visible = visible.clone();
+                    let mut else_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.else_stmts,
+                        captured,
+                        &mut else_visible,
+                        &mut else_locals,
+                    )?;
+                }
+                Statement::For(statement) => {
+                    self.resolve_expr_with_locals(&statement.iterable, visible)?;
+                    let mut body_visible = visible.clone();
+                    match &statement.binding {
+                        ForBinding::Value { name, .. } => {
+                            body_visible.insert(name.clone());
+                        }
+                        ForBinding::Indexed {
+                            index_name,
+                            value_name,
+                            ..
+                        } => {
+                            body_visible.insert(index_name.clone());
+                            body_visible.insert(value_name.clone());
+                        }
+                    }
+                    let mut body_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.body,
+                        captured,
+                        &mut body_visible,
+                        &mut body_locals,
+                    )?;
+                }
+                Statement::Return(value, _) => match value {
+                    ReturnValue::Void => {}
+                    ReturnValue::Expr(expression) => {
+                        self.resolve_expr_with_locals(expression, visible)?
+                    }
+                    ReturnValue::SectionBlock(fields) => {
+                        for field in fields {
+                            self.resolve_expr_with_locals(&field.value, visible)?;
+                        }
+                    }
+                },
+                Statement::Try(statement) => {
+                    let mut body_visible = visible.clone();
+                    let mut body_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.body,
+                        captured,
+                        &mut body_visible,
+                        &mut body_locals,
+                    )?;
+                    let mut handler_visible = visible.clone();
+                    if let Some(name) = &statement.catch_name {
+                        handler_visible.insert(name.clone());
+                    }
+                    let mut handler_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.handler,
+                        captured,
+                        &mut handler_visible,
+                        &mut handler_locals,
+                    )?;
+                }
+                Statement::Break(_) | Statement::Continue(_) => {}
+            }
+        }
+        Ok(())
     }
 
     /// Namespace-ref validation that returns Result (used in function body context).
@@ -2617,6 +2744,9 @@ impl Resolver {
     ) -> Result<(), SparError> {
         match nr.segments.as_slice() {
             [name] => {
+                if name == "status" {
+                    return Ok(());
+                }
                 if locals.contains(name) {
                     return Ok(());
                 }
@@ -2811,7 +2941,10 @@ impl Resolver {
                     }
                 }
             }
-            Expr::Shell(_) | Expr::ExecShell(_) | Expr::Literal(_) => {}
+            Expr::Shell(_)
+            | Expr::ExecShell(_)
+            | Expr::CommandSubstitution(_)
+            | Expr::Literal(_) => {}
         }
     }
 

@@ -1,6 +1,8 @@
 use crate::ast::*;
 use crate::error::{Span, SparError};
-use crate::shell_lang::{parse_command_expression, parse_shell_block};
+use crate::shell_lang::{
+    parse_bare_command_statement, parse_command_expression, parse_command_substitution,
+};
 use crate::token::{SpannedToken, Token};
 
 pub struct Parser {
@@ -1410,11 +1412,7 @@ impl Parser {
                 self.advance();
                 self.parse_fn_call("bool".to_string(), span)
             }
-            Token::ShellBlockStart => {
-                let (shell, consumed) = parse_shell_block(&self.tokens[self.pos..])?;
-                self.pos += consumed;
-                Ok(Expr::Shell(shell))
-            }
+            Token::ShellBlockStart => self.parse_mixed_shell_block(),
             Token::KwCommand => {
                 let (shell, consumed) = parse_command_expression(&self.tokens[self.pos..])?;
                 // The command expression's terminating semicolon is also the
@@ -1428,13 +1426,20 @@ impl Parser {
                 self.advance();
                 if !self.at(&Token::ShellBlockStart) {
                     return Err(SparError::ParseError {
-                        message: "'exec' must be followed by 'shell { ... }'".to_string(),
+                        message: "'exec' must be followed by '{ ... }' or 'shell { ... }'"
+                            .to_string(),
                         span: exec_span,
                     });
                 }
-                let (shell, consumed) = parse_shell_block(&self.tokens[self.pos..])?;
-                self.pos += consumed;
+                let Expr::Shell(shell) = self.parse_mixed_shell_block()? else {
+                    unreachable!("mixed shell parser always returns Expr::Shell")
+                };
                 Ok(Expr::ExecShell(shell))
+            }
+            Token::CommandSubStart => {
+                let (shell, consumed) = parse_command_substitution(&self.tokens[self.pos..])?;
+                self.pos += consumed;
+                Ok(Expr::CommandSubstitution(shell))
             }
             Token::KwFor => self.parse_comprehension(),
             _ => Err(self.error(format!(
@@ -1470,6 +1475,40 @@ impl Parser {
         }
 
         Ok(expr)
+    }
+
+    fn parse_mixed_shell_block(&mut self) -> Result<Expr, SparError> {
+        let start = self.expect(&Token::ShellBlockStart)?.span;
+        let mut statements = Vec::new();
+        while !self.at(&Token::ShellBlockEnd) && !self.at(&Token::Eof) {
+            statements.push(self.parse_func_stmt()?);
+        }
+        let end = self.expect(&Token::ShellBlockEnd)?.span;
+        let all_commands = statements.iter().all(|statement| {
+            matches!(statement, Statement::Expression(Expr::Shell(shell), _) if shell.statements.is_empty())
+        });
+        let steps = if all_commands {
+            let mut flattened = Vec::new();
+            for statement in &statements {
+                let Statement::Expression(Expr::Shell(shell), _) = statement else {
+                    unreachable!("all_commands checked")
+                };
+                for (join, step) in shell.steps.iter().cloned() {
+                    flattened.push((join, step));
+                }
+            }
+            flattened
+        } else {
+            Vec::new()
+        };
+        if all_commands {
+            statements.clear();
+        }
+        Ok(Expr::Shell(ShellExpr {
+            statements,
+            steps,
+            span: Span::new(start.start, end.end, start.line, start.col),
+        }))
     }
 
     fn parse_list_literal(&mut self) -> Result<Expr, SparError> {
@@ -1759,6 +1798,12 @@ impl Parser {
     }
 
     fn parse_func_stmt(&mut self) -> Result<FuncStmt, SparError> {
+        if matches!(self.peek(), Token::ShellWord(_)) {
+            let span = self.peek_span();
+            let (shell, consumed) = parse_bare_command_statement(&self.tokens[self.pos..])?;
+            self.pos += consumed;
+            return Ok(FuncStmt::Expression(Expr::Shell(shell), span));
+        }
         if self.at(&Token::KwTry) {
             return self.parse_try_stmt();
         }
@@ -1819,18 +1864,35 @@ impl Parser {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
         }
 
-        if self.at_ident() && self.next_is(&Token::Eq) {
+        if self.at_ident() && (self.next_is(&Token::Eq) || self.next_is(&Token::PlusEq)) {
             let span = self.peek_span();
             let (name, _) = self.expect_ident()?;
-            self.expect(&Token::Eq)?;
-            let value = self.parse_expr()?;
+            let compound = self.at(&Token::PlusEq);
+            self.advance();
+            let rhs = self.parse_expr()?;
+            let value = if compound {
+                Expr::BinaryOp(BinaryOp {
+                    op: BinOp::Add,
+                    lhs: Box::new(Expr::NamespaceRef(NamespaceRef {
+                        segments: vec![name.clone()],
+                        span: span.clone(),
+                    })),
+                    rhs: Box::new(rhs),
+                    span: span.clone(),
+                })
+            } else {
+                rhs
+            };
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Assignment { name, value, span });
         }
 
         let span = self.peek_span();
         let expression = self.parse_expr()?;
-        if !matches!(expression, Expr::Call { .. } | Expr::FnCall(_)) {
+        if !matches!(
+            expression,
+            Expr::Call { .. } | Expr::FnCall(_) | Expr::Shell(_)
+        ) {
             return Err(SparError::ParseError {
                 message: "only function calls may be used as expression statements".into(),
                 span,
@@ -2822,6 +2884,28 @@ function f(a: int) -> int {
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         assert!(Parser::new(tokens).parse().is_ok());
+    }
+
+    #[test]
+    fn shell_block_parses_spar_statements_and_native_commands_together() {
+        let src = r#"
+function install(files: [str]) -> shell {
+    return shell {
+        var mut installed: int = 0;
+        for file in files {
+            echo "Installing ${file}";
+            installed = installed + 1;
+        }
+        if installed > 0 {
+            echo "Installed ${installed} files";
+        }
+    };
+};
+"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens)
+            .parse()
+            .expect("native shell blocks must reuse ordinary Spar statements");
     }
 
     #[test]

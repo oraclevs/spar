@@ -256,6 +256,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             if fd.is_private {
                 out.push_str("private ");
             }
+            if fd.is_async {
+                out.push_str("async ");
+            }
             out.push_str("function ");
             out.push_str(&fd.name);
             format_type_parameters(&fd.type_parameters, out);
@@ -336,6 +339,9 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str("    ");
                 if f.is_private {
                     out.push_str("private ");
+                }
+                if f.is_async {
+                    out.push_str("async ");
                 }
                 out.push_str("function ");
                 out.push_str(&f.name);
@@ -937,6 +943,11 @@ pub(crate) fn format_expr(
             format_expr(operand, 7, depth, config, out);
         }
 
+        Expr::Await { value, .. } => {
+            out.push_str("await ");
+            format_expr(value, 7, depth, config, out);
+        }
+
         Expr::List(items, _) => {
             let mut flat = String::from("[");
             for (i, item) in items.iter().enumerate() {
@@ -1475,6 +1486,16 @@ mod tests {
     fn format_exec_shell() {
         let source = "function f() -> int {\n    var r: ExecResult = exec shell {\n        true;\n    };\n    return 0;\n};\n";
         assert_eq!(fmt(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn format_async_await_is_idempotent() {
+        let source =
+            "async function main()->int{var pending:Promise<int> =value();return await pending;};";
+        let once = format_source(source).unwrap();
+        assert_eq!(format_source(&once).unwrap(), once);
+        assert!(once.contains("async function main() -> int"));
+        assert!(once.contains("return await pending;"));
     }
 
     #[test]

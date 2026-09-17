@@ -645,6 +645,7 @@ impl Evaluator {
                 self.collect_expr_deps(&b.rhs, deps);
             }
             Expr::Unary { operand, .. } => self.collect_expr_deps(operand, deps),
+            Expr::Await { value, .. } => self.collect_expr_deps(value, deps),
             Expr::Comprehension { source, body, .. } => {
                 self.collect_expr_deps(source, deps);
                 self.collect_expr_deps(body, deps);
@@ -1065,6 +1066,9 @@ impl Evaluator {
                     }),
                 }
             }
+            Expr::Await { .. } => Err(EvalErr::Host {
+                message: "`await` requires the compiled async runtime".into(),
+            }),
             Expr::Index {
                 source,
                 index,

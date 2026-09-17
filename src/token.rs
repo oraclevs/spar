@@ -61,6 +61,8 @@ pub enum Token {
     At, // `@`
 
     // Function keywords
+    KwAsync,
+    KwAwait,
     KwFunction,
     KwReturn,
     KwIf,
@@ -176,6 +178,8 @@ impl Token {
             Token::OrOr => "'||'",
             Token::Bang => "'!'",
             Token::At => "'@'",
+            Token::KwAsync => "'async'",
+            Token::KwAwait => "'await'",
             Token::KwFunction => "'function'",
             Token::KwReturn => "'return'",
             Token::KwIf => "'if'",
@@ -230,6 +234,8 @@ pub fn keyword_or_ident(s: String) -> Token {
         "shell" => Token::TypeShell,
         "true" => Token::True,
         "false" => Token::False,
+        "async" => Token::KwAsync,
+        "await" => Token::KwAwait,
         "function" => Token::KwFunction,
         "return" => Token::KwReturn,
         "if" => Token::KwIf,

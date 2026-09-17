@@ -1376,6 +1376,8 @@ mod tests {
     fn lex_keywords_function_return_if_else_for_in_break_continue() {
         let cases: &[(&str, Token)] = &[
             ("function", Token::KwFunction),
+            ("async", Token::KwAsync),
+            ("await", Token::KwAwait),
             ("return", Token::KwReturn),
             ("if", Token::KwIf),
             ("else", Token::KwElse),

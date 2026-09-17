@@ -397,6 +397,10 @@ pub enum Expr {
         operand: Box<Expr>,
         span: Span,
     },
+    Await {
+        value: Box<Expr>,
+        span: Span,
+    },
     Comprehension {
         var_name: String,
         var_name_span: Span,
@@ -507,6 +511,7 @@ pub struct FunctionDecl {
     pub ret: SparType,
     pub ret_span: Span,
     pub body: FunctionBody,
+    pub is_async: bool,
     pub is_private: bool,
     pub span: Span,
 }

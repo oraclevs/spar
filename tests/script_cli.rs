@@ -40,6 +40,18 @@ fn exec_uses_main_integer_as_process_status() {
 }
 
 #[test]
+fn exec_drives_async_main_and_uses_its_integer_status() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("async-main.spar"),
+        "async function result() -> int { return 6; }; async function main() -> int { return await result(); };",
+    )
+    .unwrap();
+    let output = spar_in(&["exec", "async-main.spar"], dir.path());
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
+}
+
+#[test]
 fn exec_void_main_exits_zero() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

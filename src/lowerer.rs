@@ -512,12 +512,10 @@ impl FunctionLowerer<'_> {
                     span: span.clone(),
                 }
             }
-            Expr::Await { span, .. } => {
-                return Err(internal_lowering(
-                    "await support is not available in the compiled runtime",
-                    span,
-                ));
-            }
+            Expr::Await { value, span } => CompiledExpression::Await {
+                promise: Box::new(self.lower_expression(value)?),
+                span: span.clone(),
+            },
             Expr::List(items, span) => CompiledExpression::List(
                 items
                     .iter()

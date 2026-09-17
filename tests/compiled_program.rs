@@ -71,3 +71,14 @@ fn emit_compiled_does_not_call_main() {
     );
     assert_eq!(*calls.lock().unwrap(), 0);
 }
+
+#[test]
+fn compiled_program_preserves_async_calls_and_await() {
+    let compiled = Engine::default()
+        .compile_source(
+            "async function value() -> int { return 3; }; async function main() -> int { return await value(); };",
+        )
+        .unwrap();
+
+    assert_eq!(compiled.function_count(), 2);
+}

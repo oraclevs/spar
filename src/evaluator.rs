@@ -9,6 +9,26 @@ const MAX_CALL_DEPTH: usize = 20;
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PromiseHandle(u64);
+
+#[allow(dead_code)] // Constructed by compiled async runtime in Phase 5 Task 4.
+impl PromiseHandle {
+    pub(crate) fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub(crate) fn id(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for PromiseHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PromiseHandle(..)")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigValue {
     Str(String),
@@ -18,6 +38,7 @@ pub enum ConfigValue {
     List(Vec<ConfigValue>),
     Section(HashMap<String, ConfigValue>),
     Shell(spar_command::ShellPlan),
+    Promise(PromiseHandle),
     Error {
         message: String,
         kind: String,
@@ -40,6 +61,7 @@ impl ConfigValue {
             ConfigValue::Shell(_) => {
                 unreachable!("shell plans cannot appear in string interpolation")
             }
+            ConfigValue::Promise(_) => "<promise>".into(),
             ConfigValue::Error { message, .. } => message.clone(),
         }
     }
@@ -53,6 +75,7 @@ impl ConfigValue {
             ConfigValue::List(_) => "list",
             ConfigValue::Section(_) => "section",
             ConfigValue::Shell(_) => "shell",
+            ConfigValue::Promise(_) => "Promise",
             ConfigValue::Error { .. } => "error",
         }
     }
@@ -201,6 +224,7 @@ pub struct Evaluator {
     imported_programs: HashMap<String, ImportedProgram>,
     hosts: crate::host::HostRegistry,
     effect_ledger: Option<crate::session::EffectLedger>,
+    next_promise_id: u64,
 }
 
 fn build_imported_programs(
@@ -316,6 +340,7 @@ impl Evaluator {
             imported_programs: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             effect_ledger: None,
+            next_promise_id: 1,
         }
     }
 
@@ -1814,6 +1839,17 @@ pub fn execute_shell_plan_with_options(
 // ── Function call evaluation ──────────────────────────────────────────────────
 
 impl Evaluator {
+    fn allocate_opaque_promise(&mut self) -> EvalResult_ {
+        let id = self.next_promise_id;
+        self.next_promise_id =
+            self.next_promise_id
+                .checked_add(1)
+                .ok_or_else(|| EvalErr::Host {
+                    message: "promise identity space exhausted".into(),
+                })?;
+        Ok(ConfigValue::Promise(PromiseHandle::new(id)))
+    }
+
     fn eval_call(
         &mut self,
         name: &str,
@@ -1849,6 +1885,10 @@ impl Evaluator {
                 });
                 if let Some(fd) = func_decl {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+                    if fd.is_async {
+                        self.call_depth -= 1;
+                        return self.allocate_opaque_promise();
+                    }
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
@@ -1884,6 +1924,10 @@ impl Evaluator {
             });
             if let Some(fd) = group_call {
                 let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+                if fd.is_async {
+                    self.call_depth -= 1;
+                    return self.allocate_opaque_promise();
+                }
                 self.eval_default_args(&fd, &mut local_scope)?;
                 let result = self
                     .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
@@ -1905,6 +1949,10 @@ impl Evaluator {
                 });
                 if let Some(fd) = func_decl {
                     let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+                    if fd.is_async {
+                        self.call_depth -= 1;
+                        return self.allocate_opaque_promise();
+                    }
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
@@ -1955,6 +2003,10 @@ impl Evaluator {
             .unwrap(); // resolver ensures function exists
 
         let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
+        if func_decl.is_async {
+            self.call_depth -= 1;
+            return self.allocate_opaque_promise();
+        }
         self.eval_default_args(&func_decl, &mut local_scope)?;
 
         let result = self

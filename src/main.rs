@@ -668,7 +668,10 @@ fn cmd_emit(path: &str, format: EmitFormat) {
     for w in &result.warnings {
         eprintln!("warning: {w}");
     }
-    let value = spar::emit::build_emit_json(result, symbols);
+    let value = spar::emit::build_emit_json(result, symbols).unwrap_or_else(|error| {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    });
     let rendered = match format {
         EmitFormat::Json => serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into()),
         EmitFormat::Yaml => serde_yaml::to_string(&value).unwrap_or_else(|e| {
@@ -1866,7 +1869,7 @@ mod emit_tests {
         let symbols = Resolver::new().resolve(&program, &[]).unwrap();
         TypeChecker::check(&program, &symbols).unwrap();
         let result = Evaluator::evaluate(&program, &symbols).unwrap();
-        build_emit_json(&result, &symbols)
+        build_emit_json(&result, &symbols).unwrap()
     }
 
     #[test]

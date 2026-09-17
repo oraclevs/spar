@@ -157,6 +157,9 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
             ConfigValue::Shell(_) => Err(<SparDeserError as de::Error>::custom(
                 "shell plans are runtime values and cannot be deserialized as configuration",
             )),
+            ConfigValue::Promise(_) => Err(<SparDeserError as de::Error>::custom(
+                "promise values cannot be deserialized",
+            )),
             ConfigValue::Error { .. } => Err(<SparDeserError as de::Error>::custom(
                 "error values are runtime values and cannot be deserialized as configuration",
             )),
@@ -552,12 +555,36 @@ mod tests {
             sections: std::collections::HashMap::new(),
             warnings: vec![],
         };
-        #[derive(Deserialize)]
+        #[derive(Debug, Deserialize)]
         struct P {
             port: i64,
         }
         let p: P = from_eval(&result).unwrap();
         assert_eq!(p.port, 9000);
+    }
+
+    #[test]
+    fn promise_value_cannot_be_deserialized() {
+        use crate::evaluator::{ConfigValue, PromiseHandle};
+
+        let result = crate::evaluator::EvalResult {
+            globals: std::collections::HashMap::from([(
+                "value".into(),
+                ConfigValue::Promise(PromiseHandle::new(1)),
+            )]),
+            sections: std::collections::HashMap::new(),
+            warnings: vec![],
+        };
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct PromiseField {
+            value: i64,
+        }
+
+        let error = from_eval::<PromiseField>(&result).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("promise values cannot be deserialized"));
     }
 
     #[test]

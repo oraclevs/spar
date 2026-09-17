@@ -39,7 +39,7 @@ pub use engine::{Engine, ExecutionOutcome};
 pub use error::{Span, SparError};
 pub use evaluator::{
     execute_shell_plan, execute_shell_plan_with_options, ConfigValue, EvalResult, Evaluator,
-    ShellPlanOutcome,
+    PromiseHandle, ShellPlanOutcome,
 };
 pub use host::{HostError, HostFunction, HostRegistry};
 pub use lexer::Lexer;

@@ -90,6 +90,10 @@ pub(crate) enum CompiledExpression {
         operands: Vec<CompiledExpression>,
         span: Span,
     },
+    Await {
+        promise: Box<CompiledExpression>,
+        span: Span,
+    },
     Index {
         source: Box<CompiledExpression>,
         index: Box<CompiledExpression>,
@@ -190,6 +194,7 @@ pub(crate) struct CompiledFunction {
     pub local_layout: LocalLayout,
     pub default_values: Vec<Option<CompiledExpression>>,
     pub return_type: SparType,
+    pub is_async: bool,
     pub body: Vec<CompiledStatement>,
     pub span: Span,
 }
@@ -409,6 +414,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
                 }
             }
         }
+        CompiledExpression::Await { promise, .. } => visit_expression(promise, visit),
         CompiledExpression::Index { source, index, .. } => {
             visit_expression(source, visit);
             visit_expression(index, visit);
@@ -667,6 +673,7 @@ impl ModuleGraphBuilder {
             local_layout,
             default_values: Vec::new(),
             return_type: function.ret.clone(),
+            is_async: function.is_async,
             body: Vec::new(),
             span: function.span.clone(),
         }

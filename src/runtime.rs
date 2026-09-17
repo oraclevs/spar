@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::async_runtime::{TaskInvocation, TaskStatus, TaskTable};
 use crate::compiled::{
     CompiledExpression, CompiledObjectItem, CompiledProgram, CompiledStatement, CompiledStringPart,
     FunctionId, LocalSlot, TypedOperation,
@@ -65,8 +66,9 @@ pub(crate) fn execute_self_contained_entry(
         program,
         call_depth: 0,
         state: None,
+        tasks: TaskTable::default(),
     }
-    .call_function(entry, Vec::new())
+    .run_entry(entry)
     .map_err(|error| vec![error])
 }
 
@@ -74,6 +76,7 @@ pub(crate) struct Runtime<'a> {
     program: &'a CompiledProgram,
     call_depth: usize,
     state: Option<ModuleState>,
+    tasks: TaskTable,
 }
 
 struct ModuleState {
@@ -117,8 +120,9 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
         program,
         call_depth: 0,
         state: Some(state),
+        tasks: TaskTable::default(),
     }
-    .call_function(entry, Vec::new())
+    .run_entry(entry)
     .map_err(|error| vec![error])
 }
 
@@ -130,6 +134,58 @@ enum RuntimeFlow {
 }
 
 impl Runtime<'_> {
+    fn run_entry(&mut self, entry: FunctionId) -> Result<ConfigValue, SparError> {
+        let result = if self.function_is_async(entry)? {
+            let handle = self.tasks.spawn(entry, Vec::new());
+            self.drive_promise(handle, &Span::dummy())
+        } else {
+            self.call_function(entry, Vec::new())
+        };
+        self.tasks.cancel_pending();
+        result
+    }
+
+    fn function_is_async(&self, id: FunctionId) -> Result<bool, SparError> {
+        self.program
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.iter())
+            .find(|function| function.id == id)
+            .map(|function| function.is_async)
+            .ok_or_else(|| runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy()))
+    }
+
+    fn run_task(&mut self, handle: crate::PromiseHandle, invocation: TaskInvocation) {
+        let result = self.call_function(invocation.function, invocation.arguments);
+        self.tasks.complete(handle, result);
+    }
+
+    fn tick_one(&mut self) {
+        if let Some((handle, invocation)) = self.tasks.next_pending() {
+            self.run_task(handle, invocation);
+        }
+    }
+
+    fn drive_promise(
+        &mut self,
+        handle: crate::PromiseHandle,
+        span: &Span,
+    ) -> Result<ConfigValue, SparError> {
+        match self.tasks.start(handle) {
+            Ok(invocation) => {
+                self.run_task(handle, invocation);
+                match self.tasks.start(handle) {
+                    Err(TaskStatus::Ready(result)) => result,
+                    _ => Err(runtime_error("promise did not complete", span)),
+                }
+            }
+            Err(TaskStatus::Ready(result)) => result,
+            Err(TaskStatus::Running) => Err(runtime_error("promise await cycle detected", span)),
+            Err(TaskStatus::Cancelled) => Err(runtime_error("promise was cancelled", span)),
+            Err(TaskStatus::Unknown) => Err(runtime_error("unknown promise handle", span)),
+        }
+    }
+
     fn call_function(
         &mut self,
         id: FunctionId,
@@ -289,6 +345,7 @@ impl Runtime<'_> {
             if !matches!(flow, RuntimeFlow::Normal) {
                 return Ok(flow);
             }
+            self.tick_one();
         }
         Ok(RuntimeFlow::Normal)
     }
@@ -327,19 +384,27 @@ impl Runtime<'_> {
                     })
             }
             CompiledExpression::ExecShell(shell) => self.execute_shell(shell),
-            CompiledExpression::Await { span, .. } => {
-                Err(runtime_error("await requires the async runtime", span))
+            CompiledExpression::Await { promise, span } => {
+                let value = self.eval_expression(promise, frame, module)?;
+                let ConfigValue::Promise(handle) = value else {
+                    return Err(type_error("Promise", &value, span));
+                };
+                self.drive_promise(handle, span)
             }
             CompiledExpression::DirectCall {
                 function,
                 arguments,
-                ..
+                span: _,
             } => {
                 let values = arguments
                     .iter()
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.call_function(*function, values)
+                if self.function_is_async(*function)? {
+                    Ok(ConfigValue::Promise(self.tasks.spawn(*function, values)))
+                } else {
+                    self.call_function(*function, values)
+                }
             }
             CompiledExpression::List(items, _) => Ok(ConfigValue::List(
                 items
@@ -816,6 +881,7 @@ mod tests {
             program: &program,
             call_depth: 0,
             state: None,
+            tasks: TaskTable::default(),
         }
         .call_function(FunctionId(999), Vec::new())
         .unwrap_err();

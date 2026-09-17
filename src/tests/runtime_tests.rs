@@ -7,6 +7,40 @@ fn execute(source: &str) -> Result<ConfigValue, Vec<crate::SparError>> {
 }
 
 #[test]
+fn async_call_is_scheduled_once_and_await_returns_value() {
+    let value = execute(
+        r#"
+        async function value() -> int { return 21; };
+        async function main() -> int {
+            var pending: Promise<int> = value();
+            var first: int = await pending;
+            var second: int = await pending;
+            return first + second;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(42));
+}
+
+#[test]
+fn async_dependency_chain_completes() {
+    let value = execute(
+        r#"
+        async function leaf(value: int) -> int { return value + 1; };
+        async function branch(value: int) -> int { return await leaf(value: value) + 1; };
+        async function main() -> int {
+            var left: Promise<int> = branch(value: 10);
+            var right: Promise<int> = branch(value: 20);
+            return await left + await right;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(34));
+}
+
+#[test]
 fn compiled_function_uses_slots_across_nested_control_flow() {
     let value = execute("function main() -> int { var mut total: int = 0; for (index, value) in [2, 4, 6] { if index == 1 { continue; } total = total + value; } return total; };").unwrap();
     assert_eq!(value, ConfigValue::Int(8));

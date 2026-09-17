@@ -26,7 +26,7 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SparError {
     LexError {
         message: String,

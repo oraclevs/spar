@@ -1,4 +1,5 @@
 pub mod ast;
+pub(crate) mod async_runtime;
 pub mod command;
 pub mod compiled;
 pub mod compiler;

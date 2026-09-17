@@ -2,7 +2,7 @@
 
 **A statically typed scripting language, with native configuration, task automation, and package management built in.**
 
-Spar started as a typed configuration language and still is one — the same `.spar` files, `spar emit`, and Rust deserialization below are unchanged. It's grown a scripting core alongside that: mutable variables, `if`/`for` at module scope, `break`/`continue`, `void` functions, a `main` entry point, and `spar exec`/`spar repl` to actually run a `.spar` file as a program rather than only evaluate it as config.
+Spar started as a typed configuration language and still is one — the same `.spar` files, `spar emit`, and Rust deserialization below are unchanged. It's grown a scripting core alongside that: mutable variables, control flow, `void` and async functions, a `main` entry point, and `spar exec`/`spar repl` to actually run a `.spar` file as a program rather than only evaluate it as config.
 
 Write your configuration in `.spar` files — with types, computed values, cross-file imports, and schema validation — then either run `spar emit` to produce clean JSON, or load the config straight into your Rust application with one call:
 
@@ -79,6 +79,7 @@ $ spar emit server.spar
   - [Global control flow](#global-control-flow)
   - [Indexed iteration, break, and continue](#indexed-iteration-break-and-continue)
   - [void functions and main](#void-functions-and-main)
+  - [Async functions and promises](#async-functions-and-promises)
   - [Running a script](#running-a-script)
   - [REPL](#repl)
 - [Rust Integration](#rust-integration)
@@ -489,6 +490,21 @@ function main() -> int {
 ```
 
 A `void` function may also fall off the end of its body with no explicit `return` at all. `main` is an ordinary function name, not a keyword — it just has special meaning to `spar exec`: zero parameters, returning `int` (used as the process exit status) or `void` (exits `0` unless a runtime error occurs).
+
+### Async functions and promises
+
+```spar
+async function double(value: int) -> int {
+    return value * 2;
+};
+
+async function main() -> int {
+    var pending: Promise<int> = double(value: 21);
+    return await pending - 42;
+};
+```
+
+An async call returns `Promise<T>` and starts its task. `await` is valid only inside an async function; it returns the task's value or raises its error for `try`/`catch`. Async `main` is driven automatically by `spar exec`. See [Async functions and promises](docs/async-await.md) for lifecycle and boundary rules.
 
 ### Running a script
 

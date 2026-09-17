@@ -41,6 +41,41 @@ fn async_dependency_chain_completes() {
 }
 
 #[test]
+fn awaited_failure_is_caught_by_existing_error_model() {
+    let value = execute(
+        r#"
+        async function fail() -> int { return 1 / 0; };
+        async function main() -> int {
+            try {
+                var ignored: int = await fail();
+                return ignored;
+            } catch error {
+                if error.kind == "runtime" { return 7; }
+                return 8;
+            }
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(7));
+}
+
+#[test]
+fn unawaited_failure_does_not_replace_main_result() {
+    let value = execute(
+        r#"
+        async function fail() -> int { return 1 / 0; };
+        async function main() -> int {
+            var pending: Promise<int> = fail();
+            return 9;
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(value, ConfigValue::Int(9));
+}
+
+#[test]
 fn compiled_function_uses_slots_across_nested_control_flow() {
     let value = execute("function main() -> int { var mut total: int = 0; for (index, value) in [2, 4, 6] { if index == 1 { continue; } total = total + value; } return total; };").unwrap();
     assert_eq!(value, ConfigValue::Int(8));

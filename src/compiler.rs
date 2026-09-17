@@ -304,9 +304,155 @@ fn inject_exec_result_type(program: &mut Program) {
                 default: None,
                 span: span.clone(),
             },
+            TypeField {
+                name: "signal".to_string(),
+                optional: true,
+                shape: TypeFieldShape::Primitive(SparType::Int),
+                default: None,
+                span: span.clone(),
+            },
+            TypeField {
+                name: "pid".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::Int),
+                default: None,
+                span: span.clone(),
+            },
+            TypeField {
+                name: "pipeline".to_string(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Named(
+                    "ProcessStatus".into(),
+                )))),
+                default: None,
+                span: span.clone(),
+            },
         ],
-        span,
+        span: span.clone(),
     }));
+
+    for (name, fields) in [
+        (
+            "Bytes",
+            vec![TypeField {
+                name: "values".into(),
+                optional: false,
+                shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
+                default: None,
+                span: span.clone(),
+            }],
+        ),
+        (
+            "PipelineStatus",
+            vec![
+                TypeField {
+                    name: "code".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Int),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "success".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Bool),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "processes".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Named(
+                        "ProcessStatus".into(),
+                    )))),
+                    default: None,
+                    span: span.clone(),
+                },
+            ],
+        ),
+        (
+            "ProcessResult",
+            vec![
+                TypeField {
+                    name: "success".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Bool),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "exitCode".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Int),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "status".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Named("PipelineStatus".into()),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "stdout".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Named("Bytes".into()),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "stderr".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Named("Bytes".into()),
+                    default: None,
+                    span: span.clone(),
+                },
+            ],
+        ),
+        (
+            "Job",
+            vec![
+                TypeField {
+                    name: "id".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Int),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "pid".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Int),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "processGroup".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Int),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "state".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Str),
+                    default: None,
+                    span: span.clone(),
+                },
+            ],
+        ),
+    ] {
+        program.items.push(TopLevelItem::Type(TypeDecl {
+            name: name.into(),
+            name_span: span.clone(),
+            type_parameters: Vec::new(),
+            exported: false,
+            fields,
+            span: span.clone(),
+        }));
+    }
 }
 
 /// Validates a declared `main` function's signature: no parameters, a

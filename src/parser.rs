@@ -1412,7 +1412,9 @@ impl Parser {
                 self.advance();
                 self.parse_fn_call("bool".to_string(), span)
             }
-            Token::ShellBlockStart => self.parse_mixed_shell_block(),
+            Token::ShellBlockStart | Token::ShellForeignBlockStart(_) => {
+                self.parse_mixed_shell_block()
+            }
             Token::KwCommand => {
                 let (shell, consumed) = parse_command_expression(&self.tokens[self.pos..])?;
                 // The command expression's terminating semicolon is also the
@@ -1434,6 +1436,13 @@ impl Parser {
                 let Expr::Shell(shell) = self.parse_mixed_shell_block()? else {
                     unreachable!("mixed shell parser always returns Expr::Shell")
                 };
+                if !shell.statements.is_empty() || shell.steps.len() != 1 {
+                    return Err(SparError::ParseError {
+                        message: "'exec { ... }' must contain exactly one command or pipeline"
+                            .into(),
+                        span: exec_span,
+                    });
+                }
                 Ok(Expr::ExecShell(shell))
             }
             Token::CommandSubStart => {
@@ -1478,14 +1487,26 @@ impl Parser {
     }
 
     fn parse_mixed_shell_block(&mut self) -> Result<Expr, SparError> {
-        let start = self.expect(&Token::ShellBlockStart)?.span;
+        let start_token = self.tokens[self.pos].clone();
+        let foreign_shell = match &start_token.token {
+            Token::ShellBlockStart => None,
+            Token::ShellForeignBlockStart(shell) => Some(shell.clone()),
+            _ => return Err(self.error("expected a shell block")),
+        };
+        self.advance();
+        let start = start_token.span;
         let mut statements = Vec::new();
         while !self.at(&Token::ShellBlockEnd) && !self.at(&Token::Eof) {
             statements.push(self.parse_func_stmt()?);
         }
         let end = self.expect(&Token::ShellBlockEnd)?.span;
         let all_commands = statements.iter().all(|statement| {
-            matches!(statement, Statement::Expression(Expr::Shell(shell), _) if shell.statements.is_empty())
+            matches!(statement, Statement::Expression(Expr::Shell(shell), _)
+                if shell.statements.is_empty()
+                    && !shell.steps.iter().any(|(_, step)| match step {
+                        ShellStep::Command(command) => command.background,
+                        ShellStep::Pipeline(commands) => commands.last().is_some_and(|command| command.background),
+                    }))
         });
         let steps = if all_commands {
             let mut flattened = Vec::new();
@@ -1508,6 +1529,7 @@ impl Parser {
             statements,
             steps,
             span: Span::new(start.start, end.end, start.line, start.col),
+            foreign_shell,
         }))
     }
 
@@ -2906,6 +2928,21 @@ function install(files: [str]) -> shell {
         Parser::new(tokens)
             .parse()
             .expect("native shell blocks must reuse ordinary Spar statements");
+    }
+
+    #[test]
+    fn structured_exec_requires_exactly_one_command_or_pipeline() {
+        let source = "function f() -> int { var r = exec { true; false; }; return 0; };";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        let error = Parser::new(tokens).parse().unwrap_err();
+        assert!(
+            format!("{error:?}").contains("exactly one command or pipeline"),
+            "{error:?}"
+        );
+
+        let source = "function f() -> int { var r = exec { var x: int = 1; true; }; return 0; };";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+        assert!(Parser::new(tokens).parse().is_err());
     }
 
     #[test]

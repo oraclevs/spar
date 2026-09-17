@@ -94,12 +94,17 @@ pub enum Token {
 
     // Dedicated native shell-language tokens.
     ShellBlockStart,
+    ShellForeignBlockStart(String),
     ShellBlockEnd,
     ShellWord(String),
     ShellLiteralWord(String),
     ShellPipe,
     ShellRedirectAppend,
     ShellRedirectStderr,
+    ShellFdRedirect { fd: u32, append: bool },
+    ShellFdDuplicate { fd: u32, target: u32 },
+    ShellRedirectBoth { append: bool },
+    ShellBackground,
 
     // Delimiters
     LParen,
@@ -213,12 +218,18 @@ impl Token {
             Token::ShellFragment(_) => "shell text",
             Token::RunEnd => "end of run block",
             Token::ShellBlockStart => "'shell {'",
+            Token::ShellForeignBlockStart(_) => "foreign shell block",
             Token::ShellBlockEnd => "end of shell block",
             Token::ShellWord(_) => "shell word",
             Token::ShellLiteralWord(_) => "literal shell word",
             Token::ShellPipe => "'|'",
             Token::ShellRedirectAppend => "'>>'",
             Token::ShellRedirectStderr => "'2>'",
+            Token::ShellFdRedirect { .. } => "file-descriptor redirect",
+            Token::ShellFdDuplicate { .. } => "file-descriptor duplication",
+            Token::ShellRedirectBoth { append: false } => "'&>'",
+            Token::ShellRedirectBoth { append: true } => "'&>>'",
+            Token::ShellBackground => "'&'",
             Token::Eof => "end of file",
         }
     }

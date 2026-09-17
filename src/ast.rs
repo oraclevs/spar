@@ -126,6 +126,7 @@ pub struct ShellExpr {
     pub statements: Vec<Statement>,
     pub steps: Vec<(ShellJoin, ShellStep)>,
     pub span: Span,
+    pub foreign_shell: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +150,22 @@ pub struct ShellCommandExpr {
     pub stdin: Option<ShellRedirect>,
     pub stdout: Option<ShellRedirect>,
     pub stderr: Option<ShellRedirect>,
+    pub redirections: Vec<ShellFdRedirect>,
+    pub background: bool,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellFdRedirect {
+    pub fd: u32,
+    pub target: ShellFdRedirectTarget,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellFdRedirectTarget {
+    File(ShellRedirect),
+    Duplicate(u32),
 }
 
 #[derive(Debug, Clone)]

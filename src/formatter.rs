@@ -278,7 +278,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str(") -> ");
             out.push_str(&format_type(&fd.ret));
             out.push_str(" {\n");
-            format_func_stmts(&fd.body.stmts, 1, config, out);
+            format_func_stmts(&fd.body.stmts, 1, config, out, false);
             out.push_str("};\n");
         }
 
@@ -362,7 +362,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str(") -> ");
                 out.push_str(&format_type(&f.ret));
                 out.push_str(" {\n");
-                format_func_stmts(&f.body.stmts, 2, config, out);
+                format_func_stmts(&f.body.stmts, 2, config, out, false);
                 out.push_str("    }\n");
             }
             out.push_str("};\n");
@@ -388,7 +388,7 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             format_task_decl_cx(td, config, &mut empty, out);
         }
 
-        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out),
+        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out, false),
     }
 }
 
@@ -641,7 +641,7 @@ fn format_top_level_item_cx(
             format_section_items_cx(&sd.items, 1, config, cx, out, sd.path.len() == 1);
             out.push_str("};\n");
         }
-        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out),
+        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out, false),
         TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
         _ => format_top_level_item(item, config, out),
     }
@@ -1057,10 +1057,29 @@ fn format_shell_expr(
     if execute {
         out.push_str("exec ");
     }
+    if let Some(foreign_shell) = &shell.foreign_shell {
+        out.push_str("shell ");
+        out.push_str(foreign_shell);
+        out.push_str(" {");
+        if let Some((_, ShellStep::Command(command))) = shell.steps.first() {
+            if command.program.text == foreign_shell.as_str()
+                && command
+                    .args
+                    .first()
+                    .is_some_and(|argument| argument.text == "-c")
+            {
+                if let Some(source) = command.args.get(1) {
+                    out.push_str(&source.text);
+                }
+            }
+        }
+        out.push('}');
+        return;
+    }
     out.push_str("shell {");
     if !shell.statements.is_empty() {
         out.push('\n');
-        format_func_stmts(&shell.statements, depth + 1, config, out);
+        format_func_stmts(&shell.statements, depth + 1, config, out, true);
         out.push_str(&indent(depth, config));
         out.push('}');
         return;
@@ -1070,8 +1089,30 @@ fn format_shell_expr(
         return;
     }
     out.push('\n');
-    for (_, step) in &shell.steps {
-        out.push_str(&indent(depth + 1, config));
+    format_shell_steps(&shell.steps, depth + 1, config, out);
+    out.push_str(&indent(depth, config));
+    out.push('}');
+}
+
+fn format_shell_steps(
+    steps: &[(ShellJoin, ShellStep)],
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
+    for (index, (join, step)) in steps.iter().enumerate() {
+        if index == 0 {
+            out.push_str(&indent(depth, config));
+        } else {
+            match join {
+                ShellJoin::Always => {
+                    out.push_str(";\n");
+                    out.push_str(&indent(depth, config));
+                }
+                ShellJoin::OnSuccess => out.push_str(" && "),
+                ShellJoin::OnFailure => out.push_str(" || "),
+            }
+        }
         match step {
             ShellStep::Command(command) => format_shell_command(command, out),
             ShellStep::Pipeline(commands) => {
@@ -1083,10 +1124,10 @@ fn format_shell_expr(
                 }
             }
         }
+    }
+    if !steps.is_empty() {
         out.push_str(";\n");
     }
-    out.push_str(&indent(depth, config));
-    out.push('}');
 }
 
 fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
@@ -1095,7 +1136,31 @@ fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
         out.push(' ');
         format_shell_word(&argument.text, out);
     }
-    if let Some(redirect) = &command.stdout {
+    if !command.redirections.is_empty() {
+        for redirect in &command.redirections {
+            out.push(' ');
+            match &redirect.target {
+                ShellFdRedirectTarget::File(file) => {
+                    match (redirect.fd, &file.mode) {
+                        (0, _) => out.push('<'),
+                        (1, spar_command::RedirectMode::Truncate) => out.push('>'),
+                        (1, spar_command::RedirectMode::Append) => out.push_str(">>"),
+                        (fd, spar_command::RedirectMode::Truncate) => {
+                            out.push_str(&format!("{fd}>"))
+                        }
+                        (fd, spar_command::RedirectMode::Append) => {
+                            out.push_str(&format!("{fd}>>"))
+                        }
+                    }
+                    out.push(' ');
+                    format_shell_word(&file.target.text, out);
+                }
+                ShellFdRedirectTarget::Duplicate(target) => {
+                    out.push_str(&format!("{}>&{target}", redirect.fd));
+                }
+            }
+        }
+    } else if let Some(redirect) = &command.stdout {
         out.push_str(match redirect.mode {
             spar_command::RedirectMode::Truncate => " > ",
             spar_command::RedirectMode::Append => " >> ",
@@ -1105,6 +1170,9 @@ fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
     if let Some(redirect) = &command.stderr {
         out.push_str(" 2> ");
         format_shell_word(&redirect.target.text, out);
+    }
+    if command.background {
+        out.push_str(" &");
     }
 }
 
@@ -1164,13 +1232,25 @@ fn indent(depth: usize, config: &FormatConfig) -> String {
     " ".repeat(depth * config.indent_width)
 }
 
-fn format_func_stmts(stmts: &[FuncStmt], depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_func_stmts(
+    stmts: &[FuncStmt],
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+    shell_context: bool,
+) {
     for stmt in stmts {
-        format_func_stmt(stmt, depth, config, out);
+        format_func_stmt(stmt, depth, config, out, shell_context);
     }
 }
 
-fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_func_stmt(
+    stmt: &FuncStmt,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+    shell_context: bool,
+) {
     let ind = indent(depth, config);
     match stmt {
         FuncStmt::LocalVar(lv) => {
@@ -1198,6 +1278,14 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
         }
 
         FuncStmt::Expression(expr, _) => {
+            if shell_context {
+                if let Expr::Shell(shell) = expr {
+                    if shell.statements.is_empty() {
+                        format_shell_steps(&shell.steps, depth, config, out);
+                        return;
+                    }
+                }
+            }
             out.push_str(&ind);
             format_expr(expr, 0, depth, config, out);
             out.push_str(";\n");
@@ -1216,7 +1304,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
         FuncStmt::Try(ts) => {
             out.push_str(&ind);
             out.push_str("try {\n");
-            format_func_stmts(&ts.body, depth + 1, config, out);
+            format_func_stmts(&ts.body, depth + 1, config, out, shell_context);
             out.push_str(&ind);
             out.push_str("} catch");
             if let Some(name) = &ts.catch_name {
@@ -1224,7 +1312,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
                 out.push_str(name);
             }
             out.push_str(" {\n");
-            format_func_stmts(&ts.handler, depth + 1, config, out);
+            format_func_stmts(&ts.handler, depth + 1, config, out, shell_context);
             out.push_str(&ind);
             out.push_str("}\n");
         }
@@ -1266,14 +1354,14 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str("if ");
             format_expr(&if_stmt.condition, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(&if_stmt.then_stmts, depth + 1, config, out);
+            format_func_stmts(&if_stmt.then_stmts, depth + 1, config, out, shell_context);
             if if_stmt.else_stmts.is_empty() {
                 out.push_str(&ind);
                 out.push_str("}\n");
             } else {
                 out.push_str(&ind);
                 out.push_str("} else {\n");
-                format_func_stmts(&if_stmt.else_stmts, depth + 1, config, out);
+                format_func_stmts(&if_stmt.else_stmts, depth + 1, config, out, shell_context);
                 out.push_str(&ind);
                 out.push_str("}\n");
             }
@@ -1299,7 +1387,7 @@ fn format_func_stmt(stmt: &FuncStmt, depth: usize, config: &FormatConfig, out: &
             out.push_str(" in ");
             format_expr(&statement.iterable, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(&statement.body, depth + 1, config, out);
+            format_func_stmts(&statement.body, depth + 1, config, out, shell_context);
             out.push_str(&ind);
             out.push_str("}\n");
         }
@@ -1491,6 +1579,54 @@ mod tests {
     fn format_shell_block() {
         let source = "var x: shell = shell {\n    echo hi;\n};\n";
         assert_eq!(fmt(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn format_foreign_bash_block_preserves_explicit_boundary() {
+        let source = r#"function main() -> shell {
+    return shell bash {
+        printf "%s" "$HOME"
+    };
+};
+"#;
+        let formatted = fmt(source);
+        assert!(formatted.contains("shell bash {"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn format_background_and_ordered_redirections_is_idempotent() {
+        let source = r#"function main() -> shell {
+    return shell {
+        tool 2>&1 > out &;
+        tool &>> log;
+    };
+};
+"#;
+        let formatted = fmt(source);
+        assert!(formatted.contains("tool 2>&1 > out &;"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn format_mixed_shell_loop_preserves_native_command_syntax() {
+        let source = r#"function main() -> shell {
+    var files: [str] = ["one", "two"];
+    return shell {
+        var mut count: int = 0;
+        for file in files {
+            echo "${file}";
+            count += 1;
+        }
+        echo "${count}";
+    };
+};
+"#;
+
+        let formatted = fmt(source);
+        assert_eq!(fmt(&formatted), formatted);
+        assert!(formatted.contains("            echo \"${file}\";"));
+        assert!(!formatted.contains("            shell {"));
     }
 
     #[test]

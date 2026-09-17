@@ -1,6 +1,6 @@
 use crate::ast::{
-    ShellCommandExpr, ShellEnvironmentEntry, ShellExpr, ShellJoin, ShellRedirect, ShellStep,
-    ShellWord, ShellWordPart, TopLevelItem,
+    ShellCommandExpr, ShellEnvironmentEntry, ShellExpr, ShellFdRedirect, ShellFdRedirectTarget,
+    ShellJoin, ShellRedirect, ShellStep, ShellWord, ShellWordPart, TopLevelItem,
 };
 use crate::error::{Span, SparError};
 use crate::token::{SpannedToken, Token};
@@ -38,6 +38,7 @@ pub(crate) fn parse_shell_block(tokens: &[SpannedToken]) -> Result<(ShellExpr, u
             statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &end_span),
+            foreign_shell: None,
         },
         end + 1,
     ))
@@ -83,6 +84,7 @@ pub(crate) fn parse_command_expression(
             statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &end_span),
+            foreign_shell: None,
         },
         end + 1,
     ))
@@ -105,6 +107,7 @@ pub(crate) fn parse_bare_command_statement(
             statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &end_span),
+            foreign_shell: None,
         },
         end + 1,
     ))
@@ -136,6 +139,7 @@ pub(crate) fn parse_command_substitution(
             statements: Vec::new(),
             steps,
             span: joined_span(&start.span, &tokens[end].span),
+            foreign_shell: None,
         },
         end + 1,
     ))
@@ -271,6 +275,8 @@ impl<'a> BodyParser<'a> {
         let mut stdin = None;
         let mut stdout = None;
         let mut stderr = None;
+        let mut redirections = Vec::new();
+        let mut background = false;
         let mut end_span = start_span.clone();
 
         while self.pos < self.tokens.len()
@@ -278,8 +284,9 @@ impl<'a> BodyParser<'a> {
             && !self.at(&Token::ShellPipe)
             && !self.at(&Token::AndAnd)
             && !self.at(&Token::OrOr)
+            && !self.at(&Token::ShellBackground)
         {
-            match self.peek() {
+            match self.peek().clone() {
                 Token::ShellWord(_) | Token::ShellLiteralWord(_) => {
                     let word = self.expect_word("expected an argument")?;
                     end_span = word.span.clone();
@@ -299,25 +306,76 @@ impl<'a> BodyParser<'a> {
                         span: joined_span(&operator.span, &end_span),
                     };
                     if operator.token == Token::Lt {
-                        if stdin.replace(redirect).is_some() {
-                            return Err(parse_error(
-                                "stdin may only be redirected once per command",
-                                operator.span,
-                            ));
-                        }
+                        redirections.push(ShellFdRedirect {
+                            fd: 0,
+                            target: ShellFdRedirectTarget::File(redirect.clone()),
+                            span: redirect.span.clone(),
+                        });
+                        stdin = Some(redirect);
                     } else if operator.token == Token::ShellRedirectStderr {
-                        if stderr.replace(redirect).is_some() {
-                            return Err(parse_error(
-                                "stderr may only be redirected once per command",
-                                operator.span,
-                            ));
-                        }
-                    } else if stdout.replace(redirect).is_some() {
-                        return Err(parse_error(
-                            "stdout may only be redirected once per command",
-                            operator.span,
-                        ));
+                        redirections.push(ShellFdRedirect {
+                            fd: 2,
+                            target: ShellFdRedirectTarget::File(redirect.clone()),
+                            span: redirect.span.clone(),
+                        });
+                        stderr = Some(redirect);
+                    } else {
+                        redirections.push(ShellFdRedirect {
+                            fd: 1,
+                            target: ShellFdRedirectTarget::File(redirect.clone()),
+                            span: redirect.span.clone(),
+                        });
+                        stdout = Some(redirect);
                     }
+                }
+                Token::ShellFdRedirect { fd, append } => {
+                    let operator = self.advance().clone();
+                    let target = self.expect_word("expected a redirect target")?;
+                    let redirect = ShellRedirect {
+                        target,
+                        mode: if append {
+                            RedirectMode::Append
+                        } else {
+                            RedirectMode::Truncate
+                        },
+                        span: operator.span.clone(),
+                    };
+                    redirections.push(ShellFdRedirect {
+                        fd,
+                        target: ShellFdRedirectTarget::File(redirect),
+                        span: operator.span,
+                    });
+                }
+                Token::ShellFdDuplicate { fd, target } => {
+                    let operator = self.advance().clone();
+                    redirections.push(ShellFdRedirect {
+                        fd,
+                        target: ShellFdRedirectTarget::Duplicate(target),
+                        span: operator.span,
+                    });
+                }
+                Token::ShellRedirectBoth { append } => {
+                    let operator = self.advance().clone();
+                    let target = self.expect_word("expected a redirect target")?;
+                    let redirect = ShellRedirect {
+                        target,
+                        mode: if append {
+                            RedirectMode::Append
+                        } else {
+                            RedirectMode::Truncate
+                        },
+                        span: operator.span.clone(),
+                    };
+                    redirections.push(ShellFdRedirect {
+                        fd: 1,
+                        target: ShellFdRedirectTarget::File(redirect),
+                        span: operator.span.clone(),
+                    });
+                    redirections.push(ShellFdRedirect {
+                        fd: 2,
+                        target: ShellFdRedirectTarget::Duplicate(1),
+                        span: operator.span,
+                    });
                 }
                 token => {
                     return Err(self.error(format!(
@@ -328,6 +386,11 @@ impl<'a> BodyParser<'a> {
             }
         }
 
+        if self.at(&Token::ShellBackground) {
+            self.advance();
+            background = true;
+        }
+
         Ok(ShellCommandExpr {
             environment,
             program,
@@ -335,6 +398,8 @@ impl<'a> BodyParser<'a> {
             stdin,
             stdout,
             stderr,
+            redirections,
+            background,
             span: joined_span(&start_span, &end_span),
         })
     }
@@ -410,6 +475,11 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
                 span,
             )?));
             cursor = expression_end + 1;
+        } else if text[dollar..].starts_with("$!") || text[dollar..].starts_with("$?") {
+            parts.push(ShellWordPart::Environment(
+                text[dollar + 1..dollar + 2].to_string(),
+            ));
+            cursor = dollar + 2;
         } else {
             let name_start = dollar + 1;
             let name_len = text[name_start..]

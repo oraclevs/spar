@@ -1,0 +1,21 @@
+// Canonical implementations for Spar's tiny implicit prelude.
+function print(message: str = "") -> void {
+    nativeIo::print(message: message);
+    return;
+};
+
+function println(message: str = "") -> void {
+    nativeIo::println(message: message);
+    return;
+};
+
+function len<T>(value: T) -> int {
+    return nativeCore::len(value: value);
+};
+
+function assert(condition: bool, message: str) -> void {
+    if !condition {
+        panic(message: message);
+    }
+    return;
+};

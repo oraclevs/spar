@@ -8,13 +8,25 @@ pub struct LoadedImport {
     pub path: String,
     pub exports: HashSet<String>,
     pub functions: HashMap<String, crate::ast::FunctionDecl>,
+    /// Package-resolution scope that applies while evaluating this imported
+    /// module. Local modules inherit their caller's scope; package modules
+    /// receive a locator scoped to the resolved dependency so their own
+    /// `import pkg ...` statements follow that dependency's lockfile edges.
+    pub locator: Option<crate::package::ModuleLocator>,
     /// Where `path` actually resolved to on disk — a plain
     /// `base_dir.join(path)` for a filesystem import, or a store
-    /// snapshot path for a package-aware bare import resolved through a
+    /// snapshot path for an explicit package import resolved through a
     /// `ModuleLocator`. Evaluation reads this directly instead of
     /// re-deriving it from `path`, so it only ever needs to know how to
     /// resolve an import once.
     pub resolved_path: PathBuf,
+}
+
+
+#[derive(Clone, Debug)]
+pub struct ResolvedImportSource {
+    pub path: PathBuf,
+    pub locator: Option<crate::package::ModuleLocator>,
 }
 
 pub struct ImportLoader {
@@ -39,47 +51,95 @@ impl ImportLoader {
         self
     }
 
-    /// Where a raw import string in this file should read from.
-    /// Filesystem-like strings (`./x`, `../x`, `/x`, or anything with a
-    /// `.spar` suffix) always resolve relative to `base_dir`, exactly as
-    /// before package-aware imports existed. A bare word with no
-    /// locator, or one whose edges don't recognize it, falls back to the
-    /// same `base_dir`-relative join — so it still fails with today's
-    /// familiar "cannot find import file" diagnostic rather than a
-    /// separate "unknown package" one.
-    fn resolve_path(&self, raw: &str) -> PathBuf {
-        if looks_like_filesystem_path(raw) {
-            return self.base_dir.join(raw);
-        }
-        if let Some(locator) = &self.locator {
-            if let Some(resolved) = locator.resolve_import(&self.base_dir, raw) {
-                return resolved;
+    /// Resolves one import declaration to a concrete Spar source file and
+    /// the package-resolution scope that applies inside that file.
+    ///
+    /// New code should make package intent explicit with `import pkg ...`.
+    /// Local/module imports are resolved relative to `base_dir`, gain a
+    /// `.spar` suffix automatically when omitted, and inherit the caller's
+    /// package-resolution scope. Package dependencies are never guessed from
+    /// a normal import; source must opt in with `import pkg ...`.
+    pub fn resolve_import(
+        &self,
+        decl: &crate::ast::ImportDecl,
+    ) -> Result<ResolvedImportSource, SparError> {
+        if decl.package {
+            if let Some(path) = crate::stdlib::resolve_bundled_import(&decl.path) {
+                return Ok(ResolvedImportSource {
+                    path,
+                    locator: self.locator.clone(),
+                });
             }
+            if decl.path == "std" || decl.path.starts_with("std/") {
+                return Err(SparError::ResolveError {
+                    message: format!(
+                        "cannot resolve bundled standard-library module '{}'",
+                        decl.path
+                    ),
+                    hint: Some("check the std module path; bundled std imports cannot escape the std package".into()),
+                    span: decl.span.clone(),
+                });
+            }
+            let locator = self.locator.as_ref().ok_or_else(|| SparError::ResolveError {
+                message: format!(
+                    "cannot resolve package import '{}' — no package lock/store is configured",
+                    decl.path
+                ),
+                hint: Some(
+                    "run `spar install` in a project with spar.package.spar, then try again"
+                        .into(),
+                ),
+                span: decl.span.clone(),
+            })?;
+            return locator
+                .resolve_import_scoped(&self.base_dir, &decl.path)
+                .map(|(path, scoped)| ResolvedImportSource {
+                    path,
+                    locator: Some(scoped),
+                })
+                .ok_or_else(|| SparError::ResolveError {
+                    message: format!(
+                        "cannot resolve package import '{}' — dependency or module was not found",
+                        decl.path
+                    ),
+                    hint: Some(
+                        "check [Dependencies], run `spar install`, and verify the package module path"
+                            .into(),
+                    ),
+                    span: decl.span.clone(),
+                });
         }
-        self.base_dir.join(raw)
+
+        Ok(ResolvedImportSource {
+            path: local_module_path(&self.base_dir, &decl.path),
+            locator: self.locator.clone(),
+        })
     }
+
 }
 
-fn looks_like_filesystem_path(raw: &str) -> bool {
-    raw.starts_with('.') || raw.starts_with('/') || raw.contains('/') || raw.ends_with(".spar")
+fn local_module_path(base_dir: &Path, raw: &str) -> PathBuf {
+    let mut path = base_dir.join(raw);
+    if path.extension().is_none() {
+        path.set_extension("spar");
+    }
+    path
 }
 
-/// Splice selective/asPartOf import targets into `program`'s own top-level
-/// items, in place, before resolve/typecheck ever run. `import "path" as
-/// alias;` and `import schema "path";` pass through untouched — they're
-/// still handled by `collect_imports` / `validate_schema_imports`.
+/// Splice selective import targets into `program`'s own top-level items,
+/// in place, before resolve/typecheck ever run. `import "path" as alias;`
+/// and `import schema "path";` pass through untouched — they're still
+/// handled by `collect_imports` / `validate_schema_imports`.
 pub fn expand_imports(
     program: &mut Program,
     loader: &mut ImportLoader,
 ) -> Result<(), Vec<SparError>> {
-    let mut visiting: Vec<PathBuf> = Vec::new();
-    expand_imports_inner(program, loader, &mut visiting)
+    expand_imports_inner(program, loader)
 }
 
 fn expand_imports_inner(
     program: &mut Program,
     loader: &mut ImportLoader,
-    visiting: &mut Vec<PathBuf>,
 ) -> Result<(), Vec<SparError>> {
     use crate::ast::{ImportKind, TopLevelItem};
 
@@ -110,7 +170,6 @@ fn expand_imports_inner(
             ImportKind::TypeSelective(requested) => {
                 splice_selective(&decl, requested, true, loader)
             }
-            ImportKind::AsPartOf => splice_as_part_of(&decl, loader, visiting),
         };
 
         match spliced {
@@ -174,9 +233,7 @@ fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span>
 /// from the source file, so an `export [Colors]{...}` pulled in via
 /// `import { Colors } from "...";` was indistinguishable from a section the
 /// importing file declared and exported itself, and got flagged by schema
-/// Rule 2 as "not declared in any imported schema." Must NOT be applied to
-/// asPartOf's splice path — that mechanism intentionally preserves
-/// visibility flags verbatim ("as if pasted in directly").
+/// Rule 2 as "not declared in any imported schema."
 fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelItem {
     use crate::ast::TopLevelItem;
     match item {
@@ -304,7 +361,8 @@ fn splice_selective(
 ) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
     use crate::ast::TopLevelItem;
 
-    let full_path = loader.resolve_path(&decl.path);
+    let resolved = loader.resolve_import(decl).map_err(|error| vec![error])?;
+    let full_path = resolved.path;
     if !full_path.exists() {
         return Err(vec![SparError::ResolveError {
             message: format!(
@@ -332,13 +390,17 @@ fn splice_selective(
         }]
     })?;
 
-    let imported_program = crate::parser::Parser::new(tokens).parse().map_err(|e| {
+    let mut imported_program = crate::parser::Parser::new(tokens).parse().map_err(|e| {
         vec![SparError::ResolveError {
             message: format!("import file '{}' has a parse error: {}", decl.path, e),
             hint: None,
             span: decl.span.clone(),
         }]
     })?;
+
+    if crate::stdlib::is_bundled_std_path(&full_path) {
+        mark_program_trusted_native(&mut imported_program);
+    }
 
     let available: Vec<(&str, &TopLevelItem)> = imported_program
         .items
@@ -415,6 +477,64 @@ fn splice_selective(
                         &name,
                         &parent_name,
                         "field",
+                        "type",
+                        &available,
+                        &mut pulled,
+                        &mut spliced,
+                        &mut errors,
+                        decl,
+                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                    );
+                }
+            }
+            TopLevelItem::Function(function) => {
+                let parent_name = function.name.clone();
+                let mut type_refs = Vec::new();
+                for parameter in &function.params {
+                    collect_spar_type_refs(&parameter.ty, &mut type_refs);
+                }
+                collect_spar_type_refs(&function.ret, &mut type_refs);
+                for name in type_refs {
+                    if !available.iter().any(|(candidate, item)| {
+                        *candidate == name
+                            && matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                    }) {
+                        continue;
+                    }
+                    pull_dependency(
+                        &name,
+                        &parent_name,
+                        "signature",
+                        "type",
+                        &available,
+                        &mut pulled,
+                        &mut spliced,
+                        &mut errors,
+                        decl,
+                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                    );
+                }
+            }
+            TopLevelItem::FunctionGroup(group) => {
+                let parent_name = group.name.clone();
+                let mut type_refs = Vec::new();
+                for function in &group.functions {
+                    for parameter in &function.params {
+                        collect_spar_type_refs(&parameter.ty, &mut type_refs);
+                    }
+                    collect_spar_type_refs(&function.ret, &mut type_refs);
+                }
+                for name in type_refs {
+                    if !available.iter().any(|(candidate, item)| {
+                        *candidate == name
+                            && matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                    }) {
+                        continue;
+                    }
+                    pull_dependency(
+                        &name,
+                        &parent_name,
+                        "signature",
                         "type",
                         &available,
                         &mut pulled,
@@ -584,72 +704,20 @@ fn pull_dependency<F: Fn(&crate::ast::TopLevelItem) -> bool>(
     }
 }
 
-fn splice_as_part_of(
-    decl: &crate::ast::ImportDecl,
-    loader: &mut ImportLoader,
-    visiting: &mut Vec<PathBuf>,
-) -> Result<Vec<crate::ast::TopLevelItem>, Vec<SparError>> {
-    let full_path = loader.base_dir.join(&decl.path);
-    let canonical = full_path
-        .canonicalize()
-        .unwrap_or_else(|_| full_path.clone());
-
-    if let Some(cycle) = crate::depgraph::find_cycle_in_stack(visiting, &canonical) {
-        let chain: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
-        return Err(vec![SparError::ResolveError {
-            message: format!(
-                "import cycle detected via `asPartOf`: {}",
-                chain.join(" -> ")
-            ),
-            hint: None,
-            span: decl.span.clone(),
-        }]);
+pub(crate) fn mark_program_trusted_native(program: &mut Program) {
+    for item in &mut program.items {
+        match item {
+            crate::ast::TopLevelItem::Function(function) => {
+                function.trusted_native = true;
+            }
+            crate::ast::TopLevelItem::FunctionGroup(group) => {
+                for function in &mut group.functions {
+                    function.trusted_native = true;
+                }
+            }
+            _ => {}
+        }
     }
-
-    if !full_path.exists() {
-        return Err(vec![SparError::ResolveError {
-            message: format!(
-                "cannot find import file '{}' — file does not exist",
-                decl.path
-            ),
-            hint: Some("check the file path and ensure it is relative to the current file".into()),
-            span: decl.span.clone(),
-        }]);
-    }
-
-    let src = std::fs::read_to_string(&full_path).map_err(|e| {
-        vec![SparError::ResolveError {
-            message: format!("cannot read import file '{}': {}", decl.path, e),
-            hint: None,
-            span: decl.span.clone(),
-        }]
-    })?;
-
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| {
-        vec![SparError::ResolveError {
-            message: format!("import file '{}' has a lex error: {}", decl.path, e),
-            hint: None,
-            span: decl.span.clone(),
-        }]
-    })?;
-
-    let mut sub_program = crate::parser::Parser::new(tokens).parse().map_err(|e| {
-        vec![SparError::ResolveError {
-            message: format!("import file '{}' has a parse error: {}", decl.path, e),
-            hint: None,
-            span: decl.span.clone(),
-        }]
-    })?;
-
-    let sub_base = full_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let mut sub_loader = ImportLoader::new(&sub_base);
-
-    visiting.push(canonical);
-    let result = expand_imports_inner(&mut sub_program, &mut sub_loader, visiting);
-    visiting.pop();
-    result?;
-
-    Ok(sub_program.items)
 }
 
 pub fn collect_imports(
@@ -678,16 +746,26 @@ pub fn collect_imports(
                 .to_string()
         });
 
-        let full_path = loader.resolve_path(&decl.path);
+        let resolved = match loader.resolve_import(decl) {
+            Ok(source) => source,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let full_path = resolved.path;
+        let import_locator = resolved.locator;
         if !full_path.exists() {
             errors.push(SparError::ResolveError {
                 message: format!(
                     "cannot find import file '{}' — file does not exist",
                     decl.path
                 ),
-                hint: Some(
-                    "check the file path and ensure it is relative to the current file".into(),
-                ),
+                hint: Some(if decl.package {
+                    "check the package alias/module path and run `spar install` if dependencies changed".into()
+                } else {
+                    "check the module path; `.spar` is optional and paths are relative to the current file".into()
+                }),
                 span: decl.span.clone(),
             });
             continue;
@@ -718,7 +796,7 @@ pub fn collect_imports(
             }
         };
 
-        let imported_program = match crate::parser::Parser::new(tokens).parse() {
+        let mut imported_program = match crate::parser::Parser::new(tokens).parse() {
             Ok(p) => p,
             Err(e) => {
                 errors.push(SparError::ResolveError {
@@ -729,6 +807,10 @@ pub fn collect_imports(
                 continue;
             }
         };
+
+        if crate::stdlib::is_bundled_std_path(&full_path) {
+            mark_program_trusted_native(&mut imported_program);
+        }
 
         // Collect exported symbol names
         let mut exports = HashSet::new();
@@ -764,6 +846,7 @@ pub fn collect_imports(
                 exports,
                 functions,
                 resolved_path: full_path.clone(),
+                locator: import_locator,
             },
         );
     }
@@ -949,7 +1032,7 @@ pub fn validate_schema_imports(
         has_schema_imports = true;
 
         // Resolve and load the schema file
-        let full_path = base_dir.join(&decl.path);
+        let full_path = local_module_path(base_dir, &decl.path);
         let schema_src = match std::fs::read_to_string(&full_path) {
             Ok(s) => s,
             Err(e) => {
@@ -1624,79 +1707,6 @@ mod tests {
         let mut loader = ImportLoader::new(dir.path());
         let err = expand_imports(&mut program, &mut loader).unwrap_err();
         assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("already"))),
-            "got: {:?}", err);
-    }
-
-    // ── Phase 3: expand_imports (asPartOf) ───────────────────────────────
-
-    #[test]
-    fn expand_imports_as_part_of_inlines_target_file() {
-        use std::fs;
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("common.spar"),
-            concat!(
-                "export var host: str = \"localhost\";\n",
-                "private [Defaults]{ timeout: int = 30; };\n",
-            ),
-        )
-        .unwrap();
-        let src = r#"import asPartOf "common.spar";"#;
-        let mut program = parse_src(src);
-        let mut loader = ImportLoader::new(dir.path());
-        expand_imports(&mut program, &mut loader).expect("expand must succeed");
-
-        assert!(program
-            .items
-            .iter()
-            .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "host")));
-        assert!(program.items.iter().any(|it| matches!(it, TopLevelItem::Section(s) if s.private)),
-            "private sections must be pulled in too — true textual inclusion, not a namespaced import");
-    }
-
-    #[test]
-    fn expand_imports_as_part_of_is_transitive() {
-        use std::fs;
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("base.spar"),
-            "export var version: str = \"1.0\";\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("middle.spar"),
-            "import asPartOf \"base.spar\";\nexport var name: str = \"mid\";\n",
-        )
-        .unwrap();
-        let src = r#"import asPartOf "middle.spar";"#;
-        let mut program = parse_src(src);
-        let mut loader = ImportLoader::new(dir.path());
-        expand_imports(&mut program, &mut loader).expect("expand must succeed");
-
-        assert!(
-            program
-                .items
-                .iter()
-                .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")),
-            "transitively-included file's declarations must flatten in too"
-        );
-        assert!(program
-            .items
-            .iter()
-            .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "name")));
-    }
-
-    #[test]
-    fn expand_imports_as_part_of_detects_direct_cycle() {
-        use std::fs;
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("a.spar"), "import asPartOf \"b.spar\";\n").unwrap();
-        fs::write(dir.path().join("b.spar"), "import asPartOf \"a.spar\";\n").unwrap();
-        let src = r#"import asPartOf "a.spar";"#;
-        let mut program = parse_src(src);
-        let mut loader = ImportLoader::new(dir.path());
-        let err = expand_imports(&mut program, &mut loader).unwrap_err();
-        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("cycle"))),
             "got: {:?}", err);
     }
 

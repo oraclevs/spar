@@ -78,6 +78,11 @@ pub(crate) enum CompiledExpression {
         arguments: Vec<CompiledExpression>,
         span: Span,
     },
+    NativeCall {
+        function: crate::runtime::NativeFunctionId,
+        arguments: Vec<CompiledExpression>,
+        span: Span,
+    },
     Panic {
         message: Box<CompiledExpression>,
         span: Span,
@@ -177,6 +182,7 @@ pub(crate) enum CompiledShellWordPart {
     Literal(String),
     Expression(CompiledExpression),
     Environment(String),
+    CommandSubstitution(CompiledShellExpr),
 }
 
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
@@ -460,6 +466,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
     match expression {
         CompiledExpression::DirectCall { arguments, .. }
         | CompiledExpression::HostCall { arguments, .. }
+        | CompiledExpression::NativeCall { arguments, .. }
         | CompiledExpression::List(arguments, _)
         | CompiledExpression::Operation {
             operands: arguments,
@@ -569,10 +576,16 @@ impl ModuleGraphBuilder {
         let id = ModuleId(self.modules.len() as u32);
         self.identities.insert(cache_identity, id);
         let functions = self.compile_function_headers(id, &checked.program, &checked.symbols);
-        let mut imports: Vec<(String, PathBuf)> = checked
+        let mut imports: Vec<(String, PathBuf, Option<crate::package::ModuleLocator>)> = checked
             .imports
             .iter()
-            .map(|(alias, import)| (alias.clone(), import.resolved_path.clone()))
+            .map(|(alias, import)| {
+                (
+                    alias.clone(),
+                    import.resolved_path.clone(),
+                    import.locator.clone(),
+                )
+            })
             .collect();
         imports.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -584,7 +597,7 @@ impl ModuleGraphBuilder {
             functions,
         });
 
-        for (alias, path) in imports {
+        for (alias, path, scoped_locator) in imports {
             let module_id = if let Some(existing) = self
                 .identities
                 .get(&path.canonicalize().unwrap_or_else(|_| path.clone()))
@@ -605,6 +618,7 @@ impl ModuleGraphBuilder {
                         .to_path_buf(),
                     source_path: Some(path.clone()),
                     evaluate: false,
+                    locator: scoped_locator,
                     ..self.options.clone()
                 };
                 let compilation = Compiler::new(import_options).compile(&source);

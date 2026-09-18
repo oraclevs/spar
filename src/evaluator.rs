@@ -227,6 +227,7 @@ struct ImportedProgram {
     program: Program,
     symbols: SymbolTable,
     imports: HashMap<String, ImportedProgram>,
+    base_dir: std::path::PathBuf,
 }
 
 pub struct Evaluator {
@@ -242,6 +243,8 @@ pub struct Evaluator {
     warnings: Vec<String>,
     imported_programs: HashMap<String, ImportedProgram>,
     hosts: crate::host::HostRegistry,
+    natives: crate::runtime::NativeRegistry,
+    runtime_context: crate::runtime::RuntimeContext,
     effect_ledger: Option<crate::session::EffectLedger>,
     next_promise_id: u64,
     pending_promises: Vec<PendingPromise>,
@@ -250,6 +253,8 @@ pub struct Evaluator {
 fn build_imported_programs(
     loaded: &HashMap<String, crate::loader::LoadedImport>,
     _base_dir: &std::path::Path,
+    hosts: &crate::host::HostRegistry,
+    natives: &crate::runtime::NativeRegistry,
 ) -> Result<HashMap<String, ImportedProgram>, Vec<SparError>> {
     let mut visiting = Vec::new();
     let mut cache = HashMap::new();
@@ -258,18 +263,28 @@ fn build_imported_programs(
         .map(|(alias, import)| {
             // `resolved_path` is already the right file — a plain
             // filesystem join for an ordinary import, or a package
-            // store snapshot path for a package-aware bare import — so
+            // store/live path for an explicit package import — so
             // this never re-derives it from `base_dir`/`import.path`.
-            load_imported_program(&import.resolved_path, &mut visiting, &mut cache)
-                .map(|program| (alias.clone(), program))
+            load_imported_program(
+                &import.resolved_path,
+                import.locator.as_ref(),
+                &mut visiting,
+                &mut cache,
+                hosts,
+                natives,
+            )
+            .map(|program| (alias.clone(), program))
         })
         .collect()
 }
 
 fn load_imported_program(
     path: &std::path::Path,
+    locator: Option<&crate::package::ModuleLocator>,
     visiting: &mut Vec<std::path::PathBuf>,
     cache: &mut HashMap<std::path::PathBuf, ImportedProgram>,
+    hosts: &crate::host::HostRegistry,
+    natives: &crate::runtime::NativeRegistry,
 ) -> Result<ImportedProgram, Vec<SparError>> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(program) = cache.get(&canonical) {
@@ -318,27 +333,47 @@ fn load_imported_program(
                 span: Span::dummy(),
             }]
         })?;
+    if crate::stdlib::is_bundled_std_path(path) {
+        crate::loader::mark_program_trusted_native(&mut program);
+    }
     let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut expand_loader = crate::loader::ImportLoader::new(base_dir);
-    crate::loader::expand_imports(&mut program, &mut expand_loader)?;
     let mut import_loader = crate::loader::ImportLoader::new(base_dir);
+    if let Some(locator) = locator {
+        expand_loader = expand_loader.with_locator(locator.clone());
+        import_loader = import_loader.with_locator(locator.clone());
+    }
+    crate::loader::expand_imports(&mut program, &mut expand_loader)?;
     let loaded = crate::loader::collect_imports(&program, &mut import_loader)?;
 
     visiting.push(canonical.clone());
     let imports = loaded
         .iter()
         .map(|(alias, import)| {
-            load_imported_program(&import.resolved_path, visiting, cache)
-                .map(|program| (alias.clone(), program))
+            load_imported_program(
+                &import.resolved_path,
+                import.locator.as_ref(),
+                visiting,
+                cache,
+                hosts,
+                natives,
+            )
+            .map(|program| (alias.clone(), program))
         })
         .collect::<Result<HashMap<_, _>, _>>();
     visiting.pop();
     let imports = imports?;
-    let symbols = crate::resolver::Resolver::resolve_with_imports(&program, &loaded)?;
+    let symbols = crate::resolver::Resolver::resolve_with_imports_hosts_and_natives(
+        &program,
+        &loaded,
+        hosts.clone(),
+        natives.clone(),
+    )?;
     let imported = ImportedProgram {
         program,
         symbols,
         imports,
+        base_dir: base_dir.to_path_buf(),
     };
     cache.insert(canonical, imported.clone());
     Ok(imported)
@@ -359,6 +394,8 @@ impl Evaluator {
             warnings: Vec::new(),
             imported_programs: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
+            natives: crate::stdlib::native_registry(),
+            runtime_context: crate::runtime::RuntimeContext::for_base_dir(std::path::Path::new(".")),
             effect_ledger: None,
             next_promise_id: 1,
             pending_promises: Vec::new(),
@@ -370,6 +407,16 @@ impl Evaluator {
     /// are unaffected.
     pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
         self.hosts = hosts;
+        self
+    }
+
+    pub fn with_natives(mut self, natives: crate::runtime::NativeRegistry) -> Self {
+        self.natives = natives;
+        self
+    }
+
+    pub fn with_runtime_context(mut self, context: crate::runtime::RuntimeContext) -> Self {
+        self.runtime_context = context;
         self
     }
 
@@ -412,9 +459,31 @@ impl Evaluator {
         hosts: crate::host::HostRegistry,
         effect_ledger: Option<crate::session::EffectLedger>,
     ) -> Result<EvalResult, Vec<SparError>> {
-        let imported = build_imported_programs(loaded, base_dir)?;
+        Self::evaluate_with_imports_base_effects_and_natives(
+            program,
+            symbols,
+            loaded,
+            base_dir,
+            hosts,
+            crate::stdlib::native_registry(),
+            effect_ledger,
+        )
+    }
+
+    pub(crate) fn evaluate_with_imports_base_effects_and_natives(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        hosts: crate::host::HostRegistry,
+        natives: crate::runtime::NativeRegistry,
+        effect_ledger: Option<crate::session::EffectLedger>,
+    ) -> Result<EvalResult, Vec<SparError>> {
+        let imported = build_imported_programs(loaded, base_dir, &hosts, &natives)?;
         let mut ev = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
+            .with_natives(natives)
+            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
             .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         let result = ev.run();
@@ -434,11 +503,14 @@ impl Evaluator {
         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
         base_dir: &std::path::Path,
         hosts: crate::host::HostRegistry,
+        natives: crate::runtime::NativeRegistry,
         effect_ledger: Option<crate::session::EffectLedger>,
     ) -> Result<(EvalResult, Vec<PendingPromise>), Vec<SparError>> {
-        let imported = build_imported_programs(loaded, base_dir)?;
+        let imported = build_imported_programs(loaded, base_dir, &hosts, &natives)?;
         let mut evaluator = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
+            .with_natives(natives)
+            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
             .with_effect_ledger(effect_ledger);
         evaluator.imported_programs = imported;
         match evaluator.run() {
@@ -594,9 +666,12 @@ impl Evaluator {
         hosts: crate::host::HostRegistry,
         effect_ledger: Option<crate::session::EffectLedger>,
     ) -> Result<(EvalResult, ConfigValue), Vec<SparError>> {
-        let imported = build_imported_programs(loaded, base_dir)?;
+        let natives = crate::stdlib::native_registry();
+        let imported = build_imported_programs(loaded, base_dir, &hosts, &natives)?;
         let mut ev = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
+            .with_natives(natives)
+            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
             .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         match ev.run() {
@@ -1063,6 +1138,26 @@ impl Evaluator {
                     Ok(items[i as usize].clone())
                 }
             }
+            (ConfigValue::Section(mut fields), ConfigValue::Int(i)) => {
+                let Some(ConfigValue::List(items)) = fields.remove("values") else {
+                    return Err(EvalErr::TypeMismatch {
+                        expected: "list or Bytes",
+                        got: "section",
+                    });
+                };
+                if i < 0 || i as usize >= items.len() {
+                    Err(EvalErr::CyclicRef {
+                        name: format!(
+                            "index {} out of bounds for Bytes of length {}",
+                            i,
+                            items.len()
+                        ),
+                        span: span.clone(),
+                    })
+                } else {
+                    Ok(items[i as usize].clone())
+                }
+            }
             (_, iv) => Err(EvalErr::TypeMismatch {
                 expected: "list[int]",
                 got: iv.type_name(),
@@ -1116,10 +1211,11 @@ impl Evaluator {
                 let op = op.clone();
                 self.eval_binop(&op, local_scope)
             }
-            Expr::Call { name, args, .. } => {
+            Expr::Call { name, args, span, .. } => {
                 let name = name.clone();
                 let args = args.clone();
-                self.eval_call(&name, &args, local_scope)
+                let span = span.clone();
+                self.eval_call(&name, &args, &span, local_scope)
             }
             Expr::Unary { op, operand, .. } => {
                 let operand = operand.clone();
@@ -1339,6 +1435,8 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.natives = self.natives.clone();
+                    sub.runtime_context = crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
                     sub.effect_ledger = self.effect_ledger.clone();
                     let result = if imported
                         .symbols
@@ -1390,6 +1488,8 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols.clone(), imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.natives = self.natives.clone();
+                    sub.runtime_context = crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
                     sub.effect_ledger = self.effect_ledger.clone();
 
                     if imported.symbols.enums.contains_key(rest[0].as_str()) {
@@ -2004,6 +2104,7 @@ impl Evaluator {
         &mut self,
         name: &str,
         args: &[CallArg],
+        call_span: &Span,
         caller_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
         if name == "panic" {
@@ -2066,10 +2167,27 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.natives = self.natives.clone();
+                    // Imported functions execute in the caller's runtime session. Moving the
+                    // context (rather than creating a fresh one rooted at the imported file)
+                    // preserves cwd, environment, redirected IO, resources, and cancellation.
+                    // Any intentional context mutations performed by the function therefore
+                    // remain visible to its caller.
+                    let caller_context = std::mem::replace(
+                        &mut self.runtime_context,
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir),
+                    );
+                    sub.runtime_context = caller_context;
                     sub.effect_ledger = self.effect_ledger.clone();
                     sub.call_depth = self.call_depth;
-                    sub.eval_default_args(&fd, &mut local_scope)?;
-                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
+                    let result = (|| {
+                        sub.eval_default_args(&fd, &mut local_scope)?;
+                        sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)
+                    })();
+                    self.runtime_context = std::mem::replace(
+                        &mut sub.runtime_context,
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir),
+                    );
                     self.absorb_diagnostics(&mut sub);
                     let result = result?.into_return().unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
@@ -2142,10 +2260,27 @@ impl Evaluator {
                     let mut sub = Evaluator::new(imported.symbols, imported.program);
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
+                    sub.natives = self.natives.clone();
+                    // Imported functions execute in the caller's runtime session. Moving the
+                    // context (rather than creating a fresh one rooted at the imported file)
+                    // preserves cwd, environment, redirected IO, resources, and cancellation.
+                    // Any intentional context mutations performed by the function therefore
+                    // remain visible to its caller.
+                    let caller_context = std::mem::replace(
+                        &mut self.runtime_context,
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir),
+                    );
+                    sub.runtime_context = caller_context;
                     sub.effect_ledger = self.effect_ledger.clone();
                     sub.call_depth = self.call_depth;
-                    sub.eval_default_args(&fd, &mut local_scope)?;
-                    let result = sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope);
+                    let result = (|| {
+                        sub.eval_default_args(&fd, &mut local_scope)?;
+                        sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)
+                    })();
+                    self.runtime_context = std::mem::replace(
+                        &mut sub.runtime_context,
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir),
+                    );
                     self.absorb_diagnostics(&mut sub);
                     let result = result?.into_return().unwrap_or(ConfigValue::Int(0));
                     self.call_depth -= 1;
@@ -2164,6 +2299,35 @@ impl Evaluator {
                 return host_fn.call(&ordered).map_err(|e| EvalErr::Host {
                     message: e.to_string(),
                 });
+            }
+            if let Some(signature) = self
+                .symbols
+                .natives
+                .get(&(ns.to_string(), fn_name.to_string()))
+                .cloned()
+            {
+                let bound = self.eval_explicit_args(args, caller_scope)?;
+                let ordered = signature
+                    .params
+                    .iter()
+                    .map(|(param_name, _)| {
+                        bound
+                            .get(param_name)
+                            .cloned()
+                            .map(crate::runtime::Value::from_config)
+                            .ok_or_else(|| EvalErr::Host {
+                                message: format!("missing native argument '{param_name}'"),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.call_depth -= 1;
+                return self
+                    .natives
+                    .call(signature.id, &mut self.runtime_context, &ordered, call_span)
+                    .and_then(|value| value.try_into_config(call_span))
+                    .map_err(|error| EvalErr::Host {
+                        message: error.to_string(),
+                    });
             }
 
             self.call_depth -= 1;

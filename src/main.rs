@@ -589,8 +589,8 @@ fn use_stdout_color() -> bool {
 }
 
 /// Builds offline compile options for a source path. When the source belongs
-/// to a Spar package project with an existing lockfile, bare imports resolve
-/// through that lock and the durable global store. No provider/network code
+/// to a Spar package project with an existing lockfile, explicit `import pkg`
+/// requests resolve through that lock and the durable global store. No provider/network code
 /// is involved in ordinary language or task commands.
 fn compile_options_for_path(path: &Path) -> Result<CompileOptions, String> {
     let mut options = CompileOptions::for_path(path);

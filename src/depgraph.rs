@@ -63,8 +63,8 @@ pub fn topological_sort(graph: &DepGraph) -> Result<Vec<DeclId>, Vec<DeclId>> {
     }
 }
 
-/// Cross-file cycle detection for `import asPartOf`. `stack` is the chain of
-/// files currently being expanded (outermost first); returns the cycle
+/// Cross-file cycle detection helper. `stack` is the chain of files
+/// currently being loaded (outermost first); returns the cycle
 /// (stack-suffix + the repeated candidate) if `candidate` is already on it.
 pub fn find_cycle_in_stack(
     stack: &[std::path::PathBuf],

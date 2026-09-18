@@ -1,7 +1,7 @@
 //! `spar.package.spar` — the project manifest, written in Spar itself.
 //!
-//! Deliberately restricted: exactly `[Package]`, `[Dependencies]`, and an
-//! optional `[Overrides]` section, each holding only literal string
+//! Deliberately restricted: exactly `struct Package`, `struct Dependencies`, and an
+//! optional `struct Overrides` declaration, each holding only literal string
 //! fields (no interpolation, no function calls, no imports). Parsing a
 //! manifest never runs the resolver, type checker, or evaluator — it's a
 //! plain AST walk over the lexer/parser output, so it's bootstrap-safe
@@ -100,7 +100,7 @@ impl PackageManifest {
         }
 
         let fields =
-            package_fields.ok_or_else(|| manifest_err(path, "missing [Package] section"))?;
+            package_fields.ok_or_else(|| manifest_err(path, "missing Package declaration"))?;
         if let Some(field) = fields
             .keys()
             .find(|field| !matches!(field.as_str(), "name" | "version" | "kind" | "entry"))
@@ -160,6 +160,15 @@ impl PackageManifest {
             None => PathBuf::from(kind.conventional_entry()),
         };
 
+        if dependencies.contains_key(crate::stdlib::STD_PACKAGE_NAME)
+            || overrides.contains_key(crate::stdlib::STD_PACKAGE_NAME)
+        {
+            return Err(manifest_err(
+                path,
+                "dependency alias 'std' is reserved for Spar's bundled standard library and must not be declared",
+            ));
+        }
+
         for (alias, request) in dependencies.iter().chain(overrides.iter()) {
             if alias.is_empty() {
                 return Err(manifest_err(path, "a dependency alias cannot be empty"));
@@ -211,18 +220,18 @@ impl PackageManifest {
     /// `spar.package.lock.spar` is.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str("[Package] -> SparPackage {\n");
-        out.push_str(&format!("    name: \"{}\";\n", escape(&self.name)));
-        out.push_str(&format!("    version: \"{}\";\n", self.version));
-        out.push_str(&format!("    kind: \"{}\";\n", self.kind.as_str()));
+        out.push_str("struct Package: SparPackage {\n");
+        out.push_str(&format!("    name = \"{}\";\n", escape(&self.name)));
+        out.push_str(&format!("    version = \"{}\";\n", self.version));
+        out.push_str(&format!("    kind = \"{}\";\n", self.kind.as_str()));
         out.push_str(&format!(
-            "    entry: \"{}\";\n",
+            "    entry = \"{}\";\n",
             escape(&self.entry.to_string_lossy())
         ));
         out.push_str("};\n");
 
         if !self.dependencies.is_empty() {
-            out.push_str("\n[Dependencies] {\n");
+            out.push_str("\nstruct Dependencies {\n");
             for (alias, request) in &self.dependencies {
                 out.push_str(&format!("    {alias}: str = \"{}\";\n", escape(request)));
             }
@@ -230,7 +239,7 @@ impl PackageManifest {
         }
 
         if !self.overrides.is_empty() {
-            out.push_str("\n[Overrides] {\n");
+            out.push_str("\nstruct Overrides {\n");
             for (alias, request) in &self.overrides {
                 out.push_str(&format!("    {alias}: str = \"{}\";\n", escape(request)));
             }
@@ -265,7 +274,7 @@ fn is_valid_package_name(name: &str) -> bool {
 fn unsupported(path: &Path) -> PackageError {
     manifest_err(
         path,
-        "manifest may contain only literal [Package], [Dependencies], and [Overrides] sections",
+        "manifest may contain only literal Package, Dependencies, and Overrides declarations",
     )
 }
 

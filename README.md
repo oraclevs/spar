@@ -685,16 +685,18 @@ struct Dependencies {
 };
 ```
 
-Import a dependency exactly like a local file, by its declared alias instead of a path:
+Import a dependency explicitly with `import pkg`. Local modules keep the normal `import` form, and local `.spar` extensions may be omitted:
 
 ```spar
-import "http" as http;
-import { get, post } from "http";
+import { helper } from "./utils/helper";
+import pkg "http" as http;
+import pkg { get, post } from "http";
+import pkg { Client } from "http/client";
 ```
 
 The exact filename activates Spar's built-in `SparPackage` type: `spar check` and `spar-ls` validate required fields and offer field/kind completions without copying a type into each project. `Dependencies` and `Overrides` remain open alias maps, but every value is validated as a literal package request; overrides must use `path:`.
 
-`spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.package.lock.spar`. The generated lock is typed Spar source (`[Lock] -> SparPackageLock`), not TOML, and records exact graph edges, remote commits, and integrity identities. Commit it to version control; don't hand-edit it.
+`spar init` scaffolds a manifest and entry file; `spar add <alias> <request>` resolves a dependency (`github:owner/repo@1.4.0`, `github:owner/repo#branch`, or `path:../local`) and locks it into `spar.package.lock.spar`. The generated lock is typed Spar source (`struct Lock: SparPackageLock`), not TOML, and records exact graph edges, remote commits, and integrity identities. Commit it to version control; don't hand-edit it.
 
 `spar install` materializes every locked dependency from its exact recorded revision — never re-resolving a version requirement or branch, so an upstream tag moving after you've locked it can't silently change what gets installed — and `spar install --offline` fails clearly instead of touching the network if anything's still missing. `spar update [alias]` is the explicit, opposite operation: re-resolve against the manifest's current requests. `spar remove <alias>` drops a dependency and re-locks. `spar tree` prints the resolved dependency tree.
 

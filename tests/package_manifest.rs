@@ -160,3 +160,20 @@ fn invalid_dependency_request_syntax_is_reported_at_parse_time() {
         "{error}"
     );
 }
+
+#[test]
+fn std_dependency_alias_is_reserved() {
+    let source = r#"
+        struct Package: SparPackage {
+            name = "app";
+            version = "1.0.0";
+            kind = "application";
+        };
+        struct Dependencies {
+            std: str = "path:../std";
+        };
+    "#;
+    let error = PackageManifest::parse(source, Path::new("spar.package.spar")).unwrap_err();
+    assert!(error.to_string().contains("reserved"), "{error}");
+    assert!(error.to_string().contains("std"), "{error}");
+}

@@ -6,25 +6,25 @@ section for a quick tour.
 
 ## Manifest
 
-`spar.package.spar`, written in Spar itself, holds exactly three sections —
-`[Package]` (required), `[Dependencies]` (optional), `[Overrides]` (optional)
-— and every field in them must be a literal string: no `${...}`
+`spar.package.spar`, written in Spar itself, holds exactly three metadata structs —
+`Package` (required), `Dependencies` (optional), and `Overrides` (optional) —
+and every field in them must be a literal string: no `${...}`
 interpolation, no function calls, no references to other values. Parsing a
 manifest never runs the resolver, type checker, or evaluator.
 
 ```spar
-[Package] -> SparPackage {
-    name: "my-app";
-    version: "1.0.0";
-    kind: "application";
-    entry: "src/main.spar";
+struct Package: SparPackage {
+    name = "my-app";
+    version = "1.0.0";
+    kind = "application";
+    entry = "src/main.spar";
 };
 
-[Dependencies] {
+struct Dependencies {
     http: str = "github:owner/spar-http@1.4.0";
 };
 
-[Overrides] {
+struct Overrides {
     http: str = "path:../spar-http";
 };
 ```
@@ -37,12 +37,10 @@ authoritative.
 The reserved filename implicitly preloads `SparPackage`; no import or copied
 schema is needed. `spar check` validates the shape, and `spar-ls` exposes its
 fields and allowed `kind` values for completion and hover. The package tools
-emit this typed form. Older unbound `[Package] { ... }` sections are still
-accepted when reading a manifest.
+emit this typed form. Older section-style package manifests remain readable for backward compatibility, but package tools emit the canonical `struct` form.
 
-`[Overrides]` swaps a dependency's resolution for local development without
-touching the declared `[Dependencies]` entry — every alias in `[Overrides]`
-must already exist in `[Dependencies]`.
+`Overrides` swaps a dependency's resolution for local development without
+touching the declared `Dependencies` entry — every alias in `Overrides` must already exist in `Dependencies`.
 
 ## Dependency requests
 
@@ -56,20 +54,26 @@ must already exist in `[Dependencies]`.
 
 ## Imports
 
-No new import syntax. A filesystem-like string (starts with `.`/`/`, or ends
-in `.spar`) resolves exactly as it always has. A bare word resolves through
-the current project's `[Dependencies]`/lockfile instead:
+Module imports and package imports are explicit and never guessed. Local Spar
+modules use normal `import`; `.spar` is optional because the resolver already
+knows the source extension. Dependency packages use `import pkg` and resolve
+through the current package's `Dependencies`/lockfile edges:
 
 ```spar
-import "http" as http;
-import { get, post } from "http";
+import { helper } from "./utils/helper";
+import pkg "http" as http;
+import pkg { get, post } from "http";
+import pkg { Client } from "http/client";
 ```
+
+A normal `import` never falls back to a package dependency. This keeps module
+paths and package aliases unambiguous.
 
 ## Lockfile and global store
 
 `spar add`/`spar install`/`spar update` write `spar.package.lock.spar` — the
 exact resolved dependency graph as typed Spar source, sorted deterministically
-so diffs stay readable. Its root is `[Lock] -> SparPackageLock`; built-in
+so diffs stay readable. Its root is `struct Lock: SparPackageLock`; built-in
 `SparLockedPackage` and `SparLockedDependency` shapes validate package
 identities and graph edges. Commit it to version control; you shouldn't need
 to hand-edit this generated file.
@@ -112,8 +116,6 @@ scripts (`postinstall` and friends don't exist here), and no native
 
 ## Deliberately out of scope for this phase
 
-- A first-party standard library package (the package manager and host
-  registry make one possible; building it is a separate project).
 - Package sources other than GitHub and local paths (the `PackageSource`
   abstraction has room for a future `git:`/`gitlab:`/registry provider).
 - Partial re-resolution (`spar update <alias>` re-resolves the whole graph

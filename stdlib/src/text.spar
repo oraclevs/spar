@@ -1,0 +1,35 @@
+function trim(value: str) -> str {
+    return nativeText::trim(value: value);
+};
+
+function lower(value: str) -> str {
+    return nativeText::lower(value: value);
+};
+
+function upper(value: str) -> str {
+    return nativeText::upper(value: value);
+};
+
+function contains(value: str, needle: str) -> bool {
+    return nativeText::contains(value: value, needle: needle);
+};
+
+function startsWith(value: str, needle: str) -> bool {
+    return nativeText::startsWith(value: value, needle: needle);
+};
+
+function endsWith(value: str, needle: str) -> bool {
+    return nativeText::endsWith(value: value, needle: needle);
+};
+
+function replace(value: str, from: str, to: str) -> str {
+    return nativeText::replace(value: value, from: from, to: to);
+};
+
+function split(value: str, separator: str) -> [str] {
+    return nativeText::split(value: value, separator: separator);
+};
+
+function join(values: [str], separator: str) -> str {
+    return nativeText::join(values: values, separator: separator);
+};

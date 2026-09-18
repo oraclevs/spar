@@ -1,0 +1,20 @@
+async function all<T>(promises: [Promise<T>]) -> [T] {
+    return for promise in promises { await promise };
+};
+
+async function race<T>(promises: [Promise<T>]) -> T {
+    return nativeAsync::race(promises: promises);
+};
+
+async function timeout<T>(promise: Promise<T>, millis: int) -> T {
+    return nativeAsync::timeout(promise: promise, millis: millis);
+};
+
+async function resolve<T>(value: T) -> T {
+    return value;
+};
+
+async function delay(millis: int) -> void {
+    nativeTime::sleepMillis(millis: millis);
+    return;
+};

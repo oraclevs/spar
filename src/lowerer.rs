@@ -695,6 +695,11 @@ impl FunctionLowerer<'_> {
                     ShellWordPart::Environment(name) => {
                         Ok(CompiledShellWordPart::Environment(name.clone()))
                     }
+                    ShellWordPart::CommandSubstitution(shell) => {
+                        Ok(CompiledShellWordPart::CommandSubstitution(
+                            self.lower_shell(shell)?,
+                        ))
+                    }
                 })
                 .collect::<Result<Vec<_>, SparError>>()?,
             span: word.span.clone(),
@@ -771,6 +776,37 @@ impl FunctionLowerer<'_> {
                 arguments: ordered,
                 span: span.clone(),
             });
+        }
+        if let [namespace, function_name] = segments.as_slice() {
+            if let Some(signature) = self
+                .locals
+                .symbols
+                .natives
+                .get(&(namespace.to_string(), function_name.to_string()))
+                .cloned()
+            {
+                let mut ordered = Vec::with_capacity(signature.params.len());
+                for (parameter_name, _) in &signature.params {
+                    let argument = arguments
+                        .iter()
+                        .find(|argument| &argument.param_name == parameter_name)
+                        .ok_or_else(|| {
+                            internal_lowering(
+                                &format!(
+                                    "native call '{}::{}' is missing checked argument '{}'",
+                                    namespace, function_name, parameter_name
+                                ),
+                                span,
+                            )
+                        })?;
+                    ordered.push(self.lower_expression(&argument.value)?);
+                }
+                return Ok(CompiledExpression::NativeCall {
+                    function: signature.id,
+                    arguments: ordered,
+                    span: span.clone(),
+                });
+            }
         }
         let (namespace, function_name) = segments.split_at(segments.len().saturating_sub(1));
         Ok(CompiledExpression::HostCall {

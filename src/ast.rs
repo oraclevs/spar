@@ -187,6 +187,10 @@ pub enum ShellWordPart {
     Literal(String),
     Expr(Expr),
     Environment(String),
+    /// Native command substitution embedded in one argv word, e.g.
+    /// `"prefix-$(printf value)"`. The result is UTF-8 text and is
+    /// appended to the surrounding word without implicit splitting.
+    CommandSubstitution(ShellExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -267,13 +271,14 @@ pub enum ImportKind {
     Selective(Vec<ImportItem>),
     /// `import type { A, B } from "path";`
     TypeSelective(Vec<ImportItem>),
-    /// `import asPartOf "path";`
-    AsPartOf,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
     pub path: String,
+    /// Explicit package-namespace import (`import pkg ...`). When false,
+    /// the path is resolved strictly as a local/module import.
+    pub package: bool,
     pub kind: ImportKind,
     pub span: Span,
 }
@@ -542,6 +547,10 @@ pub struct FunctionDecl {
     pub body: FunctionBody,
     pub is_async: bool,
     pub is_private: bool,
+    /// Compiler-owned trust marker. Source parsing always sets this false;
+    /// the loader marks functions originating from the bundled std package
+    /// so only trusted library code can call private native capabilities.
+    pub trusted_native: bool,
     pub span: Span,
 }
 

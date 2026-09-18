@@ -24,9 +24,11 @@ pub struct CompileOptions {
     /// Native functions `ns::fn(...)` calls may dispatch to — empty by
     /// default, so every existing caller behaves exactly as before.
     pub hosts: crate::host::HostRegistry,
-    /// Routes bare (non-filesystem-looking) imports through a project's
-    /// resolved package lock/store — `None` by default, so an ordinary
-    /// project with no `spar.package.spar` behaves exactly as before.
+    /// Internal runtime-native capabilities. The default registry contains the
+    /// capabilities required by the bundled standard library.
+    pub natives: crate::runtime::NativeRegistry,
+    /// Resolves explicit `import pkg` requests through a project's package
+    /// lock/store. Ordinary `import` statements remain local modules only.
     pub locator: Option<crate::package::ModuleLocator>,
     /// Optional replay guard for process effects. Ordinary one-shot
     /// compilation leaves this unset; persistent sessions install one
@@ -42,6 +44,7 @@ impl Default for CompileOptions {
             evaluate: true,
             allow_schema_file: true,
             hosts: crate::host::HostRegistry::default(),
+            natives: crate::stdlib::native_registry(),
             locator: None,
             effect_ledger: None,
         }
@@ -149,6 +152,26 @@ impl Compiler {
         };
         program.shebang = shebang;
 
+        let compiling_bundled_std = self
+            .options
+            .source_path
+            .as_deref()
+            .is_some_and(crate::stdlib::is_bundled_std_path);
+        if !compiling_bundled_std {
+            if let Err(errors) = crate::stdlib::inject_prelude(&mut program) {
+                compilation.errors.extend(errors);
+            }
+        }
+
+        if self
+            .options
+            .source_path
+            .as_deref()
+            .is_some_and(crate::stdlib::is_bundled_std_path)
+        {
+            crate::loader::mark_program_trusted_native(&mut program);
+        }
+
         inject_exec_result_type(&mut program);
 
         if let Some((path, kind)) = self
@@ -185,10 +208,11 @@ impl Compiler {
             Err(errors) => compilation.errors.extend(errors),
         }
 
-        let symbols = match Resolver::resolve_with_imports_and_hosts(
+        let symbols = match Resolver::resolve_with_imports_hosts_and_natives(
             &program,
             &compilation.imports,
             self.options.hosts.clone(),
+            self.options.natives.clone(),
         ) {
             Ok(symbols) => symbols,
             Err(errors) => {
@@ -211,12 +235,13 @@ impl Compiler {
         }
 
         if self.options.evaluate && compilation.errors.is_empty() {
-            match Evaluator::evaluate_with_imports_base_and_effects(
+            match Evaluator::evaluate_with_imports_base_effects_and_natives(
                 &program,
                 &symbols,
                 &compilation.imports,
                 &self.options.base_dir,
                 self.options.hosts.clone(),
+                self.options.natives.clone(),
                 self.options.effect_ledger.clone(),
             ) {
                 Ok(result) => {
@@ -456,7 +481,7 @@ fn inject_exec_result_type(program: &mut Program) {
 }
 
 /// Validates a declared `main` function's signature: no parameters, a
-/// return type of `int` or `void`, and not `private`. A program with no
+/// return type of `int`, `void`, or `shell`, and not `private`. A program with no
 /// `main` at all is `Ok(())` here — this only checks the shape of a
 /// declaration that exists; deciding whether Execute mode *requires* one
 /// present is that mode's job (Task 9), not this structural check's.
@@ -523,9 +548,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_entry_accepts_only_zero_argument_int_or_void_main() {
+    fn execute_entry_accepts_zero_argument_int_void_or_shell_main() {
         assert_entry_ok("function main() -> int { return 7; };");
         assert_entry_ok("function main() -> void {};");
+        assert_entry_ok("function main() -> shell { return shell { echo ok; }; };");
         assert_entry_error(
             "function main(x: int) -> int { return x; };",
             "must not declare parameters",

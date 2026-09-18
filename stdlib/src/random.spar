@@ -1,0 +1,20 @@
+function bytes(count: int) -> Bytes {
+    return nativeRandom::bytes(count: count);
+};
+
+function randomInt(min: int, max: int) -> int {
+    return nativeRandom::randomInt(min: min, max: max);
+};
+
+function randomFloat() -> float {
+    return nativeRandom::randomFloat();
+};
+function choose<T>(values: [T]) -> T {
+    var count: int = nativeCore::len(value: values);
+    if count == 0 {
+        panic(message: "cannot choose from an empty list");
+    }
+    var index: int = nativeRandom::randomInt(min: 0, max: count - 1);
+    return values[index];
+};
+

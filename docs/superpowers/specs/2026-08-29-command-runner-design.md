@@ -79,7 +79,7 @@ symbol rules. The type checker requires scalar parameter types, string `cwd` and
 lowerer converts evaluated Spar values and validated CLI arguments to runner IR.
 
 Tasks follow existing import expansion. Public tasks may be selected or merged
-with `asPartOf`; aliased imports do not invent a second task namespace in V1.
+with selective imports; aliased imports do not invent a second task namespace in V1.
 
 ## Runner behavior
 

@@ -1,8 +1,7 @@
 //! Spar's package manager: manifests, lockfiles, the global store, and
-//! GitHub/local dependency resolution. Reuses ordinary Spar imports for
-//! package-aware code (`import "http" as http;` resolves through the
-//! current project's lockfile when `"http"` isn't a filesystem path) —
-//! no new syntax anywhere in this subsystem.
+//! GitHub/local dependency resolution. Package-namespace imports use explicit `import pkg` syntax and resolve
+//! through the current package scope in the lock graph; ordinary `import`
+//! is reserved for source modules/files.
 
 pub mod commands;
 pub mod error;

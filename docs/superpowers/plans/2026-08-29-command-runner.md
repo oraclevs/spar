@@ -144,7 +144,7 @@
 - [ ] Write and observe RED diagnostics for duplicate tasks, duplicate defaults, unknown dependencies, bad metadata types, non-scalar parameters, and task-local unknown names.
 - [ ] Register and resolve tasks and task-local parameters while reusing normal expression resolution.
 - [ ] Type-check metadata and interpolation through existing `SparType`; reject lists/sections as task parameters.
-- [ ] Write import RED tests for selective and `asPartOf` public task behavior, then extend loader match arms without importing Just module semantics.
+- [ ] Write import RED tests for selective public task behavior, then extend loader match arms without importing Just module semantics.
 - [ ] Write the critical RED integration test where a normal Spar value and task argument both reach a command template.
 - [ ] Implement lowering: pre-evaluate ordinary Spar expressions, preserve neutral parameter slots, escape `#{` to literal `${`, and reject unsupported parameter-dependent compound expressions with a precise diagnostic if the existing evaluator cannot represent them safely.
 - [ ] Extend `Compilation` with lowered tasks only when normal compilation succeeds; do not add tasks to emitted JSON.

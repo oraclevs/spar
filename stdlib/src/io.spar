@@ -1,0 +1,41 @@
+function print(message: str = "") -> void {
+    nativeIo::print(message: message);
+    return;
+};
+
+function println(message: str = "") -> void {
+    nativeIo::println(message: message);
+    return;
+};
+
+function eprint(message: str = "") -> void {
+    nativeIo::eprint(message: message);
+    return;
+};
+
+function eprintln(message: str = "") -> void {
+    nativeIo::eprintln(message: message);
+    return;
+};
+
+function readAll() -> str {
+    return nativeIo::readAll();
+};
+
+function readLine() -> str {
+    return nativeIo::readLine();
+};
+
+function readBytes() -> Bytes {
+    return nativeIo::readBytes();
+};
+
+function writeBytes(content: Bytes) -> void {
+    nativeIo::writeBytes(content: content);
+    return;
+};
+
+function writeErrorBytes(content: Bytes) -> void {
+    nativeIo::writeErrorBytes(content: content);
+    return;
+};

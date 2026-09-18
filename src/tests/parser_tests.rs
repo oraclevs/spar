@@ -886,16 +886,10 @@ fn parse_import_type_selective() {
 }
 
 #[test]
-fn parse_import_as_part_of() {
-    let src = r#"import asPartOf "common.spar";"#;
-    let prog = parse_ok(src);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Import(d) => {
-            assert!(matches!(d.kind, crate::ast::ImportKind::AsPartOf));
-            assert_eq!(d.path, "common.spar");
-        }
-        other => panic!("expected TopLevelItem::Import, got {:?}", other),
-    }
+fn parse_import_as_part_of_reports_removed_syntax() {
+    let err = parse_err(r#"import asPartOf "common.spar";"#);
+    assert!(err.contains("asPartOf imports were removed"), "got: {err}");
+    assert!(err.contains("import {"), "got: {err}");
 }
 
 #[test]
@@ -1006,7 +1000,7 @@ fn parse_schema_file_still_rejects_selective_import() {
 }
 
 #[test]
-fn parse_schema_file_still_rejects_as_part_of() {
+fn parse_schema_file_rejects_removed_as_part_of_syntax() {
     let src = concat!("@SchemaFile\n", "import asPartOf \"types.spar\";\n",);
     let _ = parse_err(src);
 }

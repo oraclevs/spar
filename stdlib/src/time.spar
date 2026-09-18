@@ -1,0 +1,29 @@
+function nowMillis() -> int {
+    return nativeTime::nowMillis();
+};
+
+function sleepMillis(millis: int) -> void {
+    nativeTime::sleepMillis(millis: millis);
+    return;
+};
+
+function seconds(value: int) -> int {
+    return value * 1000;
+};
+
+function minutes(value: int) -> int {
+    return value * 60000;
+};
+
+function elapsedMillis(startMillis: int) -> int {
+    return nativeTime::nowMillis() - startMillis;
+};
+
+function formatIso8601(millis: int) -> str {
+    return nativeTime::formatIso8601(millis: millis);
+};
+
+function parseIso8601(value: str) -> int {
+    return nativeTime::parseIso8601(value: value);
+};
+

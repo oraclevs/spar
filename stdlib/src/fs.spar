@@ -1,0 +1,69 @@
+export type [FileMetadata] {
+    size: int;
+    isFile: bool;
+    isDir: bool;
+    modifiedMillis: int;
+};
+
+function readText(path: str) -> str {
+    return nativeFs::readText(path: path);
+};
+
+function writeText(path: str, content: str) -> void {
+    nativeFs::writeText(path: path, content: content);
+    return;
+};
+
+function appendText(path: str, content: str) -> void {
+    nativeFs::appendText(path: path, content: content);
+    return;
+};
+
+function readBytes(path: str) -> Bytes {
+    return nativeFs::readBytes(path: path);
+};
+
+function writeBytes(path: str, content: Bytes) -> void {
+    nativeFs::writeBytes(path: path, content: content);
+    return;
+};
+
+function exists(path: str) -> bool {
+    return nativeFs::exists(path: path);
+};
+
+function isFile(path: str) -> bool {
+    return nativeFs::isFile(path: path);
+};
+
+function isDir(path: str) -> bool {
+    return nativeFs::isDir(path: path);
+};
+
+function metadata(path: str) -> FileMetadata {
+    return nativeFs::metadata(path: path);
+};
+
+function createDir(path: str, recursive: bool) -> void {
+    nativeFs::createDir(path: path, recursive: recursive);
+    return;
+};
+
+function removeFile(path: str) -> void {
+    nativeFs::removeFile(path: path);
+    return;
+};
+
+function removeDir(path: str, recursive: bool) -> void {
+    nativeFs::removeDir(path: path, recursive: recursive);
+    return;
+};
+
+function copy(from: str, to: str) -> int {
+    return nativeFs::copy(from: from, to: to);
+};
+
+function move(from: str, to: str) -> void {
+    nativeFs::move(from: from, to: to);
+    return;
+};

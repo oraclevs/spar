@@ -45,7 +45,7 @@ No generic parameter representation exists. No `async`, `await`, `try`, or `catc
 
 ### Loading and packages
 
-`src/loader.rs` expands selective and `asPartOf` imports, collects aliased imports, validates schemas, and retains source-local spans. `package::ModuleLocator` resolves bare package aliases through the package lock/store. The loader has no trust context and no reserved `std/*`, `shell/*`, or `@native/*` resolution path.
+`src/loader.rs` expands selective imports, collects aliased imports, validates schemas, and retains source-local spans. `package::ModuleLocator` resolves bare package aliases through the package lock/store. The loader has no trust context and no reserved `std/*`, `shell/*`, or `@native/*` resolution path.
 
 ### Type checking
 

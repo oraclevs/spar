@@ -1076,7 +1076,11 @@ fn format_shell_expr(
         out.push('}');
         return;
     }
-    out.push_str("shell {");
+    if execute {
+        out.push('{');
+    } else {
+        out.push_str("shell {");
+    }
     if !shell.statements.is_empty() {
         out.push('\n');
         format_func_stmts(&shell.statements, depth + 1, config, out, true);
@@ -1615,8 +1619,10 @@ mod tests {
     return shell {
         var mut count: int = 0;
         for file in files {
-            echo "${file}";
-            count += 1;
+            for other in files {
+                echo "${file}:${other}";
+                count += 1;
+            }
         }
         echo "${count}";
     };
@@ -1625,7 +1631,7 @@ mod tests {
 
         let formatted = fmt(source);
         assert_eq!(fmt(&formatted), formatted);
-        assert!(formatted.contains("            echo \"${file}\";"));
+        assert!(formatted.contains("                echo \"${file}:${other}\";"));
         assert!(!formatted.contains("            shell {"));
     }
 
@@ -1645,7 +1651,9 @@ mod tests {
     #[test]
     fn format_exec_shell() {
         let source = "function f() -> int {\n    var r: ExecResult = exec shell {\n        true;\n    };\n    return 0;\n};\n";
-        assert_eq!(fmt(source).trim(), source.trim());
+        let expected = "function f() -> int {\n    var r: ExecResult = exec {\n        true;\n    };\n    return 0;\n};\n";
+        assert_eq!(fmt(source).trim(), expected.trim());
+        assert_eq!(fmt(expected), expected);
     }
 
     #[test]
@@ -1661,7 +1669,8 @@ mod tests {
     #[test]
     fn format_inferred_exec_shell_local_preserves_omitted_type() {
         let src = "function f() -> int {\n    var r = exec shell {\n        true;\n    };\n    return r.exitCode;\n};\n";
-        assert_eq!(fmt(src).trim(), src.trim());
+        let expected = "function f() -> int {\n    var r = exec {\n        true;\n    };\n    return r.exitCode;\n};\n";
+        assert_eq!(fmt(src).trim(), expected.trim());
     }
 
     #[test]

@@ -445,6 +445,45 @@ mod tests {
     }
 
     #[test]
+    fn deferred_shell_runs_nested_loops_with_interpolation_and_local_mutation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("nested-loop-output");
+        let source = format!(
+            r#"
+            function writeGrid(items: [str]) -> shell {{
+                return shell {{
+                    var mut count: int = 0;
+                    for outer in items {{
+                        for inner in items {{
+                            printf "%s:%s;" "${{outer}}" "${{inner}}" >> "{}";
+                            count += 1;
+                        }}
+                    }}
+                    printf "%s" "${{count}}" >> "{}";
+                }};
+            }};
+
+            function main() -> shell {{
+                return shell {{
+                    writeGrid(items: ["a", "b"]);
+                }};
+            }};
+            "#,
+            marker.display(),
+            marker.display()
+        );
+
+        let outcome = Engine::default()
+            .execute_source(&source)
+            .expect("nested mixed shell program should execute");
+        assert_eq!(outcome.exit_status, 0);
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "a:a;a:b;b:a;b:b;4"
+        );
+    }
+
+    #[test]
     fn deferred_shell_interpolation_captures_values_and_preserves_one_argument() {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("captured");

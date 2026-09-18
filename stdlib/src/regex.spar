@@ -1,0 +1,19 @@
+function isMatch(pattern: str, text: str) -> bool {
+    return nativeRegex::isMatch(pattern: pattern, text: text);
+};
+
+function find(pattern: str, text: str) -> str {
+    return nativeRegex::find(pattern: pattern, text: text);
+};
+
+function findAll(pattern: str, text: str) -> [str] {
+    return nativeRegex::findAll(pattern: pattern, text: text);
+};
+
+function replace(pattern: str, text: str, replacement: str) -> str {
+    return nativeRegex::replace(pattern: pattern, text: text, replacement: replacement);
+};
+
+function split(pattern: str, text: str) -> [str] {
+    return nativeRegex::split(pattern: pattern, text: text);
+};

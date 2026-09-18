@@ -211,6 +211,8 @@ pub struct SymbolTable {
     /// Registered host functions' signatures, keyed by (namespace, name) —
     /// empty unless the resolver was built with `Resolver::new().with_hosts(...)`.
     pub hosts: HashMap<(String, String), crate::host::HostSignature>,
+    /// Built-in/private runtime-native function signatures.
+    pub natives: HashMap<(String, String), crate::runtime::NativeSignature>,
 }
 
 impl SymbolTable {
@@ -297,9 +299,11 @@ pub struct Resolver {
     loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
     imported_functions: HashMap<String, FunctionEntry>,
     hosts: crate::host::HostRegistry,
+    natives: crate::runtime::NativeRegistry,
     errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
     current_type_parameters: Vec<TypeParameter>,
+    current_native_trusted: bool,
 }
 
 impl Resolver {
@@ -350,11 +354,12 @@ impl Resolver {
 
         let segments: Vec<&str> = name.split("::").collect();
         if segments.len() == 2
-            && self.hosts.get(segments[0], segments[1]).is_some()
+            && (self.hosts.get(segments[0], segments[1]).is_some()
+                || self.natives.get(segments[0], segments[1]).is_some())
             && !arguments.is_empty()
         {
             return Err(SparError::ResolveError {
-                message: format!("host function '{name}' does not accept type arguments"),
+                message: format!("native/host function '{name}' does not accept type arguments"),
                 hint: None,
                 span: span.clone(),
             });
@@ -463,9 +468,11 @@ impl Resolver {
             loaded_exports: HashMap::new(),
             imported_functions: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
+            natives: crate::stdlib::native_registry(),
             errors: Vec::new(),
             current_section: None,
             current_type_parameters: Vec::new(),
+            current_native_trusted: false,
         }
     }
 
@@ -474,6 +481,11 @@ impl Resolver {
     /// `Resolver::new().resolve(...)` call sites are unaffected.
     pub fn with_hosts(mut self, hosts: crate::host::HostRegistry) -> Self {
         self.hosts = hosts;
+        self
+    }
+
+    pub fn with_natives(mut self, natives: crate::runtime::NativeRegistry) -> Self {
+        self.natives = natives;
         self
     }
 
@@ -490,9 +502,20 @@ impl Resolver {
             loaded_exports: exports,
             imported_functions: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
+            // Imported-module resolution is still ordinary Spar resolution.
+            // In particular, bundled std/prelude functions may contain
+            // trusted calls such as `nativeIo::println` or
+            // `nativeCore::len`.  Starting this internal resolver with an
+            // empty registry made those calls appear undefined on code paths
+            // that did not subsequently replace the registry.  Keep the same
+            // default as `Resolver::new()` and `CompileOptions::default()`;
+            // callers that need a custom registry still overwrite it in
+            // `resolve_with_imports_hosts_and_natives`.
+            natives: crate::stdlib::native_registry(),
             errors: Vec::new(),
             current_section: None,
             current_type_parameters: Vec::new(),
+            current_native_trusted: false,
         }
     }
 
@@ -544,6 +567,7 @@ impl Resolver {
                 function_groups: self.function_groups,
                 tasks: self.tasks,
                 hosts: self.hosts.signatures(),
+                natives: self.natives.signatures(),
             })
         } else {
             Err(self.errors)
@@ -562,6 +586,20 @@ impl Resolver {
         loaded: &HashMap<String, LoadedImport>,
         hosts: crate::host::HostRegistry,
     ) -> Result<SymbolTable, Vec<SparError>> {
+        Self::resolve_with_imports_hosts_and_natives(
+            program,
+            loaded,
+            hosts,
+            crate::stdlib::native_registry(),
+        )
+    }
+
+    pub fn resolve_with_imports_hosts_and_natives(
+        program: &Program,
+        loaded: &HashMap<String, LoadedImport>,
+        hosts: crate::host::HostRegistry,
+        natives: crate::runtime::NativeRegistry,
+    ) -> Result<SymbolTable, Vec<SparError>> {
         // Build alias → exported names map
         let exports: HashMap<String, HashSet<String>> = loaded
             .iter()
@@ -570,6 +608,7 @@ impl Resolver {
 
         let mut r = Resolver::with_loaded(exports);
         r.hosts = hosts;
+        r.natives = natives;
         for (alias, loaded_import) in loaded {
             for (name, declaration) in &loaded_import.functions {
                 let entry = r.build_function_entry(declaration);
@@ -593,6 +632,7 @@ impl Resolver {
                 function_groups: r.function_groups,
                 tasks: r.tasks,
                 hosts: r.hosts.signatures(),
+                natives: r.natives.signatures(),
             })
         } else {
             Err(r.errors)
@@ -627,6 +667,40 @@ impl Resolver {
                     format!(
                         "call to host function '{}::{}' is missing required argument '{name}'",
                         host_fn.namespace, host_fn.name
+                    ),
+                    name_span.clone(),
+                );
+            }
+        }
+    }
+
+    fn check_native_call_args(
+        &mut self,
+        module: &str,
+        name: &str,
+        signature: &crate::runtime::NativeSignature,
+        args: &[CallArg],
+        name_span: &Span,
+    ) {
+        let param_names: HashSet<&str> =
+            signature.params.iter().map(|(name, _)| name.as_str()).collect();
+        for arg in args {
+            if !param_names.contains(arg.param_name.as_str()) {
+                self.push_error(
+                    format!(
+                        "native function '{module}::{name}' has no param '{}'",
+                        arg.param_name
+                    ),
+                    arg.param_name_span.clone(),
+                );
+            }
+        }
+        let given: HashSet<&str> = args.iter().map(|arg| arg.param_name.as_str()).collect();
+        for (param_name, _) in &signature.params {
+            if !given.contains(param_name.as_str()) {
+                self.push_error(
+                    format!(
+                        "call to native function '{module}::{name}' is missing required argument '{param_name}'"
                     ),
                     name_span.clone(),
                 );
@@ -944,7 +1018,7 @@ impl Resolver {
 
     fn register_import(&mut self, decl: &ImportDecl) {
         // Schema imports are consumed by the validation pass; Selective /
-        // TypeSelective / AsPartOf imports are already spliced away by
+        // TypeSelective imports are already spliced away by
         // loader::expand_imports before resolve ever runs — only a plain
         // aliased import reaches this function.
         let ImportKind::Aliased(alias) = &decl.kind else {
@@ -1325,6 +1399,8 @@ impl Resolver {
     fn resolve_one_function_body(&mut self, f: &FunctionDecl) -> HashSet<DeclId> {
         let previous_type_parameters =
             std::mem::replace(&mut self.current_type_parameters, f.type_parameters.clone());
+        let previous_native_trusted =
+            std::mem::replace(&mut self.current_native_trusted, f.trusted_native);
         let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         let mut local_names = param_names.clone();
         let mut mutable_names = HashSet::new();
@@ -1360,6 +1436,7 @@ impl Resolver {
         }
         self.collect_closure_deps_stmts(&f.body.stmts, &param_names, &mut deps);
         self.current_type_parameters = previous_type_parameters;
+        self.current_native_trusted = previous_native_trusted;
         deps
     }
 
@@ -1796,6 +1873,20 @@ impl Resolver {
                             }
                         } else if let Some(host_fn) = self.hosts.get(ns, fn_name).cloned() {
                             self.check_host_call_args(&host_fn, args, name_span);
+                            for arg in args {
+                                self.resolve_expr(&arg.value);
+                            }
+                        } else if let Some(signature) = self.natives.signature(ns, fn_name) {
+                            if signature.private && !self.current_native_trusted {
+                                self.push_error(
+                                    format!(
+                                        "private native capability '{ns}::{fn_name}' is available only to trusted standard/host libraries"
+                                    ),
+                                    name_span.clone(),
+                                );
+                            } else {
+                                self.check_native_call_args(ns, fn_name, &signature, args, name_span);
+                            }
                             for arg in args {
                                 self.resolve_expr(&arg.value);
                             }
@@ -2533,6 +2624,52 @@ impl Resolver {
                             }
                             return Ok(());
                         }
+                        if let Some(signature) = self.natives.signature(ns, fn_name) {
+                            if signature.private && !self.current_native_trusted {
+                                return Err(SparError::ResolveError {
+                                    message: format!(
+                                        "private native capability '{ns}::{fn_name}' is available only to trusted standard/host libraries"
+                                    ),
+                                    hint: None,
+                                    span: name_span.clone(),
+                                });
+                            }
+                            let param_names: HashSet<&str> = signature
+                                .params
+                                .iter()
+                                .map(|(name, _)| name.as_str())
+                                .collect();
+                            for arg in args {
+                                if !param_names.contains(arg.param_name.as_str()) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!(
+                                            "native function '{ns}::{fn_name}' has no param '{}'",
+                                            arg.param_name
+                                        ),
+                                        hint: None,
+                                        span: arg.param_name_span.clone(),
+                                    });
+                                }
+                            }
+                            let given: HashSet<&str> =
+                                args.iter().map(|a| a.param_name.as_str()).collect();
+                            for (param_name, _) in &signature.params {
+                                if !given.contains(param_name.as_str()) {
+                                    return Err(SparError::ResolveError {
+                                        message: format!(
+                                            "call to native function '{ns}::{fn_name}' is missing \
+                                             required argument '{param_name}'"
+                                        ),
+                                        hint: None,
+                                        span: name_span.clone(),
+                                    });
+                                }
+                            }
+                            for arg in args {
+                                self.resolve_expr_with_locals(&arg.value, locals)?;
+                            }
+                            return Ok(());
+                        }
                         Err(SparError::ResolveError {
                             message: format!("undefined function '{name}'"),
                             hint: None,
@@ -3083,6 +3220,35 @@ mod tests {
 
     fn has_error(src: &str, fragment: &str) -> bool {
         resolve_err(src).iter().any(|e| e.contains(fragment))
+    }
+
+    #[test]
+    fn default_resolver_paths_keep_bundled_std_native_registry() {
+        let src = r#"
+            function bridge(message: str) -> void {
+                nativeIo::println(message: message);
+            };
+        "#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let mut program = crate::parser::Parser::new(tokens).parse().expect("parse");
+        crate::loader::mark_program_trusted_native(&mut program);
+
+        let direct = Resolver::new()
+            .resolve(&program, &[])
+            .expect("Resolver::new must expose bundled std native signatures");
+        assert!(direct
+            .natives
+            .contains_key(&("nativeIo".to_string(), "println".to_string())));
+
+        let imported = Resolver::resolve_with_imports_and_hosts(
+            &program,
+            &std::collections::HashMap::new(),
+            crate::host::HostRegistry::default(),
+        )
+        .expect("import-aware resolver must expose bundled std native signatures");
+        assert!(imported
+            .natives
+            .contains_key(&("nativeIo".to_string(), "println".to_string())));
     }
 
     #[test]

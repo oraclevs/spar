@@ -1,0 +1,6 @@
+struct Package: SparPackage {
+    name = "std";
+    version = "0.3.0";
+    kind = "library";
+    entry = "src/lib.spar";
+};

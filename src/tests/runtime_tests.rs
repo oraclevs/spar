@@ -1,7 +1,7 @@
 use crate::runtime::execute_self_contained_entry;
-use crate::{ConfigValue, Engine};
+use crate::{Engine, Value};
 
-fn execute(source: &str) -> Result<ConfigValue, Vec<crate::SparError>> {
+fn execute(source: &str) -> Result<Value, Vec<crate::SparError>> {
     let program = Engine::default().compile_source(source)?;
     execute_self_contained_entry(&program)
 }
@@ -20,7 +20,7 @@ fn async_call_is_scheduled_once_and_await_returns_value() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(42));
+    assert_eq!(value, Value::Int(42));
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn async_dependency_chain_completes() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(34));
+    assert_eq!(value, Value::Int(34));
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn awaited_failure_is_caught_by_existing_error_model() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(7));
+    assert_eq!(value, Value::Int(7));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn unawaited_failure_does_not_replace_main_result() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(9));
+    assert_eq!(value, Value::Int(9));
 }
 
 #[test]
@@ -134,19 +134,19 @@ fn unawaited_async_panic_aborts_the_runtime() {
 #[test]
 fn compiled_function_uses_slots_across_nested_control_flow() {
     let value = execute("function main() -> int { var mut total: int = 0; for (index, value) in [2, 4, 6] { if index == 1 { continue; } total = total + value; } return total; };").unwrap();
-    assert_eq!(value, ConfigValue::Int(8));
+    assert_eq!(value, Value::Int(8));
 }
 
 #[test]
 fn compiled_functions_support_recursion_defaults_and_named_arguments() {
     let value = execute("function sum(value: int, carry: int = 0) -> int { if value == 0 { return carry; } return sum(carry: carry + value, value: value - 1); }; function main() -> int { return sum(value: 4); };").unwrap();
-    assert_eq!(value, ConfigValue::Int(10));
+    assert_eq!(value, Value::Int(10));
 }
 
 #[test]
 fn compiled_expressions_build_lists_objects_interpolation_and_comprehensions() {
     let value = execute("type [Result] { label: str; }; function main() -> int { var values: [int] = for value in [1, 2, 3] { value }; var object: Result = { label: \"sum-${values[0] + values[2]}\"; }; if object.label == \"sum-4\" { return 0; } return 1; };").unwrap();
-    assert_eq!(value, ConfigValue::Int(0));
+    assert_eq!(value, Value::Int(0));
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn compiled_try_catch_exposes_error_and_supports_ignored_binding() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(7));
+    assert_eq!(value, Value::Int(7));
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn compiled_try_catch_without_binding_executes_handler() {
         "function main() -> int { try { var broken: int = 1 / 0; } catch { return 9; } return 0; };",
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(9));
+    assert_eq!(value, Value::Int(9));
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn compiled_generic_functions_are_erased_and_reusable() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(7));
+    assert_eq!(value, Value::Int(7));
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn compiled_generic_named_types_substitute_nested_fields() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(9));
+    assert_eq!(value, Value::Int(9));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn compiled_generic_function_can_construct_applied_return_type() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(13));
+    assert_eq!(value, Value::Int(13));
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn compiled_function_group_member_can_be_generic() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(17));
+    assert_eq!(value, Value::Int(17));
 }
 
 #[test]
@@ -261,5 +261,5 @@ fn compiled_generic_calls_specialize_callers_and_recurse_erased() {
         "#,
     )
     .unwrap();
-    assert_eq!(value, ConfigValue::Int(9));
+    assert_eq!(value, Value::Int(9));
 }

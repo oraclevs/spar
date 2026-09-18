@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::compiled::FunctionId;
-use crate::{ConfigValue, PromiseHandle, SparError};
+use crate::{PromiseHandle, SparError, Value};
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeFault {
@@ -34,13 +34,13 @@ impl From<SparError> for RuntimeFault {
 #[derive(Clone, Debug)]
 pub(crate) struct TaskInvocation {
     pub(crate) function: FunctionId,
-    pub(crate) arguments: Vec<ConfigValue>,
+    pub(crate) arguments: Vec<Value>,
 }
 
 enum TaskState {
     Pending(TaskInvocation),
     Running,
-    Ready(Result<ConfigValue, RuntimeFault>),
+    Ready(Result<Value, RuntimeFault>),
     Cancelled,
 }
 
@@ -55,7 +55,7 @@ impl TaskTable {
     pub(crate) fn spawn(
         &mut self,
         function: FunctionId,
-        arguments: Vec<ConfigValue>,
+        arguments: Vec<Value>,
     ) -> PromiseHandle {
         let handle = PromiseHandle::new(self.next_id);
         self.next_id += 1;
@@ -108,7 +108,7 @@ impl TaskTable {
     pub(crate) fn complete(
         &mut self,
         handle: PromiseHandle,
-        result: Result<ConfigValue, RuntimeFault>,
+        result: Result<Value, RuntimeFault>,
     ) {
         self.states.insert(handle, TaskState::Ready(result));
     }
@@ -128,7 +128,7 @@ pub(crate) enum TaskStatus {
     Unknown,
     Pending,
     Running,
-    Ready(Result<ConfigValue, RuntimeFault>),
+    Ready(Result<Value, RuntimeFault>),
     Cancelled,
 }
 
@@ -139,14 +139,14 @@ mod tests {
     #[test]
     fn completed_task_is_started_only_once() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(7), vec![ConfigValue::Int(3)]);
+        let handle = tasks.spawn(FunctionId(7), vec![Value::Int(3)]);
         let invocation = tasks.start(handle).unwrap();
         assert_eq!(invocation.function, FunctionId(7));
-        tasks.complete(handle, Ok(ConfigValue::Int(4)));
+        tasks.complete(handle, Ok(Value::Int(4)));
 
         assert!(matches!(
             tasks.start(handle),
-            Err(TaskStatus::Ready(Ok(ConfigValue::Int(4))))
+            Err(TaskStatus::Ready(Ok(Value::Int(4))))
         ));
     }
 

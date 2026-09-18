@@ -70,9 +70,9 @@ pub struct Lockfile {
 impl Lockfile {
     pub fn to_spar(&self) -> Result<String, PackageError> {
         let mut out = String::from(concat!(
-            "[Lock] -> SparPackageLock {\n",
-            "    formatVersion: 1;\n",
-            "    root: [SparLockedDependency] = [\n",
+            "struct Lock: SparPackageLock {\n",
+            "    formatVersion = 1;\n",
+            "    root: List<SparLockedDependency> = [\n",
         ));
         for (alias, package_id) in &self.root {
             out.push_str(&format!(
@@ -81,7 +81,7 @@ impl Lockfile {
                 escape(package_id)
             ));
         }
-        out.push_str("    ];\n    packages: [SparLockedPackage] = [\n");
+        out.push_str("    ];\n    packages: List<SparLockedPackage> = [\n");
         for (id, package) in &self.packages {
             let (source_kind, source_location, revision) = match &package.source {
                 LockedSource::Github {
@@ -104,7 +104,7 @@ impl Lockfile {
             ] {
                 out.push_str(&format!("            {name}: \"{}\";\n", escape(value)));
             }
-            out.push_str("            dependencies: [SparLockedDependency] = [\n");
+            out.push_str("            dependencies: List<SparLockedDependency> = [\n");
             for (alias, dependency_id) in &package.dependencies {
                 out.push_str(&format!(
                     "                {{ alias: \"{}\"; packageId: \"{}\"; }},\n",
@@ -128,7 +128,7 @@ impl Lockfile {
         let [TopLevelItem::Section(section)] = program.items.as_slice() else {
             return Err(lock_err(
                 path,
-                "lockfile must contain exactly one [Lock] section",
+                "lockfile must contain exactly one `struct Lock: SparPackageLock` declaration",
             ));
         };
         if section.path.as_slice() != ["Lock"]
@@ -143,7 +143,7 @@ impl Lockfile {
         {
             return Err(lock_err(
                 path,
-                "lockfile must use `[Lock] -> SparPackageLock { ... };`",
+                "lockfile must use `struct Lock: SparPackageLock { ... };`",
             ));
         }
 
@@ -547,8 +547,8 @@ mod tests {
         let original = lockfile_in_order(&["a", "b"]);
         let path = Path::new("spar.package.lock.spar");
         let text = original.to_spar().unwrap();
-        assert!(text.starts_with("[Lock] -> SparPackageLock {"));
-        assert!(text.contains("\n    formatVersion: 1;\n    root:"));
+        assert!(text.starts_with("struct Lock: SparPackageLock {"));
+        assert!(text.contains("\n    formatVersion = 1;\n    root: List<SparLockedDependency> ="));
         assert!(!text.contains("[[packages]]"));
         let parsed = Lockfile::parse_spar(&text, path).unwrap();
         assert_eq!(original, parsed);

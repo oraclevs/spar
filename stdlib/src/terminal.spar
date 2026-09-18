@@ -1,0 +1,43 @@
+function isStdoutTty() -> bool {
+    return nativeTerminal::isStdoutTty();
+};
+
+function isStderrTty() -> bool {
+    return nativeTerminal::isStderrTty();
+};
+
+function width() -> int {
+    return nativeTerminal::width();
+};
+
+function height() -> int {
+    return nativeTerminal::height();
+};
+
+function bold(text: str) -> str {
+    return nativeTerminal::style(code: 1, text: text);
+};
+
+function red(text: str) -> str {
+    return nativeTerminal::style(code: 31, text: text);
+};
+
+function green(text: str) -> str {
+    return nativeTerminal::style(code: 32, text: text);
+};
+
+function yellow(text: str) -> str {
+    return nativeTerminal::style(code: 33, text: text);
+};
+
+function blue(text: str) -> str {
+    return nativeTerminal::style(code: 34, text: text);
+};
+
+function clearScreen() -> str {
+    return nativeTerminal::clearScreen();
+};
+
+function moveCursor(row: int, column: int) -> str {
+    return nativeTerminal::moveCursor(row: row, column: column);
+};

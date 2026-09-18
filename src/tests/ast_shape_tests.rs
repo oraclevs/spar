@@ -28,6 +28,7 @@ fn ast_new_types_compile() {
         },
         is_async: false,
         is_private: false,
+        trusted_native: false,
         span: Span::dummy(),
     };
 

@@ -1,0 +1,31 @@
+function join(left: str, right: str) -> str {
+    return nativePath::join(left: left, right: right);
+};
+
+function basename(path: str) -> str {
+    return nativePath::basename(path: path);
+};
+
+function dirname(path: str) -> str {
+    return nativePath::dirname(path: path);
+};
+
+function extension(path: str) -> str {
+    return nativePath::extension(path: path);
+};
+
+function normalize(path: str) -> str {
+    return nativePath::normalize(path: path);
+};
+
+function isAbsolute(path: str) -> bool {
+    return nativePath::isAbsolute(path: path);
+};
+
+function absolute(path: str) -> str {
+    return nativePath::absolute(path: path);
+};
+
+function relative(from: str, to: str) -> str {
+    return nativePath::relative(from: from, to: to);
+};

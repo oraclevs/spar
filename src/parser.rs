@@ -342,29 +342,34 @@ impl Parser {
     fn parse_import(&mut self) -> Result<ImportDecl, SparError> {
         let span = self.peek_span();
         self.expect(&Token::Import)?;
+        let package = if matches!(self.peek(), Token::Ident(name) if name == "pkg") {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // `import schema "path";`
         if matches!(self.peek(), Token::Ident(s) if s == "schema") {
+            if package {
+                return Err(self.error("`import pkg schema` is not supported; schema imports are local modules"));
+            }
             self.advance();
             let path = self.parse_import_path()?;
             self.expect(&Token::Semicolon)?;
             return Ok(ImportDecl {
                 path,
+                package,
                 kind: ImportKind::Schema,
                 span,
             });
         }
 
-        // `import asPartOf "path";`
         if matches!(self.peek(), Token::Ident(s) if s == "asPartOf") {
-            self.advance();
-            let path = self.parse_import_path()?;
-            self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl {
-                path,
-                kind: ImportKind::AsPartOf,
-                span,
-            });
+            return Err(self.error(
+                "`asPartOf` imports were removed; use `import { Name } from \"./module\";` \
+                 for selective imports or `import \"./module\" as alias;` for a module namespace",
+            ));
         }
 
         // `import type { A, B } from "path";`
@@ -376,6 +381,7 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
             return Ok(ImportDecl {
                 path,
+                package,
                 kind: ImportKind::TypeSelective(items),
                 span,
             });
@@ -389,6 +395,7 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
             return Ok(ImportDecl {
                 path,
+                package,
                 kind: ImportKind::Selective(items),
                 span,
             });
@@ -406,6 +413,7 @@ impl Parser {
         self.expect(&Token::Semicolon)?;
         Ok(ImportDecl {
             path,
+            package,
             kind: ImportKind::Aliased(alias),
             span,
         })
@@ -1775,6 +1783,7 @@ impl Parser {
             },
             is_async,
             is_private,
+            trusted_native: false,
             span,
         })
     }
@@ -2501,6 +2510,37 @@ mod tests {
     }
 
     #[test]
+    fn test_package_selective_import_is_explicit() {
+        let item = first_item(r#"import pkg { println } from "std";"#);
+        let TopLevelItem::Import(decl) = item else {
+            panic!("not import")
+        };
+        assert!(decl.package);
+        assert_eq!(decl.path, "std");
+        assert!(matches!(decl.kind, ImportKind::Selective(ref items) if items.len() == 1 && items[0].name == "println"));
+    }
+
+    #[test]
+    fn test_package_submodule_import_keeps_package_intent() {
+        let item = first_item(r#"import pkg { createFile } from "std/fs";"#);
+        let TopLevelItem::Import(decl) = item else {
+            panic!("not import")
+        };
+        assert!(decl.package);
+        assert_eq!(decl.path, "std/fs");
+    }
+
+    #[test]
+    fn test_local_extensionless_import_is_not_a_package() {
+        let item = first_item(r#"import { helper } from "./utils/helper";"#);
+        let TopLevelItem::Import(decl) = item else {
+            panic!("not import")
+        };
+        assert!(!decl.package);
+        assert_eq!(decl.path, "./utils/helper");
+    }
+
+    #[test]
     fn test_import_interpolation_error() {
         let err = parse_err(r#"import "${bad}.spar";"#);
         assert!(
@@ -2928,6 +2968,70 @@ function install(files: [str]) -> shell {
         Parser::new(tokens)
             .parse()
             .expect("native shell blocks must reuse ordinary Spar statements");
+    }
+
+    #[test]
+    fn shell_block_parses_multiline_lists_and_named_calls() {
+        let src = r#"
+function verifyZip(archive: str) -> shell {
+    return shell { unzip -l "${archive}"; };
+};
+
+function main() -> shell {
+    return shell {
+        var files: [str] = [
+            "Cargo.toml",
+            "Cargo.lock",
+            "src/main.rs",
+        ];
+        verifyZip(
+            archive: files[0]
+        );
+    };
+};
+"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens)
+            .parse()
+            .expect("multiline Spar statements inside shell blocks must parse as Spar");
+    }
+
+    #[test]
+    fn shell_block_parses_multiline_native_commands_with_and_without_backslash() {
+        let src = r#"
+function main() -> shell {
+    return shell {
+        printf "%s\\n"
+            one
+            two;
+
+        printf "%s\\n" \\
+            three \\
+            four;
+    };
+};
+"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens)
+            .parse()
+            .expect("native commands may span physical lines until their semicolon");
+    }
+
+    #[test]
+    fn shell_background_command_can_be_followed_by_spar_and_native_statements() {
+        let src = r#"
+function main() -> shell {
+    return shell {
+        sleep 1 &
+        println(message: "background started");
+        echo done;
+    };
+};
+"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens)
+            .parse()
+            .expect("background '&' must terminate its command before the next statement");
     }
 
     #[test]

@@ -1,0 +1,37 @@
+// Opaque child-process handle. Values are created only by spawn(); user-created
+// empty Process objects are rejected by the native provider as invalid handles.
+export type [Process] {};
+
+function args() -> [str] {
+    return nativeProcess::args();
+};
+
+function which(program: str) -> str {
+    return nativeProcess::which(program: program);
+};
+
+function run(program: str, args: [str]) -> ProcessResult {
+    return nativeProcess::run(program: program, args: args);
+};
+
+function spawn(program: str, args: [str]) -> Process {
+    return nativeProcess::spawn(program: program, args: args);
+};
+
+function pid(process: Process) -> int {
+    return nativeProcess::pid(process: process);
+};
+
+function wait(process: Process) -> ProcessStatus {
+    return nativeProcess::wait(process: process);
+};
+
+function kill(process: Process) -> void {
+    nativeProcess::kill(process: process);
+    return;
+};
+
+function exit(code: int) -> void {
+    nativeProcess::exit(code: code);
+    return;
+};

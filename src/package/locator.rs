@@ -1,10 +1,8 @@
-//! Routes a bare (non-filesystem-looking) import string through a
+//! Routes an explicit `import pkg` request through a
 //! project's already-resolved `Lockfile` and `PackageStore` — the piece
-//! that makes `import "http" as http;` mean "the `http` dependency this
-//! project's manifest declared" instead of "a file literally named
-//! `http`". Filesystem-like imports (`./x`, `../x`, `/x`, anything with
-//! a `.spar` suffix) never reach this — `loader.rs` keeps resolving
-//! those exactly as it always has.
+//! that makes `import pkg "http" as http;` resolve the `http` dependency
+//! declared by the current package scope. Ordinary `import` never reaches
+//! this locator; it remains a source-module/file import.
 //!
 //! Deliberately offline: `resolve_import` only ever reads the lockfile
 //! and store already on disk. It never resolves a version requirement,
@@ -20,8 +18,8 @@ use crate::package::store::PackageStore;
 
 #[derive(Clone, Debug)]
 pub struct ModuleLocator {
-    /// The package whose `[Dependencies]` alias edges apply to a bare
-    /// import resolved through this locator — `None` for the root
+    /// The package whose dependency-alias edges apply to an explicit
+    /// `import pkg` resolved through this locator — `None` for the root
     /// project itself, whose edges live at `lockfile.root` rather than
     /// under some `PackageId` in `lockfile.packages`.
     current: Option<PackageId>,
@@ -39,7 +37,7 @@ impl ModuleLocator {
     }
 
     /// A locator for resolving imports *inside* an already-resolved
-    /// dependency (`id`), so its own bare imports follow its own
+    /// dependency (`id`), so its own `import pkg` requests follow its own
     /// `[Dependencies]` edges, not the root project's.
     pub fn for_package(id: PackageId, lockfile: Lockfile, store: PackageStore) -> Self {
         Self {
@@ -49,30 +47,78 @@ impl ModuleLocator {
         }
     }
 
-    /// Resolves `alias` (already known not to look like a filesystem
-    /// path) to that dependency's entry module inside its store
-    /// snapshot. `None` when nothing in the current package's edges
-    /// matches — the caller falls back to treating `alias` as an
-    /// ordinary (and here, nonexistent) filesystem path, which produces
-    /// the same "cannot find import file" diagnostic bare imports
-    /// always have, rather than a separate "unknown package" message.
-    pub fn resolve_import(&self, _base_dir: &Path, alias: &str) -> Option<PathBuf> {
+    /// Resolves a dependency import request to a concrete Spar module.
+    /// `alias` resolves to the dependency entry module. `alias/sub/module`
+    /// resolves relative to the entry module's directory and gains `.spar`
+    /// when omitted. This gives package imports a stable module root without
+    /// exposing the global store layout to source code.
+    pub fn resolve_import(&self, base_dir: &Path, request: &str) -> Option<PathBuf> {
+        self.resolve_import_scoped(base_dir, request)
+            .map(|(path, _)| path)
+    }
+
+    /// Like `resolve_import`, but also returns a locator scoped to the
+    /// resolved dependency. Imported package code must use this scoped
+    /// locator for its own `import pkg ...` statements so transitive
+    /// dependencies are resolved from that package's lockfile edges rather
+    /// than from the root project's aliases.
+    pub fn resolve_import_scoped(
+        &self,
+        _base_dir: &Path,
+        request: &str,
+    ) -> Option<(PathBuf, ModuleLocator)> {
+        let (alias, submodule) = match request.split_once('/') {
+            Some((alias, rest)) => (alias, Some(rest)),
+            None => (request, None),
+        };
+        if alias.is_empty() {
+            return None;
+        }
         let edges = match &self.current {
             None => &self.lockfile.root,
             Some(id) => &self.lockfile.packages.get(id)?.dependencies,
         };
-        let target_id = edges.get(alias)?;
-        let package = self.lockfile.packages.get(target_id)?;
+        let target_id = edges.get(alias)?.clone();
+        let package = self.lockfile.packages.get(&target_id)?;
         let package_root = match &package.source {
-            LockedSource::Github { .. } => self.store.snapshot_path(target_id),
+            LockedSource::Github { .. } => self.store.snapshot_path(&target_id),
             LockedSource::Path { path } => PathBuf::from(path),
         };
-        Some(package_root.join(&package.entry))
+
+        let path = match submodule {
+            None => package_root.join(&package.entry),
+            Some(submodule) => {
+                if submodule.is_empty() {
+                    return None;
+                }
+                let relative = Path::new(submodule);
+                if relative.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                }) {
+                    return None;
+                }
+
+                let entry = Path::new(&package.entry);
+                let module_root = entry.parent().unwrap_or_else(|| Path::new(""));
+                let mut module = module_root.join(relative);
+                if module.extension().is_none() {
+                    module.set_extension("spar");
+                }
+                package_root.join(module)
+            }
+        };
+
+        Some((path, self.for_dependency(target_id)))
     }
 
     /// A locator scoped to one of the current package's own
-    /// dependencies, for recursing into a fetched package's own bare
-    /// imports with the right edges.
+    /// dependencies, for recursing into a fetched package's own `import pkg`
+    /// statements with the right edges.
     pub fn for_dependency(&self, target_id: PackageId) -> Self {
         Self {
             current: Some(target_id),
@@ -129,6 +175,24 @@ mod tests {
             resolved,
             PathBuf::from("/data/spar/store/github-owner-http-abc123/src/lib.spar")
         );
+    }
+
+    #[test]
+    fn package_submodule_resolves_beside_the_entry_and_adds_spar_extension() {
+        let locator = ModuleLocator::for_root(sample_lockfile(), test_store());
+        let resolved = locator
+            .resolve_import(Path::new("."), "http/client")
+            .expect("http/client must resolve");
+        assert_eq!(
+            resolved,
+            PathBuf::from("/data/spar/store/github-owner-http-abc123/src/client.spar")
+        );
+    }
+
+    #[test]
+    fn package_submodule_cannot_escape_the_package_root() {
+        let locator = ModuleLocator::for_root(sample_lockfile(), test_store());
+        assert!(locator.resolve_import(Path::new("."), "http/../secret").is_none());
     }
 
     #[test]

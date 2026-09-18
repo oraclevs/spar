@@ -1665,6 +1665,12 @@ impl<'a> TypeChecker<'a> {
                         .hosts
                         .get(&(segments[0].to_string(), segments[1].to_string()))
                         .map(|host_fn| host_fn.ret.clone())
+                })
+                .or_else(|| {
+                    self.symbols
+                        .natives
+                        .get(&(segments[0].to_string(), segments[1].to_string()))
+                        .map(|native_fn| native_fn.ret.clone())
                 }),
             1 => self.symbols.functions.get(name).map(callable_return_type),
             _ => None,
@@ -2086,6 +2092,35 @@ impl<'a> TypeChecker<'a> {
             return Ok((SparType::Void, vec![("message".to_string(), SparType::Str)]));
         }
         let Some(entry) = self.call_entry(name) else {
+            let segments: Vec<&str> = name.split("::").collect();
+            if let [namespace, function] = segments.as_slice() {
+                if let Some(host) = self
+                    .symbols
+                    .hosts
+                    .get(&(namespace.to_string(), function.to_string()))
+                {
+                    return self.instantiate_external_signature(
+                        &host.ret,
+                        &host.params,
+                        arguments,
+                        locals,
+                        span,
+                    );
+                }
+                if let Some(native) = self
+                    .symbols
+                    .natives
+                    .get(&(namespace.to_string(), function.to_string()))
+                {
+                    return self.instantiate_external_signature(
+                        &native.ret,
+                        &native.params,
+                        arguments,
+                        locals,
+                        span,
+                    );
+                }
+            }
             return self
                 .call_return_type(name)
                 .map(|ret| (ret, Vec::new()))
@@ -2147,6 +2182,44 @@ impl<'a> TypeChecker<'a> {
                 .map(|(parameter_name, ty)| {
                     (parameter_name.clone(), substitute_type(ty, &substitution))
                 })
+                .collect(),
+        ))
+    }
+
+    /// Instantiate type variables appearing in host/native signatures from
+    /// the call-site argument types. Native signatures intentionally do not
+    /// carry a separate generic-parameter declaration; any `TypeParameter`
+    /// in the registered signature is universally quantified for that call.
+    fn instantiate_external_signature(
+        &self,
+        ret: &SparType,
+        params: &[(String, SparType)],
+        arguments: &[CallArg],
+        locals: Option<&HashMap<String, SparType>>,
+        span: &Span,
+    ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
+        let mut substitution = TypeSubstitution::new();
+        for argument in arguments {
+            let Some((_, pattern)) = params
+                .iter()
+                .find(|(parameter_name, _)| parameter_name == &argument.param_name)
+            else {
+                continue;
+            };
+            let actual = match locals {
+                Some(locals) => self.infer_type_with_locals(&argument.value, locals),
+                None => self.infer_type(&argument.value),
+            };
+            if let Some(actual) = actual {
+                unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
+            }
+        }
+
+        Ok((
+            substitute_type(ret, &substitution),
+            params
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_type(ty, &substitution)))
                 .collect(),
         ))
     }
@@ -3740,6 +3813,7 @@ mod tests {
                         function_groups: Default::default(),
                         tasks: Default::default(),
                         hosts: Default::default(),
+                        natives: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -3769,6 +3843,7 @@ mod tests {
                         function_groups: Default::default(),
                         tasks: Default::default(),
                         hosts: Default::default(),
+                        natives: Default::default(),
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(

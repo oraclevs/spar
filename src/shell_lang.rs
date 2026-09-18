@@ -128,9 +128,18 @@ pub(crate) fn parse_command_substitution(
         .map(|position| position + 1)
         .ok_or_else(|| parse_error("unterminated command substitution", start.span.clone()))?;
     let steps = BodyParser::new(&tokens[1..end]).parse()?;
-    if steps.len() != 1 {
+    if steps.is_empty() {
         return Err(parse_error(
-            "command substitution must contain one command or pipeline",
+            "command substitution must contain at least one command or pipeline",
+            start.span.clone(),
+        ));
+    }
+    if steps.iter().any(|(_, step)| match step {
+        ShellStep::Command(command) => command.background,
+        ShellStep::Pipeline(commands) => commands.iter().any(|command| command.background),
+    }) {
+        return Err(parse_error(
+            "background commands are not allowed inside command substitution",
             start.span.clone(),
         ));
     }
@@ -267,6 +276,19 @@ impl<'a> BodyParser<'a> {
             )));
         }
         let program = self.expect_word("expected an executable name")?;
+        if program.text.contains('(') {
+            return Err(parse_error(
+                format!(
+                    "'{}' looks like a Spar function call, not a shell command — function \
+                     calls are not supported inside a native command chain (after ';', '&&', \
+                     or '||'); capture the command's result instead: \
+                     `var ok: str = $(cmd && echo \"true\" || echo \"false\"); \
+                     if ok == \"true\" {{ ... }} else {{ ... }}`",
+                    program.text
+                ),
+                program.span.clone(),
+            ));
+        }
         let start_span = environment
             .first()
             .map(|entry| entry.span.clone())
@@ -475,6 +497,18 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
                 span,
             )?));
             cursor = expression_end + 1;
+        } else if text[dollar..].starts_with("$(") {
+            let Some(end) = command_substitution_end(text, dollar) else {
+                return Err(parse_error(
+                    "unterminated '$(...)' command substitution",
+                    span.clone(),
+                ));
+            };
+            let source = &text[dollar..=end];
+            let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+            let (shell, _) = parse_command_substitution(&tokens)?;
+            parts.push(ShellWordPart::CommandSubstitution(shell));
+            cursor = end + 1;
         } else if text[dollar..].starts_with("$!") || text[dollar..].starts_with("$?") {
             parts.push(ShellWordPart::Environment(
                 text[dollar + 1..dollar + 2].to_string(),
@@ -505,6 +539,55 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
         parts.push(ShellWordPart::Literal(text.to_string()));
     }
     Ok(parts)
+}
+
+/// Returns the byte index of the `)` closing the `$(` at `dollar`.
+/// Quotes and escapes inside the native command are respected and nested
+/// parenthesized text is balanced, so command substitution can safely appear
+/// as one segment of a larger argv word.
+fn command_substitution_end(text: &str, dollar: usize) -> Option<usize> {
+    if !text[dollar..].starts_with("$(") {
+        return None;
+    }
+    let mut depth = 1_u32;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut iter = text[dollar + 2..].char_indices();
+    while let Some((relative, ch)) = iter.next() {
+        let index = dollar + 2 + relative;
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = if quote == Some(ch) {
+                None
+            } else if quote.is_none() {
+                Some(ch)
+            } else {
+                quote
+            };
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_word_expression(source: &str, span: &Span) -> Result<crate::ast::Expr, SparError> {
@@ -648,6 +731,48 @@ mod tests {
         let tokens = Lexer::new("shell { a | }").tokenize().expect("lex failed");
         let err = parse_shell_block(&tokens).expect_err("dangling pipe must fail");
         assert!(err.to_string().contains("pipe"), "got: {err}");
+    }
+
+    #[test]
+    fn command_substitution_accepts_logical_command_chains() {
+        let tokens = Lexer::new("$(test -f file && echo true || echo false)")
+            .tokenize()
+            .expect("lex failed");
+        let (expression, consumed) = super::parse_command_substitution(&tokens)
+            .expect("logical command substitution must parse");
+        assert_eq!(consumed, tokens.len() - 1);
+        assert_eq!(expression.steps.len(), 3);
+        assert!(matches!(expression.steps[0].0, ShellJoin::Always));
+        assert!(matches!(expression.steps[1].0, ShellJoin::OnSuccess));
+        assert!(matches!(expression.steps[2].0, ShellJoin::OnFailure));
+    }
+
+    #[test]
+    fn command_substitution_rejects_background_commands() {
+        let tokens = Lexer::new("$(sleep 1 &)")
+            .tokenize()
+            .expect("lex failed");
+        let error = super::parse_command_substitution(&tokens)
+            .expect_err("background substitution must fail");
+        assert!(error.to_string().contains("background"), "got: {error}");
+    }
+
+    #[test]
+    fn shell_word_supports_embedded_command_substitution() {
+        let expression = parse_block(
+            r#"shell { printf "%s" "prefix-$(printf value)-suffix"; }"#,
+        );
+        let ShellStep::Command(command) = &expression.steps[0].1 else {
+            panic!("expected command")
+        };
+        assert!(matches!(
+            command.args[1].parts.as_slice(),
+            [
+                ShellWordPart::Literal(prefix),
+                ShellWordPart::CommandSubstitution(_),
+                ShellWordPart::Literal(suffix)
+            ] if prefix == "prefix-" && suffix == "-suffix"
+        ));
     }
 
     #[test]

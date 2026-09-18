@@ -1,0 +1,43 @@
+function absInt(value: int) -> int {
+    return nativeMath::absInt(value: value);
+};
+
+function abs(value: float) -> float {
+    return nativeMath::abs(value: value);
+};
+
+function minInt(left: int, right: int) -> int {
+    return nativeMath::minInt(left: left, right: right);
+};
+
+function maxInt(left: int, right: int) -> int {
+    return nativeMath::maxInt(left: left, right: right);
+};
+
+function min(left: float, right: float) -> float {
+    return nativeMath::min(left: left, right: right);
+};
+
+function max(left: float, right: float) -> float {
+    return nativeMath::max(left: left, right: right);
+};
+
+function round(value: float) -> float {
+    return nativeMath::round(value: value);
+};
+
+function floor(value: float) -> float {
+    return nativeMath::floor(value: value);
+};
+
+function ceil(value: float) -> float {
+    return nativeMath::ceil(value: value);
+};
+
+function pow(left: float, right: float) -> float {
+    return nativeMath::pow(left: left, right: right);
+};
+
+function sqrt(value: float) -> float {
+    return nativeMath::sqrt(value: value);
+};

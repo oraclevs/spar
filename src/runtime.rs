@@ -1,5 +1,15 @@
 use std::collections::HashMap;
 
+pub(crate) mod context;
+pub(crate) mod native;
+pub(crate) mod resource;
+pub(crate) mod value;
+
+pub use context::{RuntimeContext, RuntimeInput, RuntimeOutput};
+pub use native::{NativeExecutionKind, NativeFunction, NativeFunctionId, NativeIntrinsic, NativeRegistry, NativeSignature};
+pub use resource::{ResourceId, ResourceTable};
+pub use value::Value;
+
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus, TaskTable};
 use crate::compiled::{
     CompiledExpression, CompiledObjectItem, CompiledProgram, CompiledShellCommand,
@@ -12,7 +22,7 @@ use crate::evaluator::ConfigValue;
 
 #[derive(Clone)]
 pub(crate) struct Frame {
-    slots: Vec<Option<ConfigValue>>,
+    slots: Vec<Option<Value>>,
 }
 
 #[derive(Clone)]
@@ -45,7 +55,7 @@ impl Frame {
         }
     }
 
-    pub fn read(&self, slot: LocalSlot, span: &Span) -> Result<&ConfigValue, SparError> {
+    pub fn read(&self, slot: LocalSlot, span: &Span) -> Result<&Value, SparError> {
         self.slots
             .get(slot.0 as usize)
             .ok_or_else(|| internal_slot_error(slot, "is invalid", span))?
@@ -56,7 +66,7 @@ impl Frame {
     pub fn write(
         &mut self,
         slot: LocalSlot,
-        value: ConfigValue,
+        value: Value,
         span: &Span,
     ) -> Result<(), SparError> {
         let destination = self
@@ -80,7 +90,7 @@ const MAX_CALL_DEPTH: usize = 20;
 #[cfg(test)]
 pub(crate) fn execute_self_contained_entry(
     program: &CompiledProgram,
-) -> Result<ConfigValue, Vec<SparError>> {
+) -> Result<Value, Vec<SparError>> {
     let entry = program.entry_main.ok_or_else(|| {
         vec![SparError::ResolveError {
             message: "no 'main' function found".into(),
@@ -98,6 +108,8 @@ pub(crate) fn execute_self_contained_entry(
         jobs: Vec::new(),
         last_job: None,
         shell_exit: false,
+        shell_cwd: None,
+        context: RuntimeContext::for_base_dir(&program.options.base_dir),
     }
     .run_entry(entry)
     .map_err(|fault| vec![fault.into_error()])
@@ -111,19 +123,23 @@ pub(crate) struct Runtime<'a> {
     shell_depth: usize,
     shell_outcome: Option<crate::evaluator::ShellPlanOutcome>,
     jobs: Vec<spar_process::Job>,
-    last_job: Option<ConfigValue>,
+    last_job: Option<Value>,
     shell_exit: bool,
+    shell_cwd: Option<std::path::PathBuf>,
+    context: RuntimeContext,
 }
 
 impl Drop for Runtime<'_> {
     fn drop(&mut self) {
         self.tasks.cancel_pending();
+        self.context.shutdown();
     }
 }
 
 struct ModuleState {
     results: HashMap<crate::compiled::ModuleId, crate::evaluator::EvalResult>,
     hosts: crate::HostRegistry,
+    natives: NativeRegistry,
     effect_ledger: Option<crate::session::EffectLedger>,
 }
 
@@ -132,15 +148,26 @@ impl ModuleState {
         Self {
             results: HashMap::new(),
             hosts: program.options.hosts.clone(),
+            natives: program.options.natives.clone(),
             effect_ledger: program.options.effect_ledger.clone(),
         }
     }
 }
 
-pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, Vec<SparError>> {
+pub(crate) fn execute_program(program: &CompiledProgram) -> Result<Value, Vec<SparError>> {
+    execute_program_with_context(
+        program,
+        RuntimeContext::for_base_dir(&program.options.base_dir),
+    )
+}
+
+pub(crate) fn execute_program_with_context(
+    program: &CompiledProgram,
+    context: RuntimeContext,
+) -> Result<Value, Vec<SparError>> {
     let entry = program.entry_main.ok_or_else(|| {
         vec![SparError::ResolveError {
-            message: "no 'main' function found — Execute mode requires a zero-argument 'main' returning 'int' or 'void'".into(),
+            message: "no 'main' function found — Execute mode requires a zero-argument 'main' returning 'int', 'void', or 'shell'".into(),
             hint: None,
             span: Span::dummy(),
         }]
@@ -155,16 +182,27 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<ConfigValue, 
         jobs: Vec::new(),
         last_job: None,
         shell_exit: false,
+        shell_cwd: None,
+        context,
     };
     let value = runtime
         .ensure_module(program.entry)
         .and_then(|()| runtime.run_entry(entry))
         .map_err(|fault| vec![fault.into_error()])?;
     match value {
-        ConfigValue::ShellProgram(program) => runtime
+        Value::ShellProgram(program) => runtime
             .execute_shell_program(&program)
-            .map(|outcome| ConfigValue::Int(i64::from(outcome.exit_code)))
+            .map(|outcome| Value::Int(i64::from(outcome.exit_code)))
             .map_err(|fault| vec![fault.into_error()]),
+        Value::Shell(plan) => {
+            let span = runtime
+                .entry_function_span(entry)
+                .unwrap_or_else(Span::dummy);
+            runtime
+                .execute_native_shell_plan(&plan, &span)
+                .map(|outcome| Value::Int(i64::from(outcome.exit_code)))
+                .map_err(|fault| vec![fault.into_error()])
+        }
         other => Ok(other),
     }
 }
@@ -173,11 +211,11 @@ enum RuntimeFlow {
     Normal,
     Break,
     Continue,
-    Return(ConfigValue),
+    Return(Value),
 }
 
 impl Runtime<'_> {
-    fn run_entry(&mut self, entry: FunctionId) -> Result<ConfigValue, RuntimeFault> {
+    fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
             let handle = self.tasks.spawn(entry, Vec::new());
             self.drive_promise(handle, &Span::dummy())
@@ -201,6 +239,16 @@ impl Runtime<'_> {
                     &Span::dummy(),
                 ))
             })
+    }
+
+
+    fn entry_function_span(&self, id: FunctionId) -> Option<Span> {
+        self.program
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.iter())
+            .find(|function| function.id == id)
+            .map(|function| function.span.clone())
     }
 
     fn run_task(
@@ -231,7 +279,7 @@ impl Runtime<'_> {
         &mut self,
         handle: crate::PromiseHandle,
         span: &Span,
-    ) -> Result<ConfigValue, RuntimeFault> {
+    ) -> Result<Value, RuntimeFault> {
         loop {
             match self.tasks.status(handle) {
                 TaskStatus::Pending => {
@@ -263,8 +311,8 @@ impl Runtime<'_> {
     fn call_function(
         &mut self,
         id: FunctionId,
-        arguments: Vec<ConfigValue>,
-    ) -> Result<ConfigValue, RuntimeFault> {
+        arguments: Vec<Value>,
+    ) -> Result<Value, RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(
                 runtime_error("maximum function call depth exceeded", &Span::dummy()).into(),
@@ -289,7 +337,7 @@ impl Runtime<'_> {
             return Err(runtime_error("too many direct-call arguments", &function_span).into());
         }
         self.call_depth += 1;
-        let result: Result<ConfigValue, RuntimeFault> = (|| {
+        let result: Result<Value, RuntimeFault> = (|| {
             let mut frame = Frame::new(slot_count);
             let supplied_count = arguments.len();
             for (slot, value) in parameter_slots.iter().copied().zip(arguments) {
@@ -312,7 +360,7 @@ impl Runtime<'_> {
             }
             match self.execute_statements(&body, &mut frame, module)? {
                 RuntimeFlow::Return(value) => Ok(value),
-                RuntimeFlow::Normal => Ok(ConfigValue::Int(0)),
+                RuntimeFlow::Normal => Ok(Value::Void),
                 RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(
                     "loop control escaped a compiled function",
                     &function_span,
@@ -346,10 +394,10 @@ impl Runtime<'_> {
                     let value = self.eval_expression(expression, frame, module)?;
                     if self.shell_depth > 0 {
                         let outcome = match value {
-                            ConfigValue::Shell(plan) => {
+                            Value::Shell(plan) => {
                                 Some(self.execute_native_shell_plan(&plan, statement_span)?)
                             }
-                            ConfigValue::ShellProgram(program) => {
+                            Value::ShellProgram(program) => {
                                 Some(self.execute_shell_program(&program)?)
                             }
                             _ => None,
@@ -366,8 +414,8 @@ impl Runtime<'_> {
                     else_body,
                     span,
                 } => match self.eval_expression(condition, frame, module)? {
-                    ConfigValue::Bool(true) => self.execute_statements(then_body, frame, module)?,
-                    ConfigValue::Bool(false) => {
+                    Value::Bool(true) => self.execute_statements(then_body, frame, module)?,
+                    Value::Bool(false) => {
                         self.execute_statements(else_body, frame, module)?
                     }
                     value => return Err(type_error("bool", &value, span).into()),
@@ -379,14 +427,14 @@ impl Runtime<'_> {
                     body,
                     span,
                 } => {
-                    let ConfigValue::List(items) = self.eval_expression(iterable, frame, module)?
+                    let Value::List(items) = self.eval_expression(iterable, frame, module)?
                     else {
                         return Err(runtime_error("checked loop received a non-list", span).into());
                     };
                     let mut loop_flow = RuntimeFlow::Normal;
                     for (index, value) in items.into_iter().enumerate() {
                         if let Some(index_slot) = index_slot {
-                            frame.write(*index_slot, ConfigValue::Int(index as i64), span)?;
+                            frame.write(*index_slot, Value::Int(index as i64), span)?;
                         }
                         frame.write(*value_slot, value, span)?;
                         match self.execute_statements(body, frame, module)? {
@@ -402,7 +450,7 @@ impl Runtime<'_> {
                 }
                 CompiledStatement::Return(value, _) => RuntimeFlow::Return(match value {
                     Some(value) => self.eval_expression(value, frame, module)?,
-                    None => ConfigValue::Int(0),
+                    None => Value::Void,
                 }),
                 CompiledStatement::Break(_) => RuntimeFlow::Break,
                 CompiledStatement::Continue(_) => RuntimeFlow::Continue,
@@ -414,7 +462,7 @@ impl Runtime<'_> {
                 } => match self.execute_statements(body, frame, module) {
                     Ok(flow) => flow,
                     Err(RuntimeFault::Raised(error)) => {
-                        let caught = ConfigValue::Error {
+                        let caught = Value::Error {
                             message: error.to_string(),
                             kind: "runtime".into(),
                             code: 1,
@@ -428,6 +476,9 @@ impl Runtime<'_> {
                     Err(fatal @ RuntimeFault::Fatal(_)) => return Err(fatal),
                 },
             };
+            if let Some(code) = self.context.requested_exit() {
+                return Ok(RuntimeFlow::Return(Value::Int(i64::from(code))));
+            }
             if self.shell_exit && self.shell_depth > 0 {
                 return Ok(RuntimeFlow::Normal);
             }
@@ -444,9 +495,9 @@ impl Runtime<'_> {
         expression: &CompiledExpression,
         frame: &mut Frame,
         module: crate::compiled::ModuleId,
-    ) -> Result<ConfigValue, RuntimeFault> {
+    ) -> Result<Value, RuntimeFault> {
         match expression {
-            CompiledExpression::Constant(value, _) => Ok(value.clone()),
+            CompiledExpression::Constant(value, _) => Ok(Value::from_config(value.clone())),
             CompiledExpression::Local(slot, span) => Ok(frame.read(*slot, span)?.clone()),
             CompiledExpression::Global(name, span) => self.read_global(module, name, span),
             CompiledExpression::ImportedValue { module, path, span } => {
@@ -460,30 +511,57 @@ impl Runtime<'_> {
             } => {
                 let values = arguments
                     .iter()
-                    .map(|argument| self.eval_expression(argument, frame, module))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|argument| {
+                        self.eval_expression(argument, frame, module)?
+                            .try_into_config(span)
+                            .map_err(RuntimeFault::from)
+                    })
+                    .collect::<Result<Vec<_>, RuntimeFault>>()?;
                 self.state
                     .as_ref()
                     .ok_or_else(|| module_state_error(span))?
                     .hosts
                     .call(namespace, name, &values)
+                    .map(Value::from_config)
                     .map_err(|error| SparError::EvalError {
                         message: error.to_string(),
                         span: span.clone(),
                     })
                     .map_err(Into::into)
             }
+            CompiledExpression::NativeCall {
+                function,
+                arguments,
+                span,
+            } => {
+                let values = arguments
+                    .iter()
+                    .map(|argument| self.eval_expression(argument, frame, module))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let natives = self
+                    .state
+                    .as_ref()
+                    .ok_or_else(|| module_state_error(span))?
+                    .natives
+                    .clone();
+                if let Some(intrinsic) = natives.intrinsic(*function) {
+                    return self.execute_native_intrinsic(intrinsic, &values, span);
+                }
+                natives
+                    .call(*function, &mut self.context, &values, span)
+                    .map_err(Into::into)
+            }
             CompiledExpression::Panic { message, span } => {
                 let message = self.eval_expression(message, frame, module)?;
-                let ConfigValue::Str(message) = message else {
+                let Value::String(message) = message else {
                     return Err(type_error("str", &message, span).into());
                 };
                 Err(RuntimeFault::Fatal(runtime_error(&message, span)))
             }
-            CompiledExpression::ExecShell(shell) => self.execute_shell(shell),
+            CompiledExpression::ExecShell(shell) => self.execute_shell(shell).map(Value::from_config),
             CompiledExpression::Await { promise, span } => {
                 let value = self.eval_expression(promise, frame, module)?;
-                let ConfigValue::Promise(handle) = value else {
+                let Value::Promise(handle) = value else {
                     return Err(type_error("Promise", &value, span).into());
                 };
                 self.drive_promise(handle, span)
@@ -498,12 +576,12 @@ impl Runtime<'_> {
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 if self.function_is_async(*function)? {
-                    Ok(ConfigValue::Promise(self.tasks.spawn(*function, values)))
+                    Ok(Value::Promise(self.tasks.spawn(*function, values)))
                 } else {
                     self.call_function(*function, values)
                 }
             }
-            CompiledExpression::List(items, _) => Ok(ConfigValue::List(
+            CompiledExpression::List(items, _) => Ok(Value::List(
                 items
                     .iter()
                     .map(|item| self.eval_expression(item, frame, module))
@@ -518,7 +596,7 @@ impl Runtime<'_> {
                                 .insert(name.clone(), self.eval_expression(value, frame, module)?);
                         }
                         CompiledObjectItem::Spread(value) => {
-                            let ConfigValue::Section(fields) =
+                            let Value::Object(fields) =
                                 self.eval_expression(value, frame, module)?
                             else {
                                 return Err(runtime_error(
@@ -531,7 +609,7 @@ impl Runtime<'_> {
                         }
                     }
                 }
-                Ok(ConfigValue::Section(object))
+                Ok(Value::Object(object))
             }
             CompiledExpression::Operation {
                 operation,
@@ -564,10 +642,24 @@ impl Runtime<'_> {
                 let source = self.eval_expression(source, frame, module)?;
                 let index = self.eval_expression(index, frame, module)?;
                 match (source, index) {
-                    (ConfigValue::List(items), ConfigValue::Int(index)) if index >= 0 => Ok(items
+                    (Value::Bytes(items), Value::Int(index)) if index >= 0 => Ok(Value::Int(
+                        i64::from(*items
+                            .get(index as usize)
+                            .ok_or_else(|| runtime_error("byte index is out of bounds", span))?),
+                    )),
+                    (Value::List(items), Value::Int(index)) if index >= 0 => Ok(items
                         .get(index as usize)
                         .cloned()
                         .ok_or_else(|| runtime_error("list index is out of bounds", span))?),
+                    (Value::Object(mut fields), Value::Int(index)) if index >= 0 => {
+                        let Some(Value::List(items)) = fields.remove("values") else {
+                            return Err(runtime_error("checked index received a non-list object", span).into());
+                        };
+                        Ok(items
+                            .get(index as usize)
+                            .cloned()
+                            .ok_or_else(|| runtime_error("byte index is out of bounds", span))?)
+                    }
                     (source, index) => Err(runtime_error(
                         &format!(
                             "checked index received {} and {}",
@@ -582,20 +674,23 @@ impl Runtime<'_> {
             CompiledExpression::Field { base, field, span } => {
                 let base = self.eval_expression(base, frame, module)?;
                 match base {
-                    ConfigValue::Section(fields) => {
+                    Value::Object(fields) => {
                         Ok(fields.get(field).cloned().ok_or_else(|| {
                             runtime_error(&format!("object has no field '{field}'"), span)
                         })?)
                     }
-                    ConfigValue::Error {
+                    Value::Bytes(bytes) if field == "values" => Ok(Value::List(
+                        bytes.into_iter().map(|value| Value::Int(i64::from(value))).collect(),
+                    )),
+                    Value::Error {
                         message,
                         kind,
                         code,
                         cause,
                     } => match field.as_str() {
-                        "message" => Ok(ConfigValue::Str(message)),
-                        "kind" => Ok(ConfigValue::Str(kind)),
-                        "code" => Ok(ConfigValue::Int(code)),
+                        "message" => Ok(Value::String(message)),
+                        "kind" => Ok(Value::String(kind)),
+                        "code" => Ok(Value::Int(code)),
                         "cause" => Ok(cause
                             .map(|value| *value)
                             .ok_or_else(|| runtime_error("error has no cause", span))?),
@@ -614,16 +709,16 @@ impl Runtime<'_> {
                         CompiledStringPart::Expression(value) => {
                             let value = self.eval_expression(value, frame, module)?;
                             match value {
-                                ConfigValue::Str(value) => output.push_str(&value),
-                                ConfigValue::Int(value) => output.push_str(&value.to_string()),
-                                ConfigValue::Float(value) => output.push_str(&value.to_string()),
-                                ConfigValue::Bool(value) => output.push_str(&value.to_string()),
+                                Value::String(value) => output.push_str(&value),
+                                Value::Int(value) => output.push_str(&value.to_string()),
+                                Value::Float(value) => output.push_str(&value.to_string()),
+                                Value::Bool(value) => output.push_str(&value.to_string()),
                                 other => return Err(type_error("primitive", &other, span).into()),
                             }
                         }
                     }
                 }
-                Ok(ConfigValue::Str(output))
+                Ok(Value::String(output))
             }
             CompiledExpression::Comprehension {
                 binding,
@@ -631,7 +726,7 @@ impl Runtime<'_> {
                 body,
                 span,
             } => {
-                let ConfigValue::List(items) = self.eval_expression(source, frame, module)? else {
+                let Value::List(items) = self.eval_expression(source, frame, module)? else {
                     return Err(
                         runtime_error("checked comprehension received a non-list", span).into(),
                     );
@@ -641,59 +736,16 @@ impl Runtime<'_> {
                     frame.write(*binding, item, span)?;
                     output.push(self.eval_expression(body, frame, module)?);
                 }
-                Ok(ConfigValue::List(output))
+                Ok(Value::List(output))
             }
-            CompiledExpression::Shell(shell) => Ok(ConfigValue::Shell(
+            CompiledExpression::Shell(shell) => Ok(Value::Shell(
                 self.eval_shell_plan(shell, frame, module)?,
             )),
-            CompiledExpression::CommandSubstitution(shell) => {
-                let plan = self.eval_shell_plan(shell, frame, module)?;
-                let Some((_, step)) = plan.steps.first() else {
-                    return Err(runtime_error("empty command substitution", &shell.span).into());
-                };
-                let options = spar_process::ExecutionOptions {
-                    capture_stdout: true,
-                    capture_stderr: false,
-                    environment: None,
-                };
-                let output = match step {
-                    spar_command::Step::Command(command) => {
-                        spar_process::run_command(command, &options)
-                    }
-                    spar_command::Step::Pipeline(pipeline) => {
-                        spar_process::run_pipeline(pipeline, &options)
-                    }
-                }
-                .map_err(|error| {
-                    runtime_error(
-                        &format!("command substitution failed to start: {error}"),
-                        &shell.span,
-                    )
-                })?;
-                if !output.status.success {
-                    return Err(runtime_error(
-                        &format!(
-                            "command substitution exited with status {}",
-                            output.status.code.unwrap_or(1)
-                        ),
-                        &shell.span,
-                    )
-                    .into());
-                }
-                let bytes = output.stdout.unwrap_or_default();
-                let mut text = String::from_utf8(bytes).map_err(|_| {
-                    runtime_error(
-                        "command substitution output is not valid UTF-8",
-                        &shell.span,
-                    )
-                })?;
-                while text.ends_with('\n') || text.ends_with('\r') {
-                    text.pop();
-                }
-                Ok(ConfigValue::Str(text))
-            }
+            CompiledExpression::CommandSubstitution(shell) => Ok(Value::String(
+                self.execute_command_substitution(shell, frame, module)?,
+            )),
             CompiledExpression::ShellProgram { body, span } => {
-                Ok(ConfigValue::ShellProgram(ShellProgramValue {
+                Ok(Value::ShellProgram(ShellProgramValue {
                     body: body.clone(),
                     captured: frame.clone(),
                     module,
@@ -701,6 +753,317 @@ impl Runtime<'_> {
                 }))
             }
         }
+    }
+
+    fn execute_native_intrinsic(
+        &mut self,
+        intrinsic: NativeIntrinsic,
+        args: &[Value],
+        span: &Span,
+    ) -> Result<Value, RuntimeFault> {
+        match intrinsic {
+            NativeIntrinsic::PromiseRace => {
+                let promises = match args.first() {
+                    Some(Value::List(values)) => values
+                        .iter()
+                        .map(|value| match value {
+                            Value::Promise(handle) => Ok(*handle),
+                            other => Err(runtime_error(
+                                &format!("race expected Promise<T> values, received {}", other.type_name()),
+                                span,
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(other) => {
+                        return Err(runtime_error(
+                            &format!("race expected a list of promises, received {}", other.type_name()),
+                            span,
+                        )
+                        .into())
+                    }
+                    None => return Err(runtime_error("race requires a promises argument", span).into()),
+                };
+                if promises.is_empty() {
+                    return Err(runtime_error("race requires at least one promise", span).into());
+                }
+                loop {
+                    let mut pending = false;
+                    for handle in &promises {
+                        match self.tasks.status(*handle) {
+                            TaskStatus::Ready(result) => return result,
+                            TaskStatus::Pending => pending = true,
+                            TaskStatus::Running => pending = true,
+                            TaskStatus::Cancelled => {
+                                return Err(runtime_error("race encountered a cancelled promise", span).into())
+                            }
+                            TaskStatus::Unknown => {
+                                return Err(RuntimeFault::Fatal(runtime_error("race received an unknown promise", span)))
+                            }
+                        }
+                    }
+                    if !pending {
+                        return Err(RuntimeFault::Fatal(runtime_error(
+                            "race scheduler made no progress",
+                            span,
+                        )));
+                    }
+                    self.tick_one()?;
+                }
+            }
+            NativeIntrinsic::PromiseTimeout => {
+                let handle = match args.first() {
+                    Some(Value::Promise(handle)) => *handle,
+                    Some(other) => {
+                        return Err(runtime_error(
+                            &format!("timeout expected a promise, received {}", other.type_name()),
+                            span,
+                        )
+                        .into())
+                    }
+                    None => return Err(runtime_error("timeout requires a promise argument", span).into()),
+                };
+                let millis = match args.get(1) {
+                    Some(Value::Int(value)) if *value >= 0 => *value as u64,
+                    Some(Value::Int(_)) => {
+                        return Err(runtime_error("timeout duration cannot be negative", span).into())
+                    }
+                    Some(other) => {
+                        return Err(runtime_error(
+                            &format!("timeout expected an int duration, received {}", other.type_name()),
+                            span,
+                        )
+                        .into())
+                    }
+                    None => return Err(runtime_error("timeout requires a millis argument", span).into()),
+                };
+                let started = std::time::Instant::now();
+                let limit = std::time::Duration::from_millis(millis);
+                loop {
+                    match self.tasks.status(handle) {
+                        TaskStatus::Ready(result) => {
+                            if started.elapsed() > limit {
+                                return Err(runtime_error(
+                                    &format!("promise timed out after {millis} ms"),
+                                    span,
+                                )
+                                .into());
+                            }
+                            return result;
+                        }
+                        TaskStatus::Pending => {}
+                        TaskStatus::Running => {
+                            return Err(runtime_error("promise await cycle detected", span).into())
+                        }
+                        TaskStatus::Cancelled => {
+                            return Err(runtime_error("promise was cancelled", span).into())
+                        }
+                        TaskStatus::Unknown => {
+                            return Err(RuntimeFault::Fatal(runtime_error("unknown promise handle", span)))
+                        }
+                    }
+                    if started.elapsed() >= limit {
+                        return Err(runtime_error(
+                            &format!("promise timed out after {millis} ms"),
+                            span,
+                        )
+                        .into());
+                    }
+                    let Some((next_handle, invocation)) = self.tasks.next_pending() else {
+                        return Err(RuntimeFault::Fatal(runtime_error(
+                            "promise scheduler made no progress",
+                            span,
+                        )));
+                    };
+                    self.run_task(next_handle, invocation)?;
+                }
+            }
+        }
+    }
+
+    fn execute_command_substitution(
+        &mut self,
+        shell: &CompiledShellExpr,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+    ) -> Result<String, RuntimeFault> {
+        let plan = self.eval_shell_plan(shell, frame, module)?;
+        if plan.steps.is_empty() {
+            return Err(runtime_error("empty command substitution", &shell.span).into());
+        }
+        let options = spar_process::ExecutionOptions {
+            capture_stdout: true,
+            capture_stderr: false,
+            environment: Some(self.context.environment_pairs()),
+        };
+        let mut success = true;
+        let mut exit_code = 0;
+        let mut captured = Vec::new();
+        let mut executed = false;
+
+        for (join, source_step) in &plan.steps {
+            let should_run = match join {
+                spar_command::Join::Always => true,
+                spar_command::Join::OnSuccess => success,
+                spar_command::Join::OnFailure => !success,
+            };
+            if !should_run {
+                continue;
+            }
+
+            let mut step = source_step.clone();
+            self.apply_shell_cwd_to_step(&mut step, &shell.span)?;
+            if matches!(&step, spar_command::Step::Command(command) if command.background)
+                || matches!(&step, spar_command::Step::Pipeline(pipeline)
+                    if pipeline.commands.iter().any(|command| command.background))
+            {
+                return Err(runtime_error(
+                    "background commands are not allowed inside command substitution",
+                    &shell.span,
+                )
+                .into());
+            }
+            if matches!(&step, spar_command::Step::Command(command) if command.program == "cd")
+                || matches!(&step, spar_command::Step::Pipeline(pipeline)
+                    if pipeline.commands.iter().any(|command| command.program == "cd"))
+            {
+                return Err(runtime_error(
+                    "'cd' inside command substitution is not supported; use a normal shell block before substitution",
+                    &shell.span,
+                )
+                .into());
+            }
+
+            let command_output = match &step {
+                spar_command::Step::Command(command) => spar_process::run_command(command, &options),
+                spar_command::Step::Pipeline(pipeline) => spar_process::run_pipeline(pipeline, &options),
+            }
+            .map_err(|error| {
+                runtime_error(
+                    &format!("command substitution failed to start: {error}"),
+                    &shell.span,
+                )
+            })?;
+            success = command_output.status.success;
+            exit_code = command_output
+                .status
+                .code
+                .unwrap_or(if success { 0 } else { 1 });
+            captured = command_output.stdout.unwrap_or_default();
+            executed = true;
+        }
+
+        if !executed {
+            return Err(runtime_error("empty command substitution", &shell.span).into());
+        }
+        if !success {
+            return Err(runtime_error(
+                &format!("command substitution exited with status {exit_code}"),
+                &shell.span,
+            )
+            .into());
+        }
+        let mut text = String::from_utf8(captured).map_err(|_| {
+            runtime_error(
+                "command substitution output is not valid UTF-8",
+                &shell.span,
+            )
+        })?;
+        while text.ends_with('\n') || text.ends_with('\r') {
+            text.pop();
+        }
+        Ok(text)
+    }
+
+    fn ensure_shell_cwd(&mut self, span: &Span) -> Result<std::path::PathBuf, RuntimeFault> {
+        if let Some(cwd) = &self.shell_cwd {
+            return Ok(cwd.clone());
+        }
+        let cwd = self.context.cwd().to_path_buf();
+        if cwd.as_os_str().is_empty() {
+            return Err(runtime_error("runtime working directory is empty", span).into());
+        }
+        self.shell_cwd = Some(cwd.clone());
+        Ok(cwd)
+    }
+
+    fn apply_shell_cwd_to_step(
+        &mut self,
+        step: &mut spar_command::Step,
+        span: &Span,
+    ) -> Result<(), RuntimeFault> {
+        let cwd = self.ensure_shell_cwd(span)?;
+        let cwd = spar_command::WorkingDirectory::Path(cwd.to_string_lossy().into_owned());
+        match step {
+            spar_command::Step::Command(command) => {
+                if command.cwd.is_none() {
+                    command.cwd = Some(cwd);
+                }
+            }
+            spar_command::Step::Pipeline(pipeline) => {
+                for command in &mut pipeline.commands {
+                    if command.cwd.is_none() {
+                        command.cwd = Some(cwd.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_cd_builtin(
+        &mut self,
+        command: &spar_command::CommandPlan,
+        span: &Span,
+    ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
+        if command.background {
+            return Err(runtime_error("'cd' cannot run in the background", span).into());
+        }
+        if command.args.len() > 1 {
+            return Err(runtime_error("'cd' accepts zero or one path argument", span).into());
+        }
+
+        let current = self.ensure_shell_cwd(span)?;
+        let requested = match command.args.first() {
+            Some(path) => std::path::PathBuf::from(path),
+            None => self
+                .context
+                .env_get("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| runtime_error("'cd' requires HOME when no path is given", span))?,
+        };
+        let candidate = if requested.is_absolute() {
+            requested
+        } else {
+            current.join(requested)
+        };
+        let metadata = std::fs::metadata(&candidate).map_err(|error| {
+            runtime_error(
+                &format!("cd: '{}': {error}", candidate.display()),
+                span,
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(runtime_error(
+                &format!("cd: '{}' is not a directory", candidate.display()),
+                span,
+            )
+            .into());
+        }
+        let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+            runtime_error(
+                &format!("cd: could not resolve '{}': {error}", candidate.display()),
+                span,
+            )
+        })?;
+        self.context.set_cwd(resolved.clone());
+        self.shell_cwd = Some(resolved);
+        Ok(crate::evaluator::ShellPlanOutcome {
+            success: true,
+            exit_code: 0,
+            signal: None,
+            pid: 0,
+            pipeline: vec![],
+        })
     }
 
     fn execute_native_shell_plan(
@@ -715,8 +1078,11 @@ impl Runtime<'_> {
             pid: 0,
             pipeline: vec![],
         };
-        let options = spar_process::ExecutionOptions::default();
-        for (join, step) in &plan.steps {
+        let options = spar_process::ExecutionOptions {
+            environment: Some(self.context.environment_pairs()),
+            ..spar_process::ExecutionOptions::default()
+        };
+        for (join, source_step) in &plan.steps {
             let should_run = match join {
                 spar_command::Join::Always => true,
                 spar_command::Join::OnSuccess => outcome.success,
@@ -725,7 +1091,20 @@ impl Runtime<'_> {
             if !should_run {
                 continue;
             }
-            let output = match step {
+
+            let mut step = source_step.clone();
+            self.apply_shell_cwd_to_step(&mut step, span)?;
+            if let spar_command::Step::Pipeline(pipeline) = &step {
+                if pipeline.commands.iter().any(|command| command.program == "cd") {
+                    return Err(runtime_error(
+                        "'cd' cannot be used as a pipeline stage; run it as a standalone command",
+                        span,
+                    )
+                    .into());
+                }
+            }
+
+            let output = match &step {
                 spar_command::Step::Command(command) if command.program == "exit" => {
                     let code = command
                         .args
@@ -744,8 +1123,12 @@ impl Runtime<'_> {
                     self.shell_exit = true;
                     break;
                 }
+                spar_command::Step::Command(command) if command.program == "cd" => {
+                    outcome = self.execute_cd_builtin(command, span)?;
+                    continue;
+                }
                 spar_command::Step::Command(command) if command.background => {
-                    let job = spar_process::spawn_background(command).map_err(|error| {
+                    let job = spar_process::spawn_background_with_options(command, &options).map_err(|error| {
                         runtime_error(
                             &format!("could not start background command: {error}"),
                             span,
@@ -753,11 +1136,11 @@ impl Runtime<'_> {
                     })?;
                     let pid = job.pid();
                     let id = self.jobs.len() + 1;
-                    self.last_job = Some(ConfigValue::Section(HashMap::from([
-                        ("id".into(), ConfigValue::Int(id as i64)),
-                        ("pid".into(), ConfigValue::Int(i64::from(pid))),
-                        ("processGroup".into(), ConfigValue::Int(i64::from(pid))),
-                        ("state".into(), ConfigValue::Str("running".into())),
+                    self.last_job = Some(Value::Object(HashMap::from([
+                        ("id".into(), Value::Int(id as i64)),
+                        ("pid".into(), Value::Int(i64::from(pid))),
+                        ("processGroup".into(), Value::Int(i64::from(pid))),
+                        ("state".into(), Value::String("running".into())),
                     ])));
                     self.jobs.push(job);
                     outcome = crate::evaluator::ShellPlanOutcome {
@@ -776,7 +1159,7 @@ impl Runtime<'_> {
                         .is_some_and(|command| command.background) =>
                 {
                     let job =
-                        spar_process::spawn_pipeline_background(pipeline).map_err(|error| {
+                        spar_process::spawn_pipeline_background_with_options(pipeline, &options).map_err(|error| {
                             runtime_error(
                                 &format!("could not start background pipeline: {error}"),
                                 span,
@@ -784,11 +1167,11 @@ impl Runtime<'_> {
                         })?;
                     let pid = job.pid();
                     let id = self.jobs.len() + 1;
-                    self.last_job = Some(ConfigValue::Section(HashMap::from([
-                        ("id".into(), ConfigValue::Int(id as i64)),
-                        ("pid".into(), ConfigValue::Int(i64::from(pid))),
-                        ("processGroup".into(), ConfigValue::Int(i64::from(pid))),
-                        ("state".into(), ConfigValue::Str("running".into())),
+                    self.last_job = Some(Value::Object(HashMap::from([
+                        ("id".into(), Value::Int(id as i64)),
+                        ("pid".into(), Value::Int(i64::from(pid))),
+                        ("processGroup".into(), Value::Int(i64::from(pid))),
+                        ("state".into(), Value::String("running".into())),
                     ])));
                     self.jobs.push(job);
                     outcome = crate::evaluator::ShellPlanOutcome {
@@ -833,8 +1216,16 @@ impl Runtime<'_> {
         &mut self,
         program: &ShellProgramValue,
     ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
+        let outermost = self.shell_depth == 0;
         let prior_outcome = self.shell_outcome.take();
         self.shell_outcome = None;
+        let prior_cwd = if outermost { self.shell_cwd.take() } else { None };
+        let prior_exit = if outermost {
+            std::mem::replace(&mut self.shell_exit, false)
+        } else {
+            false
+        };
+
         self.shell_depth += 1;
         let mut frame = program.captured.clone();
         let execution = self.execute_statements(&program.body, &mut frame, program.module);
@@ -850,6 +1241,11 @@ impl Runtime<'_> {
                 pipeline: vec![],
             });
         self.shell_outcome = prior_outcome;
+        if outermost {
+            self.shell_cwd = prior_cwd;
+            self.shell_exit = prior_exit;
+        }
+
         match execution? {
             RuntimeFlow::Normal | RuntimeFlow::Return(_) => Ok(outcome),
             RuntimeFlow::Break | RuntimeFlow::Continue => {
@@ -906,7 +1302,7 @@ impl Runtime<'_> {
             };
             if let Some(expression) = expansion {
                 let value = self.eval_expression(expression, frame, module)?;
-                let ConfigValue::List(values) = value else {
+                let Value::List(values) = value else {
                     return Err(type_error("list", &value, &argument.span).into());
                 };
                 for value in values {
@@ -987,11 +1383,11 @@ impl Runtime<'_> {
                             .last_job
                             .as_ref()
                             .and_then(|job| match job {
-                                ConfigValue::Section(fields) => fields.get("pid"),
+                                Value::Object(fields) => fields.get("pid"),
                                 _ => None,
                             })
                             .and_then(|pid| match pid {
-                                ConfigValue::Int(pid) => Some(*pid),
+                                Value::Int(pid) => Some(*pid),
                                 _ => None,
                             })
                             .ok_or_else(|| {
@@ -1007,18 +1403,21 @@ impl Runtime<'_> {
                                 .to_string(),
                         );
                     } else {
-                        output.push_str(&std::env::var(name).unwrap_or_default())
+                        output.push_str(self.context.env_get(name).unwrap_or_default())
                     }
                 }
                 CompiledShellWordPart::Expression(expression) => {
                     let value = self.eval_expression(expression, frame, module)?;
                     match value {
-                        ConfigValue::Str(value) => output.push_str(&value),
-                        ConfigValue::Int(value) => output.push_str(&value.to_string()),
-                        ConfigValue::Float(value) => output.push_str(&value.to_string()),
-                        ConfigValue::Bool(value) => output.push_str(&value.to_string()),
+                        Value::String(value) => output.push_str(&value),
+                        Value::Int(value) => output.push_str(&value.to_string()),
+                        Value::Float(value) => output.push_str(&value.to_string()),
+                        Value::Bool(value) => output.push_str(&value.to_string()),
                         other => return Err(type_error("primitive", &other, &word.span).into()),
                     }
+                }
+                CompiledShellWordPart::CommandSubstitution(shell) => {
+                    output.push_str(&self.execute_command_substitution(shell, frame, module)?);
                 }
             }
         }
@@ -1046,6 +1445,7 @@ impl Runtime<'_> {
             &compiled.checked.imports,
             base_dir,
             state.hosts.clone(),
+            state.natives.clone(),
             state.effect_ledger.clone(),
         )
         .map_err(|mut errors| {
@@ -1082,7 +1482,10 @@ impl Runtime<'_> {
             for argument in &mut pending.arguments {
                 remap_promises(argument, &replacements);
             }
-            let handle = self.tasks.spawn(function.id, pending.arguments);
+            let handle = self.tasks.spawn(
+                function.id,
+                pending.arguments.into_iter().map(Value::from_config).collect(),
+            );
             replacements.insert(pending.handle, handle);
         }
         remap_promises_in_result(&mut result, &replacements);
@@ -1099,7 +1502,7 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
         name: &str,
         span: &Span,
-    ) -> Result<ConfigValue, RuntimeFault> {
+    ) -> Result<Value, RuntimeFault> {
         if name == "status" && self.shell_depth > 0 {
             let outcome =
                 self.shell_outcome
@@ -1113,29 +1516,29 @@ impl Runtime<'_> {
                     });
             let process_value = |process: spar_process::ProcessStatus| {
                 let mut fields = HashMap::from([
-                    ("code".into(), ConfigValue::Int(i64::from(process.code))),
-                    ("success".into(), ConfigValue::Bool(process.success)),
-                    ("pid".into(), ConfigValue::Int(i64::from(process.pid))),
+                    ("code".into(), Value::Int(i64::from(process.code))),
+                    ("success".into(), Value::Bool(process.success)),
+                    ("pid".into(), Value::Int(i64::from(process.pid))),
                 ]);
                 if let Some(signal) = process.signal {
-                    fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
+                    fields.insert("signal".into(), Value::Int(i64::from(signal)));
                 }
-                ConfigValue::Section(fields)
+                Value::Object(fields)
             };
             let pipeline = outcome.pipeline.into_iter().map(process_value).collect();
             let mut fields = HashMap::from([
                 (
                     "code".into(),
-                    ConfigValue::Int(i64::from(outcome.exit_code)),
+                    Value::Int(i64::from(outcome.exit_code)),
                 ),
-                ("success".into(), ConfigValue::Bool(outcome.success)),
-                ("pid".into(), ConfigValue::Int(i64::from(outcome.pid))),
-                ("pipeline".into(), ConfigValue::List(pipeline)),
+                ("success".into(), Value::Bool(outcome.success)),
+                ("pid".into(), Value::Int(i64::from(outcome.pid))),
+                ("pipeline".into(), Value::List(pipeline)),
             ]);
             if let Some(signal) = outcome.signal {
-                fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
+                fields.insert("signal".into(), Value::Int(i64::from(signal)));
             }
-            return Ok(ConfigValue::Section(fields));
+            return Ok(Value::Object(fields));
         }
         if name == "lastJob" && self.shell_depth > 0 {
             return self
@@ -1144,20 +1547,21 @@ impl Runtime<'_> {
                 .ok_or_else(|| runtime_error("no background job has been started", span).into());
         }
         self.ensure_module(module)?;
-        Ok(self
-            .state
-            .as_ref()
-            .and_then(|state| state.results.get(&module))
-            .and_then(|result| result.globals.get(name))
-            .cloned()
-            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?)
+        Ok(Value::from_config(
+            self.state
+                .as_ref()
+                .and_then(|state| state.results.get(&module))
+                .and_then(|result| result.globals.get(name))
+                .cloned()
+                .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?,
+        ))
     }
 
     fn write_global(
         &mut self,
         module: crate::compiled::ModuleId,
         name: &str,
-        value: ConfigValue,
+        value: Value,
         span: &Span,
     ) -> Result<(), RuntimeFault> {
         self.ensure_module(module)?;
@@ -1166,6 +1570,7 @@ impl Runtime<'_> {
             .as_mut()
             .and_then(|state| state.results.get_mut(&module))
             .ok_or_else(|| module_state_error(span))?;
+        let value = value.try_into_config(span)?;
         result.globals.insert(name.to_string(), value);
         Ok(())
     }
@@ -1175,14 +1580,14 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
         path: &[String],
         span: &Span,
-    ) -> Result<ConfigValue, RuntimeFault> {
+    ) -> Result<Value, RuntimeFault> {
         self.ensure_module(module)?;
         let result = self
             .state
             .as_ref()
             .and_then(|state| state.results.get(&module))
             .ok_or_else(|| module_state_error(span))?;
-        Ok(match path {
+        let value = match path {
             [name] => result.globals.get(name).cloned().or_else(|| {
                 result
                     .sections
@@ -1202,7 +1607,8 @@ impl Runtime<'_> {
                 &format!("imported path '{}' is unavailable", path.join("::")),
                 span,
             )
-        })?)
+        })?;
+        Ok(Value::from_config(value))
     }
 
     fn execute_shell(&self, shell: &crate::ast::ShellExpr) -> Result<ConfigValue, RuntimeFault> {
@@ -1215,7 +1621,7 @@ impl Runtime<'_> {
             let options = spar_process::ExecutionOptions {
                 capture_stdout: true,
                 capture_stderr: true,
-                environment: None,
+                environment: Some(self.context.environment_pairs()),
             };
             let mut success = true;
             let mut exit_code = 0;
@@ -1296,12 +1702,12 @@ impl Runtime<'_> {
     }
 }
 
-fn shell_primitive_to_string(value: ConfigValue, span: &Span) -> Result<String, RuntimeFault> {
+fn shell_primitive_to_string(value: Value, span: &Span) -> Result<String, RuntimeFault> {
     match value {
-        ConfigValue::Str(value) => Ok(value),
-        ConfigValue::Int(value) => Ok(value.to_string()),
-        ConfigValue::Float(value) => Ok(value.to_string()),
-        ConfigValue::Bool(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value),
+        Value::Int(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(value.to_string()),
         other => Err(type_error("primitive", &other, span).into()),
     }
 }
@@ -1356,9 +1762,9 @@ fn remap_promises(
 
 fn eval_operation(
     operation: TypedOperation,
-    values: &[ConfigValue],
+    values: &[Value],
     span: &Span,
-) -> Result<ConfigValue, SparError> {
+) -> Result<Value, SparError> {
     macro_rules! binary {
         ($left:pat, $right:pat => $value:expr) => {
             match values {
@@ -1369,111 +1775,111 @@ fn eval_operation(
     }
     match operation {
         TypedOperation::IntAdd => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Int(a + b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Int(a + b))
         }
         TypedOperation::FloatAdd => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Float(a + b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Float(a + b))
         }
         TypedOperation::StringConcat => {
-            binary!(ConfigValue::Str(a), ConfigValue::Str(b) => ConfigValue::Str(format!("{a}{b}")))
+            binary!(Value::String(a), Value::String(b) => Value::String(format!("{a}{b}")))
         }
         TypedOperation::ShellConcat => {
-            binary!(ConfigValue::Shell(a), ConfigValue::Shell(b) => ConfigValue::Shell(a.clone().then(b.clone())))
+            binary!(Value::Shell(a), Value::Shell(b) => Value::Shell(a.clone().then(b.clone())))
         }
         TypedOperation::IntSub => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Int(a - b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Int(a - b))
         }
         TypedOperation::FloatSub => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Float(a - b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Float(a - b))
         }
         TypedOperation::IntMul => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Int(a * b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Int(a * b))
         }
         TypedOperation::FloatMul => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Float(a * b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Float(a * b))
         }
         TypedOperation::IntDiv => match values {
-            [ConfigValue::Int(_), ConfigValue::Int(0)] => Err(SparError::EvalError {
+            [Value::Int(_), Value::Int(0)] => Err(SparError::EvalError {
                 message: "division by zero".into(),
                 span: span.clone(),
             }),
-            [ConfigValue::Int(a), ConfigValue::Int(b)] => Ok(ConfigValue::Int(a / b)),
+            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a / b)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::FloatDiv => match values {
-            [ConfigValue::Float(_), ConfigValue::Float(b)] if *b == 0.0 => {
+            [Value::Float(_), Value::Float(b)] if *b == 0.0 => {
                 Err(SparError::EvalError {
                     message: "division by zero".into(),
                     span: span.clone(),
                 })
             }
-            [ConfigValue::Float(a), ConfigValue::Float(b)] => Ok(ConfigValue::Float(a / b)),
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a / b)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::IntEq => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a == b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a == b))
         }
         TypedOperation::FloatEq => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a == b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a == b))
         }
         TypedOperation::StringEq => {
-            binary!(ConfigValue::Str(a), ConfigValue::Str(b) => ConfigValue::Bool(a == b))
+            binary!(Value::String(a), Value::String(b) => Value::Bool(a == b))
         }
         TypedOperation::BoolEq => {
-            binary!(ConfigValue::Bool(a), ConfigValue::Bool(b) => ConfigValue::Bool(a == b))
+            binary!(Value::Bool(a), Value::Bool(b) => Value::Bool(a == b))
         }
         TypedOperation::IntNotEq => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a != b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a != b))
         }
         TypedOperation::FloatNotEq => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a != b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a != b))
         }
         TypedOperation::StringNotEq => {
-            binary!(ConfigValue::Str(a), ConfigValue::Str(b) => ConfigValue::Bool(a != b))
+            binary!(Value::String(a), Value::String(b) => Value::Bool(a != b))
         }
         TypedOperation::BoolNotEq => {
-            binary!(ConfigValue::Bool(a), ConfigValue::Bool(b) => ConfigValue::Bool(a != b))
+            binary!(Value::Bool(a), Value::Bool(b) => Value::Bool(a != b))
         }
         TypedOperation::IntLt => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a < b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a < b))
         }
         TypedOperation::FloatLt => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a < b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a < b))
         }
         TypedOperation::IntGt => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a > b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a > b))
         }
         TypedOperation::FloatGt => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a > b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a > b))
         }
         TypedOperation::IntLtEq => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a <= b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a <= b))
         }
         TypedOperation::FloatLtEq => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a <= b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a <= b))
         }
         TypedOperation::IntGtEq => {
-            binary!(ConfigValue::Int(a), ConfigValue::Int(b) => ConfigValue::Bool(a >= b))
+            binary!(Value::Int(a), Value::Int(b) => Value::Bool(a >= b))
         }
         TypedOperation::FloatGtEq => {
-            binary!(ConfigValue::Float(a), ConfigValue::Float(b) => ConfigValue::Bool(a >= b))
+            binary!(Value::Float(a), Value::Float(b) => Value::Bool(a >= b))
         }
         TypedOperation::BoolAnd => {
-            binary!(ConfigValue::Bool(a), ConfigValue::Bool(b) => ConfigValue::Bool(*a && *b))
+            binary!(Value::Bool(a), Value::Bool(b) => Value::Bool(*a && *b))
         }
         TypedOperation::BoolOr => {
-            binary!(ConfigValue::Bool(a), ConfigValue::Bool(b) => ConfigValue::Bool(*a || *b))
+            binary!(Value::Bool(a), Value::Bool(b) => Value::Bool(*a || *b))
         }
         TypedOperation::BoolNot => match values {
-            [ConfigValue::Bool(value)] => Ok(ConfigValue::Bool(!value)),
+            [Value::Bool(value)] => Ok(Value::Bool(!value)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::IntNeg => match values {
-            [ConfigValue::Int(value)] => Ok(ConfigValue::Int(-value)),
+            [Value::Int(value)] => Ok(Value::Int(-value)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::FloatNeg => match values {
-            [ConfigValue::Float(value)] => Ok(ConfigValue::Float(-value)),
+            [Value::Float(value)] => Ok(Value::Float(-value)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::Fallback => Err(runtime_error(
@@ -1485,12 +1891,12 @@ fn eval_operation(
 
 fn operation_type_error(
     operation: TypedOperation,
-    values: &[ConfigValue],
+    values: &[Value],
     span: &Span,
 ) -> SparError {
     let types = values
         .iter()
-        .map(ConfigValue::type_name)
+        .map(Value::type_name)
         .collect::<Vec<_>>()
         .join(", ");
     runtime_error(
@@ -1499,7 +1905,7 @@ fn operation_type_error(
     )
 }
 
-fn type_error(expected: &str, value: &ConfigValue, span: &Span) -> SparError {
+fn type_error(expected: &str, value: &Value, span: &Span) -> SparError {
     runtime_error(
         &format!("expected {expected}, received {}", value.type_name()),
         span,
@@ -1525,11 +1931,11 @@ mod tests {
     fn frame_reads_and_writes_valid_slots() {
         let mut frame = Frame::new(1);
         frame
-            .write(LocalSlot(0), ConfigValue::Int(7), &Span::dummy())
+            .write(LocalSlot(0), Value::Int(7), &Span::dummy())
             .unwrap();
         assert_eq!(
             frame.read(LocalSlot(0), &Span::dummy()).unwrap(),
-            &ConfigValue::Int(7)
+            &Value::Int(7)
         );
     }
 
@@ -1561,6 +1967,8 @@ mod tests {
             jobs: Vec::new(),
             last_job: None,
             shell_exit: false,
+            shell_cwd: None,
+            context: RuntimeContext::for_base_dir(&program.options.base_dir),
         }
         .call_function(FunctionId(999), Vec::new())
         .unwrap_err();
@@ -1570,7 +1978,7 @@ mod tests {
         let span = Span::new(4, 8, 2, 3);
         let mismatch = eval_operation(
             TypedOperation::IntAdd,
-            &[ConfigValue::Bool(true), ConfigValue::Bool(false)],
+            &[Value::Bool(true), Value::Bool(false)],
             &span,
         )
         .unwrap_err();

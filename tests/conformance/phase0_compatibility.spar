@@ -73,13 +73,13 @@ var people: [Human] = [{ name: "Mike"; age: 5; }];
 
 var person: Human = people[0];
 
-function print(name: str) -> str {
+function echoName(name: str) -> str {
     return name;
 };
 
 function looper(people: [Human]) -> int {
     for person in people {
-        var gt: str = print(name: person.name);
+        var gt: str = echoName(name: person.name);
         if person.name == "jude" {
             return 6;
         }

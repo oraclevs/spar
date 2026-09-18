@@ -161,13 +161,8 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str(&escape_string_content(&imp.path));
                 out.push_str("\";\n");
             }
-            ImportKind::AsPartOf => {
-                out.push_str("import asPartOf \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push_str("\";\n");
-            }
             ImportKind::Aliased(alias) => {
-                out.push_str("import \"");
+                out.push_str(if imp.package { "import pkg \"" } else { "import \"" });
                 out.push_str(&escape_string_content(&imp.path));
                 out.push('"');
                 if let Some(alias) = alias {
@@ -177,14 +172,14 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str(";\n");
             }
             ImportKind::Selective(items) => {
-                out.push_str("import ");
+                out.push_str(if imp.package { "import pkg " } else { "import " });
                 format_import_items(items, out);
                 out.push_str(" from \"");
                 out.push_str(&escape_string_content(&imp.path));
                 out.push_str("\";\n");
             }
             ImportKind::TypeSelective(items) => {
-                out.push_str("import type ");
+                out.push_str(if imp.package { "import pkg type " } else { "import type " });
                 format_import_items(items, out);
                 out.push_str(" from \"");
                 out.push_str(&escape_string_content(&imp.path));
@@ -2171,6 +2166,7 @@ function pick(flag: bool) -> int {
             shebang: None,
             items: vec![TopLevelItem::Import(ImportDecl {
                 path: "dir\\file.spar".to_string(), // stored with literal backslash
+                package: false,
                 kind: ImportKind::Aliased(Some("x".to_string())),
                 span: crate::error::Span::dummy(),
             })],
@@ -2241,11 +2237,10 @@ function pick(flag: bool) -> int {
     }
 
     #[test]
-    fn formats_selective_and_as_part_of_imports() {
+    fn formats_selective_imports() {
         let src = concat!(
             "import { A, B as C } from \"shared.spar\";\n",
             "import type { PostgresType } from \"types.spar\";\n",
-            "import asPartOf \"common.spar\";\n",
         );
         let once = format_source(src).expect("format");
         assert!(
@@ -2256,8 +2251,21 @@ function pick(flag: bool) -> int {
             once.contains("import type { PostgresType } from \"types.spar\";"),
             "got: {once}"
         );
+        let twice = format_source(&once).expect("format again");
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+
+    #[test]
+    fn formats_explicit_package_imports() {
+        let src = concat!(
+            "import pkg \"http\" as http;\n",
+            "import pkg { get, post as send } from \"http/client\";\n",
+        );
+        let once = format_source(src).expect("format");
+        assert!(once.contains("import pkg \"http\" as http;"), "got: {once}");
         assert!(
-            once.contains("import asPartOf \"common.spar\";"),
+            once.contains("import pkg { get, post as send } from \"http/client\";"),
             "got: {once}"
         );
         let twice = format_source(&once).expect("format again");

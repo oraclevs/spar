@@ -16,7 +16,8 @@ use crate::ast::{Program, TopLevelItem};
 use crate::compiled::CompiledProgram;
 use crate::compiler::{validate_entry_signature, Compilation, CompileOptions, Compiler};
 use crate::error::{Span, SparError};
-use crate::evaluator::{execute_shell_plan, ConfigValue, Evaluator};
+use crate::evaluator::{ConfigValue, Evaluator};
+use crate::runtime::Value;
 
 /// The result of running Execute mode's `main` to completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +99,7 @@ impl Engine {
     }
 
     /// Execute mode: Check, then require a valid zero-argument `main`
-    /// returning `int` or `void`, evaluate the module exactly once, call
+    /// returning `int`, `void`, or `shell`, evaluate the module exactly once, call
     /// `main`, and translate its result into a process exit status.
     pub fn execute_source(&self, source: &str) -> Result<ExecutionOutcome, Vec<SparError>> {
         let program = self.compile_source(source)?;
@@ -115,12 +116,13 @@ impl Engine {
                     span: Span::dummy(),
                 }]
             })?;
-        let result = Evaluator::evaluate_with_imports_base_and_effects(
+        let result = Evaluator::evaluate_with_imports_base_effects_and_natives(
             &entry.checked.program,
             &entry.checked.symbols,
             &entry.checked.imports,
             &program.options.base_dir,
             program.options.hosts.clone(),
+            program.options.natives.clone(),
             program.options.effect_ledger.clone(),
         )?;
         let mut task_exprs = Vec::new();
@@ -146,6 +148,20 @@ impl Engine {
         &self,
         program: &CompiledProgram,
     ) -> Result<ExecutionOutcome, Vec<SparError>> {
+        self.execute_compiled_with_context(
+            program,
+            crate::runtime::RuntimeContext::for_base_dir(&program.options.base_dir),
+        )
+    }
+
+    /// Execute an already-compiled program with caller-owned runtime state.
+    /// Embedders and tests use this to isolate cwd, environment, arguments,
+    /// and stdio without mutating process-global state.
+    pub fn execute_compiled_with_context(
+        &self,
+        program: &CompiledProgram,
+        context: crate::runtime::RuntimeContext,
+    ) -> Result<ExecutionOutcome, Vec<SparError>> {
         let entry = program
             .modules
             .get(program.entry.0 as usize)
@@ -156,24 +172,15 @@ impl Engine {
                 }]
             })?;
         require_entry_signature(&entry.checked.program).map_err(|error| vec![error])?;
-        let result = crate::runtime::execute_program(program)?;
+        let result = crate::runtime::execute_program_with_context(program, context)?;
 
         let exit_status = match result {
-            ConfigValue::Int(status) => status as i32,
-            ConfigValue::Shell(plan) => {
-                execute_shell_plan(&plan)
-                    .map_err(|error| {
-                        vec![SparError::EvalError {
-                            message: format!(
-                                "could not execute shell plan returned by 'main': {error}"
-                            ),
-                            span: Span::dummy(),
-                        }]
-                    })?
-                    .exit_code
-            }
+            Value::Int(status) => status as i32,
             // `main() -> void` — the typechecker guarantees `main` never
-            // returns anything else.
+            // returns anything else. Shell-valued entry points are executed
+            // inside `runtime::execute_program` so they keep runtime state and
+            // source-aware diagnostics instead of falling back to a second
+            // process-execution path here.
             _ => 0,
         };
         Ok(ExecutionOutcome { exit_status })
@@ -223,7 +230,7 @@ fn require_entry_signature(program: &Program) -> Result<(), SparError> {
     if !has_main {
         return Err(SparError::ResolveError {
             message: "no 'main' function found — Execute mode requires a zero-argument \
-                       'main' returning 'int' or 'void'"
+                       'main' returning 'int', 'void', or 'shell'"
                 .into(),
             hint: None,
             span: Span::dummy(),
@@ -696,6 +703,138 @@ mod tests {
         let both = std::fs::read_to_string(both).unwrap();
         assert!(both.contains('a') && both.contains('b'));
         assert!(both.contains('c') && both.contains('d'));
+    }
+
+    #[test]
+    fn command_substitution_runs_logical_chains_and_pipelines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing");
+        let marker = temp.path().join("substitution");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    var exists: str = $(test -f "{}" && echo true || echo false);
+                    var lines: str = $(printf "one\ntwo\n" | wc -l);
+                    printf "%s:%s" "${{exists}}" "${{lines}}" > "{}";
+                }};
+            }};
+            "#,
+            missing.display(),
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "false:2");
+    }
+
+    #[test]
+    fn command_substitution_inside_a_shell_word_preserves_one_argv_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("inline-substitution");
+        let source = format!(
+            r#"
+            function main() -> shell {{
+                return shell {{
+                    printf "[%s]" prefix-$(printf "a b")-suffix > "{}";
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "[prefix-a b-suffix]"
+        );
+    }
+
+    #[test]
+    fn native_cd_changes_cwd_for_nested_shell_calls_and_relative_redirects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let source = format!(
+            r#"
+            function enter(path: str) -> shell {{
+                return shell {{
+                    cd "${{path}}";
+                }};
+            }};
+
+            function main() -> shell {{
+                return shell {{
+                    enter(
+                        path: "{}"
+                    );
+                    cd "nested";
+                    printf "%s" "$(pwd)" > "cwd.txt";
+                }};
+            }};
+            "#,
+            temp.path().display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        let marker = nested.join("cwd.txt");
+        let printed = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(printed).unwrap(),
+            std::fs::canonicalize(nested).unwrap()
+        );
+    }
+
+    #[test]
+    fn advanced_shell_stress_supports_multiline_spar_and_native_commands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("stress.txt");
+        let source = format!(
+            r#"
+            function writeSummary(path: str, files: [str]) -> shell {{
+                return shell {{
+                    var mut count: int = 0;
+                    for file in files {{
+                        printf "%s\\n" \\
+                            "${{file}}" \\
+                            >> "${{path}}";
+                        count += 1;
+                    }}
+                    printf "count=%s" "${{count}}" >> "${{path}}";
+                }};
+            }};
+
+            function main() -> shell {{
+                return shell {{
+                    var files: [str] = [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "src/main.rs",
+                    ];
+                    writeSummary(
+                        path: "{}",
+                        files: files
+                    );
+                }};
+            }};
+            "#,
+            marker.display()
+        );
+        Engine::default().execute_source(&source).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "Cargo.toml\nCargo.lock\nsrc/main.rs\ncount=3"
+        );
+    }
+
+    #[test]
+    fn pure_returned_shell_runtime_error_keeps_a_real_source_span() {
+        let errors = Engine::default()
+            .execute_source(
+                "function main() -> shell {\n    return shell { definitely-not-a-real-command-xyz; };\n};\n",
+            )
+            .unwrap_err();
+        let Some(SparError::EvalError { span, .. }) = errors.first() else {
+            panic!("expected an eval error, got {errors:?}");
+        };
+        assert!(span.line > 0, "runtime error must never use the dummy 0:0 span");
     }
 
     #[test]

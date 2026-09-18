@@ -1,0 +1,15 @@
+import pkg { writeText, readText, removeFile } from "std/fs";
+import pkg { join } from "std/path";
+
+function main() -> int {
+    var file: str = join(left: ".", right: "spar-stdlib-smoke.txt");
+    writeText(path: file, content: "Hello from Spar");
+    var contents: str = readText(path: file);
+    println(message: contents);
+    removeFile(path: file);
+
+    if contents == "Hello from Spar" {
+        return 0;
+    }
+    return 1;
+};

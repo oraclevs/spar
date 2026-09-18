@@ -23,6 +23,7 @@ pub mod resolver;
 pub mod runner;
 pub(crate) mod runtime;
 pub mod session;
+pub(crate) mod stdlib;
 mod shell_lang;
 pub mod task_lowering;
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub use lexer::Lexer;
 pub use parser::Parser;
 pub use renderer::ErrorRenderer;
 pub use resolver::{Resolver, SymbolTable};
+pub use runtime::{NativeExecutionKind, NativeFunction, NativeFunctionId, NativeRegistry, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput, Value};
 pub use session::Session;
 pub use token::{SpannedToken, Token};
 pub use typechecker::TypeChecker;

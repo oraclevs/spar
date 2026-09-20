@@ -620,7 +620,7 @@ working directories, a default task, and a `--dry-run` preview:
 ```spar
 export var appName: str = "demo";
 
-task [Test] {
+task Test {
     description: "Run tests";
     default: true;
 
@@ -629,7 +629,7 @@ task [Test] {
     };
 };
 
-task [Deploy](environment: str) {
+task Deploy(environment: str) {
     dependsOn: [Test];
 
     run {

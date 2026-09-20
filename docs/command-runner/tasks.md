@@ -10,7 +10,7 @@ checked-in example combining ordinary Spar configuration values with tasks.
 ## Declaring tasks
 
 ```spar
-task [Build] {
+task Build {
     run {
         cargo build;
     };
@@ -43,11 +43,11 @@ as `${HOME:-/tmp}`.
 ## Dependencies
 
 ```spar
-task [Build] {
+task Build {
     run { cargo build; };
 };
 
-task [Test] {
+task Test {
     dependsOn: [Build];
 
     run { cargo test; };
@@ -71,7 +71,7 @@ exits non-zero.
 ## Arguments
 
 ```spar
-task [Deploy](environment: str) {
+task Deploy(environment: str) {
     run {
         ./deploy.sh ${environment};
     };
@@ -93,7 +93,7 @@ the parameter alone, or use a literal/global value instead.
 ### Default values and variadic parameters
 
 ```spar
-task [Deploy](environment: str = "staging", *extra: str) {
+task Deploy(environment: str = "staging", *extra: str) {
     run {
         ./deploy.sh ${environment} ${extra};
     };
@@ -145,7 +145,7 @@ you omit falls back to its default (or is an error, if it's required).
 ## Environment
 
 ```spar
-task [Server] {
+task Server {
     env: {
         RUST_LOG: "debug";
         PORT: "8080";
@@ -189,7 +189,7 @@ A missing `.env` with `@LoadEnv` present is not an error.
 ## Working directories
 
 ```spar
-task [Web] {
+task Web {
     cwd: "./web";
 
     run {
@@ -204,7 +204,7 @@ that was used — not the process's current working directory.
 ## Attributes
 
 ```spar
-task [Deploy] {
+task Deploy {
     private: true;
     group: "release";
     confirm: "Really deploy to production?";
@@ -226,10 +226,12 @@ task [Deploy] {
 
 ## OS-specific run blocks
 
-A task can declare more than one `run` block, each labeled with a platform:
+A task can declare more than one `run` block, each labeled with a platform
+(the general header is `run [spar|bash] [linux|macos|windows] { ... }` — see
+"Choosing a shell" below):
 
 ```spar
-task [Build] {
+task Build {
     run windows {
         cmd /c build.bat;
     };
@@ -249,27 +251,38 @@ dependency. A label-less `run { ... }` block, if present alongside labeled
 ones, is the fallback when no label matches the current platform; if
 neither a matching label nor a label-less block exists, that's a
 compile-time error, not a silent skip. A bare `run { ... }` with no other
-`run` blocks (the common case) always runs, on every platform.
+`run` blocks (the common case) always runs, on every platform. A task has at
+most one `run` block per platform slot (`linux`, `macos`, `windows`, or
+label-less), whichever shell it uses.
 
-## Shell customization
+## Choosing a shell
 
 ```spar
-task [Web] {
-    shell: ["bash", "-euo", "pipefail", "-c"];
-
-    run { npm run dev; };
+task Build {
+    run { cargo build; echo "built ${appName}"; };          // Spar shell, any OS
+    run bash { set -euo pipefail; [[ -f Cargo.toml ]] && cargo build; };
+    run bash macos { brew install openssl; };
 };
 ```
 
-Overrides the default shell (`sh -cu` on Unix, `cmd /S /C` on Windows) used
-to run that task's `run { ... }` commands. A shebang script (below) ignores
-this — its own `#!` line picks the interpreter.
+`run [spar|bash] [linux|macos|windows] { ... }` — shell first, OS second,
+both optional.
+
+- `run { ... }` (or `run spar { ... }`) is written in Spar's native shell
+  language, the same one `shell { ... }` uses, and runs in-process on every
+  operating system. `${param}`, `${var}`, `$HOME` and `$(cmd)` work as in
+  `shell { ... }`.
+- `run bash { ... }` hands the body to `bash -c`. Use it for bash-only syntax
+  (`[[ ]]`, `$(( ))`, process substitution, `set -e`, ...). `${expr}`
+  interpolation still works.
+
+There is no `shell:` field any more; pick the shell per `run` block.
 
 ## Script (shebang) recipes
 
 ```spar
-task [Script] {
-    run {
+task Script {
+    run bash {
         #!/usr/bin/env bash
         set -euo pipefail
         echo "one interpreter, one script"
@@ -277,7 +290,7 @@ task [Script] {
 };
 ```
 
-If a `run { ... }` block's first line starts with `#!`, the whole block is
+If a `run bash { ... }` block's first line starts with `#!`, the whole block is
 treated as one script instead of being split into separate `;`-terminated
 commands. `spar` resolves interpolation, writes the script to a temporary
 file, and on Unix marks it executable and runs it directly (its own `#!`
@@ -287,7 +300,7 @@ invoked explicitly against the temp file, since Windows doesn't honor `#!`.
 ## Default task
 
 ```spar
-task [Test] {
+task Test {
     description: "Run the complete test suite";
     default: true;
 
@@ -395,3 +408,15 @@ loaded via `@LoadEnv` often interpolate secret values into the rendered
 command line, and quiet-by-default keeps those values out of the shell
 and logs. `--dry-run` always shows the full command plan regardless of
 `quiet`, since previewing commands is the point of `--dry-run`.
+
+## Migrating from the old task syntax
+
+| Before | After |
+|---|---|
+| `task [Build] { ... }` | `task Build { ... }` |
+| `shell: ["bash", "-c"];` | `run bash { ... }` |
+| `run { set -e; [[ -f x ]] && cp x y; }` | `run bash { ... }` — a bare `run { }` is now the Spar shell language |
+| `run windows { ... }` | unchanged (Spar shell, Windows only); use `run bash windows { ... }` for bash |
+
+`task [Name]` and the `shell:` field are parse errors that say what to write
+instead. Only one `run` block is allowed per OS slot.

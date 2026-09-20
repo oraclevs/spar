@@ -445,6 +445,39 @@ mod tests {
     }
 
     #[test]
+    fn nested_object_literals_stay_inside_their_typed_field() {
+        let mut session = crate::Engine::default().session();
+        session
+            .eval(
+                r#"type Deep { z?: int; };
+type Sub { x?: int; deep?: Deep; };
+type P { a?: int; sub?: Sub; };
+struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
+            )
+            .unwrap();
+
+        let ConfigValue::Section(config) = session.section("Config").expect("Config") else {
+            panic!("expected a section");
+        };
+        let Some(ConfigValue::Section(prompt)) = config.get("prompt") else {
+            panic!("prompt missing: {config:?}");
+        };
+        assert_eq!(prompt.get("a"), Some(&ConfigValue::Int(1)));
+        let Some(ConfigValue::Section(sub)) = prompt.get("sub") else {
+            panic!("nested object literal `sub` missing from prompt: {prompt:?}");
+        };
+        assert_eq!(sub.get("x"), Some(&ConfigValue::Int(2)));
+        let Some(ConfigValue::Section(deep)) = sub.get("deep") else {
+            panic!("doubly nested literal missing: {sub:?}");
+        };
+        assert_eq!(deep.get("z"), Some(&ConfigValue::Int(3)));
+        assert!(
+            session.section("sub").is_none() && session.section("deep").is_none(),
+            "nested object literals must not leak out as root sections"
+        );
+    }
+
+    #[test]
     fn interactive_eval_accepts_missing_final_statement_terminators() {
         let mut session = crate::Engine::default().session();
 

@@ -2112,9 +2112,10 @@ impl Parser {
     fn parse_task_decl(&mut self) -> Result<TaskDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'task' ident
-        self.expect(&Token::LBracket)?;
+        if self.at(&Token::LBracket) {
+            return Err(self.error("task [Name] is removed; write task Name"));
+        }
         let (name, name_span) = self.expect_ident()?;
-        self.expect(&Token::RBracket)?;
 
         let params = if self.at(&Token::LParen) {
             self.advance();
@@ -2179,7 +2180,6 @@ impl Parser {
         let mut depends_on = Vec::new();
         let mut env = Vec::new();
         let mut cwd = None;
-        let mut shell = None;
         let mut run_blocks: Vec<RunBlock> = Vec::new();
         let mut seen_run_labels: std::collections::HashSet<Option<String>> =
             std::collections::HashSet::new();
@@ -2191,12 +2191,9 @@ impl Parser {
                 self.advance();
                 ("private".to_string(), field_span)
             } else if self.at(&Token::TypeShell) {
-                // `shell` was already a task metadata field before it became
-                // the native command-plan type keyword. Preserve that
-                // established field spelling in this one declaration context.
-                let field_span = self.peek_span();
-                self.advance();
-                ("shell".to_string(), field_span)
+                return Err(self.error(
+                    "the task 'shell' field is removed; use run bash { ... } to select a shell",
+                ));
             } else {
                 self.expect_ident()?
             };
@@ -2205,15 +2202,25 @@ impl Parser {
             }
             match field_name.as_str() {
                 "run" => {
-                    let (os_label, os_span) = if let Token::Ident(label) = self.peek().clone() {
-                        let label_span = self.peek_span();
-                        self.advance();
-                        (Some(label), Some(label_span))
-                    } else {
-                        (None, None)
-                    };
+                    let (shell, shell_span, os_label, os_span) = self.parse_run_header()?;
                     let run_start = field_span.clone();
-                    let commands = self.parse_run_block()?;
+                    let body = match shell {
+                        RunShell::Bash => RunBody::Bash(self.parse_run_block()?),
+                        RunShell::Spar => {
+                            let Expr::Shell(native) = self.parse_mixed_shell_block()? else {
+                                unreachable!("mixed shell parser always returns Expr::Shell")
+                            };
+                            self.expect(&Token::Semicolon)?;
+                            if native.steps.is_empty() && native.statements.is_empty() {
+                                return Err(SparError::ParseError {
+                                    message: "task 'run' block must contain at least one command"
+                                        .to_string(),
+                                    span: run_start,
+                                });
+                            }
+                            RunBody::Native(native)
+                        }
+                    };
                     if !seen_run_labels.insert(os_label.clone()) {
                         let message = match &os_label {
                             Some(label) => format!("task 'run {label}' block may only appear once"),
@@ -2225,9 +2232,11 @@ impl Parser {
                         });
                     }
                     run_blocks.push(RunBlock {
+                        shell,
+                        shell_span,
                         os: os_label,
                         os_span,
-                        commands,
+                        body,
                         span: run_start,
                     });
                 }
@@ -2264,11 +2273,6 @@ impl Parser {
                 "cwd" => {
                     self.expect(&Token::Colon)?;
                     cwd = Some(self.parse_expr()?);
-                    self.expect(&Token::Semicolon)?;
-                }
-                "shell" => {
-                    self.expect(&Token::Colon)?;
-                    shell = Some(self.parse_expr()?);
                     self.expect(&Token::Semicolon)?;
                 }
                 "dependsOn" => {
@@ -2311,7 +2315,7 @@ impl Parser {
                 other => {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'private', 'group', 'confirm', 'dependsOn', 'cwd', 'shell', 'env', or 'run'"
+                            "unknown task field '{other}'; expected 'description', 'default', 'quiet', 'private', 'group', 'confirm', 'dependsOn', 'cwd', 'env', or 'run'"
                         ),
                         span: field_span,
                     });
@@ -2342,12 +2346,50 @@ impl Parser {
             depends_on,
             env,
             cwd,
-            shell,
             run_blocks,
             span,
             field_spans,
             closing_span,
         })
+    }
+
+    /// Parses the optional `[spar|bash] [linux|macos|windows]` words between
+    /// `run` and its body. Shell first, OS second; both optional.
+    fn parse_run_header(
+        &mut self,
+    ) -> Result<(RunShell, Option<Span>, Option<String>, Option<Span>), SparError> {
+        const OS: [&str; 3] = ["linux", "macos", "windows"];
+        let mut shell = RunShell::Spar;
+        let mut shell_span = None;
+        let mut os = None;
+        let mut os_span = None;
+        while let Token::Ident(word) = self.peek().clone() {
+            let span = self.peek_span();
+            match word.as_str() {
+                "spar" | "bash" if os.is_some() => {
+                    return Err(self.error("expected shell before OS: run <shell> <os> { }"));
+                }
+                "spar" | "bash" if shell_span.is_none() => {
+                    shell = if word == "bash" {
+                        RunShell::Bash
+                    } else {
+                        RunShell::Spar
+                    };
+                    shell_span = Some(span);
+                }
+                w if OS.contains(&w) && os.is_none() => {
+                    os = Some(word.clone());
+                    os_span = Some(span);
+                }
+                other => {
+                    return Err(self.error(format!(
+                        "unknown run option '{other}'; expected spar, bash, linux, macos, or windows"
+                    )));
+                }
+            }
+            self.advance();
+        }
+        Ok((shell, shell_span, os, os_span))
     }
 
     /// Parses a task's `run { ... };` body. The lexer has already turned the
@@ -3118,6 +3160,13 @@ function f(flag: bool) -> int {
         );
     }
 
+    fn bash_commands(block: &RunBlock) -> &[ShellCommand] {
+        match &block.body {
+            RunBody::Bash(commands) => commands,
+            RunBody::Native(_) => panic!("expected a bash run block"),
+        }
+    }
+
     fn task_decl(src: &str) -> TaskDecl {
         match first_item(src) {
             TopLevelItem::Task(t) => *t,
@@ -3128,8 +3177,8 @@ function f(flag: bool) -> int {
     #[test]
     fn minimal_task_parses() {
         let task = task_decl(
-            r#"task [Build] {
-    run {
+            r#"task Build {
+    run bash {
         cargo build;
     };
 };"#,
@@ -3138,25 +3187,25 @@ function f(flag: bool) -> int {
         assert!(task.params.is_empty());
         assert!(task.depends_on.is_empty());
         assert_eq!(task.run_blocks.len(), 1);
-        assert_eq!(task.run_blocks[0].commands.len(), 1);
-        assert!(!task.run_blocks[0].commands[0].is_shebang);
+        assert_eq!(bash_commands(&task.run_blocks[0]).len(), 1);
+        assert!(!bash_commands(&task.run_blocks[0])[0].is_shebang);
         assert!(matches!(
-            &task.run_blocks[0].commands[0].parts[..],
+            &bash_commands(&task.run_blocks[0])[0].parts[..],
             [ShellTemplatePart::Literal(s)] if s.trim() == "cargo build"
         ));
     }
 
     #[test]
     fn top_level_task_requires_trailing_semicolon() {
-        let missing = "task [Build] { run { true; }; }";
+        let missing = "task Build { run { true; }; }";
         assert!(parse_err(missing).contains("expected ';'"));
-        parse_str("task [Build] { run { true; }; };");
+        parse_str("task Build { run { true; }; };");
     }
 
     #[test]
     fn task_dependencies_parse() {
         let task = task_decl(
-            r#"task [Test] {
+            r#"task Test {
     dependsOn: [Build, Lint];
 
     run {
@@ -3176,8 +3225,8 @@ function f(flag: bool) -> int {
     #[test]
     fn task_parameters_parse() {
         let task = task_decl(
-            r#"task [Deploy](environment: str) {
-    run {
+            r#"task Deploy(environment: str) {
+    run bash {
         ./deploy.sh ${environment};
     };
 };"#,
@@ -3185,9 +3234,9 @@ function f(flag: bool) -> int {
         assert_eq!(task.params.len(), 1);
         assert_eq!(task.params[0].name, "environment");
         assert_eq!(task.params[0].ty, SparType::Str);
-        assert_eq!(task.run_blocks[0].commands.len(), 1);
+        assert_eq!(bash_commands(&task.run_blocks[0]).len(), 1);
         assert!(matches!(
-            &task.run_blocks[0].commands[0].parts[..],
+            &bash_commands(&task.run_blocks[0])[0].parts[..],
             [ShellTemplatePart::Literal(_), ShellTemplatePart::Expr(_)]
         ));
     }
@@ -3195,7 +3244,7 @@ function f(flag: bool) -> int {
     #[test]
     fn task_parameters_support_defaults_and_a_final_variadic() {
         let task = task_decl(
-            r#"task [Deploy](environment: str = "staging", *extra: str) {
+            r#"task Deploy(environment: str = "staging", *extra: str) {
     run { echo ${environment} ${extra}; };
 };"#,
         );
@@ -3217,10 +3266,10 @@ function f(flag: bool) -> int {
     #[test]
     fn task_parameters_reject_invalid_default_and_variadic_ordering() {
         for src in [
-            "task [Deploy](*first: str, *second: str) { run { echo hi; }; }",
-            "task [Deploy](*extra: str, environment: str) { run { echo hi; }; }",
-            "task [Deploy](*extra: str = \"x\") { run { echo hi; }; }",
-            "task [Deploy](optional: str = \"x\", required: str) { run { echo hi; }; };",
+            "task Deploy(*first: str, *second: str) { run { echo hi; }; }",
+            "task Deploy(*extra: str, environment: str) { run { echo hi; }; }",
+            "task Deploy(*extra: str = \"x\") { run { echo hi; }; }",
+            "task Deploy(optional: str = \"x\", required: str) { run { echo hi; }; };",
         ] {
             assert!(
                 Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
@@ -3233,7 +3282,7 @@ function f(flag: bool) -> int {
     #[test]
     fn task_env_parses() {
         let task = task_decl(
-            r#"task [Server] {
+            r#"task Server {
     env: {
         RUST_LOG: "debug";
         PORT: "8080";
@@ -3252,11 +3301,10 @@ function f(flag: bool) -> int {
     #[test]
     fn task_v2_metadata_fields_parse() {
         let task = task_decl(
-            r#"task [Deploy] {
+            r#"task Deploy {
     private: true;
     group: "release";
     confirm: "Really deploy?";
-    shell: ["bash", "-euo", "pipefail", "-c"];
     run { ./deploy.sh; };
 };"#,
         );
@@ -3266,13 +3314,12 @@ function f(flag: bool) -> int {
         ));
         assert!(task.group.is_some());
         assert!(task.confirm.is_some());
-        assert!(task.shell.is_some());
     }
 
     #[test]
     fn task_cwd_parses() {
         let task = task_decl(
-            r#"task [Web] {
+            r#"task Web {
     cwd: "./web";
 
     run {
@@ -3286,7 +3333,7 @@ function f(flag: bool) -> int {
     #[test]
     fn task_description_default_quiet_parse() {
         let task = task_decl(
-            r#"task [Test] {
+            r#"task Test {
     description: "Run the complete test suite";
     default: true;
     quiet: true;
@@ -3310,22 +3357,22 @@ function f(flag: bool) -> int {
     #[test]
     fn multiple_run_commands_split_in_declaration_order() {
         let task = task_decl(
-            r#"task [Example] {
-    run {
+            r#"task Example {
+    run bash {
         echo "hello world";
         cargo test --workspace;
         npm run build;
     };
 };"#,
         );
-        assert_eq!(task.run_blocks[0].commands.len(), 3);
+        assert_eq!(bash_commands(&task.run_blocks[0]).len(), 3);
     }
 
     #[test]
     fn shebang_run_block_is_one_verbatim_command() {
         let task = task_decl(
-            r#"task [Script] {
-    run {
+            r#"task Script {
+    run bash {
         #!/usr/bin/env bash
         echo one
         echo two
@@ -3333,10 +3380,10 @@ function f(flag: bool) -> int {
     };
 };"#,
         );
-        assert_eq!(task.run_blocks[0].commands.len(), 1);
-        assert!(task.run_blocks[0].commands[0].is_shebang);
+        assert_eq!(bash_commands(&task.run_blocks[0]).len(), 1);
+        assert!(bash_commands(&task.run_blocks[0])[0].is_shebang);
         assert!(matches!(
-            &task.run_blocks[0].commands[0].parts[..],
+            &bash_commands(&task.run_blocks[0])[0].parts[..],
             [ShellTemplatePart::Literal(script)]
                 if script.contains("if true; then echo three; fi")
         ));
@@ -3345,7 +3392,7 @@ function f(flag: bool) -> int {
     #[test]
     fn load_env_pragma_defaults_to_dotenv_and_must_be_first() {
         let program = Parser::new(
-            crate::lexer::Lexer::new("@LoadEnv\ntask [Build] { run { echo build; }; };")
+            crate::lexer::Lexer::new("@LoadEnv\ntask Build { run { echo build; }; };")
                 .tokenize()
                 .unwrap(),
         )
@@ -3355,7 +3402,7 @@ function f(flag: bool) -> int {
         assert!(!program.is_schema_file);
         assert!(Parser::new(
             crate::lexer::Lexer::new(
-                "var name: str = \"spar\";\n@LoadEnv\ntask [Build] { run { echo build; }; };",
+                "var name: str = \"spar\";\n@LoadEnv\ntask Build { run { echo build; }; };",
             )
             .tokenize()
             .unwrap(),
@@ -3367,13 +3414,13 @@ function f(flag: bool) -> int {
     #[test]
     fn load_env_pragma_accepts_a_custom_path() {
         let program =
-            parse_str("@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };");
+            parse_str("@LoadEnv(\".env.production\")\ntask Build { run { echo build; }; };");
         assert_eq!(program.load_env.as_deref(), Some(".env.production"));
     }
 
     #[test]
     fn unknown_file_pragma_lists_supported_names() {
-        let message = parse_err("@Unknown\ntask [Build] { run { echo build; }; };");
+        let message = parse_err("@Unknown\ntask Build { run { echo build; }; };");
         assert!(
             message.contains(
                 "unknown file pragma `@Unknown`; only `@SchemaFile` or `@LoadEnv` is supported"
@@ -3400,14 +3447,14 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_missing_run_block_is_a_parse_error() {
-        let msg = parse_err("task [Build] {\n};");
+        let msg = parse_err("task Build {\n};");
         assert!(msg.contains("run"), "got: {msg}");
     }
 
     #[test]
     fn task_unknown_field_is_a_parse_error() {
         let msg = parse_err(
-            r#"task [Build] {
+            r#"task Build {
     bogus: true;
     run { echo hi; };
 };"#,
@@ -3416,14 +3463,55 @@ function f(flag: bool) -> int {
     }
 
     #[test]
-    fn task_missing_task_name_brackets_is_a_parse_error() {
-        assert!(parse_err("task Build { run { echo hi; }; }").contains("'['"));
+    fn task_without_brackets_parses_with_native_default_shell() {
+        let task = task_decl("task Build { run { echo hi; }; };");
+        assert_eq!(task.name, "Build");
+        assert_eq!(task.run_blocks[0].shell, RunShell::Spar);
+        assert!(matches!(task.run_blocks[0].body, RunBody::Native(_)));
+    }
+
+    #[test]
+    fn run_header_combinations_parse() {
+        let t = task_decl(
+            "task T { run bash { true; }; run windows { echo w; }; run bash macos { true; }; };",
+        );
+        assert_eq!(t.run_blocks[0].shell, RunShell::Bash);
+        assert_eq!(t.run_blocks[0].os, None);
+        assert_eq!(t.run_blocks[1].shell, RunShell::Spar);
+        assert_eq!(t.run_blocks[1].os.as_deref(), Some("windows"));
+        assert_eq!(t.run_blocks[2].shell, RunShell::Bash);
+        assert_eq!(t.run_blocks[2].os.as_deref(), Some("macos"));
+    }
+
+    #[test]
+    fn removed_and_invalid_task_syntax_gives_hints() {
+        assert!(parse_err("task [Build] { run { true; }; };")
+            .contains("task [Name] is removed; write task Name"));
+        assert!(
+            parse_err("task B { shell: [\"sh\"]; run { true; }; };").contains(
+                "the task 'shell' field is removed; use run bash { ... } to select a shell"
+            )
+        );
+        assert!(parse_err("task B { run windows bash { true; }; };")
+            .contains("expected shell before OS: run <shell> <os> { }"));
+        assert!(parse_err("task B { run zsh { true; }; };")
+            .contains("unknown run option 'zsh'; expected spar, bash, linux, macos, or windows"));
+    }
+
+    #[test]
+    fn one_run_block_per_os_slot_regardless_of_shell() {
+        assert!(parse_err("task B { run { true; }; run bash { true; }; };")
+            .contains("task can only have one default 'run {}' block"));
+        assert!(
+            parse_err("task B { run windows { true; }; run bash windows { true; }; };")
+                .contains("task 'run windows' block may only appear once")
+        );
     }
 
     #[test]
     fn task_duplicate_run_block_is_a_parse_error() {
         let msg = parse_err(
-            r#"task [Build] {
+            r#"task Build {
     run { echo one; };
     run { echo two; };
 };"#,
@@ -3436,7 +3524,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_accepts_bare_and_labeled_run_blocks() {
-        let src = "task [T] {\n\
+        let src = "task T {\n\
             run {\n\
                 echo default;\n\
             };\n\
@@ -3470,7 +3558,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_rejects_duplicate_run_block_for_same_os() {
-        let src = "task [T] {\n\
+        let src = "task T {\n\
             run windows {\n\
                 echo a;\n\
             };\n\
@@ -3488,7 +3576,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_rejects_two_default_run_blocks() {
-        let src = "task [T] {\n\
+        let src = "task T {\n\
             run {\n\
                 echo a;\n\
             };\n\
@@ -3509,7 +3597,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_requires_at_least_one_run_block() {
-        let src = "task [T] {\n\
+        let src = "task T {\n\
             description: \"no run at all\";\n\
         };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
@@ -3518,7 +3606,7 @@ function f(flag: bool) -> int {
 
     #[test]
     fn task_with_only_labeled_run_blocks_and_no_default_parses() {
-        let src = "task [T] {\n\
+        let src = "task T {\n\
             run windows {\n\
                 echo win;\n\
             };\n\

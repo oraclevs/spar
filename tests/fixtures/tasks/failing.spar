@@ -1,4 +1,4 @@
-task [Fails] {
+task Fails {
     default: true;
     run {
         false;

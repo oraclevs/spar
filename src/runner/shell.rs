@@ -1,28 +1,11 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub(super) fn command(script: &str, shell: Option<&[String]>) -> Command {
-    if let Some((program, arguments)) = shell.and_then(|shell| shell.split_first()) {
-        let mut command = Command::new(program);
-        command.args(arguments).arg(script);
-        inherit_stdio(&mut command);
-        return command;
-    }
-    platform_command(script)
-}
-
-#[cfg(unix)]
-fn platform_command(script: &str) -> Command {
-    let mut command = Command::new("sh");
-    command.arg("-cu").arg(script);
-    inherit_stdio(&mut command);
-    command
-}
-
-#[cfg(windows)]
-fn platform_command(script: &str) -> Command {
-    let mut command = Command::new("cmd");
-    command.args(["/S", "/C", script]);
+/// Bash-body task commands always run under `bash -c`; `run { }` (the Spar
+/// shell) never reaches this module — it executes natively.
+pub(super) fn command(script: &str) -> Command {
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(script);
     inherit_stdio(&mut command);
     command
 }
@@ -71,50 +54,14 @@ mod tests {
 
     use super::command;
 
-    #[cfg(unix)]
     #[test]
-    fn selects_the_unix_shell() {
-        let command = command("printf hello", None);
-
-        assert_eq!(command.get_program(), OsStr::new("sh"));
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            [OsStr::new("-cu"), OsStr::new("printf hello")]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn selects_the_windows_shell() {
-        let command = command("echo hello", None);
-
-        assert_eq!(command.get_program(), OsStr::new("cmd"));
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            [OsStr::new("/S"), OsStr::new("/C"), OsStr::new("echo hello")]
-        );
-    }
-
-    #[test]
-    fn custom_shell_appends_script_as_final_argument() {
-        let shell = vec![
-            "bash".to_owned(),
-            "-euo".to_owned(),
-            "pipefail".to_owned(),
-            "-c".to_owned(),
-        ];
-
-        let command = command("printf hello", Some(&shell));
+    fn bash_commands_run_under_bash_dash_c() {
+        let command = command("printf hello");
 
         assert_eq!(command.get_program(), OsStr::new("bash"));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            [
-                OsStr::new("-euo"),
-                OsStr::new("pipefail"),
-                OsStr::new("-c"),
-                OsStr::new("printf hello"),
-            ]
+            [OsStr::new("-c"), OsStr::new("printf hello")]
         );
     }
 

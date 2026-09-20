@@ -93,7 +93,7 @@ fn run_exec_still_runs_a_task_literally_named_exec() {
     fs::write(
         dir.path().join("SparMake.spar"),
         concat!(
-            "task [Exec] {\n",
+            "task Exec {\n",
             "    run linux { touch ran-exec-task; };\n",
             "    run macos { touch ran-exec-task; };\n",
             "};\n",

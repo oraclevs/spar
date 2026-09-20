@@ -1240,3 +1240,15 @@ fn unknown_double_colon_namespace_still_gets_generic_error() {
         "got: {errs}"
     );
 }
+
+#[test]
+fn undefined_interpolation_in_a_native_task_run_block_is_a_resolve_error() {
+    let in_task = resolve_err("task Build { run { echo ${nope}; }; };");
+    assert!(in_task.contains("nope"), "{in_task}");
+}
+
+#[test]
+fn defined_interpolations_and_task_params_in_shell_commands_resolve() {
+    resolve_ok("var name: str = \"a\"; task T { run { echo ${name}; }; };");
+    resolve_ok("task Greet(who: str) { run { echo ${who} | cat > out.txt; }; };");
+}

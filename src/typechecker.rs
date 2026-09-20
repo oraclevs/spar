@@ -2821,9 +2821,6 @@ impl<'a> TypeChecker<'a> {
         if let Some(expr) = &decl.cwd {
             self.check_task_scalar_field(expr, "cwd", &SparType::Str, &decl.span);
         }
-        if let Some(expr) = &decl.shell {
-            self.check_task_string_list_field(expr, "shell", &decl.span);
-        }
         for (key, value) in &decl.env {
             self.check_task_scalar_field(value, &format!("env.{key}"), &SparType::Str, &decl.span);
         }
@@ -2834,26 +2831,37 @@ impl<'a> TypeChecker<'a> {
             .map(|p| (p.name.clone(), p.ty.clone()))
             .collect();
         for block in &decl.run_blocks {
-            for command in &block.commands {
-                for part in &command.parts {
-                    if let ShellTemplatePart::Expr(expr) = part {
-                        if let Err(e) = self.check_expr_with_locals(expr, &local_types) {
-                            self.errors.push(e);
-                            continue;
+            match &block.body {
+                RunBody::Bash(commands) => {
+                    for command in commands {
+                        for part in &command.parts {
+                            if let ShellTemplatePart::Expr(expr) = part {
+                                if let Err(e) = self.check_expr_with_locals(expr, &local_types) {
+                                    self.errors.push(e);
+                                    continue;
+                                }
+                                match self.infer_type_with_locals(expr, &local_types) {
+                                    Some(SparType::Str | SparType::Int | SparType::Float | SparType::Bool) => {}
+                                    Some(other) => self.push_type_error(
+                                        format!(
+                                            "task 'run' interpolation must be a scalar value (str, int, float, or bool), \
+                                             found {}",
+                                            display_type(&other)
+                                        ),
+                                        None,
+                                        command.span.clone(),
+                                    ),
+                                    None => {} // unresolvable type — a more specific error was already reported
+                                }
+                            }
                         }
-                        match self.infer_type_with_locals(expr, &local_types) {
-                            Some(SparType::Str | SparType::Int | SparType::Float | SparType::Bool) => {}
-                            Some(other) => self.push_type_error(
-                                format!(
-                                    "task 'run' interpolation must be a scalar value (str, int, float, or bool), \
-                                     found {}",
-                                    display_type(&other)
-                                ),
-                                None,
-                                command.span.clone(),
-                            ),
-                            None => {} // unresolvable type — a more specific error was already reported
-                        }
+                    }
+                }
+                RunBody::Native(shell) => {
+                    if let Err(e) =
+                        self.check_expr_with_locals(&Expr::Shell(shell.clone()), &local_types)
+                    {
+                        self.errors.push(e);
                     }
                 }
             }
@@ -2884,51 +2892,6 @@ impl<'a> TypeChecker<'a> {
                 span.clone(),
             ),
             None => {} // unresolvable — a more specific error was already reported
-        }
-    }
-
-    fn check_task_string_list_field(&mut self, expr: &Expr, label: &str, span: &Span) {
-        if let Err(e) = self.check_expr_with_locals(expr, &HashMap::new()) {
-            self.errors.push(e);
-            return;
-        }
-        if let Expr::List(items, _) = expr {
-            if items.is_empty() {
-                self.push_type_error(
-                    format!("task '{label}' must be a non-empty List<str>"),
-                    None,
-                    span.clone(),
-                );
-                return;
-            }
-            if items
-                .iter()
-                .all(|item| self.infer_type(item) == Some(SparType::Str))
-            {
-                return;
-            }
-            self.push_type_error(
-                format!("task '{label}' must be a non-empty List<str>"),
-                None,
-                span.clone(),
-            );
-            return;
-        }
-        match self.infer_type(expr) {
-            Some(SparType::List(inner)) if *inner == SparType::Str => {}
-            Some(actual) => self.push_type_error(
-                format!(
-                    "task '{label}' must be a non-empty List<str>, found {}",
-                    display_type(&actual)
-                ),
-                None,
-                span.clone(),
-            ),
-            None => self.push_type_error(
-                format!("task '{label}' must be a non-empty List<str>"),
-                None,
-                span.clone(),
-            ),
         }
     }
 
@@ -3693,20 +3656,12 @@ mod tests {
     fn task_v2_metadata_types_are_checked() {
         for (src, field) in [
             (
-                r#"task [Deploy] { private: "yes"; run { echo deploy; }; };"#,
+                r#"task Deploy { private: "yes"; run { echo deploy; }; };"#,
                 "private",
             ),
             (
-                "task [Deploy] { group: 1; run { echo deploy; }; };",
+                "task Deploy { group: 1; run { echo deploy; }; };",
                 "group",
-            ),
-            (
-                "task [Deploy] { shell: []; run { echo deploy; }; };",
-                "shell",
-            ),
-            (
-                "task [Deploy] { shell: [1]; run { echo deploy; }; };",
-                "shell",
             ),
         ] {
             assert!(

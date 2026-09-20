@@ -116,7 +116,7 @@ functionGroup EdgeInsect {
     device: Devices = Tki.device;
 };
 
-task [Default] {
+task Default {
     default: true;
     quiet: true;
 

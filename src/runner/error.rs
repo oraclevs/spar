@@ -81,6 +81,11 @@ pub enum RunnerError {
         source_line: Option<u32>,
         status: ExitStatus,
     },
+    NativeBlockFailed {
+        task: String,
+        source_line: Option<u32>,
+        code: i32,
+    },
 }
 
 impl fmt::Display for RunnerError {
@@ -190,6 +195,20 @@ impl fmt::Display for RunnerError {
             } => match source_line {
                 Some(line) => write!(formatter, "task {task} at line {line} failed: {status}"),
                 None => write!(formatter, "task {task} failed: {status}"),
+            },
+            Self::NativeBlockFailed {
+                task,
+                source_line,
+                code,
+            } => match source_line {
+                Some(line) => write!(
+                    formatter,
+                    "task {task} at line {line} failed: native run block exited with status {code}"
+                ),
+                None => write!(
+                    formatter,
+                    "task {task} failed: native run block exited with status {code}"
+                ),
             },
         }
     }

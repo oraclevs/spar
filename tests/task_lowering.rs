@@ -17,10 +17,10 @@ fn errors_contain(compilation: &spar::Compilation, needle: &str) -> bool {
 #[test]
 fn duplicate_task_names_produce_a_diagnostic() {
     let src = r#"
-task [Build] {
+task Build {
     run { echo first; };
 };
-task [Build] {
+task Build {
     run { echo second; };
 };
 "#;
@@ -36,11 +36,11 @@ task [Build] {
 #[test]
 fn duplicate_default_tasks_produce_a_diagnostic() {
     let src = r#"
-task [Build] {
+task Build {
     default: true;
     run { echo build; };
 };
-task [Test] {
+task Test {
     default: true;
     run { echo test; };
 };
@@ -57,7 +57,7 @@ task [Test] {
 #[test]
 fn unknown_dependency_produces_a_diagnostic_before_running_anything() {
     let src = r#"
-task [Test] {
+task Test {
     dependsOn: [DoesNotExist];
     run { echo test; };
 };
@@ -74,7 +74,7 @@ task [Test] {
 #[test]
 fn bad_metadata_type_produces_a_diagnostic() {
     let src = r#"
-task [Build] {
+task Build {
     default: "yes";
     run { echo build; };
 };
@@ -91,7 +91,7 @@ task [Build] {
 #[test]
 fn non_scalar_parameter_produces_a_diagnostic() {
     let src = r#"
-task [Build](names: [str]) {
+task Build(names: [str]) {
     run { echo build; };
 };
 "#;
@@ -107,7 +107,7 @@ task [Build](names: [str]) {
 #[test]
 fn task_local_unknown_name_in_run_body_produces_a_diagnostic() {
     let src = r#"
-task [Build] {
+task Build {
     run { echo ${nope}; };
 };
 "#;
@@ -125,8 +125,8 @@ fn parameter_combined_with_other_values_in_one_interpolation_is_deferred_to_run_
     let src = r#"
 export var suffix: str = "prod";
 
-task [Deploy](environment: str) {
-    run { ./deploy.sh ${environment + suffix}; };
+task Deploy(environment: str) {
+    run bash { ./deploy.sh ${environment + suffix}; };
 };
 "#;
     let compilation = compile(src);
@@ -134,7 +134,7 @@ task [Deploy](environment: str) {
 
     let tasks = compilation.tasks.expect("task set must be lowered");
     let task = tasks.get("deploy").expect("Deploy task must be lowered");
-    let parts = &task.commands[0].template().parts;
+    let parts = &task.commands[0].template().unwrap().parts;
     assert!(
         parts.iter().any(
             |p| matches!(p, TemplatePart::Expr { source, .. } if source.contains("environment"))
@@ -159,8 +159,8 @@ function fetchContainerName(forProd: bool) -> str {
     if forProd { return "prod-db"; } else { return "dev-db"; }
 };
 
-task [DbDown](isProd: bool = false) {
-    run { docker stop ${fetchContainerName(forProd: isProd)}; };
+task DbDown(isProd: bool = false) {
+    run bash { docker stop ${fetchContainerName(forProd: isProd)}; };
 };
 "#;
     let compilation = compile(src);
@@ -168,7 +168,7 @@ task [DbDown](isProd: bool = false) {
 
     let tasks = compilation.tasks.expect("task set must be lowered");
     let task = tasks.get("dbdown").expect("DbDown task must be lowered");
-    let parts = &task.commands[0].template().parts;
+    let parts = &task.commands[0].template().unwrap().parts;
     assert!(
         parts.iter().any(|p| matches!(p, TemplatePart::Expr { .. })),
         "{parts:?}"
@@ -189,10 +189,10 @@ fn spar_value_and_task_argument_both_reach_the_command_template() {
     let src = r#"
 export var port: int = 8080;
 
-task [Deploy](environment: str) {
+task Deploy(environment: str) {
     default: true;
 
-    run {
+    run bash {
         cargo run -- --port ${port} --env ${environment};
     };
 };
@@ -204,7 +204,7 @@ task [Deploy](environment: str) {
     let task = tasks.get("deploy").expect("Deploy task must be lowered");
     assert!(task.default);
     assert_eq!(task.commands.len(), 1);
-    let parts = &task.commands[0].template().parts;
+    let parts = &task.commands[0].template().unwrap().parts;
 
     let has_evaluated_port = parts
         .iter()
@@ -226,7 +226,7 @@ task [Deploy](environment: str) {
 #[test]
 fn task_with_no_parameters_and_no_metadata_lowers_cleanly() {
     let src = r#"
-task [Build] {
+task Build {
     run {
         cargo build;
     };
@@ -244,8 +244,8 @@ task [Build] {
 #[test]
 fn hash_escape_lowers_to_literal_shell_parameter_expansion() {
     let src = r#"
-task [Build] {
-    run {
+task Build {
+    run bash {
         echo #{HOME:-x};
     };
 };
@@ -261,10 +261,10 @@ task [Build] {
 #[test]
 fn dependencies_and_env_and_cwd_lower_correctly() {
     let src = r#"
-task [Prepare] {
+task Prepare {
     run { echo prepare; };
 };
-task [Build] {
+task Build {
     dependsOn: [Prepare];
     cwd: "./web";
     env: {
@@ -294,7 +294,7 @@ fn bare_load_env_loads_dotenv_from_the_base_directory() {
         base_dir: directory.path().to_path_buf(),
         ..CompileOptions::default()
     })
-    .compile("@LoadEnv\ntask [Build] { run { echo build; }; };");
+    .compile("@LoadEnv\ntask Build { run { echo build; }; };");
 
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
     let tasks = compilation.tasks.expect("task set must be lowered");
@@ -321,7 +321,7 @@ fn load_env_custom_path_is_resolved_from_the_base_directory() {
         base_dir: directory.path().to_path_buf(),
         ..CompileOptions::default()
     })
-    .compile("@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };");
+    .compile("@LoadEnv(\".env.production\")\ntask Build { run { echo build; }; };");
 
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
     let tasks = compilation.tasks.expect("task set must be lowered");
@@ -348,12 +348,11 @@ fn program_with_no_tasks_lowers_to_no_task_set() {
 fn lowers_v2_metadata_defaults_and_shebang_commands() {
     let compilation = compile(
         r#"
-task [Deploy](environment: str = "staging", *extra: str) {
+task Deploy(environment: str = "staging", *extra: str) {
     private: true;
     group: "release";
     confirm: "Really deploy?";
-    shell: ["bash", "-c"];
-    run {
+    run bash {
         #!/usr/bin/env bash
         echo ${environment} ${extra}
     };
@@ -366,15 +365,11 @@ task [Deploy](environment: str = "staging", *extra: str) {
     assert!(task.private);
     assert_eq!(task.group.as_deref(), Some("release"));
     assert_eq!(task.confirm.as_deref(), Some("Really deploy?"));
-    assert_eq!(
-        task.shell.as_deref(),
-        Some(["bash".to_string(), "-c".to_string()].as_slice())
-    );
     assert_eq!(task.parameters[0].default.as_deref(), Some("staging"));
     assert!(task.parameters[1].variadic);
     assert!(matches!(
         task.commands[0],
-        spar::runner::TaskCommand::Script(_)
+        spar::runner::TaskCommand::BashScript(_)
     ));
 }
 
@@ -383,7 +378,7 @@ fn run_block_matching_current_os_is_selected_over_default() {
     let os = std::env::consts::OS;
     let src = format!(
         r#"
-task [T] {{
+task T {{
     run {{
         echo default;
     }};
@@ -409,7 +404,7 @@ fn default_run_block_is_selected_when_no_os_specific_block_matches() {
         .unwrap();
     let src = format!(
         r#"
-task [T] {{
+task T {{
     run {{
         echo default;
     }};
@@ -435,7 +430,7 @@ fn missing_run_block_for_current_os_with_no_default_is_a_clear_lowering_error() 
         .collect();
     let src = format!(
         r#"
-task [T] {{
+task T {{
     run {} {{
         echo one;
     }};

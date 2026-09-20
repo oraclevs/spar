@@ -1,4 +1,4 @@
-task [Build] {
+task Build {
     description: "Build the project";
     run {
         echo "build";

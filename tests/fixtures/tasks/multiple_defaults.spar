@@ -1,11 +1,11 @@
-task [Build] {
+task Build {
     default: true;
     run {
         echo "build";
     };
 };
 
-task [Deploy] {
+task Deploy {
     default: true;
     run {
         echo "deploy";

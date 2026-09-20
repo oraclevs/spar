@@ -820,3 +820,118 @@ fn native_block_spreads_variadic_parameters_with_ellipsis() {
         "compile main.dart"
     );
 }
+
+#[test]
+fn load_env_values_are_visible_to_stdlib_env_in_native_run_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_LOADENV_TEST_VALUE=from-dotenv\n");
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"@LoadEnv
+
+import pkg { getOr, has } from "std/env";
+
+task ShowEnv {
+    run {
+        var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missing");
+        echo "${value}";
+    };
+};
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["run", "ShowEnv", "-f", "tasks.spar"])
+        .current_dir(dir.path())
+        .env_remove("SPAR_LOADENV_TEST_VALUE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "from-dotenv");
+}
+
+#[test]
+fn host_environment_wins_over_load_env_in_stdlib_env() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_LOADENV_TEST_VALUE=from-dotenv\n");
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"@LoadEnv
+
+import pkg { getOr } from "std/env";
+
+task ShowEnv {
+    run {
+        var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missing");
+        echo "${value}";
+    };
+};
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["run", "ShowEnv", "-f", "tasks.spar"])
+        .current_dir(dir.path())
+        .env("SPAR_LOADENV_TEST_VALUE", "from-host")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "from-host");
+}
+
+#[test]
+fn load_env_values_are_visible_to_stdlib_env_in_file_level_vars() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_LOADENV_TEST_VALUE=from-dotenv\n");
+    write_fixture(
+        dir.path(),
+        "config.spar",
+        r#"@LoadEnv
+
+import pkg { getOr } from "std/env";
+
+export var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missing");
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["emit", "config.spar"])
+        .current_dir(dir.path())
+        .env_remove("SPAR_LOADENV_TEST_VALUE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"from-dotenv\""),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn pound_brace_escape_is_not_interpreted_in_native_run_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        "task Show {\n    run {\n        echo \"#{HOME}\";\n    };\n};\n",
+    );
+    let output = spar_in(&["run", "Show", "-f", "tasks.spar"], dir.path());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "#{HOME}");
+}
+
+#[test]
+fn trailing_comment_on_native_command_does_not_swallow_next_command() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        "task Cmds {\n    run {\n        echo a; // ta\n        echo b;\n    };\n};\n",
+    );
+    let output = spar_in(&["run", "Cmds", "-f", "tasks.spar"], dir.path());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\n");
+}

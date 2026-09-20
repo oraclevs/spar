@@ -65,9 +65,15 @@ fn native_block_runner(
                 local_scope.insert(name.clone(), bound_to_config(value, *kind));
             }
         }
-        let value =
-            Evaluator::eval_standalone(program, symbols, eval_result, &entry.expr, &local_scope)
-                .map_err(|e| e.to_string())?;
+        let value = Evaluator::eval_standalone_with_environment(
+            program,
+            symbols,
+            eval_result,
+            &entry.expr,
+            &local_scope,
+            environment,
+        )
+        .map_err(|e| e.to_string())?;
         let ConfigValue::Shell(plan) = value else {
             return Err("native run block did not evaluate to a shell plan".to_owned());
         };

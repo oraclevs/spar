@@ -491,8 +491,27 @@ impl Evaluator {
             hosts,
             natives,
             effect_ledger,
-            crate::runtime::RuntimeContext::for_base_dir(base_dir),
+            Self::runtime_context_for_program(program, base_dir)?,
         )
+    }
+
+    /// Runtime context for the main program: starts from the host
+    /// environment and overlays the file's `@LoadEnv` dotenv values. A
+    /// variable already set in the host environment is never overridden.
+    fn runtime_context_for_program(
+        program: &Program,
+        base_dir: &std::path::Path,
+    ) -> Result<crate::runtime::RuntimeContext, Vec<SparError>> {
+        let mut context = crate::runtime::RuntimeContext::for_base_dir(base_dir);
+        if let Some(path) = &program.load_env {
+            let values = crate::dotenv::load(&base_dir.join(path)).map_err(|error| vec![error])?;
+            for (key, value) in values {
+                if std::env::var_os(&key).is_none() {
+                    context.env_set(key, value);
+                }
+            }
+        }
+        Ok(context)
     }
 
     pub(crate) fn evaluate_with_imports_base_effects_natives_and_context(
@@ -536,7 +555,7 @@ impl Evaluator {
         let mut evaluator = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
             .with_natives(natives)
-            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
+            .with_runtime_context(Self::runtime_context_for_program(program, base_dir)?)
             .with_effect_ledger(effect_ledger);
         evaluator.imported_programs = imported;
         match evaluator.run() {
@@ -584,9 +603,34 @@ impl Evaluator {
         expr: &Expr,
         local_scope: &HashMap<String, ConfigValue>,
     ) -> Result<ConfigValue, SparError> {
+        Self::eval_standalone_with_environment(
+            program,
+            symbols,
+            result,
+            expr,
+            local_scope,
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    /// Like `eval_standalone`, but overlays `environment` (a task's
+    /// `@LoadEnv` values and `env:` entries) on the host environment the
+    /// evaluator's runtime context starts with, so `std/env` functions and
+    /// `$NAME` expansion see the same variables the task's commands do.
+    pub fn eval_standalone_with_environment(
+        program: &Program,
+        symbols: &SymbolTable,
+        result: &EvalResult,
+        expr: &Expr,
+        local_scope: &HashMap<String, ConfigValue>,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> Result<ConfigValue, SparError> {
         let mut ev = Evaluator::new(symbols.clone(), program.clone());
         ev.global_cache = result.globals.clone();
         ev.section_cache = result.sections.clone();
+        for (key, value) in environment {
+            ev.runtime_context.env_set(key.clone(), value.clone());
+        }
         ev.eval_expr(expr, local_scope)
             .map_err(EvalErr::into_kl_error)
     }
@@ -718,7 +762,7 @@ impl Evaluator {
         let mut ev = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
             .with_natives(natives)
-            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
+            .with_runtime_context(Self::runtime_context_for_program(program, base_dir)?)
             .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         match ev.run() {
@@ -997,6 +1041,7 @@ impl Evaluator {
                             optional: field.optional,
                             ty: None,
                             value: field.default.map(FieldValue::Expr),
+                            end_line: field.span.line,
                             span: field.span,
                         }));
                     }

@@ -39,6 +39,7 @@ pub(crate) fn parse_shell_block(tokens: &[SpannedToken]) -> Result<(ShellExpr, u
             steps,
             span: joined_span(&start.span, &end_span),
             foreign_shell: None,
+            end_line: end_span.line,
         },
         end + 1,
     ))
@@ -85,6 +86,7 @@ pub(crate) fn parse_command_expression(
             steps,
             span: joined_span(&start.span, &end_span),
             foreign_shell: None,
+            end_line: end_span.line,
         },
         end + 1,
     ))
@@ -108,6 +110,7 @@ pub(crate) fn parse_bare_command_statement(
             steps,
             span: joined_span(&start.span, &end_span),
             foreign_shell: None,
+            end_line: end_span.line,
         },
         end + 1,
     ))
@@ -149,6 +152,7 @@ pub(crate) fn parse_command_substitution(
             steps,
             span: joined_span(&start.span, &tokens[end].span),
             foreign_shell: None,
+            end_line: tokens[end].span.line,
         },
         end + 1,
     ))

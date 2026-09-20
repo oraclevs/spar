@@ -6,6 +6,8 @@ pub struct CommentTrivia {
     pub text: String,
     pub line: u32,
     pub is_trailing: bool,
+    /// Byte offset of the comment's first character in the lexed source.
+    pub start: usize,
 }
 
 pub struct Lexer<'a> {
@@ -51,6 +53,10 @@ fn normalize_shell_body(body: &str) -> String {
     let mut pending = String::new();
     let mut pending_kind: Option<PendingKind> = None;
     let mut pending_indent = String::new();
+    // A trailing `// comment` on a native command line. It is held back so
+    // it cannot hide the command's `;` terminator, then re-attached after
+    // the finished command.
+    let mut pending_comment = String::new();
 
     for raw_line in body.split_inclusive('\n') {
         let (line, had_newline) = raw_line
@@ -84,10 +90,13 @@ fn normalize_shell_body(body: &str) -> String {
                 continue;
             }
             Some(PendingKind::NativeCommand) => {
-                append_native_command_line(&mut pending, line);
+                let (code, comment) = split_trailing_line_comment(line);
+                append_native_command_line(&mut pending, code);
+                hold_comment(&mut pending_comment, comment);
                 if native_command_complete(&pending) {
                     output.push_str(&pending_indent);
                     output.push_str(&prefix_native_command_segments(&pending));
+                    output.push_str(&std::mem::take(&mut pending_comment));
                     if had_newline {
                         output.push('\n');
                     }
@@ -143,10 +152,13 @@ fn normalize_shell_body(body: &str) -> String {
 
         let indent_len = line.len() - trimmed.len();
         pending_indent.push_str(&line[..indent_len]);
-        append_native_command_line(&mut pending, trimmed);
+        let (code, comment) = split_trailing_line_comment(trimmed);
+        append_native_command_line(&mut pending, code);
+        hold_comment(&mut pending_comment, comment);
         if native_command_complete(&pending) {
             output.push_str(&pending_indent);
             output.push_str(&prefix_native_command_segments(&pending));
+            output.push_str(&std::mem::take(&mut pending_comment));
             if had_newline {
                 output.push('\n');
             }
@@ -165,6 +177,7 @@ fn normalize_shell_body(body: &str) -> String {
                 output.push_str(&pending_indent);
                 output.push_str("command ");
                 output.push_str(pending.trim());
+                output.push_str(&pending_comment);
             }
             _ => output.push_str(&pending),
         }
@@ -438,9 +451,96 @@ fn top_level_background_terminator(source: &str) -> Option<usize> {
     last
 }
 
+/// Splits a trailing `// comment` (outside quotes, starting a word) off a
+/// native command line. `http://host` is a word, not a comment.
+fn split_trailing_line_comment(line: &str) -> (&str, &str) {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous: Option<char> = None;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if matches!(ch, '\'' | '"') {
+            quote = if quote == Some(ch) {
+                None
+            } else if quote.is_none() {
+                Some(ch)
+            } else {
+                quote
+            };
+        } else if quote.is_none()
+            && ch == '/'
+            && line[index + 1..].starts_with('/')
+            && previous.map_or(true, |p| p.is_whitespace() || p == ';')
+        {
+            return (line[..index].trim_end(), &line[index..]);
+        }
+        previous = Some(ch);
+    }
+    (line, "")
+}
+
+/// Queues `comment` behind a pending native command. The first rides the
+/// command's line; any further one (a multi-line command) goes on its own
+/// line, since a `//` comment runs to end of line.
+fn hold_comment(pending_comment: &mut String, comment: &str) {
+    if comment.is_empty() {
+        return;
+    }
+    pending_comment.push(if pending_comment.is_empty() { ' ' } else { '\n' });
+    pending_comment.push_str(comment);
+}
+
 fn spar_statement_complete(source: &str) -> bool {
-    last_top_level_semicolon(source)
+    // A trailing `// comment` after the `;` must not make the statement look
+    // unfinished, or the next line gets swallowed into it.
+    let source = strip_line_comments(source);
+    last_top_level_semicolon(&source)
         .is_some_and(|index| source[index + 1..].trim().is_empty())
+}
+
+/// Removes `//` line comments that sit outside quoted strings, keeping the
+/// line breaks.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut previous = None;
+    for ch in source.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                out.push(ch);
+            }
+            previous = Some(ch);
+            continue;
+        }
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if matches!(ch, '\'' | '"') {
+            quote = if quote == Some(ch) {
+                None
+            } else if quote.is_none() {
+                Some(ch)
+            } else {
+                quote
+            };
+        } else if ch == '/' && quote.is_none() && previous == Some('/') {
+            // Second slash of `//`: drop the first one already emitted.
+            out.pop();
+            in_comment = true;
+            previous = Some(ch);
+            continue;
+        }
+        out.push(ch);
+        previous = Some(ch);
+    }
+    out
 }
 
 fn spar_control_header_complete(source: &str) -> bool {
@@ -684,6 +784,7 @@ impl<'a> Lexer<'a> {
             text,
             line: comment_line,
             is_trailing: self.last_token_line == comment_line,
+            start: text_start,
         });
     }
 
@@ -723,6 +824,7 @@ impl<'a> Lexer<'a> {
             text,
             line: comment_line,
             is_trailing,
+            start: text_start,
         });
         Ok(())
     }
@@ -1477,7 +1579,8 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         let original = &self.source[body_start..body_end];
                         let normalized = normalize_shell_body(original);
-                        let nested = Lexer::new(&normalized).tokenize()?;
+                        let (nested, nested_comments) =
+                            Lexer::new(&normalized).tokenize_with_comments()?;
                         // Normalization inserts `command ` prefixes and
                         // terminators and re-flows whitespace, so nested
                         // spans are relative to text that does not exist in
@@ -1499,6 +1602,22 @@ impl<'a> Lexer<'a> {
                             let (line, col) = offsets.line_col(original, start, body_line, body_col);
                             token.span = Span::new(body_start + start, body_start + end, line, col);
                             tokens.push(token);
+                        }
+                        // Comments inside the block belong to the file too;
+                        // dropping them would make the formatter delete them.
+                        for comment in nested_comments {
+                            let (start, _) = offsets.original_range(
+                                original,
+                                comment.start,
+                                comment.start + comment.text.len(),
+                            );
+                            let (line, _) = offsets.line_col(original, start, body_line, body_col);
+                            self.comments.push(CommentTrivia {
+                                text: comment.text,
+                                line,
+                                is_trailing: comment.is_trailing,
+                                start: body_start + start,
+                            });
                         }
                         tokens.push(SpannedToken::new(
                             Token::ShellBlockEnd,

@@ -56,6 +56,15 @@ impl Parser {
             .unwrap_or(&Token::Eof)
     }
 
+    /// Source line of the most recently consumed token.
+    fn prev_line(&self) -> u32 {
+        self.pos
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+            .map(|st| st.span.line)
+            .unwrap_or(0)
+    }
+
     fn peek_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -710,6 +719,7 @@ impl Parser {
                 ty: None,
                 value: Some(value),
                 span,
+                end_line: self.prev_line(),
             });
         }
 
@@ -741,6 +751,7 @@ impl Parser {
                 ty: Some(ty),
                 value,
                 span,
+                end_line: self.prev_line(),
             })
         } else {
             let value = if self.at(&Token::LBrace) {
@@ -761,6 +772,7 @@ impl Parser {
                 ty: None,
                 value,
                 span,
+                end_line: self.prev_line(),
             })
         }
     }
@@ -1014,7 +1026,7 @@ impl Parser {
         // Check for a `-> TypeName` binding BEFORE the `{`
         let type_binding = self.try_parse_type_binding()?;
 
-        let items = self.parse_regular_section_items()?;
+        let (items, end_line) = self.parse_regular_section_items()?;
         Ok(TopLevelItem::Section(SectionDecl {
             exported,
             private,
@@ -1023,6 +1035,7 @@ impl Parser {
             items,
             type_binding,
             span,
+            end_line,
         }))
     }
 
@@ -1046,7 +1059,7 @@ impl Parser {
         } else {
             None
         };
-        let items = self.parse_regular_section_items()?;
+        let (items, end_line) = self.parse_regular_section_items()?;
         Ok(TopLevelItem::Section(SectionDecl {
             exported,
             private,
@@ -1055,6 +1068,7 @@ impl Parser {
             items,
             type_binding,
             span,
+            end_line,
         }))
     }
 
@@ -1076,7 +1090,7 @@ impl Parser {
 
     /// Parse a regular section body: `{ ...fields/spreads... };`, including
     /// the trailing `;`.
-    fn parse_regular_section_items(&mut self) -> Result<Vec<SectionItem>, SparError> {
+    fn parse_regular_section_items(&mut self) -> Result<(Vec<SectionItem>, u32), SparError> {
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         loop {
@@ -1087,8 +1101,9 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
+        let end_line = self.prev_line();
         self.expect(&Token::Semicolon)?;
-        Ok(items)
+        Ok((items, end_line))
     }
 
     /// A function's `-> ...` type. Identical to `parse_type` except it also
@@ -1547,6 +1562,7 @@ impl Parser {
             steps,
             span: Span::new(start.start, end.end, start.line, start.col),
             foreign_shell,
+            end_line: end.line,
         }))
     }
 
@@ -1612,6 +1628,7 @@ impl Parser {
             ty: None,
             value: Some(value),
             span,
+            end_line: self.prev_line(),
         }))
     }
 
@@ -2004,6 +2021,7 @@ impl Parser {
             catch_span,
             handler,
             span,
+            end_line: self.prev_line(),
         }))
     }
 
@@ -2048,6 +2066,7 @@ impl Parser {
             iterable,
             body,
             span,
+            end_line: self.prev_line(),
         }))
     }
 
@@ -2089,6 +2108,7 @@ impl Parser {
             then_stmts.push(self.parse_func_stmt()?);
         }
         self.expect(&Token::RBrace)?;
+        let then_end_line = self.prev_line();
         let else_stmts = if self.at(&Token::KwElse) {
             self.advance();
             self.expect(&Token::LBrace)?;
@@ -2106,6 +2126,8 @@ impl Parser {
             then_stmts,
             else_stmts,
             span,
+            then_end_line,
+            end_line: self.prev_line(),
         })
     }
 

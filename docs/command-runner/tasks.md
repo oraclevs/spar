@@ -95,7 +95,7 @@ the parameter alone, or use a literal/global value instead.
 ```spar
 task Deploy(environment: str = "staging", *extra: str) {
     run {
-        ./deploy.sh ${environment} ${extra};
+        ./deploy.sh ${environment} ...${extra};
     };
 };
 ```
@@ -104,7 +104,9 @@ task Deploy(environment: str = "staging", *extra: str) {
   the default is an ordinary Spar expression, type-checked against the
   parameter's declared type.
 - A single trailing parameter may be marked variadic with a leading `*`
-  (`*extra: str`). It captures every remaining CLI argument as a list;
+  (`*extra: str`). It captures every remaining CLI argument as a list. In a
+  native `run { }` body spread it with `...${extra}` (each value becomes its
+  own argument, and an empty list adds nothing); in a `run bash { }` body
   `${extra}` expands to those values space-joined, unquoted. A variadic
   parameter can't have a default, must be last, and only one is allowed.
 - Required parameters (no default) must still come before any parameter
@@ -417,6 +419,7 @@ and logs. `--dry-run` always shows the full command plan regardless of
 | `shell: ["bash", "-c"];` | `run bash { ... }` |
 | `run { set -e; [[ -f x ]] && cp x y; }` | `run bash { ... }` — a bare `run { }` is now the Spar shell language |
 | `run windows { ... }` | unchanged (Spar shell, Windows only); use `run bash windows { ... }` for bash |
+| `${extra}` for a variadic `*extra` in a bare `run { }` | `...${extra}` (or keep `${extra}` in `run bash { }`) |
 
 `task [Name]` and the `shell:` field are parse errors that say what to write
 instead. Only one `run` block is allowed per OS slot.

@@ -783,3 +783,40 @@ fn native_block_failure_reports_exit_code() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("exited with status 3"), "{stderr}");
 }
+
+#[test]
+fn native_block_spreads_variadic_parameters_with_ellipsis() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "variadic.spar",
+        "task Cpd(file: str = \"main.dart\", *tags: str) {\n\
+             run { echo compile ${file} ...${tags}; };\n\
+         };\n",
+    );
+    let with_tags = spar(&[
+        "run",
+        "cpd",
+        "lib.dart",
+        "release",
+        "fast",
+        "-f",
+        file.to_str().unwrap(),
+    ]);
+    assert!(
+        with_tags.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_tags.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(with_tags.stdout).unwrap().trim(),
+        "compile lib.dart release fast"
+    );
+
+    let without_tags = spar(&["run", "cpd", "-f", file.to_str().unwrap()]);
+    assert!(without_tags.status.success());
+    assert_eq!(
+        String::from_utf8(without_tags.stdout).unwrap().trim(),
+        "compile main.dart"
+    );
+}

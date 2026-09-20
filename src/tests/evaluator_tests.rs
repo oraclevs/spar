@@ -1103,3 +1103,23 @@ fn shell_returning_function_interpolates_named_argument() {
 fn eval_shell_construction_at_module_scope_is_deferred_data() {
     eval_src("var x: shell = shell { this-program-does-not-exist-xyz; };");
 }
+
+#[test]
+fn runtime_errors_without_their_own_span_point_at_the_failing_expression() {
+    // Exceeding the call depth carries no span of its own; the diagnostic
+    // must still land on the line of the expression that ran away, not on
+    // line 0/1 of the file.
+    let src = "var pad: int = 1;\n\nfunction loop(n: int) -> int {\n    return loop(n: n);\n};\n\nvar result: int = loop(n: 1);\n";
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap();
+    let error = crate::evaluator::Evaluator::new(symbols, prog)
+        .run()
+        .unwrap_err();
+    let crate::error::SparError::EvalError { span, message } = error else {
+        panic!("expected an eval error");
+    };
+    assert!(message.contains("maximum call depth"), "{message}");
+    assert!(span.line >= 4, "span was {span:?}");
+}

@@ -2239,6 +2239,7 @@ mod tests {
                         },
                     ],
                     span: crate::error::Span::dummy(),
+                    end_line: 0,
                 }),
                 TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
                     name: "Postgres".into(),
@@ -2299,6 +2300,7 @@ mod tests {
                         span: crate::error::Span::dummy(),
                     }],
                     span: crate::error::Span::dummy(),
+                    end_line: 0,
                 }),
                 TopLevelItem::Type(crate::ast::TypeDecl {
                     type_parameters: Vec::new(),
@@ -2313,6 +2315,7 @@ mod tests {
                         span: crate::error::Span::dummy(),
                     }],
                     span: crate::error::Span::dummy(),
+                    end_line: 0,
                 }),
                 TopLevelItem::SchemaFrom(crate::ast::SchemaFromDecl {
                     name: "Deco".into(),

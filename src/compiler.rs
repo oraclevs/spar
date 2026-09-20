@@ -381,6 +381,7 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             },
         ],
         span,
+        end_line: 0,
     }));
     let span = crate::Span::new(0, 0, 1, 1);
     program.items.push(TopLevelItem::Type(TypeDecl {
@@ -428,6 +429,7 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             },
         ],
         span: span.clone(),
+        end_line: 0,
     }));
 
     for (name, fields) in [
@@ -550,6 +552,7 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             exported: false,
             fields,
             span: span.clone(),
+            end_line: 0,
         }));
     }
 }

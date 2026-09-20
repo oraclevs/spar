@@ -38,7 +38,10 @@ declaration order.
 `${expr}` interpolates a Spar value, while bare shell variables such as
 `$HOME` remain untouched. Write `#{...}` when the shell itself must receive a
 literal `${...}` parameter expansion; for example, `#{HOME:-/tmp}` is executed
-as `${HOME:-/tmp}`.
+as `${HOME:-/tmp}`. This escape only exists in `run bash` bodies; it is not
+an environment lookup, and native `run` bodies leave `#{...}` as plain text.
+To read an environment variable from Spar code, use `getOr`/`get`/`has` from
+`std/env`.
 
 ## Dependencies
 
@@ -187,6 +190,23 @@ example `@LoadEnv(".env.production")`.
 3. the task's own `env: {}` block, which always wins.
 
 A missing `.env` with `@LoadEnv` present is not an error.
+
+Values loaded this way are visible to `std/env` (`get`, `getOr`, `has`,
+`keys`) in native `run` bodies and in file-level `var` declarations of the
+file that declares `@LoadEnv`, not only to spawned shell commands:
+
+```spar
+@LoadEnv
+
+import pkg { getOr } from "std/env";
+
+task Show {
+    run {
+        var token: str = getOr(name: "API_TOKEN", fallback: "unset");
+        echo "${token}";
+    };
+};
+```
 
 ## Working directories
 

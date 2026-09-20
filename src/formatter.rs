@@ -5,11 +5,19 @@ use crate::parser::Parser;
 
 pub struct FormatConfig {
     pub indent_width: usize,
+    /// Comment trivia being re-attached while formatting a whole source
+    /// file. Shared (not copied) so expression-level formatting, which only
+    /// sees the config, consumes comments from the same position as the
+    /// statement-level walk.
+    comments: CommentCursor,
 }
 
 impl Default for FormatConfig {
     fn default() -> Self {
-        FormatConfig { indent_width: 4 }
+        FormatConfig {
+            indent_width: 4,
+            comments: CommentCursor::default(),
+        }
     }
 }
 
@@ -54,6 +62,10 @@ pub fn format_program_with_comments(
 ) -> String {
     let mut out = String::new();
     let mut cx = CommentCursor::new(comments);
+    let config = &FormatConfig {
+        indent_width: config.indent_width,
+        comments: cx.clone(),
+    };
 
     if let Some(shebang) = &program.shebang {
         out.push_str(shebang);
@@ -84,7 +96,8 @@ pub fn format_program_with_comments(
         }
         // Emit any standalone comments preceding this item (after the blank-line separator)
         cx.emit_before_line(item_line, 0, config, &mut out);
-        format_top_level_item_cx(item, config, &mut cx, &mut out);
+        format_top_level_item(item, config, &mut cx, &mut out);
+        cx.append_trailing(item_end_line(item), &mut out);
     }
     // Emit any trailing comments at end of file
     cx.emit_before_line(u32::MAX, 0, config, &mut out);
@@ -101,14 +114,37 @@ fn top_level_items_need_blank_line(previous: &TopLevelItem, current: &TopLevelIt
     )
 }
 
-struct CommentCursor<'a> {
-    comments: &'a [CommentTrivia],
-    next: usize,
+/// A position in the file's comment trivia. Cloning shares the position, so
+/// every clone sees comments the others already placed.
+#[derive(Clone, Default)]
+struct CommentCursor {
+    comments: std::rc::Rc<Vec<CommentTrivia>>,
+    next: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Non-zero while formatting speculatively (e.g. trying an expression
+    /// on one line); comments must not be consumed by a throwaway attempt.
+    suspended: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
-impl<'a> CommentCursor<'a> {
-    fn new(comments: &'a [CommentTrivia]) -> Self {
-        Self { comments, next: 0 }
+struct SuspendComments(CommentCursor);
+
+impl Drop for SuspendComments {
+    fn drop(&mut self) {
+        self.0.suspended.set(self.0.suspended.get() - 1);
+    }
+}
+
+impl CommentCursor {
+    fn new(comments: &[CommentTrivia]) -> Self {
+        Self {
+            comments: std::rc::Rc::new(comments.to_vec()),
+            next: std::rc::Rc::default(),
+            suspended: std::rc::Rc::default(),
+        }
+    }
+
+    fn suspend(&self) -> SuspendComments {
+        self.suspended.set(self.suspended.get() + 1);
+        SuspendComments(self.clone())
     }
 
     /// Emit all pending comments whose source line < `before_line`, as
@@ -118,14 +154,16 @@ impl<'a> CommentCursor<'a> {
     /// cursor sweeps past here, it must still be emitted rather than
     /// silently dropped. A formatter must never delete a comment.
     fn emit_before_line(
-        &mut self,
+        &self,
         before_line: u32,
         depth: usize,
         config: &FormatConfig,
         out: &mut String,
     ) {
-        while self.next < self.comments.len() {
-            let c = &self.comments[self.next];
+        if self.suspended.get() > 0 {
+            return;
+        }
+        while let Some(c) = self.comments.get(self.next.get()) {
             if c.line >= before_line {
                 break;
             }
@@ -133,21 +171,46 @@ impl<'a> CommentCursor<'a> {
             out.push_str(&ind);
             out.push_str(&c.text);
             out.push('\n');
-            self.next += 1;
+            self.next.set(self.next.get() + 1);
+        }
+    }
+
+    /// Appends a trailing comment claimed for `on_line` to the line `out`
+    /// just finished (before its newline), if there is one.
+    fn append_trailing(&self, on_line: u32, out: &mut String) {
+        if !out.ends_with('\n') {
+            return;
+        }
+        if let Some(trailing) = self.take_trailing(on_line) {
+            out.pop();
+            out.push(' ');
+            out.push_str(&trailing);
+            out.push('\n');
         }
     }
 
     /// Consume a trailing comment on the given source line (if any), returning its text.
-    fn take_trailing(&mut self, on_line: u32) -> Option<String> {
-        if self.next < self.comments.len() {
-            let c = &self.comments[self.next];
-            if c.is_trailing && c.line == on_line {
-                let text = c.text.clone();
-                self.next += 1;
-                return Some(text);
-            }
+    fn take_trailing(&self, on_line: u32) -> Option<String> {
+        if self.suspended.get() > 0 {
+            return None;
+        }
+        let c = self.comments.get(self.next.get())?;
+        if c.is_trailing && c.line == on_line {
+            self.next.set(self.next.get() + 1);
+            return Some(c.text.clone());
         }
         None
+    }
+}
+
+/// The source line a top-level item's last token sits on — where a trailing
+/// comment after the item lives.
+fn item_end_line(item: &TopLevelItem) -> u32 {
+    match item {
+        TopLevelItem::Section(d) => d.end_line,
+        TopLevelItem::Function(d) => d.body.span.line,
+        TopLevelItem::Task(d) => d.closing_span.line,
+        _ => item_span_line(item),
     }
 }
 
@@ -178,7 +241,12 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
     }
 }
 
-fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut String) {
+fn format_top_level_item(
+    item: &TopLevelItem,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+) {
     match item {
         TopLevelItem::Import(imp) => format_import_decl(imp, out),
 
@@ -238,7 +306,8 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             } else {
                 out.push_str(if sd.path.len() == 1 { " {\n" } else { "{\n" });
             }
-            format_section_items(&sd.items, 1, config, out, sd.path.len() == 1);
+            format_section_items(&sd.items, 1, config, cx, out, sd.path.len() == 1);
+            cx.emit_before_line(sd.end_line, 1, config, out);
             out.push_str("};\n");
         }
 
@@ -268,7 +337,8 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str(") -> ");
             out.push_str(&format_type(&fd.ret));
             out.push_str(" {\n");
-            format_func_stmts(&fd.body.stmts, 1, config, out, false);
+            format_func_stmts(&fd.body.stmts, 1, config, cx, out, false);
+            cx.emit_before_line(fd.body.span.line, 1, config, out);
             out.push_str("};\n");
         }
 
@@ -352,7 +422,8 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
                 out.push_str(") -> ");
                 out.push_str(&format_type(&f.ret));
                 out.push_str(" {\n");
-                format_func_stmts(&f.body.stmts, 2, config, out, false);
+                format_func_stmts(&f.body.stmts, 2, config, cx, out, false);
+                cx.emit_before_line(f.body.span.line, 2, config, out);
                 out.push_str("    }\n");
             }
             out.push_str("};\n");
@@ -370,15 +441,11 @@ fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut S
             out.push_str("];\n");
         }
 
-        TopLevelItem::Task(td) => {
-            // Reached only if a caller formats a lone `TaskDecl` outside the
-            // comment-aware top-level walk; there's no comment trivia to
-            // thread through in that case.
-            let mut empty = CommentCursor::new(&[]);
-            format_task_decl_cx(td, config, &mut empty, out);
-        }
+        TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
 
-        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out, false),
+        TopLevelItem::Statement(statement) => {
+            format_func_stmt(statement, 0, config, cx, out, false)
+        }
     }
 }
 
@@ -572,7 +639,7 @@ fn format_task_decl_cx(
             }
             RunBody::Native(shell) => {
                 out.push(' ');
-                format_native_run_body(shell, 1, config, out);
+                format_native_run_body_cx(shell, 1, config, cx, out);
                 out.push_str(";\n");
             }
         }
@@ -678,45 +745,7 @@ fn format_import_items(items: &[ImportItem], out: &mut String) {
     out.push_str(" }");
 }
 
-fn format_top_level_item_cx(
-    item: &TopLevelItem,
-    config: &FormatConfig,
-    cx: &mut CommentCursor,
-    out: &mut String,
-) {
-    match item {
-        TopLevelItem::Section(sd) => {
-            if sd.exported {
-                out.push_str("export ");
-            }
-            if sd.private {
-                out.push_str("private ");
-            }
-            if sd.path.len() == 1 {
-                out.push_str("struct ");
-                out.push_str(&sd.path.join("."));
-            } else {
-                out.push('[');
-                out.push_str(&sd.path.join("."));
-                out.push(']');
-            }
-            if let Some(binding) = &sd.type_binding {
-                out.push_str(if sd.path.len() == 1 { ": " } else { " -> " });
-                out.push_str(&format_type(&binding.ty));
-                out.push_str(" {\n");
-            } else {
-                out.push_str(if sd.path.len() == 1 { " {\n" } else { "{\n" });
-            }
-            format_section_items_cx(&sd.items, 1, config, cx, out, sd.path.len() == 1);
-            out.push_str("};\n");
-        }
-        TopLevelItem::Statement(statement) => format_func_stmt(statement, 0, config, out, false),
-        TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
-        _ => format_top_level_item(item, config, out),
-    }
-}
-
-fn format_section_items_cx(
+fn format_section_items(
     items: &[SectionItem],
     depth: usize,
     config: &FormatConfig,
@@ -726,20 +755,7 @@ fn format_section_items_cx(
 ) {
     for item in items {
         match item {
-            SectionItem::Field(fd) => {
-                cx.emit_before_line(fd.span.line, depth, config, out);
-                format_field_decl(fd, depth, config, out, canonical);
-                // Append trailing comment for this line if present
-                if let Some(trailing) = cx.take_trailing(fd.span.line) {
-                    // Insert before the last \n
-                    if out.ends_with('\n') {
-                        out.pop();
-                        out.push(' ');
-                        out.push_str(&trailing);
-                        out.push('\n');
-                    }
-                }
-            }
+            SectionItem::Field(fd) => format_field_decl(fd, depth, config, cx, out, canonical),
             SectionItem::Spread(ss) => {
                 cx.emit_before_line(ss.span.line, depth, config, out);
                 let ind = indent(depth, config);
@@ -747,6 +763,7 @@ fn format_section_items_cx(
                 out.push_str("...");
                 format_expr(&ss.expr, 0, depth, config, out);
                 out.push_str(";\n");
+                cx.append_trailing(ss.span.line, out);
             }
         }
     }
@@ -909,10 +926,12 @@ pub(crate) fn format_expr(
     match expr {
         Expr::Object(items, _) => {
             let mut flat = String::from("{ ");
+            let speculative = config.comments.suspend();
             for item in items {
                 format_object_item_flat(item, depth + 1, config, &mut flat);
             }
             flat.push('}');
+            drop(speculative);
 
             if !object_prefers_multiline(items) && fits_inline(out, &flat) {
                 out.push_str(&flat);
@@ -920,9 +939,15 @@ pub(crate) fn format_expr(
                 out.push_str("{\n");
                 let field_indent = indent(depth + 1, config);
                 for item in items {
+                    let item_line = match item {
+                        SectionItem::Field(field) => field.span.line,
+                        SectionItem::Spread(spread) => spread.span.line,
+                    };
+                    config.comments.emit_before_line(item_line, depth + 1, config, out);
                     out.push_str(&field_indent);
                     format_object_item_wrapped(item, depth + 1, config, out);
                     out.push('\n');
+                    config.comments.append_trailing(item_line, out);
                 }
                 out.push_str(&indent(depth, config));
                 out.push('}');
@@ -1038,6 +1063,7 @@ pub(crate) fn format_expr(
 
         Expr::List(items, _) => {
             let mut flat = String::from("[");
+            let speculative = config.comments.suspend();
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     flat.push_str(", ");
@@ -1045,6 +1071,7 @@ pub(crate) fn format_expr(
                 format_expr(item, 0, depth + 1, config, &mut flat);
             }
             flat.push(']');
+            drop(speculative);
 
             if !list_prefers_multiline(items) && fits_inline(out, &flat) {
                 out.push_str(&flat);
@@ -1077,12 +1104,14 @@ pub(crate) fn format_expr(
             ..
         } => {
             let mut flat = String::from("for ");
+            let speculative = config.comments.suspend();
             flat.push_str(var_name);
             flat.push_str(" in ");
             format_expr(source, 0, depth, config, &mut flat);
             flat.push_str(" { ");
             format_expr(body, 0, depth + 1, config, &mut flat);
             flat.push_str(" }");
+            drop(speculative);
 
             if fits_inline(out, &flat) {
                 out.push_str(&flat);
@@ -1161,10 +1190,22 @@ fn format_shell_expr(
 /// Prints a native shell block's `{ ... }` (no `shell`/`exec` prefix); shared
 /// by `shell {}` values and `run { }` task bodies.
 fn format_native_run_body(shell: &ShellExpr, depth: usize, config: &FormatConfig, out: &mut String) {
+    let mut cx = config.comments.clone();
+    format_native_run_body_cx(shell, depth, config, &mut cx, out);
+}
+
+fn format_native_run_body_cx(
+    shell: &ShellExpr,
+    depth: usize,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+) {
     out.push('{');
     if !shell.statements.is_empty() {
         out.push('\n');
-        format_func_stmts(&shell.statements, depth + 1, config, out, true);
+        format_func_stmts(&shell.statements, depth + 1, config, cx, out, true);
+        cx.emit_before_line(shell.end_line, depth + 1, config, out);
         out.push_str(&indent(depth, config));
         out.push('}');
         return;
@@ -1175,6 +1216,7 @@ fn format_native_run_body(shell: &ShellExpr, depth: usize, config: &FormatConfig
     }
     out.push('\n');
     format_shell_steps(&shell.steps, depth + 1, config, out);
+    cx.emit_before_line(shell.end_line, depth + 1, config, out);
     out.push_str(&indent(depth, config));
     out.push('}');
 }
@@ -1202,25 +1244,39 @@ fn format_shell_steps_inline(steps: &[(ShellJoin, ShellStep)], out: &mut String)
     }
 }
 
+fn shell_step_line(step: &ShellStep) -> u32 {
+    match step {
+        ShellStep::Command(command) => command.span.line,
+        ShellStep::Pipeline(commands) => commands.first().map_or(0, |command| command.span.line),
+    }
+}
+
 fn format_shell_steps(
     steps: &[(ShellJoin, ShellStep)],
     depth: usize,
     config: &FormatConfig,
     out: &mut String,
 ) {
+    let cx = &config.comments;
+    let mut previous_line = 0;
     for (index, (join, step)) in steps.iter().enumerate() {
+        let line = shell_step_line(step);
         if index == 0 {
+            cx.emit_before_line(line, depth, config, out);
             out.push_str(&indent(depth, config));
         } else {
             match join {
                 ShellJoin::Always => {
                     out.push_str(";\n");
+                    cx.append_trailing(previous_line, out);
+                    cx.emit_before_line(line, depth, config, out);
                     out.push_str(&indent(depth, config));
                 }
                 ShellJoin::OnSuccess => out.push_str(" && "),
                 ShellJoin::OnFailure => out.push_str(" || "),
             }
         }
+        previous_line = line;
         match step {
             ShellStep::Command(command) => format_shell_command(command, out),
             ShellStep::Pipeline(commands) => {
@@ -1235,6 +1291,7 @@ fn format_shell_steps(
     }
     if !steps.is_empty() {
         out.push_str(";\n");
+        cx.append_trailing(previous_line, out);
     }
 }
 
@@ -1372,7 +1429,9 @@ fn format_object_item_wrapped(
     if let SectionItem::Field(f) = item {
         if let (None, Some(FieldValue::Nested(nested))) = (&f.ty, &f.value) {
             let mut flat = String::new();
+            let speculative = config.comments.suspend();
             format_object_item_flat(item, depth, config, &mut flat);
+            drop(speculative);
             flat.pop(); // drop the trailing space after ';'
             if !object_prefers_multiline(nested) && fits_inline(out, &flat) {
                 out.push_str(&flat);
@@ -1405,11 +1464,26 @@ fn format_func_stmts(
     stmts: &[FuncStmt],
     depth: usize,
     config: &FormatConfig,
+    cx: &mut CommentCursor,
     out: &mut String,
     shell_context: bool,
 ) {
     for stmt in stmts {
-        format_func_stmt(stmt, depth, config, out, shell_context);
+        format_func_stmt(stmt, depth, config, cx, out, shell_context);
+    }
+}
+
+fn func_stmt_line(stmt: &FuncStmt) -> u32 {
+    match stmt {
+        FuncStmt::LocalVar(lv) => lv.span.line,
+        FuncStmt::Assignment { span, .. }
+        | FuncStmt::Expression(_, span)
+        | FuncStmt::Break(span)
+        | FuncStmt::Continue(span)
+        | FuncStmt::Return(_, span) => span.line,
+        FuncStmt::Try(ts) => ts.span.line,
+        FuncStmt::If(is) => is.span.line,
+        FuncStmt::For(fs) => fs.span.line,
     }
 }
 
@@ -1417,6 +1491,29 @@ fn format_func_stmt(
     stmt: &FuncStmt,
     depth: usize,
     config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+    shell_context: bool,
+) {
+    let line = func_stmt_line(stmt);
+    cx.emit_before_line(line, depth, config, out);
+    format_func_stmt_body(stmt, depth, config, cx, out, shell_context);
+    // Block statements claim their trailing comment on the closing line;
+    // simple ones on their own line.
+    let trailing_line = match stmt {
+        FuncStmt::Try(ts) => ts.end_line,
+        FuncStmt::If(is) => is.end_line,
+        FuncStmt::For(fs) => fs.end_line,
+        _ => line,
+    };
+    cx.append_trailing(trailing_line, out);
+}
+
+fn format_func_stmt_body(
+    stmt: &FuncStmt,
+    depth: usize,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
     out: &mut String,
     shell_context: bool,
 ) {
@@ -1473,7 +1570,8 @@ fn format_func_stmt(
         FuncStmt::Try(ts) => {
             out.push_str(&ind);
             out.push_str("try {\n");
-            format_func_stmts(&ts.body, depth + 1, config, out, shell_context);
+            format_func_stmts(&ts.body, depth + 1, config, cx, out, shell_context);
+            cx.emit_before_line(ts.catch_span.line, depth + 1, config, out);
             out.push_str(&ind);
             out.push_str("} catch");
             if let Some(name) = &ts.catch_name {
@@ -1481,7 +1579,8 @@ fn format_func_stmt(
                 out.push_str(name);
             }
             out.push_str(" {\n");
-            format_func_stmts(&ts.handler, depth + 1, config, out, shell_context);
+            format_func_stmts(&ts.handler, depth + 1, config, cx, out, shell_context);
+            cx.emit_before_line(ts.end_line, depth + 1, config, out);
             out.push_str(&ind);
             out.push_str("}\n");
         }
@@ -1502,6 +1601,7 @@ fn format_func_stmt(
                 ReturnValue::SectionBlock(fields) => {
                     out.push_str("{\n");
                     for rf in fields {
+                        cx.emit_before_line(rf.span.line, depth + 1, config, out);
                         out.push_str(&indent(depth + 1, config));
                         out.push_str(&rf.name);
                         out.push_str(": ");
@@ -1511,6 +1611,7 @@ fn format_func_stmt(
                         }
                         format_expr(&rf.value, 0, depth + 1, config, out);
                         out.push_str(";\n");
+                        cx.append_trailing(rf.span.line, out);
                     }
                     out.push_str(&ind);
                     out.push_str("};\n");
@@ -1523,14 +1624,16 @@ fn format_func_stmt(
             out.push_str("if ");
             format_expr(&if_stmt.condition, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(&if_stmt.then_stmts, depth + 1, config, out, shell_context);
+            format_func_stmts(&if_stmt.then_stmts, depth + 1, config, cx, out, shell_context);
+            cx.emit_before_line(if_stmt.then_end_line, depth + 1, config, out);
             if if_stmt.else_stmts.is_empty() {
                 out.push_str(&ind);
                 out.push_str("}\n");
             } else {
                 out.push_str(&ind);
                 out.push_str("} else {\n");
-                format_func_stmts(&if_stmt.else_stmts, depth + 1, config, out, shell_context);
+                format_func_stmts(&if_stmt.else_stmts, depth + 1, config, cx, out, shell_context);
+                cx.emit_before_line(if_stmt.end_line, depth + 1, config, out);
                 out.push_str(&ind);
                 out.push_str("}\n");
             }
@@ -1556,7 +1659,8 @@ fn format_func_stmt(
             out.push_str(" in ");
             format_expr(&statement.iterable, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(&statement.body, depth + 1, config, out, shell_context);
+            format_func_stmts(&statement.body, depth + 1, config, cx, out, shell_context);
+            cx.emit_before_line(statement.end_line, depth + 1, config, out);
             out.push_str(&ind);
             out.push_str("}\n");
         }
@@ -1632,6 +1736,20 @@ fn format_field_decl(
     fd: &FieldDecl,
     depth: usize,
     config: &FormatConfig,
+    cx: &mut CommentCursor,
+    out: &mut String,
+    canonical: bool,
+) {
+    cx.emit_before_line(fd.span.line, depth, config, out);
+    format_field_decl_body(fd, depth, config, cx, out, canonical);
+    cx.append_trailing(fd.end_line, out);
+}
+
+fn format_field_decl_body(
+    fd: &FieldDecl,
+    depth: usize,
+    config: &FormatConfig,
+    cx: &mut CommentCursor,
     out: &mut String,
     canonical: bool,
 ) {
@@ -1661,8 +1779,9 @@ fn format_field_decl(
                 Some(FieldValue::Nested(nested_items)) => {
                     out.push_str(" = {\n");
                     for ni in nested_items {
-                        format_nested_section_item(ni, depth + 1, config, out);
+                        format_nested_section_item(ni, depth + 1, config, cx, out);
                     }
+                    cx.emit_before_line(fd.end_line, depth + 1, config, out);
                     out.push_str(&ind);
                     out.push_str("};\n");
                 }
@@ -1681,8 +1800,9 @@ fn format_field_decl(
             Some(FieldValue::Nested(nested_items)) => {
                 out.push_str("{\n");
                 for ni in nested_items {
-                    format_nested_section_item(ni, depth + 1, config, out);
+                    format_nested_section_item(ni, depth + 1, config, cx, out);
                 }
+                cx.emit_before_line(fd.end_line, depth + 1, config, out);
                 out.push_str(&ind);
                 out.push_str("};\n");
             }
@@ -1697,38 +1817,10 @@ fn format_nested_section_item(
     item: &SectionItem,
     depth: usize,
     config: &FormatConfig,
+    cx: &mut CommentCursor,
     out: &mut String,
 ) {
-    match item {
-        SectionItem::Field(f) => format_field_decl(f, depth, config, out, false),
-        SectionItem::Spread(ss) => {
-            out.push_str(&indent(depth, config));
-            out.push_str("...");
-            format_expr(&ss.expr, 0, depth, config, out);
-            out.push_str(";\n");
-        }
-    }
-}
-
-fn format_section_items(
-    items: &[SectionItem],
-    depth: usize,
-    config: &FormatConfig,
-    out: &mut String,
-    canonical: bool,
-) {
-    for item in items {
-        match item {
-            SectionItem::Field(fd) => format_field_decl(fd, depth, config, out, canonical),
-            SectionItem::Spread(ss) => {
-                let ind = indent(depth, config);
-                out.push_str(&ind);
-                out.push_str("...");
-                format_expr(&ss.expr, 0, depth, config, out);
-                out.push_str(";\n");
-            }
-        }
-    }
+    format_section_items(std::slice::from_ref(item), depth, config, cx, out, false);
 }
 
 #[cfg(test)]
@@ -2425,6 +2517,7 @@ function pick(flag: bool) -> int {
                 items: vec![],
                 type_binding: None,
                 span: crate::error::Span::dummy(),
+                end_line: 0,
             })],
         };
         let out = format_program(&program, &FormatConfig::default());
@@ -3015,6 +3108,52 @@ struct Config"#),
         assert_eq!(
             fmt(src),
             "@LoadEnv(\".env.production\")\n\ntask Build {\n    run {\n        echo build;\n    };\n};\n"
+        );
+    }
+
+    /// Every comment in the source must survive formatting, in the same
+    /// position, and formatting again must change nothing.
+    fn assert_comments_stay_put(source: &str) {
+        let formatted = fmt(source);
+        assert_eq!(formatted, source, "comments moved or layout changed");
+        assert_eq!(fmt(&formatted), formatted, "not idempotent");
+    }
+
+    #[test]
+    fn comments_stay_inside_nested_section_fields() {
+        assert_comments_stay_put(
+            "struct Container {\n    // above\n    padding: int = 5; // trailing\n    decoration: section = {\n        // inside\n        color: str = \"red\"; // nested\n        // tail nested\n    };\n    // tail\n};\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_inside_function_bodies_and_blocks() {
+        assert_comments_stay_put(
+            "function f(x: int) -> int {\n    // head\n    var y: int = x; // t1\n    if y > 1 {\n        // then\n        y = 2;\n        // then tail\n    } else {\n        y = 3; // t2\n        // else tail\n    }\n    for i in [1, 2] {\n        // loop\n        y = i;\n    }\n    try {\n        y = 4;\n    } catch e {\n        // catch\n        y = 5;\n    }\n    return y; // t3\n};\n",
+        );
+    }
+
+    #[test]
+    fn trailing_comment_after_top_level_items_stays_on_its_line() {
+        assert_comments_stay_put(
+            "var a: int = 1; // one\n\nvar b: int = 2; // two\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_inside_native_task_run_bodies() {
+        assert_comments_stay_put(
+            "task Deploy {\n    run {\n        // head\n        var n: str = \"a\"; // t1\n        echo \"${n}\";\n        // tail\n    };\n};\n",
+        );
+        assert_comments_stay_put(
+            "task Cmds {\n    run {\n        // first\n        echo a; // ta\n        // second\n        echo b && echo c; // tb\n        // last\n    };\n};\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_inside_shell_values() {
+        assert_comments_stay_put(
+            "function g() -> shell {\n    return shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
         );
     }
 }

@@ -139,6 +139,9 @@ pub struct ShellExpr {
     pub steps: Vec<(ShellJoin, ShellStep)>,
     pub span: Span,
     pub foreign_shell: Option<String>,
+    /// Source line of the closing token, so the formatter keeps comments
+    /// trailing the last statement inside the block.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +363,9 @@ pub struct SectionDecl {
     pub items: Vec<SectionItem>,
     pub type_binding: Option<TypeBinding>,
     pub span: Span,
+    /// Source line of the closing `}`, so the formatter can keep comments
+    /// trailing the last field inside the body.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +385,9 @@ pub struct FieldDecl {
     pub ty: Option<SparType>,
     pub value: Option<FieldValue>,
     pub span: Span,
+    /// Source line of the closing `}` for a nested-section value, else the
+    /// field's own line — lets the formatter keep comments inside the body.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +630,8 @@ pub struct TryStmt {
     pub catch_span: Span,
     pub handler: Vec<Statement>,
     pub span: Span,
+    /// Source line of the `catch` handler's closing `}`.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -629,6 +640,8 @@ pub struct ForStmt {
     pub iterable: Expr,
     pub body: Vec<Statement>,
     pub span: Span,
+    /// Source line of the closing `}`.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -660,6 +673,11 @@ pub struct IfStmt {
     pub then_stmts: Vec<FuncStmt>,
     pub else_stmts: Vec<FuncStmt>,
     pub span: Span,
+    /// Source line of the `}` closing the `then` block (the `else` line
+    /// when there is an else branch).
+    pub then_end_line: u32,
+    /// Source line of the last closing `}`.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]

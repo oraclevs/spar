@@ -3250,6 +3250,7 @@ impl<'a> TypeChecker<'a> {
                         ty: rf.ty.clone(),
                         value: Some(FieldValue::Expr(rf.value.clone())),
                         span: rf.span.clone(),
+                        end_line: rf.span.line,
                     })
                     .collect();
                 let config_field_refs: Vec<&FieldDecl> = config_fields.iter().collect();

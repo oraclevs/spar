@@ -1983,32 +1983,52 @@ impl<'a> Lexer<'a> {
                     if depth == 0 {
                         let body_end = self.pos;
                         self.advance();
-                        let body = self.source[body_start..body_end].trim();
+                        let original = &self.source[body_start..body_end];
                         let mut normalized_body = String::new();
-                        for line in body.lines() {
+                        for line in original.trim().lines() {
                             append_native_command_line(&mut normalized_body, line);
                         }
                         let normalized_body = normalized_body.trim();
                         let wrapped = format!("command {normalized_body};");
-                        let mut nested = Lexer::new(&wrapped).tokenize()?;
-                        nested.retain(|token| {
-                            token.token != Token::KwCommand && token.token != Token::Eof
-                        });
-                        if nested
+                        let nested = Lexer::new(&wrapped).tokenize()?;
+                        // `wrapped` inserts a `command ` prefix and a `;` terminator and
+                        // re-flows whitespace, so nested spans do not exist in the file.
+                        // Map them back onto the original body like the `shell { }` path.
+                        let inserted: Vec<(usize, usize)> = nested
+                            .iter()
+                            .filter(|token| token.token == Token::KwCommand)
+                            .map(|token| (token.span.start, token.span.end))
+                            .collect();
+                        let offsets = NormalizedOffsets::new(original, &wrapped, &inserted);
+                        let mut mapped: Vec<SpannedToken> = nested
+                            .into_iter()
+                            .filter(|token| {
+                                token.token != Token::KwCommand && token.token != Token::Eof
+                            })
+                            .map(|mut token| {
+                                let (start, end) = offsets.original_range(
+                                    original,
+                                    token.span.start,
+                                    token.span.end,
+                                );
+                                let (line, col) = offsets.line_col(
+                                    original,
+                                    start,
+                                    expression_line,
+                                    expression_col + 2,
+                                );
+                                token.span =
+                                    Span::new(body_start + start, body_start + end, line, col);
+                                token
+                            })
+                            .collect();
+                        if mapped
                             .last()
                             .is_some_and(|token| token.token == Token::Semicolon)
                         {
-                            nested.pop();
+                            mapped.pop();
                         }
-                        for mut token in nested {
-                            token.span = Span::new(
-                                body_start,
-                                body_end,
-                                expression_line,
-                                expression_col + 2,
-                            );
-                            tokens.push(token);
-                        }
+                        tokens.extend(mapped);
                         tokens.push(SpannedToken::new(
                             Token::CommandSubEnd,
                             Span::new(body_end, self.pos, self.line, self.col),
@@ -2038,6 +2058,27 @@ mod tests {
             .into_iter()
             .map(|st| st.token)
             .collect()
+    }
+
+    #[test]
+    fn command_substitution_words_keep_their_own_spans() {
+        let src = "var d: str = $(ffprobe -v error \"${input}\");\n";
+        let tokens = Lexer::new(src).tokenize().expect("lex failed");
+        let words: Vec<(String, usize, usize)> = tokens
+            .iter()
+            .filter_map(|t| match &t.token {
+                Token::ShellWord(word) => Some((word.clone(), t.span.start, t.span.end)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words[0], ("ffprobe".to_string(), 15, 22));
+        assert_eq!(words[1], ("-v".to_string(), 23, 25));
+        assert_eq!(words[2], ("error".to_string(), 26, 31));
+        // The quoted interpolation word sits after `error` and inside the parens.
+        let (_, start, end) = &words[3];
+        assert!(*start >= 32 && *end <= 42, "quoted word span was {start}..{end}");
+        // No word may span the whole substitution body any more.
+        assert!(words.iter().all(|(_, s, e)| !(*s == 15 && *e == 42)));
     }
 
     #[test]

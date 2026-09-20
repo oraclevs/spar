@@ -353,11 +353,25 @@ impl Session {
     }
 
     /// The evaluated value of a top-level `struct`/section declaration.
+    /// Nested sections are included as `ConfigValue::Section` values under
+    /// their own names (the evaluator stores them under separate path keys).
     pub fn section(&self, name: &str) -> Option<ConfigValue> {
-        self.sections
-            .get(&vec![name.to_string()])
-            .cloned()
-            .map(ConfigValue::Section)
+        let path = vec![name.to_string()];
+        self.sections.contains_key(&path).then(|| self.assemble_section(&path))
+    }
+
+    fn assemble_section(&self, path: &[String]) -> ConfigValue {
+        let mut fields = self.sections.get(path).cloned().unwrap_or_default();
+        for nested in self
+            .sections
+            .keys()
+            .filter(|candidate| candidate.len() == path.len() + 1 && candidate.starts_with(path))
+        {
+            if let Some(name) = nested.last() {
+                fields.insert(name.clone(), self.assemble_section(nested));
+            }
+        }
+        ConfigValue::Section(fields)
     }
 
 
@@ -399,6 +413,36 @@ mod tests {
     use super::*;
     use crate::engine::Engine;
     use crate::host::{HostFunction, HostRegistry};
+
+    #[test]
+    fn section_includes_nested_sections_as_values() {
+        let mut session = crate::Engine::default().session();
+        session
+            .eval(
+                r#"struct Config {
+    name: str = "top";
+    prompt: section = {
+        depth: int = 1;
+        inner: section = { flag: bool = true; };
+    };
+};"#,
+            )
+            .unwrap();
+
+        let ConfigValue::Section(config) = session.section("Config").expect("Config") else {
+            panic!("expected a section");
+        };
+        assert_eq!(config.get("name"), Some(&ConfigValue::Str("top".into())));
+        let Some(ConfigValue::Section(prompt)) = config.get("prompt") else {
+            panic!("nested `prompt` section missing: {config:?}");
+        };
+        assert_eq!(prompt.get("depth"), Some(&ConfigValue::Int(1)));
+        let Some(ConfigValue::Section(inner)) = prompt.get("inner") else {
+            panic!("doubly nested section missing: {prompt:?}");
+        };
+        assert_eq!(inner.get("flag"), Some(&ConfigValue::Bool(true)));
+        assert!(session.section("Missing").is_none());
+    }
 
     #[test]
     fn interactive_eval_accepts_missing_final_statement_terminators() {

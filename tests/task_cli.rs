@@ -80,7 +80,9 @@ fn run_explicit_task_runs_its_dependency_first() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let build_pos = stderr.find("build demo").expect("Build command echoed");
+    let build_pos = stderr
+        .find("build ${appName}")
+        .expect("Build command echoed");
     let test_pos = stderr.find("echo \"test\"").unwrap_or_else(|| {
         stderr
             .rfind("test")
@@ -156,9 +158,9 @@ fn quiet_failing_task_reports_source_location_without_dumping_script() {
         "quiet-failure.spar",
         r#"
 
-task [QuietFailure] {
+task QuietFailure {
     quiet: true;
-    run {
+    run bash {
         #!/bin/sh
         # FULL_SCRIPT_SHOULD_NOT_APPEAR
         printf 'short failure detail\n' >&2
@@ -193,9 +195,9 @@ fn quiet_successful_task_does_not_echo_script() {
     let file = write_fixture(
         directory.path(),
         "quiet-success.spar",
-        r#"task [QuietSuccess] {
+        r#"task QuietSuccess {
     quiet: true;
-    run {
+    run bash {
         #!/bin/sh
         # QUIET_SUCCESS_SCRIPT_SHOULD_NOT_APPEAR
         printf quiet-success-output
@@ -225,9 +227,9 @@ fn explicit_quiet_false_failing_task_still_dumps_full_script() {
     let file = write_fixture(
         directory.path(),
         "loud-failure.spar",
-        r#"task [LoudFailure] {
+        r#"task LoudFailure {
     quiet: false;
-    run {
+    run bash {
         #!/bin/sh
         # LOUD_FAILURE_FULL_SCRIPT
         exit 7
@@ -255,8 +257,8 @@ fn default_task_is_quiet_and_hides_full_script_on_failure() {
     let file = write_fixture(
         directory.path(),
         "default-quiet-failure.spar",
-        r#"task [DefaultFailure] {
-    run {
+        r#"task DefaultFailure {
+    run bash {
         #!/bin/sh
         # DEFAULT_QUIET_FULL_SCRIPT_SHOULD_NOT_APPEAR
         printf 'quiet by default\n' >&2
@@ -288,7 +290,7 @@ fn dry_run_prints_commands_without_executing_them() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("marker");
     let src = format!(
-        r#"task [Build] {{
+        r#"task Build {{
     default: true;
 
     run {{
@@ -335,7 +337,7 @@ fn task_commands_discover_sparmake_in_a_parent_directory() {
     write_fixture(
         directory.path(),
         "SparMake.spar",
-        "task [Build] { description: \"Found\"; run { true; }; };",
+        "task Build { description: \"Found\"; run { true; }; };",
     );
 
     let output = spar_in(&["tasks"], &nested);
@@ -367,9 +369,9 @@ fn tasks_groups_public_tasks_and_hides_private_tasks() {
         directory.path(),
         "groups.spar",
         r#"
-task [Build] { description: "Compile"; run { true; }; };
-task [Deploy] { group: "release"; run { true; }; };
-task [Secrets] { private: true; group: "release"; run { true; }; };
+task Build { description: "Compile"; run { true; }; };
+task Deploy { group: "release"; run { true; }; };
+task Secrets { private: true; group: "release"; run { true; }; };
 "#,
     );
 
@@ -403,9 +405,9 @@ fn run_choose_accepts_a_number_or_task_name_and_hides_private_tasks() {
         "choose.spar",
         &format!(
             r#"
-task [Build] {{ run {{ printf chosen > '{}'; }}; }};
-task [Test] {{ group: "quality"; run {{ printf named > '{}'; }}; }};
-task [Secret] {{ private: true; run {{ true; }}; }};
+task Build {{ run {{ printf chosen > '{}'; }}; }};
+task Test {{ group: "quality"; run {{ printf named > '{}'; }}; }};
+task Secret {{ private: true; run {{ true; }}; }};
 "#,
             first_marker.display(),
             second_marker.display()
@@ -438,11 +440,11 @@ fn show_binds_only_the_requested_task() {
         directory.path(),
         "show.spar",
         r#"
-task [Build] { run { echo dependency; }; };
-task [Deploy](environment: str) {
+task Build { run { echo dependency; }; };
+task Deploy(environment: str) {
     dependsOn: [Build];
     confirm: "Do not prompt";
-    run { echo deploy-${environment}; };
+    run bash { echo deploy-${environment}; };
 };
 "#,
     );
@@ -467,18 +469,17 @@ fn dump_emits_the_complete_lowered_catalog_as_json() {
         directory.path(),
         "dump.spar",
         r#"
-task [Deploy](environment: str = "staging", *extra: str) {
+task Deploy(environment: str = "staging", *extra: str) {
     description: "Deploy app";
     private: true;
     group: "release";
     confirm: "Continue?";
     dependsOn: [Build];
     cwd: "deploy";
-    shell: ["bash", "-c"];
     env: { MODE: "release"; };
-    run { deploy ${environment} ${extra}; };
+    run bash { deploy ${environment} ${extra}; };
 };
-task [Build] { run { build; }; };
+task Build { run { build; }; };
 "#,
     );
 
@@ -505,8 +506,7 @@ task [Build] { run { build; }; };
     assert_eq!(deploy["parameters"][1]["variadic"], true);
     assert_eq!(deploy["environment"]["MODE"], "release");
     assert_eq!(deploy["cwd"], "deploy");
-    assert_eq!(deploy["shell"], serde_json::json!(["bash", "-c"]));
-    assert_eq!(deploy["commands"][0]["kind"], "shell");
+    assert_eq!(deploy["commands"][0]["kind"], "bash");
     assert_eq!(
         deploy["commands"][0]["template"],
         "deploy ${environment} ${extra}"
@@ -521,7 +521,7 @@ fn private_task_remains_explicitly_runnable() {
         directory.path(),
         "private.spar",
         &format!(
-            "task [Secret] {{ private: true; run {{ printf yes > '{}'; }}; }};",
+            "task Secret {{ private: true; run {{ printf yes > '{}'; }}; }};",
             marker.display()
         ),
     );
@@ -542,7 +542,7 @@ fn run_choose_rejects_an_invalid_selection() {
     let file = write_fixture(
         directory.path(),
         "choose-invalid.spar",
-        "task [Build] { run { true; }; };",
+        "task Build { run { true; }; };",
     );
 
     let output = spar_with_input(
@@ -562,8 +562,8 @@ fn show_prints_a_shebang_script_in_full() {
     let file = write_fixture(
         directory.path(),
         "script.spar",
-        r#"task [Script] {
-    run {
+        r#"task Script {
+    run bash {
         #!/bin/sh
         echo first; echo second
     };
@@ -621,7 +621,7 @@ fn bare_reserved_keyword_still_runs_the_subcommand_not_a_same_named_task() {
     let file = write_fixture(
         directory.path(),
         "shadow.spar",
-        r#"task [Check] { default: true; run { true; }; };"#,
+        r#"task Check { default: true; run { true; }; };"#,
     );
 
     // `spar check <file>` must run the `check` subcommand (compile-check the
@@ -643,7 +643,7 @@ fn task_name_shadowing_a_reserved_command_warns() {
     let file = write_fixture(
         directory.path(),
         "shadow.spar",
-        r#"task [Check] { default: true; run { true; }; };"#,
+        r#"task Check { default: true; run { true; }; };"#,
     );
 
     let output = spar(&["tasks", "-f", file.to_str().unwrap()]);
@@ -674,7 +674,7 @@ fn named_argument_overrides_one_default_and_leaves_the_other() {
     let file = write_fixture(
         directory.path(),
         "cpd.spar",
-        r#"task [Cpd](file: str = "main.dart", out: str = "main") {
+        r#"task Cpd(file: str = "main.dart", out: str = "main") {
     default: true;
     run { echo "compiling ${file} to ${out}"; };
 };"#,
@@ -709,7 +709,7 @@ fn named_arguments_cannot_mix_with_positional_ones_end_to_end() {
     let file = write_fixture(
         directory.path(),
         "cpd.spar",
-        r#"task [Cpd](file: str = "main.dart", out: str = "main") {
+        r#"task Cpd(file: str = "main.dart", out: str = "main") {
     run { echo "compiling ${file} to ${out}"; };
 };"#,
     );
@@ -728,4 +728,58 @@ fn named_arguments_cannot_mix_with_positional_ones_end_to_end() {
         stderr.contains("mixes named and positional arguments"),
         "{stderr}"
     );
+}
+
+#[test]
+fn native_run_block_executes_with_param_and_global_interpolation() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "native.spar",
+        "export var app: str = \"demo\";\n\
+         task Greet(name: str = \"world\") {\n\
+             run { echo \"hello ${name} from ${app}\"; };\n\
+         };\n",
+    );
+    let output = spar(&["run", "greet", "spar", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "hello spar from demo"
+    );
+}
+
+#[test]
+fn bash_run_block_supports_bash_only_syntax() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "bash.spar",
+        "task B { run bash { [[ 1 -eq 1 ]] && echo ok; }; };\n",
+    );
+    let output = spar(&["run", "b", "-f", file.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "ok");
+}
+
+#[test]
+fn native_block_failure_reports_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "fail.spar",
+        "task F { run { exit 3; }; };\n",
+    );
+    let output = spar(&["run", "f", "-f", file.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("exited with status 3"), "{stderr}");
 }

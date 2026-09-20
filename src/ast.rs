@@ -28,7 +28,7 @@ pub enum TopLevelItem {
     Statement(Statement),
 }
 
-/// A `task [Name](params) { ... }` declaration. Metadata fields
+/// A `task Name(params) { ... }` declaration. Metadata fields
 /// (`description`, `default`, `quiet`, `cwd`, `env`) are ordinary Spar
 /// expressions, evaluated by `task_lowering` the same way any other Spar
 /// value is. `depends_on` holds bare task-name references — tasks live in
@@ -48,7 +48,6 @@ pub struct TaskDecl {
     pub depends_on: Vec<TaskRef>,
     pub env: Vec<(String, Expr)>,
     pub cwd: Option<Expr>,
-    pub shell: Option<Expr>,
     pub run_blocks: Vec<RunBlock>,
     pub span: Span,
     /// The source line of each metadata field (everything but `run`), in
@@ -90,17 +89,30 @@ pub struct ShellCommand {
     pub span: Span,
 }
 
-/// One `run <label>? { ... }` clause inside a task. `os: None` is the bare
-/// default/fallback form (`run { ... }`) every task could already write;
-/// `os: Some("windows"|"linux"|"macos")` is an override selected by
-/// matching `std::env::consts::OS` at task-lowering time. A task may have
-/// at most one default block and at most one block per label — enforced
-/// by the parser, not here.
+/// Which language a `run` body is written in. `Spar` (the default) is the
+/// native `shell {}` language; `Bash` is raw text handed to bash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunShell {
+    Spar,
+    Bash,
+}
+
+#[derive(Debug, Clone)]
+pub enum RunBody {
+    Native(ShellExpr),
+    Bash(Vec<ShellCommand>),
+}
+
+/// One `run [spar|bash] [os] { ... }` clause. `os: None` is the any-OS
+/// fallback. A task has at most one block per OS slot regardless of shell
+/// (enforced by the parser).
 #[derive(Debug, Clone)]
 pub struct RunBlock {
+    pub shell: RunShell,
+    pub shell_span: Option<Span>,
     pub os: Option<String>,
     pub os_span: Option<Span>,
-    pub commands: Vec<ShellCommand>,
+    pub body: RunBody,
     pub span: Span,
 }
 

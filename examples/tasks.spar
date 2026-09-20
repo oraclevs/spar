@@ -9,7 +9,7 @@ export var appName: str = "demo";
 
 export var port: int = 8080;
 
-task [Hello] {
+task Hello {
     description: "Print application information";
     default: true;
     run {
@@ -17,14 +17,14 @@ task [Hello] {
     };
 };
 
-task [Test] {
+task Test {
     description: "Run tests";
     run {
         echo "testing ${appName}";
     };
 };
 
-task [Dev] {
+task Dev {
     description: "Start development";
     quiet: true;
     dependsOn: [Test];

@@ -423,9 +423,8 @@ fn format_task_decl_cx(
     cx: &mut CommentCursor,
     out: &mut String,
 ) {
-    out.push_str("task [");
+    out.push_str("task ");
     out.push_str(&td.name);
-    out.push(']');
     if !td.params.is_empty() {
         out.push('(');
         for (i, p) in td.params.iter().enumerate() {
@@ -518,14 +517,6 @@ fn format_task_decl_cx(
             out.push_str(";\n");
         });
     }
-    if let Some(shell) = &td.shell {
-        with_task_field_comments(td, "shell", cx, config, out, |out| {
-            out.push_str(&body_indent);
-            out.push_str("shell: ");
-            format_expr(shell, 0, 1, config, out);
-            out.push_str(";\n");
-        });
-    }
     if !td.env.is_empty() {
         with_task_field_comments(td, "env", cx, config, out, |out| {
             out.push_str(&body_indent);
@@ -547,32 +538,44 @@ fn format_task_decl_cx(
         cx.emit_before_line(block.span.line, 1, config, out);
         out.push_str(&body_indent);
         out.push_str("run");
+        if block.shell == RunShell::Bash {
+            out.push_str(" bash");
+        }
         if let Some(os) = &block.os {
             out.push(' ');
             out.push_str(os);
         }
-        out.push_str(" {\n");
-        let run_indent = indent(2, config);
-        for cmd in &block.commands {
-            out.push_str(&run_indent);
-            for part in &cmd.parts {
-                match part {
-                    ShellTemplatePart::Literal(s) => out.push_str(s),
-                    ShellTemplatePart::Expr(e) => {
-                        out.push_str("${");
-                        format_expr(e, 0, 2, config, out);
-                        out.push('}');
+        match &block.body {
+            RunBody::Bash(commands) => {
+                out.push_str(" {\n");
+                let run_indent = indent(2, config);
+                for cmd in commands {
+                    out.push_str(&run_indent);
+                    for part in &cmd.parts {
+                        match part {
+                            ShellTemplatePart::Literal(s) => out.push_str(s),
+                            ShellTemplatePart::Expr(e) => {
+                                out.push_str("${");
+                                format_expr(e, 0, 2, config, out);
+                                out.push('}');
+                            }
+                        }
+                    }
+                    if cmd.is_shebang {
+                        out.push('\n');
+                    } else {
+                        out.push_str(";\n");
                     }
                 }
+                out.push_str(&body_indent);
+                out.push_str("};\n");
             }
-            if cmd.is_shebang {
-                out.push('\n');
-            } else {
+            RunBody::Native(shell) => {
+                out.push(' ');
+                format_native_run_body(shell, 1, config, out);
                 out.push_str(";\n");
             }
         }
-        out.push_str(&body_indent);
-        out.push_str("};\n");
     }
 
     // Anything left standalone before the closing `}` (e.g. a comment after
@@ -1149,11 +1152,16 @@ fn format_shell_expr(
         out.push('}');
         return;
     }
-    if execute {
-        out.push('{');
-    } else {
-        out.push_str("shell {");
+    if !execute {
+        out.push_str("shell ");
     }
+    format_native_run_body(shell, depth, config, out);
+}
+
+/// Prints a native shell block's `{ ... }` (no `shell`/`exec` prefix); shared
+/// by `shell {}` values and `run { }` task bodies.
+fn format_native_run_body(shell: &ShellExpr, depth: usize, config: &FormatConfig, out: &mut String) {
+    out.push('{');
     if !shell.statements.is_empty() {
         out.push('\n');
         format_func_stmts(&shell.statements, depth + 1, config, out, true);
@@ -2774,7 +2782,7 @@ struct Config"#),
 
     #[test]
     fn preserves_a_commented_out_field_inside_a_task_body() {
-        let src = "task [Build] {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n};\n";
+        let src = "task Build {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n};\n";
         let out = fmt(src);
         assert!(out.contains("// description: \"old\";"), "{out}");
         let real_pos = out.find("description: \"real\"").unwrap();
@@ -2793,14 +2801,14 @@ struct Config"#),
 
     #[test]
     fn task_body_comment_does_not_leak_into_the_next_task() {
-        let src = "task [Build] {\n    run { true; };\n    // note about build\n};\ntask [Next] {\n    run { true; };\n};\n";
+        let src = "task Build {\n    run { true; };\n    // note about build\n};\ntask Next {\n    run { true; };\n};\n";
         let out = fmt(src);
-        let build_close = out.find("task [Build]").unwrap();
-        let next_open = out.find("task [Next]").unwrap();
+        let build_close = out.find("task Build").unwrap();
+        let next_open = out.find("task Next").unwrap();
         let comment_pos = out.find("// note about build").unwrap();
         assert!(
             build_close < comment_pos && comment_pos < next_open,
-            "comment must render before `task [Next]`, still inside Build: {out}"
+            "comment must render before `task Next`, still inside Build: {out}"
         );
         // Must be indented as if inside the task body, not at column 0.
         let comment_line = out
@@ -2815,7 +2823,7 @@ struct Config"#),
 
     #[test]
     fn task_body_comment_after_last_run_block_stays_inside() {
-        let src = "task [Build] {\n    run { true; };\n    // trailing note\n};\n";
+        let src = "task Build {\n    run { true; };\n    // trailing note\n};\n";
         let out = fmt(src);
         let comment_pos = out.find("// trailing note").unwrap();
         let closing_pos = out.rfind("};").unwrap();
@@ -2827,7 +2835,7 @@ struct Config"#),
 
     #[test]
     fn preserves_block_comments_inside_a_task_body() {
-        let src = "task [Build] {\n    /* multi\n       line */\n    run { true; };\n};\n";
+        let src = "task Build {\n    /* multi\n       line */\n    run { true; };\n};\n";
         let out = fmt(src);
         assert!(out.contains("/* multi"), "{out}");
         assert!(out.contains("line */"), "{out}");
@@ -2846,7 +2854,7 @@ struct Config"#),
 
     #[test]
     fn formatting_a_task_with_in_body_comments_twice_is_idempotent() {
-        let src = "task [Build] {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n    // trailing\n};\n";
+        let src = "task Build {\n    description: \"real\";\n    // description: \"old\";\n    default: true;\n    run { true; };\n    // trailing\n};\n";
         let once = fmt(src);
         let twice = fmt(&once);
         assert_eq!(once, twice, "formatting must be idempotent: {once}");
@@ -2866,7 +2874,7 @@ struct Config"#),
 
     #[test]
     fn minimal_task_round_trips_and_is_idempotent() {
-        let src = "task [Build] {\n    run {\n        cargo build;\n    };\n};\n";
+        let src = "task Build {\n    run {\n        cargo build;\n    };\n};\n";
         let formatted = fmt(src);
         assert_eq!(formatted, src);
         let reformatted = fmt(&formatted);
@@ -2876,7 +2884,7 @@ struct Config"#),
     #[test]
     fn task_with_all_fields_round_trips_and_is_idempotent() {
         let src = concat!(
-            "task [Deploy](environment: str) {\n",
+            "task Deploy(environment: str) {\n",
             "    description: \"Deploy the app\";\n",
             "    default: true;\n",
             "    quiet: true;\n",
@@ -2885,7 +2893,7 @@ struct Config"#),
             "    env: {\n",
             "        RUST_LOG: \"debug\";\n",
             "    };\n",
-            "    run {\n",
+            "    run bash {\n",
             "        echo \"hi\";\n",
             "        ./deploy.sh ${environment};\n",
             "    };\n",
@@ -2900,7 +2908,7 @@ struct Config"#),
     #[test]
     fn task_v2_metadata_and_parameters_format_in_stable_order() {
         let src = concat!(
-            "task [Deploy](environment: str = \"staging\", *extra: str) {\n",
+            "task Deploy(environment: str = \"staging\", *extra: str) {\n",
             "    description: \"Deploy the app\";\n",
             "    default: true;\n",
             "    quiet: true;\n",
@@ -2909,11 +2917,10 @@ struct Config"#),
             "    confirm: \"Really deploy?\";\n",
             "    dependsOn: [Build];\n",
             "    cwd: \"./web\";\n",
-            "    shell: [\"bash\", \"-euo\", \"pipefail\", \"-c\"];\n",
             "    env: {\n",
             "        RUST_LOG: \"debug\";\n",
             "    };\n",
-            "    run {\n",
+            "    run bash {\n",
             "        ./deploy.sh ${environment} ${extra};\n",
             "    };\n",
             "};\n",
@@ -2925,7 +2932,7 @@ struct Config"#),
 
     #[test]
     fn multiple_run_blocks_format_in_source_order_with_labels() {
-        let src = "task [T] {\n    run {\n        echo default;\n    };\n    run windows {\n        echo win;\n    };\n};\n";
+        let src = "task T {\n    run {\n        echo default;\n    };\n    run windows {\n        echo win;\n    };\n};\n";
         let formatted = fmt(src);
         assert_eq!(formatted, src);
         let reformatted = fmt(&formatted);
@@ -2935,7 +2942,7 @@ struct Config"#),
     #[test]
     fn task_shell_body_content_stays_stable_through_formatting() {
         let src =
-            "task [Build] {\n    run {\n        cargo build --workspace --release;\n    };\n};\n";
+            "task Build {\n    run {\n        cargo build --workspace --release;\n    };\n};\n";
         let formatted = fmt(src);
         assert!(formatted.contains("cargo build --workspace --release;"));
     }
@@ -2943,8 +2950,8 @@ struct Config"#),
     #[test]
     fn task_hash_escape_round_trips_and_reparses() {
         let src = concat!(
-            "task [Build] {\n",
-            "    run {\n",
+            "task Build {\n",
+            "    run bash {\n",
             "        echo #{HOME:-x};\n",
             "    };\n",
             "};\n",
@@ -2963,8 +2970,8 @@ struct Config"#),
     #[test]
     fn shebang_task_script_round_trips_without_an_added_semicolon() {
         let src = concat!(
-            "task [Script] {\n",
-            "    run {\n",
+            "task Script {\n",
+            "    run bash {\n",
             "        #!/usr/bin/env bash\n",
             "        echo one\n",
             "        if true; then echo two; fi\n",
@@ -2977,20 +2984,37 @@ struct Config"#),
     }
 
     #[test]
+    fn formats_task_without_brackets_and_canonical_run_header() {
+        let src = "task Build { run bash windows { dir; }; run linux { echo hi; }; };\n";
+        let out = fmt(src);
+        assert!(out.contains("task Build {"), "{out}");
+        assert!(out.contains("run bash windows {"), "{out}");
+        assert!(out.contains("run linux {"), "{out}");
+        assert_eq!(fmt(&out), out, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn native_run_body_round_trips() {
+        let src = "task T {\n    run {\n        echo hi;\n    };\n};\n";
+        assert_eq!(fmt(src), src);
+        assert_eq!(fmt(&fmt(src)), fmt(src));
+    }
+
+    #[test]
     fn load_env_pragma_formats_first() {
-        let src = "@LoadEnv\ntask [Build] { run { echo build; }; };\n";
+        let src = "@LoadEnv\ntask Build { run { echo build; }; };\n";
         assert_eq!(
             fmt(src),
-            "@LoadEnv\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
+            "@LoadEnv\n\ntask Build {\n    run {\n        echo build;\n    };\n};\n"
         );
     }
 
     #[test]
     fn load_env_pragma_formats_a_custom_path() {
-        let src = "@LoadEnv(\".env.production\")\ntask [Build] { run { echo build; }; };\n";
+        let src = "@LoadEnv(\".env.production\")\ntask Build { run { echo build; }; };\n";
         assert_eq!(
             fmt(src),
-            "@LoadEnv(\".env.production\")\n\ntask [Build] {\n    run {\n        echo build;\n    };\n};\n"
+            "@LoadEnv(\".env.production\")\n\ntask Build {\n    run {\n        echo build;\n    };\n};\n"
         );
     }
 }

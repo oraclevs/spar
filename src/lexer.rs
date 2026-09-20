@@ -1142,64 +1142,73 @@ impl<'a> Lexer<'a> {
     }
 
     /// Called right after an `Ident("run")` token has been pushed. Scans
-    /// ahead (without committing) for an optional bare-identifier OS label
-    /// followed by `{` — `run { ... }` (bare/default) or
-    /// `run windows { ... }` (labeled). If neither shape is found at this
-    /// position, the position is left untouched and `run`/the tentative
-    /// label lex as ordinary tokens on the next loop iterations — this
-    /// keeps the check honest rather than assuming `run` always opens a
-    /// block.
+    /// ahead (without committing) for up to two bare-identifier header words
+    /// (`[spar|bash] [os]`) followed by `{`. `run bash ... { }` keeps the raw
+    /// text body (`RunStart`/`ShellFragment`/`RunEnd`); every other header
+    /// opens a native shell body (`ShellBlockStart`). If no `{` follows the
+    /// words, the position is left untouched and `run`/the tentative words
+    /// lex as ordinary tokens on the next loop iterations — this keeps the
+    /// check honest rather than assuming `run` always opens a block.
     fn maybe_enter_run_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+        let is_space = |byte: Option<u8>| matches!(byte, Some(b' ' | b'\t' | b'\r' | b'\n'));
         let mut offset = 0usize;
-        while matches!(
-            self.peek_at(offset),
-            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
-        ) {
-            offset += 1;
+        let mut words: Vec<(usize, usize)> = Vec::new(); // (start, end) relative to self.pos
+        loop {
+            while is_space(self.peek_at(offset)) {
+                offset += 1;
+            }
+            let start = offset;
+            while matches!(self.peek_at(offset), Some(b) if b.is_ascii_alphanumeric() || b == b'_')
+            {
+                offset += 1;
+            }
+            if offset == start || words.len() == 2 {
+                offset = start;
+                break;
+            }
+            words.push((start, offset));
         }
-        let label_start = offset;
-        while matches!(self.peek_at(offset), Some(b) if b.is_ascii_alphanumeric() || b == b'_') {
-            offset += 1;
-        }
-        let label_end = offset;
-        while matches!(
-            self.peek_at(offset),
-            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
-        ) {
+        while is_space(self.peek_at(offset)) {
             offset += 1;
         }
         if self.peek_at(offset) != Some(b'{') {
             return Ok(());
         }
+        let is_bash = words
+            .first()
+            .is_some_and(|(start, end)| &self.source[self.pos + start..self.pos + end] == "bash");
 
-        for _ in 0..label_start {
-            self.advance();
-        }
-        if label_end > label_start {
-            let label_pos = self.pos;
-            let (label_line, label_col) = (self.line, self.col);
-            let label_text =
-                self.source[self.pos..self.pos + (label_end - label_start)].to_string();
-            for _ in label_start..label_end {
+        // Commit: emit each header word as an identifier.
+        let mut consumed = 0usize;
+        for (start, end) in &words {
+            for _ in consumed..*start {
+                self.advance();
+            }
+            let (word_pos, word_line, word_col) = (self.pos, self.line, self.col);
+            let text = self.source[word_pos..word_pos + (end - start)].to_string();
+            for _ in *start..*end {
                 self.advance();
             }
             tokens.push(SpannedToken::new(
-                Token::Ident(label_text),
-                self.span_at(label_pos, label_line, label_col),
+                Token::Ident(text),
+                self.span_at(word_pos, word_line, word_col),
             ));
+            consumed = *end;
         }
-        for _ in label_end..offset {
+        for _ in consumed..offset {
             self.advance();
         }
 
-        let brace_pos = self.pos;
-        let (brace_line, brace_col) = (self.line, self.col);
+        let (brace_pos, brace_line, brace_col) = (self.pos, self.line, self.col);
         self.advance(); // consume '{'
-        tokens.push(SpannedToken::new(
-            Token::RunStart,
-            self.span_at(brace_pos, brace_line, brace_col),
-        ));
-        self.lex_run_body(tokens)
+        let span = self.span_at(brace_pos, brace_line, brace_col);
+        if is_bash {
+            tokens.push(SpannedToken::new(Token::RunStart, span));
+            self.lex_run_body(tokens)
+        } else {
+            tokens.push(SpannedToken::new(Token::ShellBlockStart, span));
+            self.lex_shell_block(tokens)
+        }
     }
 
     /// Lexes the raw shell body of a `run { ... }` block: everything up to
@@ -2094,7 +2103,7 @@ mod tests {
 
     #[test]
     fn multibyte_utf8_in_run_block_decodes_correctly() {
-        let tokens = lex("task [X] { run { echo café; }; }");
+        let tokens = lex("task X { run bash { echo café; }; }");
         assert!(
             tokens
                 .iter()
@@ -2447,7 +2456,7 @@ mod tests {
 
     #[test]
     fn run_block_preserves_quotes_pipes_redirects_braces_and_interpolation() {
-        let src = r#"run {
+        let src = r#"run bash {
     echo "hello world" | grep hi > out.txt;
     if [ -f x ]; then { echo nested; }; fi;
     cargo run -- --port ${port} $HOME #{HOME:-x};
@@ -2455,7 +2464,8 @@ mod tests {
         let tokens = lex(src);
 
         assert_eq!(tokens[0], Token::Ident("run".into()));
-        assert_eq!(tokens[1], Token::RunStart);
+        assert_eq!(tokens[1], Token::Ident("bash".into()));
+        assert_eq!(tokens[2], Token::RunStart);
         assert_eq!(tokens.last(), Some(&Token::Eof));
         assert!(tokens.contains(&Token::RunEnd));
 
@@ -2480,12 +2490,59 @@ mod tests {
     }
 
     #[test]
+    fn run_without_shell_word_enters_native_shell_body() {
+        let tokens = lex("run { echo hi; };");
+        assert_eq!(tokens[0], Token::Ident("run".into()));
+        assert_eq!(tokens[1], Token::ShellBlockStart);
+        assert!(tokens.contains(&Token::ShellBlockEnd));
+        assert!(!tokens.contains(&Token::RunStart));
+    }
+
+    #[test]
+    fn run_bash_enters_raw_body() {
+        let tokens = lex("run bash { echo hi; };");
+        assert_eq!(
+            tokens[..3],
+            [
+                Token::Ident("run".into()),
+                Token::Ident("bash".into()),
+                Token::RunStart
+            ]
+        );
+        assert!(tokens.contains(&Token::RunEnd));
+    }
+
+    #[test]
+    fn run_headers_with_shell_and_os_words_lex_as_idents() {
+        let a = lex("run bash macos { x; };");
+        assert_eq!(
+            a[..4],
+            [
+                Token::Ident("run".into()),
+                Token::Ident("bash".into()),
+                Token::Ident("macos".into()),
+                Token::RunStart
+            ]
+        );
+        let b = lex("run windows { x; };");
+        assert_eq!(
+            b[..3],
+            [
+                Token::Ident("run".into()),
+                Token::Ident("windows".into()),
+                Token::ShellBlockStart
+            ]
+        );
+    }
+
+    #[test]
     fn run_block_does_not_swallow_the_rest_of_the_file() {
-        let tokens = lex("run { echo hi; }; var x: int = 1;");
+        let tokens = lex("run bash { echo hi; }; var x: int = 1;");
         assert_eq!(
             tokens,
             vec![
                 Token::Ident("run".into()),
+                Token::Ident("bash".into()),
                 Token::RunStart,
                 Token::ShellFragment(" echo hi; ".into()),
                 Token::RunEnd,
@@ -2525,7 +2582,7 @@ mod tests {
 
     #[test]
     fn unterminated_run_block_is_a_lex_error() {
-        let result = Lexer::new("run { echo hi;").tokenize();
+        let result = Lexer::new("run bash { echo hi;").tokenize();
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unterminated run block"), "got: {msg}");

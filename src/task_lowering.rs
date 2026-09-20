@@ -23,12 +23,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Expr, Program, ShellTemplatePart, SparType, StringPart, TaskDecl, TopLevelItem};
+use crate::ast::{
+    Expr, Program, RunBody, ShellTemplatePart, SparType, StringPart, TaskDecl, TopLevelItem,
+};
 use crate::error::{Span, SparError};
 use crate::evaluator::{ConfigValue, EvalResult, Evaluator};
 use crate::resolver::SymbolTable;
 use crate::runner::{
-    CommandTemplate, ScalarKind, Task, TaskCommand, TaskParameter, TaskSet, TemplatePart,
+    CommandTemplate, NativeCommand, ScalarKind, Task, TaskCommand, TaskParameter, TaskSet,
+    TemplatePart,
 };
 
 /// A `${...}` interpolation lowered to `TemplatePart::Expr` because it
@@ -150,10 +153,6 @@ fn lower_one_task(
         .confirm
         .as_ref()
         .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors));
-    let shell = decl
-        .shell
-        .as_ref()
-        .and_then(|e| eval_string_list(program, symbols, eval_result, e, &mut errors));
     let cwd = decl
         .cwd
         .as_ref()
@@ -209,39 +208,55 @@ fn lower_one_task(
 
     let mut commands: Vec<TaskCommand> = Vec::new();
     match selected_block {
-        Some(block) => {
-            for command in &block.commands {
-                let mut parts: Vec<TemplatePart> = Vec::new();
-                for part in &command.parts {
-                    match part {
-                        ShellTemplatePart::Literal(s) => {
-                            parts.push(TemplatePart::Literal(s.replace("#{", "${")))
-                        }
-                        ShellTemplatePart::Expr(expr) => match bare_param_ref(expr, &param_names) {
-                            Some(name) => parts.push(TemplatePart::Parameter(name)),
-                            None if expr_mentions_any(expr, &param_names) => {
-                                let id = expr_table.len();
-                                let source = format_expr_source(expr);
-                                expr_table.push(TaskExprEntry {
-                                    expr: expr.clone(),
-                                    param_kinds: param_kinds.clone(),
-                                });
-                                parts.push(TemplatePart::Expr { id, source });
+        Some(block) => match &block.body {
+            RunBody::Bash(shell_commands) => {
+                for command in shell_commands {
+                    let mut parts: Vec<TemplatePart> = Vec::new();
+                    for part in &command.parts {
+                        match part {
+                            ShellTemplatePart::Literal(s) => {
+                                parts.push(TemplatePart::Literal(s.replace("#{", "${")))
                             }
-                            None => match eval_any(program, symbols, eval_result, expr) {
-                                Ok(v) => parts.push(TemplatePart::Literal(v.coerce_to_str())),
-                                Err(e) => errors.push(e),
-                            },
-                        },
+                            ShellTemplatePart::Expr(expr) => {
+                                match bare_param_ref(expr, &param_names) {
+                                    Some(name) => parts.push(TemplatePart::Parameter(name)),
+                                    None if expr_mentions_any(expr, &param_names) => {
+                                        let id = expr_table.len();
+                                        let source = format_expr_source(expr);
+                                        expr_table.push(TaskExprEntry {
+                                            expr: expr.clone(),
+                                            param_kinds: param_kinds.clone(),
+                                        });
+                                        parts.push(TemplatePart::Expr { id, source });
+                                    }
+                                    None => match eval_any(program, symbols, eval_result, expr) {
+                                        Ok(v) => {
+                                            parts.push(TemplatePart::Literal(v.coerce_to_str()))
+                                        }
+                                        Err(e) => errors.push(e),
+                                    },
+                                }
+                            }
+                        }
                     }
+                    commands.push(if command.is_shebang {
+                        TaskCommand::BashScript(CommandTemplate { parts })
+                    } else {
+                        TaskCommand::Bash(CommandTemplate { parts })
+                    });
                 }
-                commands.push(if command.is_shebang {
-                    TaskCommand::Script(CommandTemplate { parts })
-                } else {
-                    TaskCommand::Shell(CommandTemplate { parts })
-                });
             }
-        }
+            RunBody::Native(shell) => {
+                let native_expr = Expr::Shell(shell.clone());
+                let id = expr_table.len();
+                let source = native_block_source(&native_expr);
+                expr_table.push(TaskExprEntry {
+                    expr: native_expr,
+                    param_kinds: param_kinds.clone(),
+                });
+                commands.push(TaskCommand::Native(NativeCommand { id, source }));
+            }
+        },
         None => {
             let labels: Vec<&str> = decl
                 .run_blocks
@@ -276,7 +291,6 @@ fn lower_one_task(
         parameters,
         environment,
         cwd,
-        shell,
         commands,
     })
 }
@@ -304,6 +318,25 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
 /// Renders `expr` back to Spar source text, for display inside an
 /// unbound `${...}` template (`CommandTemplate::render_unbound`, used by
 /// `spar show`/`spar dump` before parameters are ever bound).
+/// Display text for a native run block (dry-run echo, `show`, `dump`): the
+/// block's statements without the `shell { }` wrapper `format_expr` adds,
+/// dedented one level. `${...}` interpolations are shown unevaluated.
+fn native_block_source(expr: &Expr) -> String {
+    let full = format_expr_source(expr);
+    let inner = full
+        .strip_prefix("shell {")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(&full);
+    inner
+        .lines()
+        .map(|line| line.strip_prefix("    ").unwrap_or(line).trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .trim_end_matches(';')
+        .to_owned()
+}
+
 fn format_expr_source(expr: &Expr) -> String {
     let mut out = String::new();
     crate::formatter::format_expr(
@@ -410,28 +443,6 @@ fn eval_bool(
         Ok(_) => None, // the typechecker already guarantees `bool` here
         Err(e) => {
             errors.push(e);
-            None
-        }
-    }
-}
-
-fn eval_string_list(
-    program: &Program,
-    symbols: &SymbolTable,
-    result: &EvalResult,
-    expr: &Expr,
-    errors: &mut Vec<SparError>,
-) -> Option<Vec<String>> {
-    match eval_any(program, symbols, result, expr) {
-        Ok(ConfigValue::List(values)) => Some(
-            values
-                .into_iter()
-                .map(|value| value.coerce_to_str())
-                .collect(),
-        ),
-        Ok(_) => None,
-        Err(error) => {
-            errors.push(error);
             None
         }
     }

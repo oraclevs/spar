@@ -17,14 +17,27 @@ pub struct Task {
     pub parameters: Vec<TaskParameter>,
     pub environment: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
-    pub shell: Option<Vec<String>>,
     pub commands: Vec<TaskCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskCommand {
-    Shell(CommandTemplate),
-    Script(CommandTemplate),
+    /// A `run bash { ... }` command, rendered to text and run with `bash -c`.
+    Bash(CommandTemplate),
+    /// A `run bash { #!... }` shebang script; the shebang picks the interpreter.
+    BashScript(CommandTemplate),
+    /// A native `run { ... }` block, evaluated and executed in-process via
+    /// the `NativeEval` callback.
+    Native(NativeCommand),
+}
+
+/// A native (Spar shell language) run block. `id` indexes the compiler's
+/// expression table (`Compilation::task_exprs`); `source` is the formatted
+/// block text used for dry-run/echo output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCommand {
+    pub id: usize,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +73,29 @@ pub enum BoundValue {
 /// Supplied by the caller (the `spar` binary wires this to `Evaluator`)
 /// since `runner` has no `Evaluator`/`ast` dependency of its own.
 pub type ExprEval<'a> = dyn Fn(usize, &BTreeMap<String, BoundValue>) -> Result<String, String> + 'a;
+
+/// Runs a native run block: given its table `id`, the task's bound
+/// parameter values, its environment, and its resolved working directory,
+/// executes the block and returns its exit code. Supplied by the caller
+/// (the `spar` binary wires this to `Evaluator` + `spar-process`) since
+/// `runner` has no `Evaluator`/`ast` dependency of its own.
+pub type NativeEval<'a> = dyn Fn(
+        usize,
+        &BTreeMap<String, BoundValue>,
+        &BTreeMap<String, String>,
+        Option<&std::path::Path>,
+    ) -> Result<i32, String>
+    + 'a;
+
+/// A `NativeEval` for callers that never run a native block (unit tests).
+pub fn no_native_eval(
+    _id: usize,
+    _values: &BTreeMap<String, BoundValue>,
+    _environment: &BTreeMap<String, String>,
+    _cwd: Option<&std::path::Path>,
+) -> Result<i32, String> {
+    Err("this task has a native run block but no native evaluator was supplied".to_owned())
+}
 
 /// An `ExprEval` for callers that never render a `TemplatePart::Expr`
 /// (unit tests, or any run block with no parameter-dependent expressions).
@@ -103,9 +139,10 @@ impl CommandTemplate {
 }
 
 impl TaskCommand {
-    pub fn template(&self) -> &CommandTemplate {
+    pub fn template(&self) -> Option<&CommandTemplate> {
         match self {
-            Self::Shell(template) | Self::Script(template) => template,
+            Self::Bash(template) | Self::BashScript(template) => Some(template),
+            Self::Native(_) => None,
         }
     }
 
@@ -114,17 +151,24 @@ impl TaskCommand {
         values: &BTreeMap<String, BoundValue>,
         exprs: &ExprEval,
     ) -> Result<String, String> {
-        self.template().render(values, exprs)
+        match self {
+            Self::Bash(template) | Self::BashScript(template) => template.render(values, exprs),
+            Self::Native(native) => Ok(native.source.clone()),
+        }
     }
 
     pub fn render_unbound(&self) -> String {
-        self.template().render_unbound()
+        match self {
+            Self::Bash(template) | Self::BashScript(template) => template.render_unbound(),
+            Self::Native(native) => native.source.clone(),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn template_mut(&mut self) -> &mut CommandTemplate {
         match self {
-            Self::Shell(template) | Self::Script(template) => template,
+            Self::Bash(template) | Self::BashScript(template) => template,
+            Self::Native(_) => panic!("native commands have no template"),
         }
     }
 }
@@ -270,7 +314,6 @@ mod tests {
             parameters: Vec::new(),
             environment: BTreeMap::new(),
             cwd: None,
-            shell: None,
             commands: Vec::new(),
         }
     }

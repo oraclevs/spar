@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 use super::no_expr_eval;
-use super::{ExecutionPlan, ExprEval, RunnerError, TaskCommand};
+use super::{no_native_eval, ExecutionPlan, ExprEval, NativeEval, RunnerError, TaskCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -21,10 +21,21 @@ pub fn execute(
     options: &ExecutionOptions,
     exprs: &ExprEval,
 ) -> Result<ExecutionReport, RunnerError> {
+    execute_with_native(plan, options, exprs, &no_native_eval)
+}
+
+/// Like [`execute`], for plans that may contain native (`run { }`) blocks.
+pub fn execute_with_native(
+    plan: &ExecutionPlan,
+    options: &ExecutionOptions,
+    exprs: &ExprEval,
+    native: &NativeEval,
+) -> Result<ExecutionReport, RunnerError> {
     execute_with_io(
         plan,
         options,
         exprs,
+        native,
         &mut std::io::stdin().lock(),
         &mut std::io::stderr().lock(),
     )
@@ -36,13 +47,21 @@ fn execute_with_echo(
     options: &ExecutionOptions,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
-    execute_with_io(plan, options, &no_expr_eval, &mut std::io::empty(), echo)
+    execute_with_io(
+        plan,
+        options,
+        &no_expr_eval,
+        &no_native_eval,
+        &mut std::io::empty(),
+        echo,
+    )
 }
 
 fn execute_with_io(
     plan: &ExecutionPlan,
     options: &ExecutionOptions,
     exprs: &ExprEval,
+    native: &NativeEval,
     input: &mut dyn BufRead,
     echo: &mut dyn Write,
 ) -> Result<ExecutionReport, RunnerError> {
@@ -67,6 +86,42 @@ fn execute_with_io(
 
     for bound_task in &plan.tasks {
         for task_command in &bound_task.task.commands {
+            if let TaskCommand::Native(native_command) = task_command {
+                let source = native_command.source.clone();
+                commands.push(source.clone());
+                if !bound_task.task.quiet || options.dry_run {
+                    let _ = writeln!(echo, "{source}");
+                }
+                if options.dry_run {
+                    continue;
+                }
+                let cwd = bound_task.task.cwd.as_ref().map(|cwd| {
+                    if cwd.is_relative() {
+                        options.base_dir.join(cwd)
+                    } else {
+                        cwd.clone()
+                    }
+                });
+                let code = native(
+                    native_command.id,
+                    &bound_task.parameter_values,
+                    &bound_task.task.environment,
+                    cwd.as_deref(),
+                )
+                .map_err(|message| RunnerError::CommandExecution {
+                    task: bound_task.task.name.clone(),
+                    command: source.clone(),
+                    message,
+                })?;
+                if code != 0 {
+                    return Err(RunnerError::NativeBlockFailed {
+                        task: bound_task.task.name.clone(),
+                        source_line: bound_task.task.source_line,
+                        code,
+                    });
+                }
+                continue;
+            }
             let script = task_command
                 .render(&bound_task.parameter_values, exprs)
                 .map_err(|message| RunnerError::TaskExprFailed {
@@ -85,10 +140,9 @@ fn execute_with_io(
 
             let mut script_file = None;
             let mut child = match task_command {
-                TaskCommand::Shell(_) => {
-                    super::shell::command(&script, bound_task.task.shell.as_deref())
-                }
-                TaskCommand::Script(_) => {
+                TaskCommand::Native(_) => unreachable!("native commands are handled above"),
+                TaskCommand::Bash(_) => super::shell::command(&script),
+                TaskCommand::BashScript(_) => {
                     let mut file = tempfile::NamedTempFile::new().map_err(|error| {
                         RunnerError::CommandExecution {
                             task: bound_task.task.name.clone(),
@@ -173,8 +227,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::runner::{
-        execute, no_expr_eval, BoundTask, CommandTemplate, ExecutionOptions, ExecutionPlan, Task,
-        TaskCommand, TemplatePart,
+        execute, no_expr_eval, no_native_eval, BoundTask, CommandTemplate, ExecutionOptions,
+        ExecutionPlan, Task, TaskCommand, TemplatePart,
     };
 
     fn plan(command: String) -> ExecutionPlan {
@@ -193,8 +247,7 @@ mod tests {
                     parameters: Vec::new(),
                     environment: BTreeMap::new(),
                     cwd: None,
-                    shell: None,
-                    commands: vec![TaskCommand::Shell(CommandTemplate {
+                    commands: vec![TaskCommand::Bash(CommandTemplate {
                         parts: vec![TemplatePart::Literal(command)],
                     })],
                 },
@@ -203,33 +256,16 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn create_marker_command(path: &std::path::Path) -> String {
         format!("printf marker > '{}'", path.display())
     }
 
-    #[cfg(windows)]
-    fn create_marker_command(path: &std::path::Path) -> String {
-        format!("type nul > \"{}\"", path.display())
-    }
-
-    #[cfg(unix)]
     fn append_command(value: &str, path: &std::path::Path) -> String {
         format!("printf {value} >> '{}'", path.display())
     }
 
-    #[cfg(windows)]
-    fn append_command(value: &str, path: &std::path::Path) -> String {
-        format!("<nul set /p ={value} >> \"{}\"", path.display())
-    }
-
-    #[cfg(unix)]
     const FAILURE_COMMAND: &str = "exit 7";
 
-    #[cfg(windows)]
-    const FAILURE_COMMAND: &str = "exit /B 7";
-
-    #[cfg(unix)]
     fn write_environment_command(path: &std::path::Path) -> String {
         format!(
             "printf '%s|%s' \"$SPAR_RUNNER_INHERITED\" \"$SPAR_RUNNER_OVERRIDE\" > '{}'",
@@ -237,32 +273,12 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
     fn write_working_directory_command(path: &std::path::Path) -> String {
         format!("pwd > '{}'", path.display())
     }
 
-    #[cfg(windows)]
-    fn write_working_directory_command(path: &std::path::Path) -> String {
-        format!("cd > \"{}\"", path.display())
-    }
-
-    #[cfg(unix)]
     fn noisy_marker_command(path: &std::path::Path) -> String {
         format!("printf child-output; printf marker > '{}'", path.display())
-    }
-
-    #[cfg(windows)]
-    fn noisy_marker_command(path: &std::path::Path) -> String {
-        format!("echo child-output & type nul > \"{}\"", path.display())
-    }
-
-    #[cfg(windows)]
-    fn write_environment_command(path: &std::path::Path) -> String {
-        format!(
-            "<nul set /p =%SPAR_RUNNER_INHERITED%^|%SPAR_RUNNER_OVERRIDE% > \"{}\"",
-            path.display()
-        )
     }
 
     #[test]
@@ -294,7 +310,7 @@ mod tests {
         plan.tasks[0]
             .task
             .commands
-            .push(TaskCommand::Shell(CommandTemplate {
+            .push(TaskCommand::Bash(CommandTemplate {
                 parts: vec![TemplatePart::Literal(second.clone())],
             }));
 
@@ -481,7 +497,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn script_uses_its_shebang_and_ignores_the_task_shell_override() {
+    fn script_uses_its_shebang() {
         let directory = tempdir().unwrap();
         let marker = directory.path().join("script-marker");
         let script = format!(
@@ -489,8 +505,7 @@ mod tests {
             marker.display()
         );
         let mut plan = plan("unused".to_owned());
-        plan.tasks[0].task.shell = Some(vec!["false".to_owned()]);
-        plan.tasks[0].task.commands = vec![TaskCommand::Script(CommandTemplate {
+        plan.tasks[0].task.commands = vec![TaskCommand::BashScript(CommandTemplate {
             parts: vec![TemplatePart::Literal(script.clone())],
         })];
 
@@ -531,6 +546,7 @@ mod tests {
                 base_dir: directory.path().to_owned(),
             },
             &no_expr_eval,
+            &no_native_eval,
             &mut input,
             &mut output,
         )
@@ -561,6 +577,7 @@ mod tests {
                 base_dir: directory.path().to_owned(),
             },
             &no_expr_eval,
+            &no_native_eval,
             &mut input,
             &mut output,
         )
@@ -588,6 +605,7 @@ mod tests {
                 base_dir: directory.path().to_owned(),
             },
             &no_expr_eval,
+            &no_native_eval,
             &mut input,
             &mut output,
         )

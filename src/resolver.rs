@@ -1530,9 +1530,6 @@ impl Resolver {
         if let Some(expr) = &decl.cwd {
             self.resolve_expr(expr);
         }
-        if let Some(expr) = &decl.shell {
-            self.resolve_expr(expr);
-        }
         for (_, value) in &decl.env {
             self.resolve_expr(value);
         }
@@ -1546,12 +1543,23 @@ impl Resolver {
 
         let locals: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
         for block in &decl.run_blocks {
-            for command in &block.commands {
-                for part in &command.parts {
-                    if let ShellTemplatePart::Expr(expr) = part {
-                        if let Err(e) = self.resolve_expr_with_locals(expr, &locals) {
-                            self.errors.push(e);
+            match &block.body {
+                RunBody::Bash(commands) => {
+                    for command in commands {
+                        for part in &command.parts {
+                            if let ShellTemplatePart::Expr(expr) = part {
+                                if let Err(e) = self.resolve_expr_with_locals(expr, &locals) {
+                                    self.errors.push(e);
+                                }
+                            }
                         }
+                    }
+                }
+                RunBody::Native(shell) => {
+                    if let Err(e) =
+                        self.resolve_expr_with_locals(&Expr::Shell(shell.clone()), &locals)
+                    {
+                        self.errors.push(e);
                     }
                 }
             }
@@ -2762,7 +2770,55 @@ impl Resolver {
             outer_locals,
             &mut visible,
             &mut shell_locals,
-        )
+        )?;
+        // A block made only of commands is flattened into `steps` (its
+        // `statements` are cleared), and command words hold `${...}`
+        // interpolations too — resolve those against the surrounding scope.
+        for (_, step) in &shell.steps {
+            match step {
+                ShellStep::Command(command) => {
+                    self.resolve_shell_command_words(command, outer_locals)?
+                }
+                ShellStep::Pipeline(commands) => {
+                    for command in commands {
+                        self.resolve_shell_command_words(command, outer_locals)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_shell_command_words(
+        &self,
+        command: &ShellCommandExpr,
+        locals: &HashSet<String>,
+    ) -> Result<(), SparError> {
+        let redirect_words = command
+            .stdin
+            .iter()
+            .chain(command.stdout.iter())
+            .chain(command.stderr.iter())
+            .map(|redirect| &redirect.target)
+            .chain(command.redirections.iter().filter_map(|fd| match &fd.target {
+                ShellFdRedirectTarget::File(redirect) => Some(&redirect.target),
+                ShellFdRedirectTarget::Duplicate(_) => None,
+            }));
+        for word in std::iter::once(&command.program)
+            .chain(command.args.iter())
+            .chain(redirect_words)
+        {
+            for part in &word.parts {
+                match part {
+                    ShellWordPart::Expr(expr) => self.resolve_expr_with_locals(expr, locals)?,
+                    ShellWordPart::CommandSubstitution(inner) => {
+                        self.resolve_shell_program(inner, locals)?
+                    }
+                    ShellWordPart::Literal(_) | ShellWordPart::Environment(_) => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve_shell_statements(

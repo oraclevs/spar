@@ -289,7 +289,6 @@ mod tests {
             parameters: Vec::new(),
             environment: BTreeMap::new(),
             cwd: None,
-            shell: None,
             commands: Vec::new(),
         }
     }
@@ -479,7 +478,6 @@ mod tests {
             ],
             environment: BTreeMap::new(),
             cwd: None,
-            shell: None,
             commands: Vec::new(),
         }])
         .unwrap();

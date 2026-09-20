@@ -131,7 +131,7 @@ fn task_named_exec_and_script_exec_remain_distinct() {
     fs::write(
         directory.path().join("SparMake.spar"),
         concat!(
-            "task [Exec] {\n",
+            "task Exec {\n",
             "    run linux { touch task-ran; };\n",
             "    run macos { touch task-ran; };\n",
             "};\n",

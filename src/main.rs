@@ -37,6 +37,63 @@ fn task_expr_evaluator(
     }
 }
 
+/// Builds the `NativeEval` callback `runner::execute_with_native` uses to
+/// run a native `run { }` block: binds the task's parameters as locals,
+/// evaluates the block's `Expr::Shell` to a `ShellPlan`, and executes it
+/// through `spar-process`. `task_exprs` holds the block's expression (the
+/// same table parameter-dependent `${...}` interpolations use).
+fn native_block_runner(
+    compilation: &Compilation,
+) -> impl Fn(
+    usize,
+    &BTreeMap<String, BoundValue>,
+    &BTreeMap<String, String>,
+    Option<&Path>,
+) -> Result<i32, String>
+       + '_ {
+    let program = compilation.program.as_ref().expect("compiled program");
+    let symbols = compilation.symbols.as_ref().expect("compiled symbols");
+    let eval_result = compilation.result.as_ref().expect("compiled eval result");
+    let entries = &compilation.task_exprs;
+    move |id, values, environment, cwd| {
+        let entry = entries
+            .get(id)
+            .ok_or_else(|| format!("internal error: unknown native block #{id}"))?;
+        let mut local_scope = HashMap::new();
+        for (name, kind) in &entry.param_kinds {
+            if let Some(value) = values.get(name) {
+                local_scope.insert(name.clone(), bound_to_config(value, *kind));
+            }
+        }
+        let value =
+            Evaluator::eval_standalone(program, symbols, eval_result, &entry.expr, &local_scope)
+                .map_err(|e| e.to_string())?;
+        let ConfigValue::Shell(plan) = value else {
+            return Err("native run block did not evaluate to a shell plan".to_owned());
+        };
+        let mut options = spar_process::ExecutionOptions::default();
+        let mut merged: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+            std::env::vars_os().collect();
+        merged.extend(
+            environment
+                .iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        options.environment = Some(merged);
+        // `spar-process` has no working-directory option, so switch the
+        // process directory around the call. The runner is sequential.
+        let previous = std::env::current_dir().ok();
+        if let Some(cwd) = cwd {
+            std::env::set_current_dir(cwd).map_err(|e| e.to_string())?;
+        }
+        let outcome = spar::evaluator::execute_shell_plan_with_options(&plan, &options);
+        if let Some(previous) = previous {
+            let _ = std::env::set_current_dir(previous);
+        }
+        outcome.map(|o| o.exit_code).map_err(|e| e.to_string())
+    }
+}
+
 fn bound_to_config(value: &BoundValue, kind: ScalarKind) -> ConfigValue {
     match value {
         BoundValue::Variadic(items) => {
@@ -896,7 +953,8 @@ fn cmd_run(
 
     let exec_options = ExecutionOptions { dry_run, base_dir };
     let exprs = task_expr_evaluator(&compilation);
-    if let Err(e) = spar::runner::execute(&plan, &exec_options, &exprs) {
+    let native = native_block_runner(&compilation);
+    if let Err(e) = spar::runner::execute_with_native(&plan, &exec_options, &exprs, &native) {
         match e {
             RunnerError::QuietCommandFailed {
                 task,
@@ -1246,8 +1304,9 @@ fn task_json(task: &spar::runner::Task) -> serde_json::Value {
         .iter()
         .map(|command| {
             let kind = match command {
-                spar::runner::TaskCommand::Shell(_) => "shell",
-                spar::runner::TaskCommand::Script(_) => "script",
+                spar::runner::TaskCommand::Bash(_) => "bash",
+                spar::runner::TaskCommand::BashScript(_) => "bash-script",
+                spar::runner::TaskCommand::Native(_) => "native",
             };
             serde_json::json!({
                 "kind": kind,
@@ -1267,7 +1326,6 @@ fn task_json(task: &spar::runner::Task) -> serde_json::Value {
         "parameters": parameters,
         "environment": task.environment,
         "cwd": task.cwd.as_ref().map(|path| path.display().to_string()),
-        "shell": task.shell,
         "commands": commands,
     })
 }
@@ -1419,12 +1477,12 @@ mod tests {
         let nested = directory.path().join("one").join("two");
         std::fs::create_dir_all(&nested).unwrap();
         let parent_file = directory.path().join("SparMake.spar");
-        std::fs::write(&parent_file, "task [Build] { run { true; }; };").unwrap();
+        std::fs::write(&parent_file, "task Build { run { true; }; };").unwrap();
 
         assert_eq!(discover_task_file(&nested).unwrap(), parent_file);
 
         let current_file = nested.join("SparMake.spar");
-        std::fs::write(&current_file, "task [Build] { run { true; }; };").unwrap();
+        std::fs::write(&current_file, "task Build { run { true; }; };").unwrap();
         assert_eq!(discover_task_file(&nested).unwrap(), current_file);
     }
 
@@ -1434,7 +1492,7 @@ mod tests {
         let spar_directory = home.path().join(".spar");
         std::fs::create_dir(&spar_directory).unwrap();
         let task_file = spar_directory.join("SparMake.spar");
-        std::fs::write(&task_file, "task [Build] { run { true; }; };").unwrap();
+        std::fs::write(&task_file, "task Build { run { true; }; };").unwrap();
 
         assert_eq!(global_task_file(home.path()).unwrap(), task_file);
     }
@@ -1453,8 +1511,8 @@ mod tests {
     #[test]
     fn task_list_colors_groups_names_and_descriptions_when_enabled() {
         let source = r#"
-task [Build] { description: "Compile"; run { true; }; };
-task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
+task Build { description: "Compile"; run { true; }; };
+task Deploy { group: "release"; description: "Ship it"; run { true; }; };
 "#;
         let compilation = Compiler::new(CompileOptions::for_path("Tasks.spar")).compile(source);
         assert!(compilation.errors.is_empty());
@@ -1472,8 +1530,8 @@ task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
     #[test]
     fn task_list_plain_output_remains_byte_for_byte_unchanged() {
         let source = r#"
-task [Build] { description: "Compile"; run { true; }; };
-task [Deploy] { group: "release"; description: "Ship it"; run { true; }; };
+task Build { description: "Compile"; run { true; }; };
+task Deploy { group: "release"; description: "Ship it"; run { true; }; };
 "#;
         let compilation = Compiler::new(CompileOptions::for_path("Tasks.spar")).compile(source);
         assert!(compilation.errors.is_empty());

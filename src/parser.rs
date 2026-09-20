@@ -890,19 +890,23 @@ impl Parser {
         let (name, name_span) = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
         let mut variants = Vec::new();
+        let mut variant_lines = Vec::new();
         if !self.at(&Token::RBrace) {
-            let (v, _) = self.expect_ident()?;
+            let (v, variant_span) = self.expect_ident()?;
             variants.push(v);
+            variant_lines.push(variant_span.line);
             while self.at(&Token::Comma) {
                 self.advance();
                 if self.at(&Token::RBrace) {
                     break; // trailing comma
                 }
-                let (v, _) = self.expect_ident()?;
+                let (v, variant_span) = self.expect_ident()?;
                 variants.push(v);
+                variant_lines.push(variant_span.line);
             }
         }
         self.expect(&Token::RBrace)?;
+        let end_line = self.prev_line();
         self.expect(&Token::Semicolon)?;
         Ok(EnumDecl {
             name,
@@ -910,6 +914,8 @@ impl Parser {
             exported,
             variants,
             span,
+            variant_lines,
+            end_line,
         })
     }
 
@@ -931,6 +937,7 @@ impl Parser {
             fields.push(self.parse_type_field(&type_parameters)?);
         }
         self.expect(&Token::RBrace)?;
+        let end_line = self.prev_line();
         self.expect(&Token::Semicolon)?;
         Ok(TypeDecl {
             name,
@@ -939,6 +946,7 @@ impl Parser {
             exported,
             fields,
             span,
+            end_line,
         })
     }
 
@@ -1587,13 +1595,16 @@ impl Parser {
     }
 
     fn parse_object_literal(&mut self) -> Result<Expr, SparError> {
-        let span = self.peek_span();
+        let open = self.peek_span();
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             items.push(self.parse_object_item()?);
         }
-        self.expect(&Token::RBrace)?;
+        let close = self.expect(&Token::RBrace)?.span.clone();
+        // Cover the whole `{ ... }` so the formatter can tell which comments
+        // sit inside it.
+        let span = Span::new(open.start, close.end, open.line, open.col);
         Ok(Expr::Object(items, span))
     }
 

@@ -111,7 +111,7 @@ enum EvalErr {
         message: String,
         span: Span,
     },
-    EnvVarMissing(String),
+    EnvVarMissing(String, Span),
     CyclicRef {
         name: String,
         span: Span,
@@ -158,6 +158,56 @@ impl StatementFlow {
 }
 
 impl EvalErr {
+    /// Gives an error that has no source location the location of `span`.
+    /// Errors that already point somewhere are left alone.
+    fn located_at(self, span: &Span) -> EvalErr {
+        let unlocated = match &self {
+            EvalErr::Fatal { span, .. }
+            | EvalErr::CyclicRef { span, .. }
+            | EvalErr::DivisionByZero(span)
+            | EvalErr::NotScalar { span, .. }
+            | EvalErr::PathNotFound { span, .. } => span.line == 0,
+            EvalErr::TypeMismatch { .. }
+            | EvalErr::MaxCallDepth { .. }
+            | EvalErr::Host { .. } => true,
+            // Caught by the `??` fallback, and downgraded to a warning by
+            // `push_eval_error`; both must keep seeing the original variant.
+            EvalErr::ImportRef { .. } => false,
+            EvalErr::EnvVarMissing(..) => false,
+        };
+        if !unlocated {
+            return self;
+        }
+        match self {
+            EvalErr::Fatal { message, .. } => EvalErr::Fatal {
+                message,
+                span: span.clone(),
+            },
+            EvalErr::CyclicRef { name, .. } => EvalErr::CyclicRef {
+                name,
+                span: span.clone(),
+            },
+            EvalErr::DivisionByZero(_) => EvalErr::DivisionByZero(span.clone()),
+            EvalErr::NotScalar { name, .. } => EvalErr::NotScalar {
+                name,
+                span: span.clone(),
+            },
+            EvalErr::PathNotFound { path, .. } => EvalErr::PathNotFound {
+                path,
+                span: span.clone(),
+            },
+            other => {
+                let SparError::EvalError { message, .. } = other.into_kl_error() else {
+                    unreachable!("into_kl_error always yields an EvalError");
+                };
+                EvalErr::Fatal {
+                    message,
+                    span: span.clone(),
+                }
+            }
+        }
+    }
+
     fn into_kl_error(self) -> SparError {
         match self {
             EvalErr::Fatal { message, span } => SparError::EvalError { message, span },
@@ -172,9 +222,9 @@ impl EvalErr {
                 message: "division by zero".into(),
                 span,
             },
-            EvalErr::EnvVarMissing(name) => SparError::EvalError {
+            EvalErr::EnvVarMissing(name, span) => SparError::EvalError {
                 message: format!("env var `{name}` is not set and has no `??` fallback"),
-                span: Span::dummy(),
+                span,
             },
             EvalErr::ImportRef { alias, symbol } => SparError::EvalError {
                 message: format!(
@@ -1287,6 +1337,20 @@ impl Evaluator {
         expr: &Expr,
         local_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
+        // The innermost expression that fails claims errors that carry no
+        // span of their own, so they surface on the right line.
+        self.eval_expr_inner(expr, local_scope)
+            .map_err(|error| match expr.span() {
+                Some(span) => error.located_at(span),
+                None => error,
+            })
+    }
+
+    fn eval_expr_inner(
+        &mut self,
+        expr: &Expr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
         match expr {
             Expr::Literal(Literal::Int(n)) => Ok(ConfigValue::Int(*n)),
             Expr::Literal(Literal::Float(f)) => Ok(ConfigValue::Float(*f)),
@@ -2263,7 +2327,7 @@ impl Evaluator {
                 };
                 std::env::var(&key)
                     .map(ConfigValue::Str)
-                    .map_err(|_| EvalErr::EnvVarMissing(key))
+                    .map_err(|_| EvalErr::EnvVarMissing(key, fc.span.clone()))
             }
             "str" => {
                 let val = self.eval_expr(&fc.args[0], local_scope)?;
@@ -2344,7 +2408,7 @@ impl Evaluator {
         if op.op == BinOp::Fallback {
             return match self.eval_expr(&op.lhs, local_scope) {
                 Ok(val) => Ok(val),
-                Err(EvalErr::EnvVarMissing(_)) | Err(EvalErr::ImportRef { .. }) => {
+                Err(EvalErr::EnvVarMissing(..)) | Err(EvalErr::ImportRef { .. }) => {
                     self.eval_expr(&op.rhs, local_scope)
                 }
                 Err(e) => Err(e),

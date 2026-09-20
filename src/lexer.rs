@@ -42,6 +42,14 @@ pub struct Lexer<'a> {
 /// normalizer tracks an in-progress Spar statement or command until its real
 /// syntactic terminator is reached.
 fn normalize_shell_body(body: &str) -> String {
+    normalize_shell_body_tracked(body).0
+}
+
+/// Like `normalize_shell_body`, also returning the byte ranges of the
+/// `command ` prefixes it inserted (needed to map a lex error in the
+/// normalized text back onto the original when no tokens exist to show them).
+fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
+    let mut inserted: Vec<(usize, usize)> = Vec::new();
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PendingKind {
         SparStatement,
@@ -95,7 +103,8 @@ fn normalize_shell_body(body: &str) -> String {
                 hold_comment(&mut pending_comment, comment);
                 if native_command_complete(&pending) {
                     output.push_str(&pending_indent);
-                    output.push_str(&prefix_native_command_segments(&pending));
+                    let base = output.len();
+                    output.push_str(&prefix_native_command_segments(&pending, base, &mut inserted));
                     output.push_str(&std::mem::take(&mut pending_comment));
                     if had_newline {
                         output.push('\n');
@@ -157,7 +166,8 @@ fn normalize_shell_body(body: &str) -> String {
         hold_comment(&mut pending_comment, comment);
         if native_command_complete(&pending) {
             output.push_str(&pending_indent);
-            output.push_str(&prefix_native_command_segments(&pending));
+            let base = output.len();
+            output.push_str(&prefix_native_command_segments(&pending, base, &mut inserted));
             output.push_str(&std::mem::take(&mut pending_comment));
             if had_newline {
                 output.push('\n');
@@ -175,6 +185,7 @@ fn normalize_shell_body(body: &str) -> String {
         match pending_kind {
             Some(PendingKind::NativeCommand) => {
                 output.push_str(&pending_indent);
+                inserted.push((output.len(), output.len() + "command ".len()));
                 output.push_str("command ");
                 output.push_str(pending.trim());
                 output.push_str(&pending_comment);
@@ -183,7 +194,7 @@ fn normalize_shell_body(body: &str) -> String {
         }
     }
 
-    output
+    (output, inserted)
 }
 
 /// Maps byte offsets in a normalized shell body back to the original body.
@@ -260,6 +271,27 @@ impl NormalizedOffsets {
     }
 }
 
+/// Re-anchors a lex error raised while lexing normalized shell-body text
+/// onto the original source.
+fn remap_nested_lex_error(
+    error: SparError,
+    offsets: &NormalizedOffsets,
+    original: &str,
+    body_start: usize,
+    body_line: u32,
+    body_col: u32,
+) -> SparError {
+    let SparError::LexError { message, span } = error else {
+        return error;
+    };
+    let (start, end) = offsets.original_range(original, span.start, span.end);
+    let (line, col) = offsets.line_col(original, start, body_line, body_col);
+    SparError::LexError {
+        message,
+        span: Span::new(body_start + start, body_start + end.max(start + 1), line, col),
+    }
+}
+
 /// Appends one physical line to an in-progress native command.  Native Spar
 /// commands are semicolon terminated, so an ordinary newline is whitespace.
 /// A Bash-style `\\` immediately before the newline is accepted as explicit
@@ -311,7 +343,11 @@ fn trailing_unquoted_backslash(text: &str) -> Option<&str> {
         .then(|| &trimmed[..trimmed.len() - 1])
 }
 
-fn prefix_native_command_segments(line: &str) -> String {
+fn prefix_native_command_segments(
+    line: &str,
+    base: usize,
+    inserted: &mut Vec<(usize, usize)>,
+) -> String {
     let mut output = String::new();
     let mut start = 0;
     let mut quote = None;
@@ -354,6 +390,7 @@ fn prefix_native_command_segments(line: &str) -> String {
         if ch == ';' {
             let segment = line[start..index].trim();
             if !segment.is_empty() {
+                inserted.push((base + output.len(), base + output.len() + "command ".len()));
                 output.push_str("command ");
                 output.push_str(segment);
                 output.push(';');
@@ -372,6 +409,7 @@ fn prefix_native_command_segments(line: &str) -> String {
         {
             let segment = line[start..index].trim();
             if !segment.is_empty() {
+                inserted.push((base + output.len(), base + output.len() + "command ".len()));
                 output.push_str("command ");
                 output.push_str(segment);
                 output.push_str(" &;");
@@ -381,6 +419,7 @@ fn prefix_native_command_segments(line: &str) -> String {
     }
     let tail = line[start..].trim();
     if !tail.is_empty() {
+        inserted.push((base + output.len(), base + output.len() + "command ".len()));
         output.push_str("command ");
         output.push_str(tail);
         if !tail.ends_with(';') {
@@ -1578,9 +1617,21 @@ impl<'a> Lexer<'a> {
                         let close_col = self.col;
                         self.advance();
                         let original = &self.source[body_start..body_end];
-                        let normalized = normalize_shell_body(original);
+                        let (normalized, inserted_prefixes) = normalize_shell_body_tracked(original);
                         let (nested, nested_comments) =
-                            Lexer::new(&normalized).tokenize_with_comments()?;
+                            match Lexer::new(&normalized).tokenize_with_comments() {
+                                Ok(lexed) => lexed,
+                                Err(error) => {
+                                    // The error's span is relative to the
+                                    // normalized text; put it back on the
+                                    // real source line.
+                                    let offsets =
+                                        NormalizedOffsets::new(original, &normalized, &inserted_prefixes);
+                                    return Err(remap_nested_lex_error(
+                                        error, &offsets, original, body_start, body_line, body_col,
+                                    ));
+                                }
+                            };
                         // Normalization inserts `command ` prefixes and
                         // terminators and re-flows whitespace, so nested
                         // spans are relative to text that does not exist in
@@ -2118,7 +2169,20 @@ impl<'a> Lexer<'a> {
                         }
                         let normalized_body = normalized_body.trim();
                         let wrapped = format!("command {normalized_body};");
-                        let nested = Lexer::new(&wrapped).tokenize()?;
+                        let nested = Lexer::new(&wrapped).tokenize().map_err(|error| match error {
+                            // Spans in `wrapped` mean nothing in the file;
+                            // point at the substitution instead.
+                            SparError::LexError { message, .. } => SparError::LexError {
+                                message,
+                                span: Span::new(
+                                    expression_start,
+                                    self.pos,
+                                    expression_line,
+                                    expression_col,
+                                ),
+                            },
+                            other => other,
+                        })?;
                         // `wrapped` inserts a `command ` prefix and a `;` terminator and
                         // re-flows whitespace, so nested spans do not exist in the file.
                         // Map them back onto the original body like the `shell { }` path.
@@ -2850,5 +2914,15 @@ mod tests {
             matches!(err, SparError::LexError { .. }) && err.to_string().contains("brace"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn lex_error_inside_a_native_shell_block_reports_its_real_line() {
+        let source = "var a: int = 1;\n\ntask T {\n    run {\n        echo one;\n        echo two;\n        #!/usr/bin/env bash\n        echo three;\n    };\n};\n";
+        let error = Lexer::new(source).tokenize().expect_err("must fail");
+        let SparError::LexError { span, .. } = error else {
+            panic!("expected a lex error");
+        };
+        assert_eq!(span.line, 7, "span: {span:?}");
     }
 }

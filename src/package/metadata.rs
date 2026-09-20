@@ -108,6 +108,7 @@ fn type_decl(name: &str, fields: Vec<TypeField>) -> TypeDecl {
         exported: false,
         fields,
         span,
+        end_line: 0,
     }
 }
 

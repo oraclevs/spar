@@ -222,6 +222,10 @@ pub struct EnumDecl {
     pub exported: bool,
     pub variants: Vec<String>,
     pub span: Span,
+    /// Source line of each variant, in order.
+    pub variant_lines: Vec<u32>,
+    /// Source line of the closing `}`.
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +236,8 @@ pub struct TypeDecl {
     pub exported: bool,
     pub fields: Vec<TypeField>,
     pub span: Span,
+    /// Source line of the closing `}` (0 for compiler-synthesized types).
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -484,6 +490,32 @@ pub enum Expr {
     Shell(ShellExpr),
     ExecShell(ShellExpr),
     CommandSubstitution(ShellExpr),
+}
+
+impl Expr {
+    /// The expression's own source span. Literals carry none (their parent
+    /// does), so this is `None` for them.
+    pub fn span(&self) -> Option<&Span> {
+        match self {
+            Expr::Literal(_) => None,
+            Expr::String(value) => Some(&value.span),
+            Expr::NamespaceRef(value) => Some(&value.span),
+            Expr::FnCall(value) => Some(&value.span),
+            Expr::BinaryOp(value) => Some(&value.span),
+            Expr::List(_, span)
+            | Expr::Grouped(_, span)
+            | Expr::Call { span, .. }
+            | Expr::Unary { span, .. }
+            | Expr::Await { span, .. }
+            | Expr::Comprehension { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::FieldAccess { span, .. }
+            | Expr::Object(_, span) => Some(span),
+            Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => {
+                Some(&value.span)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

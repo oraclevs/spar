@@ -175,6 +175,46 @@ impl CommentCursor {
         }
     }
 
+    /// Whether a pending comment starts inside byte range `[start, end)`.
+    fn has_comment_in_offsets(&self, start: usize, end: usize) -> bool {
+        self.comments
+            .iter()
+            .skip(self.next.get())
+            .take_while(|comment| comment.start < end)
+            .any(|comment| comment.start >= start)
+    }
+
+    /// Whether a pending comment sits on a line in `[from_line, before_line)`.
+    fn has_comment_in_lines(&self, from_line: u32, before_line: u32) -> bool {
+        self.comments
+            .iter()
+            .skip(self.next.get())
+            .take_while(|comment| comment.line < before_line)
+            .any(|comment| comment.line >= from_line)
+    }
+
+    /// Like `emit_before_line`, but bounded by a byte offset.
+    fn emit_before_offset(
+        &self,
+        before: usize,
+        depth: usize,
+        config: &FormatConfig,
+        out: &mut String,
+    ) {
+        if self.suspended.get() > 0 {
+            return;
+        }
+        while let Some(c) = self.comments.get(self.next.get()) {
+            if c.start >= before {
+                break;
+            }
+            out.push_str(&indent(depth, config));
+            out.push_str(&c.text);
+            out.push('\n');
+            self.next.set(self.next.get() + 1);
+        }
+    }
+
     /// Appends a trailing comment claimed for `on_line` to the line `out`
     /// just finished (before its newline), if there is one.
     fn append_trailing(&self, on_line: u32, out: &mut String) {
@@ -210,6 +250,8 @@ fn item_end_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Section(d) => d.end_line,
         TopLevelItem::Function(d) => d.body.span.line,
         TopLevelItem::Task(d) => d.closing_span.line,
+        TopLevelItem::Enum(d) => d.end_line,
+        TopLevelItem::Type(d) if d.end_line > 0 => d.end_line,
         _ => item_span_line(item),
     }
 }
@@ -367,6 +409,7 @@ fn format_top_level_item(
             for field in &td.fields {
                 format_type_field(field, 1, config, out);
             }
+            cx.emit_before_line(td.end_line, 1, config, out);
             out.push_str("};\n");
         }
 
@@ -378,13 +421,17 @@ fn format_top_level_item(
             out.push_str(&ed.name);
             out.push_str(" {\n");
             for (i, v) in ed.variants.iter().enumerate() {
+                let line = ed.variant_lines.get(i).copied().unwrap_or(0);
+                cx.emit_before_line(line, 1, config, out);
                 out.push_str("    ");
                 out.push_str(v);
                 if i + 1 < ed.variants.len() {
                     out.push(',');
                 }
                 out.push('\n');
+                cx.append_trailing(line, out);
             }
+            cx.emit_before_line(ed.end_line, 1, config, out);
             out.push_str("};\n");
         }
 
@@ -924,7 +971,10 @@ pub(crate) fn format_expr(
     out: &mut String,
 ) {
     match expr {
-        Expr::Object(items, _) => {
+        Expr::Object(items, object_span) => {
+            let has_comments = config
+                .comments
+                .has_comment_in_offsets(object_span.start, object_span.end);
             let mut flat = String::from("{ ");
             let speculative = config.comments.suspend();
             for item in items {
@@ -933,22 +983,22 @@ pub(crate) fn format_expr(
             flat.push('}');
             drop(speculative);
 
-            if !object_prefers_multiline(items) && fits_inline(out, &flat) {
+            if !has_comments && !object_prefers_multiline(items) && fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("{\n");
                 let field_indent = indent(depth + 1, config);
                 for item in items {
-                    let item_line = match item {
-                        SectionItem::Field(field) => field.span.line,
-                        SectionItem::Spread(spread) => spread.span.line,
-                    };
+                    let (item_line, item_end_line) = section_item_lines(item);
                     config.comments.emit_before_line(item_line, depth + 1, config, out);
                     out.push_str(&field_indent);
                     format_object_item_wrapped(item, depth + 1, config, out);
                     out.push('\n');
-                    config.comments.append_trailing(item_line, out);
+                    config.comments.append_trailing(item_end_line, out);
                 }
+                config
+                    .comments
+                    .emit_before_offset(object_span.end, depth + 1, config, out);
                 out.push_str(&indent(depth, config));
                 out.push('}');
             }
@@ -1420,6 +1470,14 @@ fn format_object_item_flat(
 /// Renders one object-literal item for the multi-line branch, without a
 /// trailing space. Nested `{ ... }` values stay inline only when they are
 /// small and fit the line budget; otherwise they expand one field per line.
+/// First and last source line of an object/section item.
+fn section_item_lines(item: &SectionItem) -> (u32, u32) {
+    match item {
+        SectionItem::Field(field) => (field.span.line, field.end_line),
+        SectionItem::Spread(spread) => (spread.span.line, spread.span.line),
+    }
+}
+
 fn format_object_item_wrapped(
     item: &SectionItem,
     depth: usize,
@@ -1433,7 +1491,8 @@ fn format_object_item_wrapped(
             format_object_item_flat(item, depth, config, &mut flat);
             drop(speculative);
             flat.pop(); // drop the trailing space after ';'
-            if !object_prefers_multiline(nested) && fits_inline(out, &flat) {
+            let has_comments = config.comments.has_comment_in_lines(f.span.line, f.end_line);
+            if !has_comments && !object_prefers_multiline(nested) && fits_inline(out, &flat) {
                 out.push_str(&flat);
                 return;
             }
@@ -1443,10 +1502,14 @@ fn format_object_item_wrapped(
             }
             out.push_str(": {\n");
             for nested_item in nested {
+                let (item_line, item_end_line) = section_item_lines(nested_item);
+                config.comments.emit_before_line(item_line, depth + 1, config, out);
                 out.push_str(&indent(depth + 1, config));
                 format_object_item_wrapped(nested_item, depth + 1, config, out);
                 out.push('\n');
+                config.comments.append_trailing(item_end_line, out);
             }
+            config.comments.emit_before_line(f.end_line, depth + 1, config, out);
             out.push_str(&indent(depth, config));
             out.push_str("};");
             return;
@@ -1692,6 +1755,20 @@ fn format_schema_field(field: &SchemaField, depth: usize, config: &FormatConfig,
 }
 
 fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out: &mut String) {
+    config.comments.emit_before_line(field.span.line, depth, config, out);
+    let is_section = format_type_field_body(field, depth, config, out);
+    if !is_section {
+        config.comments.append_trailing(field.span.line, out);
+    }
+}
+
+/// Returns whether the field was a nested `section = { ... }`.
+fn format_type_field_body(
+    field: &TypeField,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) -> bool {
     let indent = " ".repeat(depth * config.indent_width);
     out.push_str(&indent);
     out.push_str(&field.name);
@@ -1722,7 +1799,7 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
             }
             out.push_str(&indent);
             out.push_str("};\n");
-            return;
+            return true;
         }
     }
     if let Some(default) = &field.default {
@@ -1730,6 +1807,7 @@ fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out
         format_expr(default, 0, depth, config, out);
     }
     out.push_str(";\n");
+    false
 }
 
 fn format_field_decl(
@@ -3154,6 +3232,36 @@ struct Config"#),
     fn comments_stay_inside_shell_values() {
         assert_comments_stay_put(
             "function g() -> shell {\n    return shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_inside_object_literals() {
+        assert_comments_stay_put(
+            "var cfg: Server = {\n    // above host\n    host: \"h\"; // trailing\n    // between\n    port: 80;\n    // tail\n};\n",
+        );
+        assert_comments_stay_put(
+            "var cfg: Server = {\n    host: \"h\";\n    limits: {\n        // inside nested\n        max: 1; // tm\n        // nested tail\n    };\n};\n",
+        );
+    }
+
+    #[test]
+    fn comment_inside_a_short_object_keeps_it_multiline() {
+        // Would fit on one line, but a comment cannot live on that line.
+        assert_comments_stay_put("var cfg: Server = {\n    // why\n    host: \"h\";\n};\n");
+    }
+
+    #[test]
+    fn comments_stay_inside_enum_declarations() {
+        assert_comments_stay_put(
+            "enum Mode {\n    // first\n    Fast, // quick\n    // second\n    Slow\n    // tail\n};\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_inside_type_declarations() {
+        assert_comments_stay_put(
+            "type Config {\n    // name\n    name: str; // the name\n    // port\n    port: int = 80;\n    // tail\n};\n",
         );
     }
 }

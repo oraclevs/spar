@@ -3,6 +3,17 @@ use crate::lexer::Lexer;
 use crate::token::Token;
 
 pub fn parse_shell_plan(source: &str) -> Result<spar_command::ShellPlan, SparError> {
+    match parse_shell_plan_exact(source) {
+        Ok(plan) => Ok(plan),
+        Err(_) if !source.trim_end().ends_with(';') => {
+            let terminated = format!("{source};");
+            parse_shell_plan_exact(&terminated)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_shell_plan_exact(source: &str) -> Result<spar_command::ShellPlan, SparError> {
     let wrapped = format!("shell {{ {source} }}");
     let tokens = Lexer::new(&wrapped).tokenize()?;
     let (expression, consumed) = crate::shell_lang::parse_shell_block(&tokens)?;
@@ -16,6 +27,17 @@ pub fn parse_shell_plan(source: &str) -> Result<spar_command::ShellPlan, SparErr
 #[cfg(test)]
 mod tests {
     use spar_command::{EnvironmentOverride, Join, RedirectMode, Redirection, Step};
+
+    #[test]
+    fn single_interactive_command_does_not_require_trailing_semicolon() {
+        let plan = super::parse_shell_plan("cd Projects").unwrap();
+
+        let Step::Command(command) = &plan.steps[0].1 else {
+            panic!("expected a command");
+        };
+        assert_eq!(command.program, "cd");
+        assert_eq!(command.args, ["Projects"]);
+    }
 
     #[test]
     fn command_text_lowers_through_the_native_shell_grammar() {

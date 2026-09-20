@@ -13,6 +13,69 @@ use crate::task_lowering::TaskExprEntry;
 use crate::typechecker::TypeChecker;
 use crate::{Lexer, Parser};
 
+
+#[derive(Clone, Debug, Default)]
+pub struct BundledPackageRoots {
+    roots: HashMap<String, PathBuf>,
+}
+
+impl BundledPackageRoots {
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        root: impl Into<PathBuf>,
+    ) -> Result<(), String> {
+        let name = name.into();
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name == crate::stdlib::STD_PACKAGE_NAME
+        {
+            return Err(format!("invalid bundled package name '{name}'"));
+        }
+        self.roots.insert(name, root.into());
+        Ok(())
+    }
+
+    pub fn resolve(&self, request: &str) -> Option<PathBuf> {
+        let (name, module) = match request.split_once('/') {
+            Some((name, module)) => (name, Some(module)),
+            None => (request, None),
+        };
+        let root = self.roots.get(name)?;
+        let relative = match module {
+            None => PathBuf::from("lib.spar"),
+            Some(module) if !module.is_empty() => {
+                let path = Path::new(module);
+                if path.is_absolute()
+                    || path.components().any(|part| {
+                        matches!(
+                            part,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return None;
+                }
+                let mut path = path.to_path_buf();
+                if path.extension().is_none() {
+                    path.set_extension("spar");
+                }
+                path
+            }
+            Some(_) => return None,
+        };
+        Some(root.join(relative))
+    }
+
+    pub fn contains_package(&self, request: &str) -> bool {
+        let name = request.split('/').next().unwrap_or(request);
+        self.roots.contains_key(name)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompileOptions {
     pub base_dir: PathBuf,
@@ -30,6 +93,9 @@ pub struct CompileOptions {
     /// Resolves explicit `import pkg` requests through a project's package
     /// lock/store. Ordinary `import` statements remain local modules only.
     pub locator: Option<crate::package::ModuleLocator>,
+    /// Source-backed first-party packages registered by an embedder.
+    /// `std` remains reserved and is resolved separately before these roots.
+    pub bundled_packages: BundledPackageRoots,
     /// Optional replay guard for process effects. Ordinary one-shot
     /// compilation leaves this unset; persistent sessions install one
     /// shared ledger across every replay.
@@ -46,6 +112,7 @@ impl Default for CompileOptions {
             hosts: crate::host::HostRegistry::default(),
             natives: crate::stdlib::native_registry(),
             locator: None,
+            bundled_packages: BundledPackageRoots::default(),
             effect_ledger: None,
         }
     }
@@ -107,7 +174,13 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn new(options: CompileOptions) -> Self {
+    pub fn new(mut options: CompileOptions) -> Self {
+        // The bundled std package (implicitly preloaded into every program)
+        // is backed by the stdlib natives, so they must stay resolvable even
+        // when an embedder supplies its own registry.
+        options
+            .natives
+            .extend_missing(&crate::stdlib::native_registry());
         Self { options }
     }
 
@@ -116,7 +189,8 @@ impl Compiler {
     }
 
     fn import_loader(&self) -> ImportLoader {
-        let loader = ImportLoader::new(&self.options.base_dir);
+        let loader = ImportLoader::new(&self.options.base_dir)
+            .with_bundled_packages(self.options.bundled_packages.clone());
         match &self.options.locator {
             Some(locator) => loader.with_locator(locator.clone()),
             None => loader,
@@ -267,7 +341,7 @@ impl Compiler {
     }
 }
 
-fn inject_exec_result_type(program: &mut Program) {
+pub(crate) fn inject_exec_result_type(program: &mut Program) {
     use crate::ast::{SparType, TopLevelItem, TypeDecl, TypeField, TypeFieldShape};
 
     let span = crate::Span::new(0, 0, 1, 1);

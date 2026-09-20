@@ -49,6 +49,46 @@ pub use parser::Parser;
 pub use renderer::ErrorRenderer;
 pub use resolver::{Resolver, SymbolTable};
 pub use runtime::{NativeExecutionKind, NativeFunction, NativeFunctionId, NativeRegistry, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput, Value};
-pub use session::Session;
+pub use session::{input_completeness, InputCompleteness, InteractiveEvalResult, Session};
 pub use token::{SpannedToken, Token};
 pub use typechecker::TypeChecker;
+
+/// Editor/tooling-safe view of the bundled Spar standard library.
+///
+/// These helpers deliberately expose only stable read-only module identity
+/// information. Tooling such as `spar-ls` should not need access to the
+/// compiler's private stdlib implementation modules.
+pub fn bundled_stdlib_module_names() -> Vec<String> {
+    let root = stdlib::bundled_root().join("src");
+    let mut modules = std::fs::read_dir(root)
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("spar") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            Some(if stem == "lib" {
+                "std".to_string()
+            } else {
+                format!("std/{stem}")
+            })
+        })
+        .collect::<Vec<_>>();
+    modules.sort();
+    modules.dedup();
+    modules
+}
+
+/// Resolve `std` or `std/<module>` to the bundled source used by this Spar
+/// build. Returns `None` for non-stdlib requests.
+pub fn resolve_bundled_stdlib_import(request: &str) -> Option<std::path::PathBuf> {
+    stdlib::resolve_bundled_import(request)
+}
+
+/// True when `path` belongs to the bundled standard library shipped with this
+/// Spar build.
+pub fn is_bundled_stdlib_path(path: &std::path::Path) -> bool {
+    stdlib::is_bundled_std_path(path)
+}

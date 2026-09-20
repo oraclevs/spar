@@ -13,17 +13,34 @@ impl Default for FormatConfig {
     }
 }
 
+/// Canonical single-expression rendering, for tooling that shows a value
+/// (e.g. a parameter default in signature help) without slicing source text.
+pub fn format_expression(expr: &crate::ast::Expr) -> String {
+    let mut out = String::new();
+    format_expr(expr, 0, 0, &FormatConfig::default(), &mut out);
+    out
+}
+
 pub fn format_source(src: &str) -> Result<String, SparError> {
     let lexer = Lexer::new(src);
     let shebang = lexer.shebang().map(str::to_owned);
     let (tokens, comments) = lexer.tokenize_with_comments()?;
     let mut program = Parser::new(tokens).parse()?;
     program.shebang = shebang;
-    Ok(format_program_with_comments(
+    let formatted = format_program_with_comments(
         &program,
         &FormatConfig::default(),
         &comments,
-    ))
+    );
+
+    // Formatting must never hand the caller source that Spar itself cannot
+    // parse. This is a final safety barrier around the pretty-printer: even
+    // if a future AST branch is formatted incorrectly, `spar format` fails
+    // instead of overwriting a valid file with invalid output.
+    let formatted_tokens = Lexer::new(&formatted).tokenize()?;
+    Parser::new(formatted_tokens).parse()?;
+
+    Ok(formatted)
 }
 
 pub fn format_program(program: &Program, config: &FormatConfig) -> String {
@@ -57,11 +74,12 @@ pub fn format_program_with_comments(
 
     for (i, item) in program.items.iter().enumerate() {
         let item_line = item_span_line(item);
-        if i > 0
-            || program.shebang.is_some()
-            || program.load_env.is_some()
-            || program.is_schema_file
-        {
+        let needs_separator = if i == 0 {
+            program.shebang.is_some() || program.load_env.is_some() || program.is_schema_file
+        } else {
+            top_level_items_need_blank_line(&program.items[i - 1], item)
+        };
+        if needs_separator {
             out.push('\n');
         }
         // Emit any standalone comments preceding this item (after the blank-line separator)
@@ -74,6 +92,13 @@ pub fn format_program_with_comments(
         out.push('\n');
     }
     out
+}
+
+fn top_level_items_need_blank_line(previous: &TopLevelItem, current: &TopLevelItem) -> bool {
+    !matches!(
+        (previous, current),
+        (TopLevelItem::Import(_), TopLevelItem::Import(_))
+    )
 }
 
 struct CommentCursor<'a> {
@@ -155,37 +180,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
 
 fn format_top_level_item(item: &TopLevelItem, config: &FormatConfig, out: &mut String) {
     match item {
-        TopLevelItem::Import(imp) => match &imp.kind {
-            ImportKind::Schema => {
-                out.push_str("import schema \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push_str("\";\n");
-            }
-            ImportKind::Aliased(alias) => {
-                out.push_str(if imp.package { "import pkg \"" } else { "import \"" });
-                out.push_str(&escape_string_content(&imp.path));
-                out.push('"');
-                if let Some(alias) = alias {
-                    out.push_str(" as ");
-                    out.push_str(alias);
-                }
-                out.push_str(";\n");
-            }
-            ImportKind::Selective(items) => {
-                out.push_str(if imp.package { "import pkg " } else { "import " });
-                format_import_items(items, out);
-                out.push_str(" from \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push_str("\";\n");
-            }
-            ImportKind::TypeSelective(items) => {
-                out.push_str(if imp.package { "import pkg type " } else { "import type " });
-                format_import_items(items, out);
-                out.push_str(" from \"");
-                out.push_str(&escape_string_content(&imp.path));
-                out.push_str("\";\n");
-            }
-        },
+        TopLevelItem::Import(imp) => format_import_decl(imp, out),
 
         TopLevelItem::Var(vd) => {
             if vd.exported {
@@ -589,17 +584,93 @@ fn format_task_decl_cx(
     out.push_str("};\n");
 }
 
+fn format_import_decl(imp: &ImportDecl, out: &mut String) {
+    match &imp.kind {
+        ImportKind::Schema => {
+            out.push_str("import schema \"");
+            out.push_str(&escape_string_content(&imp.path));
+            out.push_str("\";\n");
+        }
+        ImportKind::Aliased(alias) => {
+            out.push_str(if imp.package { "import pkg \"" } else { "import \"" });
+            out.push_str(&escape_string_content(&imp.path));
+            out.push('"');
+            if let Some(alias) = alias {
+                out.push_str(" as ");
+                out.push_str(alias);
+            }
+            out.push_str(";\n");
+        }
+        ImportKind::Selective(items) => {
+            format_selective_import(imp.package, false, items, &imp.path, out)
+        }
+        ImportKind::TypeSelective(items) => {
+            format_selective_import(imp.package, true, items, &imp.path, out)
+        }
+    }
+}
+
+fn format_import_item(item: &ImportItem, out: &mut String) {
+    out.push_str(&item.name);
+    if let Some(alias) = &item.alias {
+        out.push_str(" as ");
+        out.push_str(alias);
+    }
+}
+
+fn format_selective_import(
+    package: bool,
+    type_only: bool,
+    items: &[ImportItem],
+    path: &str,
+    out: &mut String,
+) {
+    let prefix = match (package, type_only) {
+        (true, true) => "import pkg type ",
+        (true, false) => "import pkg ",
+        (false, true) => "import type ",
+        (false, false) => "import ",
+    };
+
+    let mut flat = String::new();
+    flat.push_str(prefix);
+    format_import_items(items, &mut flat);
+    flat.push_str(" from \"");
+    flat.push_str(&escape_string_content(path));
+    flat.push_str("\";");
+
+    // A selective import is much easier to scan vertically once it has a
+    // handful of names, even when the raw character count would technically
+    // fit on one line. Short imports remain compact.
+    let wrap = items.len() >= 4 || current_column(out) + flat.chars().count() > MAX_LINE_WIDTH;
+    if !wrap {
+        out.push_str(&flat);
+        out.push('\n');
+        return;
+    }
+
+    out.push_str(prefix);
+    out.push_str("{\n");
+    for (index, item) in items.iter().enumerate() {
+        out.push_str("    ");
+        format_import_item(item, out);
+        if index + 1 < items.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("} from \"");
+    out.push_str(&escape_string_content(path));
+    out.push_str("\";\n");
+}
+
 fn format_import_items(items: &[ImportItem], out: &mut String) {
     out.push_str("{ ");
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        out.push_str(&item.name);
-        if let Some(alias) = &item.alias {
-            out.push_str(" as ");
-            out.push_str(alias);
-        }
+        format_import_item(item, out);
     }
     out.push_str(" }");
 }
@@ -805,6 +876,26 @@ fn fits_inline(out: &str, candidate: &str) -> bool {
     !candidate.contains('\n') && current_column(out) + candidate.chars().count() <= MAX_LINE_WIDTH
 }
 
+fn object_prefers_multiline(items: &[SectionItem]) -> bool {
+    if items.len() >= 3 {
+        return true;
+    }
+
+    items.iter().any(|item| match item {
+        SectionItem::Spread(_) => false,
+        SectionItem::Field(field) => match &field.value {
+            Some(FieldValue::Nested(_)) => true,
+            Some(FieldValue::Expr(Expr::Object(_, _))) => true,
+            Some(FieldValue::Expr(Expr::List(_, _))) => items.len() >= 2,
+            _ => false,
+        },
+    })
+}
+
+fn list_prefers_multiline(items: &[Expr]) -> bool {
+    items.iter().any(|item| matches!(item, Expr::Object(_, _)))
+}
+
 pub(crate) fn format_expr(
     expr: &Expr,
     parent_prec: u8,
@@ -820,15 +911,14 @@ pub(crate) fn format_expr(
             }
             flat.push('}');
 
-            if fits_inline(out, &flat) {
+            if !object_prefers_multiline(items) && fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("{\n");
                 let field_indent = indent(depth + 1, config);
                 for item in items {
                     out.push_str(&field_indent);
-                    format_object_item_flat(item, depth + 1, config, out);
-                    out.pop(); // drop the flat variant's trailing space after ';'
+                    format_object_item_wrapped(item, depth + 1, config, out);
                     out.push('\n');
                 }
                 out.push_str(&indent(depth, config));
@@ -953,7 +1043,7 @@ pub(crate) fn format_expr(
             }
             flat.push(']');
 
-            if fits_inline(out, &flat) {
+            if !list_prefers_multiline(items) && fits_inline(out, &flat) {
                 out.push_str(&flat);
             } else {
                 out.push_str("[\n");
@@ -1024,19 +1114,7 @@ pub(crate) fn format_expr(
         Expr::ExecShell(shell) => format_shell_expr(shell, true, depth, config, out),
         Expr::CommandSubstitution(shell) => {
             out.push_str("$(");
-            if let Some((_, step)) = shell.steps.first() {
-                match step {
-                    ShellStep::Command(command) => format_shell_command(command, out),
-                    ShellStep::Pipeline(commands) => {
-                        for (index, command) in commands.iter().enumerate() {
-                            if index > 0 {
-                                out.push_str(" | ");
-                            }
-                            format_shell_command(command, out);
-                        }
-                    }
-                }
-            }
+            format_shell_steps_inline(&shell.steps, out);
             out.push(')');
         }
     }
@@ -1093,6 +1171,29 @@ fn format_shell_expr(
     out.push('}');
 }
 
+fn format_shell_steps_inline(steps: &[(ShellJoin, ShellStep)], out: &mut String) {
+    for (index, (join, step)) in steps.iter().enumerate() {
+        if index > 0 {
+            match join {
+                ShellJoin::Always => out.push_str("; "),
+                ShellJoin::OnSuccess => out.push_str(" && "),
+                ShellJoin::OnFailure => out.push_str(" || "),
+            }
+        }
+        match step {
+            ShellStep::Command(command) => format_shell_command(command, out),
+            ShellStep::Pipeline(commands) => {
+                for (command_index, command) in commands.iter().enumerate() {
+                    if command_index > 0 {
+                        out.push_str(" | ");
+                    }
+                    format_shell_command(command, out);
+                }
+            }
+        }
+    }
+}
+
 fn format_shell_steps(
     steps: &[(ShellJoin, ShellStep)],
     depth: usize,
@@ -1130,6 +1231,12 @@ fn format_shell_steps(
 }
 
 fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
+    for environment in &command.environment {
+        out.push_str(&environment.name);
+        out.push('=');
+        format_shell_word(&environment.value, out);
+        out.push(' ');
+    }
     format_shell_word(&command.program.text, out);
     for argument in &command.args {
         out.push(' ');
@@ -1159,16 +1266,22 @@ fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
                 }
             }
         }
-    } else if let Some(redirect) = &command.stdout {
-        out.push_str(match redirect.mode {
-            spar_command::RedirectMode::Truncate => " > ",
-            spar_command::RedirectMode::Append => " >> ",
-        });
-        format_shell_word(&redirect.target.text, out);
-    }
-    if let Some(redirect) = &command.stderr {
-        out.push_str(" 2> ");
-        format_shell_word(&redirect.target.text, out);
+    } else {
+        if let Some(redirect) = &command.stdin {
+            out.push_str(" < ");
+            format_shell_word(&redirect.target.text, out);
+        }
+        if let Some(redirect) = &command.stdout {
+            out.push_str(match redirect.mode {
+                spar_command::RedirectMode::Truncate => " > ",
+                spar_command::RedirectMode::Append => " >> ",
+            });
+            format_shell_word(&redirect.target.text, out);
+        }
+        if let Some(redirect) = &command.stderr {
+            out.push_str(" 2> ");
+            format_shell_word(&redirect.target.text, out);
+        }
     }
     if command.background {
         out.push_str(" &");
@@ -1212,10 +1325,22 @@ fn format_object_item_flat(
             out.push_str(": ");
             if let Some(ty) = &f.ty {
                 out.push_str(&format_type(ty));
-                out.push_str(" = ");
+                if f.value.is_some() {
+                    out.push_str(" = ");
+                }
             }
-            if let Some(FieldValue::Expr(e)) = &f.value {
-                format_expr(e, 0, depth, config, out);
+            match &f.value {
+                Some(FieldValue::Expr(e)) => {
+                    format_expr(e, 0, depth, config, out);
+                }
+                Some(FieldValue::Nested(items)) => {
+                    out.push_str("{ ");
+                    for item in items {
+                        format_object_item_flat(item, depth + 1, config, out);
+                    }
+                    out.push('}');
+                }
+                None => {}
             }
             out.push_str("; ");
         }
@@ -1225,6 +1350,43 @@ fn format_object_item_flat(
             out.push_str("; ");
         }
     }
+}
+
+/// Renders one object-literal item for the multi-line branch, without a
+/// trailing space. Nested `{ ... }` values stay inline only when they are
+/// small and fit the line budget; otherwise they expand one field per line.
+fn format_object_item_wrapped(
+    item: &SectionItem,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
+    if let SectionItem::Field(f) = item {
+        if let (None, Some(FieldValue::Nested(nested))) = (&f.ty, &f.value) {
+            let mut flat = String::new();
+            format_object_item_flat(item, depth, config, &mut flat);
+            flat.pop(); // drop the trailing space after ';'
+            if !object_prefers_multiline(nested) && fits_inline(out, &flat) {
+                out.push_str(&flat);
+                return;
+            }
+            out.push_str(&f.name);
+            if f.optional {
+                out.push('?');
+            }
+            out.push_str(": {\n");
+            for nested_item in nested {
+                out.push_str(&indent(depth + 1, config));
+                format_object_item_wrapped(nested_item, depth + 1, config, out);
+                out.push('\n');
+            }
+            out.push_str(&indent(depth, config));
+            out.push_str("};");
+            return;
+        }
+    }
+    format_object_item_flat(item, depth, config, out);
+    out.pop(); // drop the flat variant's trailing space after ';'
 }
 
 fn indent(depth: usize, config: &FormatConfig) -> String {
@@ -1608,6 +1770,32 @@ mod tests {
     }
 
     #[test]
+    fn stderr_redirection_is_not_duplicated_by_formatting() {
+        let source = r#"function main() -> shell {
+    return shell {
+        tool 2> errors.log;
+    };
+};
+"#;
+        let formatted = fmt(source);
+        assert_eq!(formatted.matches("2> errors.log").count(), 1, "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn command_substitution_preserves_every_control_chain_step() {
+        let source =
+            "var branch: str = $(git symbolic-ref --short HEAD || echo detached);\n";
+        let formatted = fmt(source);
+
+        assert!(
+            formatted.contains("git symbolic-ref --short HEAD || echo detached"),
+            "command substitution was truncated: {formatted}"
+        );
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
     fn format_mixed_shell_loop_preserves_native_command_syntax() {
         let source = r#"function main() -> shell {
     var files: [str] = ["one", "two"];
@@ -1683,6 +1871,39 @@ mod tests {
     }
 
     #[test]
+    fn nested_object_values_are_never_dropped() {
+        let src = concat!(
+            "var config: section = { ",
+            "python: { enabled: true; }; ",
+            "kids: true; ",
+            "};\n",
+        );
+        let formatted = fmt(src);
+
+        assert!(formatted.contains("python: { enabled: true; };"), "got: {formatted}");
+        assert!(formatted.contains("kids: true;"), "got: {formatted}");
+        assert_eq!(fmt(&formatted), formatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn shell_environment_prefix_is_never_dropped() {
+        let src = concat!(
+            "function main() -> shell {\n",
+            "    return shell {\n",
+            "        RUST_LOG=debug cargo run;\n",
+            "    };\n",
+            "};\n",
+        );
+        let formatted = fmt(src);
+
+        assert!(
+            formatted.contains("RUST_LOG=debug cargo run;"),
+            "shell-local environment assignment was lost: {formatted}"
+        );
+        assert_eq!(fmt(&formatted), formatted, "formatting must be idempotent");
+    }
+
+    #[test]
     fn format_enum_decl_round_trips() {
         let src = "export enum Devices {\n    Ios,\n    Android,\n};\n";
         let formatted = fmt(src);
@@ -1710,9 +1931,9 @@ mod tests {
         // literal used to render as one unreadable ~350-char line.
         let src = concat!(
             "export var apiReplicas: [int] = for i in [0, 1, 2] { ",
-            "{ name: str = replicaName(base: \"api\", index: i); ",
-            "image: str = \"acme/api\"; tag: str = \"1.4.2\"; ",
-            "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
+            "{ name: replicaName(base: \"api\", index: i); ",
+            "image: \"acme/api\"; tag: \"1.4.2\"; ",
+            "restart: RestartPolicy::OnFailure; } };\n",
         );
         let formatted = fmt(src);
         assert!(
@@ -1752,7 +1973,7 @@ mod tests {
         let src = concat!(
             "export var apiReplicas: [int] = for i in [0, 1, 2] {\n",
             "    {\n",
-            "        ports: [Port] = [{ container: 8080; host: Compute::replicaPort(basePort: 8081, index: i); }];\n",
+            "        ports: [{ container: 8080; host: Compute::replicaPort(basePort: 8081, index: i); }];\n",
             "    }\n",
             "};\n",
         );
@@ -1762,7 +1983,7 @@ mod tests {
             "no line should exceed the width budget once real indentation is counted, got: {formatted}"
         );
         assert!(
-            formatted.contains("ports: List<Port> = [\n"),
+            formatted.contains("ports: [\n"),
             "the ports list must wrap onto its own lines, got: {formatted}"
         );
         let reformatted = fmt(&formatted);
@@ -1797,9 +2018,9 @@ mod tests {
         let src = concat!(
             "[Services]{\n",
             "    replicas: [int] = for i in [0, 1, 2] { ",
-            "{ name: str = replicaName(base: \"api\", index: i); ",
-            "image: str = \"acme/api\"; tag: str = \"1.4.2\"; ",
-            "restart: RestartPolicy = RestartPolicy::OnFailure; } };\n",
+            "{ name: replicaName(base: \"api\", index: i); ",
+            "image: \"acme/api\"; tag: \"1.4.2\"; ",
+            "restart: RestartPolicy::OnFailure; } };\n",
             "};\n",
         );
         let formatted = fmt(src);
@@ -2255,6 +2476,110 @@ function pick(flag: bool) -> int {
         assert_eq!(once, twice, "formatting must be idempotent");
     }
 
+
+    #[test]
+    fn formats_sparsh_config_with_readable_multiline_layout() {
+        let src = r#"// Sparsh startup/config entry point.
+import type { SparshAlias, SparshEnvironmentVariable, SparshPrompt, SparshHistory, SparshCompletion } from "sparsh-types.spar";
+import { greet, build, showFile, rsBinInstall, zipOccLang } from "functions.spar";
+
+struct Config {
+    aliases: List<SparshAlias> = [
+        { name: "gs"; command: ["git", "status"]; },
+        { name: "ls"; command: ["eza", "-la", "--icons", "--group-directories-first"]; }
+    ];
+    environment: List<SparshEnvironmentVariable> = [
+        { name: "EDITOR"; value: "nvim"; },
+        { name: "PATH"; prepend: ["$HOME/.local/bin", "$HOME/.cargo/bin"]; append: ["$HOME/.pub-cache/bin"]; }
+    ];
+    prompt: SparshPrompt = {
+        showStatus: true;
+        showDuration: true;
+        durationThresholdMs: 2000;
+        path: { enabled: true; parentLength: 64; maxLastLength: 96; maxWidth: 512; };
+        git: { enabled: true; showBranch: true; showAheadBehind: true; showStaged: true; showModified: true; showUntracked: true; showConflicts: true; };
+        time: { enabled: true; format: "HH:mm:ss"; };
+    };
+    history: SparshHistory = { maxEntries: 10000; dedupeConsecutive: true; };
+    completion: SparshCompletion = { enabled: true; };
+};
+
+function startup() -> shell {
+    return shell {
+        nitch;
+    };
+};
+"#;
+
+        let formatted = format_source(src).expect("format");
+
+        assert!(
+            formatted.contains(r#"import type {
+    SparshAlias,
+    SparshEnvironmentVariable,
+    SparshPrompt,
+    SparshHistory,
+    SparshCompletion
+} from "sparsh-types.spar";"#),
+            "type import should wrap cleanly: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"import {
+    greet,
+    build,
+    showFile,
+    rsBinInstall,
+    zipOccLang
+} from "functions.spar";
+
+struct Config"#),
+            "imports should stay grouped with one blank line before the struct: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"aliases: List<SparshAlias> = [
+        {
+            name: "gs";
+            command: ["git", "status"];
+        },"#),
+            "lists of config objects should be vertical: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"environment: List<SparshEnvironmentVariable> = [
+        { name: "EDITOR"; value: "nvim"; },
+        {
+            name: "PATH";
+            prepend: ["$HOME/.local/bin", "$HOME/.cargo/bin"];
+            append: ["$HOME/.pub-cache/bin"];
+        }
+    ];"#),
+            "environment PATH edits should format as a readable nested object: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"path: {
+            enabled: true;
+            parentLength: 64;
+            maxLastLength: 96;
+            maxWidth: 512;
+        };"#),
+            "larger nested objects should expand vertically: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"time: { enabled: true; format: "HH:mm:ss"; };"#)
+                && formatted.contains(
+                    "history: SparshHistory = { maxEntries: 10000; dedupeConsecutive: true; };"
+                ),
+            "small simple objects should remain compact: {formatted}"
+        );
+        assert!(
+            formatted.contains(r#"function startup() -> shell {
+    return shell {
+        nitch;
+    };
+};"#),
+            "startup() should remain a normal formatted Spar function: {formatted}"
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
 
     #[test]
     fn formats_explicit_package_imports() {

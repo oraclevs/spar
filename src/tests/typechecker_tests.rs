@@ -1225,3 +1225,45 @@ fn self_dot_field_access_type_mismatch_errors() {
     let errs = check_err(src);
     assert!(errs.contains("type mismatch"), "got: {errs}");
 }
+
+#[test]
+fn bound_type_accepts_list_of_named_object_literals() {
+    check_ok(
+        r#"
+        type AliasConfig {
+            name: str;
+            command: List<str>;
+        };
+        type RootConfig {
+            aliases?: List<AliasConfig>;
+        };
+        struct Config: RootConfig {
+            aliases = [
+                { name: "ll"; command: ["eza", "--icons"]; }
+            ];
+        };
+        "#,
+    );
+}
+
+#[test]
+fn contextual_native_shell_words_typecheck_as_ordinary_names() {
+    check_ok(
+        r#"
+        type Tool {
+            command: str;
+            exec: str;
+            shell: str;
+        };
+        var command: str = "run";
+        var exec: str = command;
+        var shell: str = exec;
+        var tool: Tool = { command: command; exec: exec; shell: shell; };
+        function command(exec: str, shell: str) -> str {
+            return "${exec}:${shell}";
+        };
+        var result: str = command(exec: tool.exec, shell: tool.shell);
+        "#,
+    );
+}
+

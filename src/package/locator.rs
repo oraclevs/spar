@@ -47,6 +47,26 @@ impl ModuleLocator {
         }
     }
 
+    /// Return the dependency aliases visible from the current package scope.
+    ///
+    /// This is intentionally read-only and offline. Editor tooling can use it
+    /// for `import pkg` completion without reaching into lockfile internals or
+    /// triggering package resolution/network access.
+    pub fn visible_import_aliases(&self) -> Vec<String> {
+        let edges = match &self.current {
+            None => &self.lockfile.root,
+            Some(id) => {
+                let Some(package) = self.lockfile.packages.get(id) else {
+                    return Vec::new();
+                };
+                &package.dependencies
+            }
+        };
+        let mut aliases = edges.keys().cloned().collect::<Vec<_>>();
+        aliases.sort();
+        aliases
+    }
+
     /// Resolves a dependency import request to a concrete Spar module.
     /// `alias` resolves to the dependency entry module. `alias/sub/module`
     /// resolves relative to the entry module's directory and gains `.spar`
@@ -269,4 +289,12 @@ mod tests {
             PathBuf::from("/data/spar/store/github-owner-json-def456/src/lib.spar")
         );
     }
+    #[test]
+    fn visible_import_aliases_are_sorted_and_offline() {
+        let mut lockfile = sample_lockfile();
+        lockfile.root.insert("alpha".to_string(), "github-owner-http-abc123".to_string());
+        let locator = ModuleLocator::for_root(lockfile, test_store());
+        assert_eq!(locator.visible_import_aliases(), vec!["alpha".to_string(), "http".to_string()]);
+    }
+
 }

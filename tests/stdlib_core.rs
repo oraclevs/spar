@@ -17,7 +17,7 @@ fn prelude_println_is_available_without_import() {
         .expect("prelude source should compile");
 
     let buffer = Arc::new(Mutex::new(Vec::new()));
-    let mut context = RuntimeContext::for_base_dir(&program.options.base_dir);
+    let mut context = RuntimeContext::for_base_dir(program.base_dir());
     context.set_stdout(RuntimeOutput::Buffer(buffer.clone()));
     let outcome = engine
         .execute_compiled_with_context(&program, context)
@@ -132,7 +132,7 @@ fn io_supports_blank_println_and_byte_oriented_runtime_io() {
         .expect("std/io byte APIs should compile");
 
     let buffer = Arc::new(Mutex::new(Vec::new()));
-    let mut context = RuntimeContext::for_base_dir(&program.options.base_dir);
+    let mut context = RuntimeContext::for_base_dir(program.base_dir());
     context.set_stdin(RuntimeInput::from_bytes(b"A".to_vec()));
     context.set_stdout(RuntimeOutput::Buffer(buffer.clone()));
     let outcome = engine

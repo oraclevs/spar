@@ -129,6 +129,18 @@ impl NativeRegistry {
         Ok(id)
     }
 
+    /// Registers every function of `other` that is not already present.
+    /// Existing entries (and their ids) win, so an embedder's own natives
+    /// are never shadowed by the ones merged in behind them.
+    pub fn extend_missing(&mut self, other: &NativeRegistry) {
+        for function in &other.functions {
+            let key = (function.module.clone(), function.name.clone());
+            if !self.by_name.contains_key(&key) {
+                let _ = self.register(function.clone());
+            }
+        }
+    }
+
     pub fn get(&self, module: &str, name: &str) -> Option<(NativeFunctionId, &NativeFunction)> {
         let id = *self.by_name.get(&(module.to_string(), name.to_string()))?;
         self.functions.get(id.0 as usize).map(|function| (id, function))

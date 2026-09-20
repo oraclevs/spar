@@ -164,3 +164,71 @@ fn retains_program_for_rendered_diagnostics() {
     assert!(rendered.contains("invalid.spar"));
     assert!(rendered.matches("error[type]").count() >= 2, "{rendered}");
 }
+
+#[test]
+fn selective_import_brings_helpers_from_the_modules_own_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("colors.spar"),
+        "function red() -> str { return \"#f00\"; };\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("toolkit.spar"),
+        concat!(
+            "import { red } from \"colors.spar\";\n",
+            "function shade() -> str { return red(); };\n",
+            "function color() -> str { return shade(); };\n",
+        ),
+    )
+    .unwrap();
+    let source = concat!(
+        "import { color } from \"toolkit.spar\";\n",
+        "export var picked: str = color();\n",
+    );
+    let compilation = Compiler::new(CompileOptions {
+        base_dir: temp.path().to_path_buf(),
+        ..CompileOptions::default()
+    })
+    .compile(source);
+
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    assert_eq!(
+        compilation.result.unwrap().globals["picked"],
+        spar::ConfigValue::Str("#f00".to_string())
+    );
+}
+
+#[test]
+fn shell_interpolation_spans_point_at_the_real_source() {
+    let source = "function demo(input: str) -> shell { return shell { echo -n \"${input}\"; }; };\n";
+    let tokens = spar::Lexer::new(source).tokenize().unwrap();
+    let program = spar::Parser::new(tokens).parse().unwrap();
+    let spar::ast::TopLevelItem::Function(function) = &program.items[0] else {
+        panic!("expected a function");
+    };
+    let mut spans = Vec::new();
+    fn walk_shell(shell: &spar::ast::ShellExpr, spans: &mut Vec<(usize, usize)>) {
+        for (_, step) in &shell.steps {
+            let spar::ast::ShellStep::Command(command) = step else { continue };
+            for word in std::iter::once(&command.program).chain(command.args.iter()) {
+                for part in &word.parts {
+                    if let spar::ast::ShellWordPart::Expr(spar::ast::Expr::NamespaceRef(reference)) =
+                        part
+                    {
+                        spans.push((reference.span.start, reference.span.end));
+                    }
+                }
+            }
+        }
+    }
+    for statement in &function.body.stmts {
+        if let spar::ast::Statement::Return(spar::ast::ReturnValue::Expr(expr), _) = statement {
+            if let spar::ast::Expr::Shell(shell) = expr {
+                walk_shell(shell, &mut spans);
+            }
+        }
+    }
+    let start = source.find("input}").unwrap();
+    assert_eq!(spans, vec![(start, start + "input".len())]);
+}

@@ -8,21 +8,21 @@ async function request(method: str, url: str, body: str = "") -> HttpResponse {
 };
 
 async function get(url: str) -> HttpResponse {
-    return await request(method: "GET", url: url);
+    return nativeHttp::request(method: "GET", url: url, body: "");
 };
 
 async function delete(url: str) -> HttpResponse {
-    return await request(method: "DELETE", url: url);
+    return nativeHttp::request(method: "DELETE", url: url, body: "");
 };
 
 async function post(url: str, body: str) -> HttpResponse {
-    return await request(method: "POST", url: url, body: body);
+    return nativeHttp::request(method: "POST", url: url, body: body);
 };
 
 async function put(url: str, body: str) -> HttpResponse {
-    return await request(method: "PUT", url: url, body: body);
+    return nativeHttp::request(method: "PUT", url: url, body: body);
 };
 
 async function patch(url: str, body: str) -> HttpResponse {
-    return await request(method: "PATCH", url: url, body: body);
+    return nativeHttp::request(method: "PATCH", url: url, body: body);
 };

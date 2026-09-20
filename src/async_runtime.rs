@@ -49,6 +49,7 @@ pub(crate) struct TaskTable {
     next_id: u64,
     queue: VecDeque<PromiseHandle>,
     states: HashMap<PromiseHandle, TaskState>,
+    created: HashMap<PromiseHandle, std::time::Instant>,
 }
 
 impl TaskTable {
@@ -66,8 +67,15 @@ impl TaskTable {
                 arguments,
             }),
         );
+        self.created.insert(handle, std::time::Instant::now());
         self.queue.push_back(handle);
         handle
+    }
+
+    /// When the promise was created; deadlines are measured from here so a
+    /// promise that was slow to run still counts against its timeout.
+    pub(crate) fn created_at(&self, handle: PromiseHandle) -> Option<std::time::Instant> {
+        self.created.get(&handle).copied()
     }
 
     pub(crate) fn start(&mut self, handle: PromiseHandle) -> Result<TaskInvocation, TaskStatus> {

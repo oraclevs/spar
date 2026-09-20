@@ -85,19 +85,23 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), SparError> {
-        match self.peek() {
-            Token::Ident(_) => {
-                let st = self.advance().clone();
-                if let Token::Ident(s) = st.token {
-                    Ok((s, st.span))
-                } else {
-                    unreachable!()
-                }
-            }
-            _ => Err(SparError::ParseError {
+        let name = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            // Native-shell words are contextual keywords: outside their
+            // construct positions they remain legal Spar names.
+            Token::KwCommand => Some("command".to_string()),
+            Token::KwExec => Some("exec".to_string()),
+            Token::TypeShell => Some("shell".to_string()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            let span = self.advance().span.clone();
+            Ok((name, span))
+        } else {
+            Err(SparError::ParseError {
                 message: format!("expected a name, found {}", self.peek().human_name()),
                 span: self.peek_span(),
-            }),
+            })
         }
     }
 
@@ -114,7 +118,10 @@ impl Parser {
 
     #[allow(dead_code)]
     fn at_ident(&self) -> bool {
-        matches!(self.peek(), Token::Ident(_))
+        matches!(
+            self.peek(),
+            Token::Ident(_) | Token::KwCommand | Token::KwExec | Token::TypeShell
+        )
     }
 
     fn error(&self, msg: impl Into<String>) -> SparError {
@@ -277,6 +284,9 @@ impl Parser {
                 Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
             }
             Token::Ident(_)
+            | Token::KwCommand
+            | Token::KwExec
+            | Token::TypeShell
             | Token::TypeStr
             | Token::TypeInt
             | Token::TypeFloat
@@ -578,10 +588,12 @@ impl Parser {
     }
 
     fn parse_section_item(&mut self) -> Result<SectionItem, SparError> {
-        match self.peek() {
-            Token::DotDotDot => Ok(SectionItem::Spread(self.parse_spread()?)),
-            Token::Ident(_) => Ok(SectionItem::Field(self.parse_field_decl()?)),
-            _ => Err(self.error("expected a field declaration or `...` spread")),
+        if self.at(&Token::DotDotDot) {
+            Ok(SectionItem::Spread(self.parse_spread()?))
+        } else if self.at_ident() {
+            Ok(SectionItem::Field(self.parse_field_decl()?))
+        } else {
+            Err(self.error("expected a field declaration or `...` spread"))
         }
     }
 
@@ -597,10 +609,11 @@ impl Parser {
             | Token::TypeInt
             | Token::TypeFloat
             | Token::TypeBool
-            | Token::TypeSection => true,
+            | Token::TypeSection
+            | Token::TypeShell => true,
             // A bare Ident is only a type-start when immediately followed by
             // `=` — otherwise it's the type-omitted value form (`name: someVar;`).
-            Token::Ident(_) => {
+            Token::Ident(_) | Token::KwCommand | Token::KwExec => {
                 if matches!(
                     self.tokens.get(self.pos + 1).map(|st| &st.token),
                     Some(Token::Eq)
@@ -644,7 +657,7 @@ impl Parser {
                     // `[Ident] =` — list of a named type, same `=`-disambiguation.
                     matches!(
                         self.tokens.get(self.pos + 1).map(|st| &st.token),
-                        Some(Token::Ident(_))
+                        Some(Token::Ident(_)) | Some(Token::KwCommand) | Some(Token::KwExec)
                     ) && matches!(
                         self.tokens.get(self.pos + 2).map(|st| &st.token),
                         Some(Token::RBracket)
@@ -1168,14 +1181,11 @@ impl Parser {
     }
 
     fn parse_scalar_type(&mut self) -> Result<SparType, SparError> {
-        if let Token::Ident(name) = self.peek() {
-            // 'str'/'int'/'float'/'bool'/'section' are their own dedicated
-            // tokens (see below) — any Ident here is unambiguously a
-            // reference to another declared type. Mirrors
-            // parse_type_field_shape's identical handling one level up
-            // (inside `type [X]{...}` field shapes).
-            let name = name.clone();
-            self.advance();
+        if matches!(self.peek(), Token::Ident(_) | Token::KwCommand | Token::KwExec) {
+            // Native-shell words are contextual here too: a user-declared
+            // type named `command` or `exec` remains referenceable outside
+            // the actual native-shell construct positions.
+            let (name, _) = self.expect_ident()?;
             if self.at(&Token::Lt) {
                 let arguments = self.parse_type_arguments_required()?;
                 if name == "List" {
@@ -1399,7 +1409,7 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Expr::Grouped(Box::new(inner), span))
             }
-            Token::Ident(_) => self.parse_namespace_ref_or_fn_call(),
+            Token::Ident(_) | Token::TypeShell => self.parse_namespace_ref_or_fn_call(),
             Token::TypeStr => {
                 let span = self.peek_span();
                 self.advance();
@@ -1423,7 +1433,12 @@ impl Parser {
             Token::ShellBlockStart | Token::ShellForeignBlockStart(_) => {
                 self.parse_mixed_shell_block()
             }
-            Token::KwCommand => {
+            Token::KwCommand
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|token| &token.token),
+                    Some(Token::ShellWord(_)) | Some(Token::ShellLiteralWord(_))
+                ) =>
+            {
                 let (shell, consumed) = parse_command_expression(&self.tokens[self.pos..])?;
                 // The command expression's terminating semicolon is also the
                 // containing Spar statement's semicolon, so leave it for the
@@ -1431,16 +1446,9 @@ impl Parser {
                 self.pos += consumed - 1;
                 Ok(Expr::Shell(shell))
             }
-            Token::KwExec => {
+            Token::KwExec if self.next_is(&Token::ShellBlockStart) => {
                 let exec_span = self.peek_span();
                 self.advance();
-                if !self.at(&Token::ShellBlockStart) {
-                    return Err(SparError::ParseError {
-                        message: "'exec' must be followed by '{ ... }' or 'shell { ... }'"
-                            .to_string(),
-                        span: exec_span,
-                    });
-                }
                 let Expr::Shell(shell) = self.parse_mixed_shell_block()? else {
                     unreachable!("mixed shell parser always returns Expr::Shell")
                 };
@@ -1453,6 +1461,7 @@ impl Parser {
                 }
                 Ok(Expr::ExecShell(shell))
             }
+            Token::KwCommand | Token::KwExec => self.parse_namespace_ref_or_fn_call(),
             Token::CommandSubStart => {
                 let (shell, consumed) = parse_command_substitution(&self.tokens[self.pos..])?;
                 self.pos += consumed;
@@ -1566,10 +1575,44 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            items.push(self.parse_section_item()?);
+            items.push(self.parse_object_item()?);
         }
         self.expect(&Token::RBrace)?;
         Ok(Expr::Object(items, span))
+    }
+
+    /// Object literals are values, not section declarations. In particular,
+    /// `shell: shell;` means a field named `shell` whose value is the
+    /// contextual identifier `shell`; it must not be reinterpreted as a
+    /// declaration of type `shell`. Typed section fields continue to use
+    /// `parse_field_decl`.
+    fn parse_object_item(&mut self) -> Result<SectionItem, SparError> {
+        if self.at(&Token::DotDotDot) {
+            return Ok(SectionItem::Spread(self.parse_spread()?));
+        }
+
+        let span = self.peek_span();
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::Colon)?;
+        let value = if self.at(&Token::LBrace) {
+            self.expect(&Token::LBrace)?;
+            let mut items = Vec::new();
+            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                items.push(self.parse_object_item()?);
+            }
+            self.expect(&Token::RBrace)?;
+            FieldValue::Nested(items)
+        } else {
+            FieldValue::Expr(self.parse_expr()?)
+        };
+        self.expect(&Token::Semicolon)?;
+        Ok(SectionItem::Field(FieldDecl {
+            name,
+            optional: false,
+            ty: None,
+            value: Some(value),
+            span,
+        }))
     }
 
     fn parse_interp_string(&mut self) -> Result<InterpolString, SparError> {
@@ -3336,6 +3379,22 @@ function f(flag: bool) -> int {
                 "unknown file pragma `@Unknown`; only `@SchemaFile` or `@LoadEnv` is supported"
             ),
             "got: {message}"
+        );
+    }
+
+    #[test]
+    fn native_shell_words_are_contextual_identifiers_outside_construct_position() {
+        parse_str(
+            r#"
+            type [command] { value: str; };
+            struct Holder {
+                command: str = "field";
+                exec: str = "value";
+                shell: str = "name";
+            };
+            function command(exec: str) -> str { return exec; };
+            var commandValue: str = command(exec: "ok");
+            "#
         );
     }
 

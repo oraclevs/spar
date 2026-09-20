@@ -451,7 +451,7 @@ fn parse_local_var_can_infer_exec_shell_result_type() {
 fn parse_bare_exec_without_shell_is_an_error() {
     let error = parse_err("function f() -> int { var r: int = exec 1; return 0; };");
     assert!(
-        error.contains("exec") && error.contains("shell"),
+        error.contains("expected ';'") && error.contains("integer literal"),
         "got: {error}"
     );
 }
@@ -888,7 +888,7 @@ fn parse_import_type_selective() {
 #[test]
 fn parse_import_as_part_of_reports_removed_syntax() {
     let err = parse_err(r#"import asPartOf "common.spar";"#);
-    assert!(err.contains("asPartOf imports were removed"), "got: {err}");
+    assert!(err.contains("asPartOf") && err.contains("removed"), "got: {err}");
     assert!(err.contains("import {"), "got: {err}");
 }
 
@@ -1462,4 +1462,39 @@ fn rejects_generic_struct_declarations_with_actionable_message() {
         "{error}"
     );
     assert!(error.contains("generic `type`"), "{error}");
+}
+
+
+#[test]
+fn native_shell_words_are_contextual_names_outside_construct_position() {
+    let program = parse_ok(
+        r#"
+        type Tool {
+            command: str;
+            exec: str;
+            shell: str;
+        };
+        var command: str = "run";
+        var exec: str = command;
+        var shell: str = exec;
+        var tool: Tool = { command: command; exec: exec; shell: shell; };
+        function echoFields(command: str, exec: str, shell: str) -> str {
+            return command;
+        };
+        var result: str = echoFields(command: tool.command, exec: tool.exec, shell: tool.shell);
+        "#,
+    );
+    assert!(!program.items.is_empty());
+}
+
+#[test]
+fn command_exec_and_shell_construct_forms_remain_reserved_in_construct_position() {
+    let program = parse_ok(
+        r#"
+        var one: shell = command echo one;
+        var two: shell = shell { echo two; };
+        function run() -> section { return exec { echo three; }; };
+        "#,
+    );
+    assert_eq!(program.items.len(), 3);
 }

@@ -91,6 +91,7 @@ pub struct EvalResult {
     pub globals: HashMap<String, ConfigValue>,
     pub sections: HashMap<Vec<String>, HashMap<String, ConfigValue>>,
     pub warnings: Vec<String>,
+    pub(crate) interactive_value: Option<ConfigValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -336,6 +337,9 @@ fn load_imported_program(
     if crate::stdlib::is_bundled_std_path(path) {
         crate::loader::mark_program_trusted_native(&mut program);
     }
+    // Same builtin types the compiler gives every module (`Bytes`, ...), so
+    // imported modules that mention them resolve on their own.
+    crate::compiler::inject_exec_result_type(&mut program);
     let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut expand_loader = crate::loader::ImportLoader::new(base_dir);
     let mut import_loader = crate::loader::ImportLoader::new(base_dir);
@@ -479,11 +483,33 @@ impl Evaluator {
         natives: crate::runtime::NativeRegistry,
         effect_ledger: Option<crate::session::EffectLedger>,
     ) -> Result<EvalResult, Vec<SparError>> {
+        Self::evaluate_with_imports_base_effects_natives_and_context(
+            program,
+            symbols,
+            loaded,
+            base_dir,
+            hosts,
+            natives,
+            effect_ledger,
+            crate::runtime::RuntimeContext::for_base_dir(base_dir),
+        )
+    }
+
+    pub(crate) fn evaluate_with_imports_base_effects_natives_and_context(
+        program: &Program,
+        symbols: &SymbolTable,
+        loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+        base_dir: &std::path::Path,
+        hosts: crate::host::HostRegistry,
+        natives: crate::runtime::NativeRegistry,
+        effect_ledger: Option<crate::session::EffectLedger>,
+        runtime_context: crate::runtime::RuntimeContext,
+    ) -> Result<EvalResult, Vec<SparError>> {
         let imported = build_imported_programs(loaded, base_dir, &hosts, &natives)?;
         let mut ev = Evaluator::new(symbols.clone(), program.clone())
             .with_hosts(hosts)
             .with_natives(natives)
-            .with_runtime_context(crate::runtime::RuntimeContext::for_base_dir(base_dir))
+            .with_runtime_context(runtime_context)
             .with_effect_ledger(effect_ledger);
         ev.imported_programs = imported;
         let result = ev.run();
@@ -600,10 +626,30 @@ impl Evaluator {
                 _ => None,
             })
             .collect();
+        let mut interactive_value = None;
         if !statements.is_empty() {
             let mut module_scope = HashMap::new();
-            if let Err(error) = self.eval_func_stmts(&statements, &mut module_scope) {
-                self.push_eval_error(error);
+            for statement in &statements {
+                match statement {
+                    Statement::Expression(expression, _) => {
+                        match self.eval_expr(expression, &module_scope) {
+                            Ok(value) => interactive_value = Some(value),
+                            Err(error) => {
+                                self.push_eval_error(error);
+                                break;
+                            }
+                        }
+                    }
+                    other => {
+                        interactive_value = None;
+                        if let Err(error) =
+                            self.eval_func_stmts(std::slice::from_ref(other), &mut module_scope)
+                        {
+                            self.push_eval_error(error);
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -612,6 +658,7 @@ impl Evaluator {
                 globals: self.global_cache.clone(),
                 sections: self.section_cache.clone(),
                 warnings: self.warnings.clone(),
+                interactive_value,
             })
         } else {
             Err(self.errors.remove(0))
@@ -1273,15 +1320,15 @@ impl Evaluator {
                     }),
                 }
             }
-            Expr::Shell(shell) => Ok(ConfigValue::Shell(lower_shell_expr(shell))),
+            Expr::Shell(shell) => Ok(ConfigValue::Shell(
+                self.eval_deferred_shell(shell, local_scope)?,
+            )),
             Expr::ExecShell(shell) => {
+                let plan = self.eval_deferred_shell(shell, local_scope)?;
                 let run = || {
-                    let outcome =
-                        execute_shell_plan(&lower_shell_expr(shell)).map_err(|error| {
-                            EvalErr::Host {
-                                message: format!("could not execute shell plan: {error}"),
-                            }
-                        })?;
+                    let outcome = execute_shell_plan(&plan).map_err(|error| EvalErr::Host {
+                        message: format!("could not execute shell plan: {error}"),
+                    })?;
                     Ok(ConfigValue::Section(HashMap::from([
                         ("success".to_string(), ConfigValue::Bool(outcome.success)),
                         (
@@ -1290,15 +1337,457 @@ impl Evaluator {
                         ),
                     ])))
                 };
-                match &self.effect_ledger {
+                let ledger = self.effect_ledger.clone();
+                match ledger {
                     Some(ledger) => ledger.get_or_try_run((shell.span.start, shell.span.end), run),
                     None => run(),
                 }
             }
-            Expr::CommandSubstitution(_) => Err(EvalErr::Host {
-                message: "command substitution requires the compiled shell runtime".into(),
-            }),
+            Expr::CommandSubstitution(shell) => Ok(ConfigValue::Str(
+                self.eval_deferred_command_substitution(shell, local_scope)?,
+            )),
         }
+    }
+
+    fn eval_deferred_shell(
+        &mut self,
+        shell: &ShellExpr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<spar_command::ShellPlan, EvalErr> {
+        if !shell.statements.is_empty() {
+            let mut mixed_scope = local_scope.clone();
+            let (plan, _) = self.eval_deferred_shell_statements(
+                &shell.statements,
+                &mut mixed_scope,
+            )?;
+            return Ok(plan);
+        }
+
+        let mut steps = Vec::with_capacity(shell.steps.len());
+        for (join, step) in &shell.steps {
+            let join = match join {
+                ShellJoin::Always => spar_command::Join::Always,
+                ShellJoin::OnSuccess => spar_command::Join::OnSuccess,
+                ShellJoin::OnFailure => spar_command::Join::OnFailure,
+            };
+            let step = match step {
+                ShellStep::Command(command) => spar_command::Step::Command(
+                    self.eval_deferred_shell_command(command, local_scope)?,
+                ),
+                ShellStep::Pipeline(commands) => {
+                    let mut lowered = Vec::with_capacity(commands.len());
+                    for command in commands {
+                        lowered.push(self.eval_deferred_shell_command(command, local_scope)?);
+                    }
+                    spar_command::Step::Pipeline(spar_command::PipelinePlan {
+                        commands: lowered,
+                    })
+                }
+            };
+            steps.push((join, step));
+        }
+        Ok(spar_command::ShellPlan { steps })
+    }
+
+    fn eval_deferred_shell_statements(
+        &mut self,
+        statements: &[Statement],
+        local_scope: &mut HashMap<String, ConfigValue>,
+    ) -> Result<(spar_command::ShellPlan, StatementFlow), EvalErr> {
+        let mut steps = Vec::new();
+
+        for statement in statements {
+            match statement {
+                Statement::LocalVar(declaration) => {
+                    let value = self.eval_expr(&declaration.value, local_scope)?;
+                    local_scope.insert(declaration.name.clone(), value);
+                }
+                Statement::Assignment { name, value, .. } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    if local_scope.contains_key(name) {
+                        local_scope.insert(name.clone(), value);
+                    } else {
+                        self.global_cache.insert(name.clone(), value);
+                    }
+                }
+                Statement::Expression(expression, _) => {
+                    if let ConfigValue::Shell(plan) = self.eval_expr(expression, local_scope)? {
+                        steps.extend(plan.steps);
+                    }
+                }
+                Statement::Return(value, _) => {
+                    let value = match value {
+                        ReturnValue::Void => ConfigValue::Int(0),
+                        ReturnValue::Expr(expression) => self.eval_expr(expression, local_scope)?,
+                        ReturnValue::SectionBlock(fields) => {
+                            let mut section = HashMap::new();
+                            for field in fields {
+                                section.insert(
+                                    field.name.clone(),
+                                    self.eval_expr(&field.value, local_scope)?,
+                                );
+                            }
+                            ConfigValue::Section(section)
+                        }
+                    };
+                    return Ok((
+                        spar_command::ShellPlan { steps },
+                        StatementFlow::Return(value),
+                    ));
+                }
+                Statement::Break(_) => {
+                    return Ok((spar_command::ShellPlan { steps }, StatementFlow::Break));
+                }
+                Statement::Continue(_) => {
+                    return Ok((spar_command::ShellPlan { steps }, StatementFlow::Continue));
+                }
+                Statement::If(if_statement) => {
+                    let condition = self.eval_expr(&if_statement.condition, local_scope)?;
+                    let branch = match condition {
+                        ConfigValue::Bool(true) => &if_statement.then_stmts,
+                        ConfigValue::Bool(false) => &if_statement.else_stmts,
+                        _ => unreachable!("typechecker ensures bool condition"),
+                    };
+                    let snapshot = local_scope.clone();
+                    let (branch_plan, flow) =
+                        self.eval_deferred_shell_statements(branch, local_scope)?;
+                    restore_block_scope(local_scope, &snapshot, branch, None);
+                    steps.extend(branch_plan.steps);
+                    if !matches!(flow, StatementFlow::Normal) {
+                        return Ok((spar_command::ShellPlan { steps }, flow));
+                    }
+                }
+                Statement::For(for_statement) => {
+                    let items = match self.eval_expr(&for_statement.iterable, local_scope)? {
+                        ConfigValue::List(items) => items,
+                        _ => unreachable!("typechecker ensures for-loop iterable is a list"),
+                    };
+                    for (index, item) in items.into_iter().enumerate() {
+                        let snapshot = local_scope.clone();
+                        match &for_statement.binding {
+                            ForBinding::Value { name, .. } => {
+                                local_scope.insert(name.clone(), item);
+                            }
+                            ForBinding::Indexed {
+                                index_name,
+                                value_name,
+                                ..
+                            } => {
+                                local_scope.insert(
+                                    index_name.clone(),
+                                    ConfigValue::Int(index as i64),
+                                );
+                                local_scope.insert(value_name.clone(), item);
+                            }
+                        }
+                        let (iteration_plan, flow) = self.eval_deferred_shell_statements(
+                            &for_statement.body,
+                            local_scope,
+                        )?;
+                        restore_block_scope(
+                            local_scope,
+                            &snapshot,
+                            &for_statement.body,
+                            Some(&for_statement.binding),
+                        );
+                        steps.extend(iteration_plan.steps);
+                        match flow {
+                            StatementFlow::Normal | StatementFlow::Continue => {}
+                            StatementFlow::Break => break,
+                            flow @ StatementFlow::Return(_) => {
+                                return Ok((spar_command::ShellPlan { steps }, flow));
+                            }
+                        }
+                    }
+                }
+                Statement::Try(try_statement) => {
+                    let snapshot = local_scope.clone();
+                    match self.eval_deferred_shell_statements(
+                        &try_statement.body,
+                        local_scope,
+                    ) {
+                        Ok((body_plan, flow)) => {
+                            restore_block_scope(
+                                local_scope,
+                                &snapshot,
+                                &try_statement.body,
+                                None,
+                            );
+                            steps.extend(body_plan.steps);
+                            if !matches!(flow, StatementFlow::Normal) {
+                                return Ok((spar_command::ShellPlan { steps }, flow));
+                            }
+                        }
+                        Err(error @ EvalErr::Fatal { .. }) => return Err(error),
+                        Err(error) => {
+                            restore_block_scope(
+                                local_scope,
+                                &snapshot,
+                                &try_statement.body,
+                                None,
+                            );
+                            let handler_snapshot = local_scope.clone();
+                            if let Some(name) = &try_statement.catch_name {
+                                local_scope.insert(
+                                    name.clone(),
+                                    ConfigValue::Error {
+                                        message: error.into_kl_error().to_string(),
+                                        kind: "runtime".into(),
+                                        code: 1,
+                                        cause: None,
+                                    },
+                                );
+                            }
+                            let (handler_plan, flow) = self.eval_deferred_shell_statements(
+                                &try_statement.handler,
+                                local_scope,
+                            )?;
+                            restore_block_scope(
+                                local_scope,
+                                &handler_snapshot,
+                                &try_statement.handler,
+                                None,
+                            );
+                            if let Some(name) = &try_statement.catch_name {
+                                match handler_snapshot.get(name) {
+                                    Some(value) => {
+                                        local_scope.insert(name.clone(), value.clone());
+                                    }
+                                    None => {
+                                        local_scope.remove(name);
+                                    }
+                                }
+                            }
+                            steps.extend(handler_plan.steps);
+                            if !matches!(flow, StatementFlow::Normal) {
+                                return Ok((spar_command::ShellPlan { steps }, flow));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((spar_command::ShellPlan { steps }, StatementFlow::Normal))
+    }
+
+    fn eval_deferred_shell_command(
+        &mut self,
+        command: &ShellCommandExpr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<spar_command::CommandPlan, EvalErr> {
+        let mut args = Vec::with_capacity(command.args.len());
+        for argument in &command.args {
+            let spread = match argument.parts.as_slice() {
+                [ShellWordPart::Literal(prefix), ShellWordPart::Expr(expression)]
+                    if prefix == "..." => Some(expression),
+                _ => None,
+            };
+            if let Some(expression) = spread {
+                let value = self.eval_expr(expression, local_scope)?;
+                let values = match value {
+                    ConfigValue::List(values) => values,
+                    other => {
+                        return Err(EvalErr::TypeMismatch {
+                            expected: "list",
+                            got: other.type_name(),
+                        })
+                    }
+                };
+                for value in values {
+                    args.push(shell_scalar_to_string(value)?);
+                }
+            } else {
+                args.push(self.eval_deferred_shell_word(argument, local_scope)?);
+            }
+        }
+
+        Ok(spar_command::CommandPlan {
+            program: self.eval_deferred_shell_word(&command.program, local_scope)?,
+            args,
+            env: command
+                .environment
+                .iter()
+                .map(|entry| spar_command::EnvironmentOverride {
+                    key: entry.name.clone(),
+                    value: entry.value.clone(),
+                })
+                .collect(),
+            cwd: None,
+            stdin: self.eval_deferred_shell_redirect(command.stdin.as_ref(), local_scope)?,
+            stdout: self.eval_deferred_shell_redirect(command.stdout.as_ref(), local_scope)?,
+            stderr: self.eval_deferred_shell_redirect(command.stderr.as_ref(), local_scope)?,
+            redirections: command
+                .redirections
+                .iter()
+                .map(|redirect| {
+                    Ok(spar_command::OrderedRedirection {
+                        fd: redirect.fd,
+                        target: match &redirect.target {
+                            ShellFdRedirectTarget::File(file) => {
+                                spar_command::Redirection::File {
+                                    path: self.eval_deferred_shell_word(&file.target, local_scope)?,
+                                    mode: file.mode.clone(),
+                                }
+                            }
+                            ShellFdRedirectTarget::Duplicate(fd) => {
+                                spar_command::Redirection::DuplicateFd(*fd)
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, EvalErr>>()?,
+            background: command.background,
+        })
+    }
+
+    fn eval_deferred_shell_redirect(
+        &mut self,
+        redirect: Option<&ShellRedirect>,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<Option<spar_command::Redirection>, EvalErr> {
+        redirect
+            .map(|redirect| {
+                Ok(spar_command::Redirection::File {
+                    path: self.eval_deferred_shell_word(&redirect.target, local_scope)?,
+                    mode: redirect.mode.clone(),
+                })
+            })
+            .transpose()
+    }
+
+    fn eval_deferred_shell_word(
+        &mut self,
+        word: &ShellWord,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<String, EvalErr> {
+        let mut output = String::new();
+        for part in &word.parts {
+            match part {
+                ShellWordPart::Literal(value) => output.push_str(value),
+                ShellWordPart::Expr(expression) => {
+                    output.push_str(&shell_scalar_to_string(
+                        self.eval_expr(expression, local_scope)?,
+                    )?);
+                }
+                ShellWordPart::Environment(name) => {
+                    if name == "?" || name == "!" {
+                        return Err(EvalErr::Host {
+                            message: format!(
+                                "${name} requires an active shell execution context"
+                            ),
+                        });
+                    }
+                    output.push_str(self.runtime_context.env_get(name).unwrap_or_default());
+                }
+                ShellWordPart::CommandSubstitution(shell) => {
+                    output.push_str(&self.eval_deferred_command_substitution(shell, local_scope)?);
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    fn eval_deferred_command_substitution(
+        &mut self,
+        shell: &ShellExpr,
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> Result<String, EvalErr> {
+        let mut plan = self.eval_deferred_shell(shell, local_scope)?;
+        if plan.steps.is_empty() {
+            return Err(EvalErr::Host {
+                message: "empty command substitution".into(),
+            });
+        }
+
+        let cwd = spar_command::WorkingDirectory::Path(
+            self.runtime_context.cwd().to_string_lossy().into_owned(),
+        );
+        let options = spar_process::ExecutionOptions {
+            capture_stdout: true,
+            capture_stderr: false,
+            environment: Some(self.runtime_context.environment_pairs()),
+        };
+        let mut success = true;
+        let mut exit_code = 0;
+        let mut captured = Vec::new();
+        let mut executed = false;
+
+        for (join, step) in &mut plan.steps {
+            let should_run = match join {
+                spar_command::Join::Always => true,
+                spar_command::Join::OnSuccess => success,
+                spar_command::Join::OnFailure => !success,
+            };
+            if !should_run {
+                continue;
+            }
+
+            match step {
+                spar_command::Step::Command(command) => {
+                    if command.background {
+                        return Err(EvalErr::Host {
+                            message: "background commands are not allowed inside command substitution".into(),
+                        });
+                    }
+                    if command.program == "cd" {
+                        return Err(EvalErr::Host {
+                            message: "'cd' inside command substitution is not supported".into(),
+                        });
+                    }
+                    if command.cwd.is_none() {
+                        command.cwd = Some(cwd.clone());
+                    }
+                }
+                spar_command::Step::Pipeline(pipeline) => {
+                    if pipeline.commands.iter().any(|command| command.background) {
+                        return Err(EvalErr::Host {
+                            message: "background commands are not allowed inside command substitution".into(),
+                        });
+                    }
+                    if pipeline.commands.iter().any(|command| command.program == "cd") {
+                        return Err(EvalErr::Host {
+                            message: "'cd' inside command substitution is not supported".into(),
+                        });
+                    }
+                    for command in &mut pipeline.commands {
+                        if command.cwd.is_none() {
+                            command.cwd = Some(cwd.clone());
+                        }
+                    }
+                }
+            }
+
+            let output = match step {
+                spar_command::Step::Command(command) => spar_process::run_command(command, &options),
+                spar_command::Step::Pipeline(pipeline) => spar_process::run_pipeline(pipeline, &options),
+            }
+            .map_err(|error| EvalErr::Host {
+                message: format!("command substitution failed to start: {error}"),
+            })?;
+            success = output.status.success;
+            exit_code = output.status.code.unwrap_or(if success { 0 } else { 1 });
+            captured.extend_from_slice(&output.stdout.unwrap_or_default());
+            executed = true;
+        }
+
+        if !executed {
+            return Err(EvalErr::Host {
+                message: "empty command substitution".into(),
+            });
+        }
+        if !success {
+            return Err(EvalErr::Host {
+                message: format!("command substitution exited with status {exit_code}"),
+            });
+        }
+        let mut text = String::from_utf8(captured).map_err(|_| EvalErr::Host {
+            message: "command substitution output is not valid UTF-8".into(),
+        })?;
+        while text.ends_with('\n') || text.ends_with('\r') {
+            text.pop();
+        }
+        Ok(text)
     }
 
     fn eval_interp_string(
@@ -1908,6 +2397,19 @@ impl Evaluator {
             }
             _ => unreachable!("typechecker ensures numeric operands"),
         }
+    }
+}
+
+fn shell_scalar_to_string(value: ConfigValue) -> Result<String, EvalErr> {
+    match value {
+        ConfigValue::Str(value) => Ok(value),
+        ConfigValue::Int(value) => Ok(value.to_string()),
+        ConfigValue::Float(value) => Ok(value.to_string()),
+        ConfigValue::Bool(value) => Ok(value.to_string()),
+        other => Err(EvalErr::TypeMismatch {
+            expected: "primitive",
+            got: other.type_name(),
+        }),
     }
 }
 

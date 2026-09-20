@@ -364,7 +364,7 @@ fn language_cli_commands_use_the_project_lockfile_for_bare_imports() {
     fs::write(
         fx.project_dir.join("src/main.spar"),
         concat!(
-            "import { red } from \"colors\";\n",
+            "import pkg { red } from \"colors\";\n",
             "export var selected: str = red;\n",
             "function main() -> int { return 0; };\n",
         ),

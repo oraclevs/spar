@@ -1063,6 +1063,43 @@ fn eval_shell_plus_shell_composes_in_order() {
 }
 
 #[test]
+fn deferred_shell_interpolation_uses_module_variables() {
+    let result = eval_src(
+        r#"
+        var name: str = "OCC";
+        var plan: shell = shell { echo "Hello ${name}"; };
+        "#,
+    );
+    let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["plan"] else {
+        panic!("expected ConfigValue::Shell")
+    };
+    let spar_command::Step::Command(command) = &plan.steps[0].1 else {
+        panic!("expected command")
+    };
+    assert_eq!(command.program, "echo");
+    assert_eq!(command.args, ["Hello OCC"]);
+}
+
+#[test]
+fn shell_returning_function_interpolates_named_argument() {
+    let result = eval_src(
+        r#"
+        function greet(name: str) -> shell {
+            return shell { echo "Hello ${name}"; };
+        };
+        var plan: shell = greet(name: "OCC");
+        "#,
+    );
+    let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["plan"] else {
+        panic!("expected ConfigValue::Shell")
+    };
+    let spar_command::Step::Command(command) = &plan.steps[0].1 else {
+        panic!("expected command")
+    };
+    assert_eq!(command.args, ["Hello OCC"]);
+}
+
+#[test]
 fn eval_shell_construction_at_module_scope_is_deferred_data() {
     eval_src("var x: shell = shell { this-program-does-not-exist-xyz; };");
 }

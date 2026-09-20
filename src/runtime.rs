@@ -836,7 +836,10 @@ impl Runtime<'_> {
                     }
                     None => return Err(runtime_error("timeout requires a millis argument", span).into()),
                 };
-                let started = std::time::Instant::now();
+                let started = self
+                    .tasks
+                    .created_at(handle)
+                    .unwrap_or_else(std::time::Instant::now);
                 let limit = std::time::Duration::from_millis(millis);
                 loop {
                     match self.tasks.status(handle) {
@@ -852,6 +855,15 @@ impl Runtime<'_> {
                         }
                         TaskStatus::Pending => {}
                         TaskStatus::Running => {
+                            // The promise is suspended further down this
+                            // stack, so it cannot finish while we wait.
+                            if started.elapsed() >= limit {
+                                return Err(runtime_error(
+                                    &format!("promise timed out after {millis} ms"),
+                                    span,
+                                )
+                                .into());
+                            }
                             return Err(runtime_error("promise await cycle detected", span).into())
                         }
                         TaskStatus::Cancelled => {
@@ -888,7 +900,7 @@ impl Runtime<'_> {
     ) -> Result<String, RuntimeFault> {
         let plan = self.eval_shell_plan(shell, frame, module)?;
         if plan.steps.is_empty() {
-            return Err(runtime_error("empty command substitution", &shell.span).into());
+            return Err(evaluation_error("empty command substitution", &shell.span).into());
         }
         let options = spar_process::ExecutionOptions {
             capture_stdout: true,
@@ -916,7 +928,7 @@ impl Runtime<'_> {
                 || matches!(&step, spar_command::Step::Pipeline(pipeline)
                     if pipeline.commands.iter().any(|command| command.background))
             {
-                return Err(runtime_error(
+                return Err(evaluation_error(
                     "background commands are not allowed inside command substitution",
                     &shell.span,
                 )
@@ -926,7 +938,7 @@ impl Runtime<'_> {
                 || matches!(&step, spar_command::Step::Pipeline(pipeline)
                     if pipeline.commands.iter().any(|command| command.program == "cd"))
             {
-                return Err(runtime_error(
+                return Err(evaluation_error(
                     "'cd' inside command substitution is not supported; use a normal shell block before substitution",
                     &shell.span,
                 )
@@ -938,7 +950,7 @@ impl Runtime<'_> {
                 spar_command::Step::Pipeline(pipeline) => spar_process::run_pipeline(pipeline, &options),
             }
             .map_err(|error| {
-                runtime_error(
+                evaluation_error(
                     &format!("command substitution failed to start: {error}"),
                     &shell.span,
                 )
@@ -953,17 +965,17 @@ impl Runtime<'_> {
         }
 
         if !executed {
-            return Err(runtime_error("empty command substitution", &shell.span).into());
+            return Err(evaluation_error("empty command substitution", &shell.span).into());
         }
         if !success {
-            return Err(runtime_error(
+            return Err(evaluation_error(
                 &format!("command substitution exited with status {exit_code}"),
                 &shell.span,
             )
             .into());
         }
         let mut text = String::from_utf8(captured).map_err(|_| {
-            runtime_error(
+            evaluation_error(
                 "command substitution output is not valid UTF-8",
                 &shell.span,
             )
@@ -1914,6 +1926,13 @@ fn type_error(expected: &str, value: &Value, span: &Span) -> SparError {
 
 fn module_state_error(span: &Span) -> SparError {
     runtime_error("module state is unavailable", span)
+}
+
+fn evaluation_error(message: &str, span: &Span) -> SparError {
+    SparError::EvalError {
+        message: message.to_string(),
+        span: span.clone(),
+    }
 }
 
 fn runtime_error(message: &str, span: &Span) -> SparError {

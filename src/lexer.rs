@@ -173,6 +173,80 @@ fn normalize_shell_body(body: &str) -> String {
     output
 }
 
+/// Maps byte offsets in a normalized shell body back to the original body.
+///
+/// Normalization only ever inserts text (`command ` prefixes, `;`/`&`
+/// terminators), re-flows whitespace, and drops explicit `\` line
+/// continuations; every other non-whitespace character survives in order.
+/// That lets the two texts be aligned on their non-whitespace characters.
+struct NormalizedOffsets {
+    /// For each byte of the normalized text, the original offset of that
+    /// character, or `None` for inserted text and whitespace.
+    mapped: Vec<Option<usize>>,
+}
+
+impl NormalizedOffsets {
+    fn new(original: &str, normalized: &str, inserted: &[(usize, usize)]) -> Self {
+        let mut mapped = vec![None; normalized.len() + 1];
+        let mut source = original
+            .char_indices()
+            .filter(|(_, ch)| !ch.is_whitespace())
+            .peekable();
+        for (index, ch) in normalized.char_indices() {
+            if ch.is_whitespace()
+                || inserted
+                    .iter()
+                    .any(|(start, end)| index >= *start && index < *end)
+            {
+                continue;
+            }
+            while let Some(&(source_index, source_ch)) = source.peek() {
+                if source_ch == ch {
+                    mapped[index] = Some(source_index);
+                    source.next();
+                    break;
+                }
+                if ch == ';' {
+                    break; // an inserted terminator
+                }
+                source.next(); // a dropped character, e.g. a `\` continuation
+            }
+        }
+        Self { mapped }
+    }
+
+    /// Original `[start, end)` for a token spanning `[start, end)` of the
+    /// normalized text.
+    fn original_range(&self, original: &str, start: usize, end: usize) -> (usize, usize) {
+        let first = (start..end.min(self.mapped.len()))
+            .find_map(|index| self.mapped[index])
+            .unwrap_or(original.len());
+        let last = (start..end.min(self.mapped.len()))
+            .rev()
+            .find_map(|index| self.mapped[index])
+            .map(|index| {
+                index
+                    + original[index..]
+                        .chars()
+                        .next()
+                        .map_or(1, char::len_utf8)
+            })
+            .unwrap_or(first);
+        (first, last.max(first))
+    }
+
+    fn line_col(&self, original: &str, offset: usize, body_line: u32, body_col: u32) -> (u32, u32) {
+        let before = &original[..offset.min(original.len())];
+        let newlines = before.matches('\n').count() as u32;
+        let line = body_line + newlines;
+        let col = match before.rfind('\n') {
+            Some(at) => before[at + 1..].chars().count() as u32 + 1,
+            None => body_col + before.chars().count() as u32,
+        };
+        (line, col)
+    }
+}
+
 /// Appends one physical line to an in-progress native command.  Native Spar
 /// commands are semicolon terminated, so an ordinary newline is whitespace.
 /// A Bash-style `\\` immediately before the newline is accepted as explicit
@@ -279,6 +353,7 @@ fn prefix_native_command_segments(line: &str) -> String {
         // ordinary Unix shell.  Do not split logical '&&' or '&>'/'&>>'.
         if ch == '&'
             && bytes.get(index.wrapping_sub(1)) != Some(&b'&')
+            && bytes.get(index.wrapping_sub(1)) != Some(&b'>')
             && bytes.get(index + 1) != Some(&b'&')
             && bytes.get(index + 1) != Some(&b'>')
         {
@@ -351,6 +426,7 @@ fn top_level_background_terminator(source: &str) -> Option<usize> {
             '}' => brace = brace.saturating_sub(1),
             '&' if paren == 0 && bracket == 0 && brace == 0
                 && bytes.get(index.wrapping_sub(1)) != Some(&b'&')
+                && bytes.get(index.wrapping_sub(1)) != Some(&b'>')
                 && bytes.get(index + 1) != Some(&b'&')
                 && bytes.get(index + 1) != Some(&b'>') =>
             {
@@ -1390,17 +1466,29 @@ impl<'a> Lexer<'a> {
                         let close_line = self.line;
                         let close_col = self.col;
                         self.advance();
-                        let normalized = normalize_shell_body(&self.source[body_start..body_end]);
+                        let original = &self.source[body_start..body_end];
+                        let normalized = normalize_shell_body(original);
                         let nested = Lexer::new(&normalized).tokenize()?;
+                        // Normalization inserts `command ` prefixes and
+                        // terminators and re-flows whitespace, so nested
+                        // spans are relative to text that does not exist in
+                        // the file. Map them back onto the original body.
+                        let inserted: Vec<(usize, usize)> = nested
+                            .iter()
+                            .filter(|token| token.token == Token::KwCommand)
+                            .map(|token| (token.span.start, token.span.end))
+                            .collect();
+                        let offsets = NormalizedOffsets::new(original, &normalized, &inserted);
                         for mut token in nested.into_iter().filter(|token| {
                             token.token != Token::Eof && token.token != Token::KwCommand
                         }) {
-                            token.span.start += body_start;
-                            token.span.end += body_start;
-                            token.span.line += body_line.saturating_sub(1);
-                            if token.span.line == body_line {
-                                token.span.col += body_col.saturating_sub(1);
-                            }
+                            let (start, end) = offsets.original_range(
+                                original,
+                                token.span.start,
+                                token.span.end,
+                            );
+                            let (line, col) = offsets.line_col(original, start, body_line, body_col);
+                            token.span = Span::new(body_start + start, body_start + end, line, col);
                             tokens.push(token);
                         }
                         tokens.push(SpannedToken::new(
@@ -1418,6 +1506,49 @@ impl<'a> Lexer<'a> {
             message: "unterminated shell block — expected '}' (unbalanced brace)".to_string(),
             span: Span::new(body_start, self.pos, body_line, body_col),
         })
+    }
+
+    fn should_enter_command_body(&self) -> bool {
+        let mut offset = 0usize;
+        while matches!(
+            self.peek_at(offset),
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            offset += 1;
+        }
+
+        // Native `command` sugar is whitespace-delimited (`command echo ...`).
+        // With no separation, `command` is an ordinary Spar identifier used
+        // in an expression such as `command/2` or `command.foo`.
+        if offset == 0 {
+            return false;
+        }
+        let Some(next) = self.peek_at(offset) else {
+            return false;
+        };
+        // `command` is a soft keyword. These tokens unambiguously continue a
+        // normal Spar identifier/reference/call rather than introducing the
+        // native command expression sugar.
+        if matches!(
+            next,
+            b';' | b':' | b'?' | b'=' | b',' | b')' | b']' | b'}' | b'('
+                | b'+' | b'*' | b'<' | b'>' | b'!'
+        ) {
+            return false;
+        }
+        if next == b'.' {
+            let rest = &self.source[self.pos + offset..];
+            return rest.starts_with("./") || rest.starts_with("../");
+        }
+        if next == b'-' {
+            // A bare `command - ...` is not a valid native program name and
+            // is overwhelmingly a Spar operator use.
+            return false;
+        }
+        if next == b'/' && self.peek_at(offset + 1).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            return false;
+        }
+        true
     }
 
     fn lex_command_body(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
@@ -1654,7 +1785,10 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             if byte.is_ascii_whitespace()
-                || matches!(byte, b';' | b'|' | b'&' | b'<' | b'>' | b'{' | b'}' | b'"')
+                || matches!(
+                    byte,
+                    b';' | b'|' | b'&' | b'<' | b'>' | b'{' | b'}' | b'"' | b'\''
+                )
             {
                 break;
             }
@@ -1790,7 +1924,7 @@ impl<'a> Lexer<'a> {
                             self.maybe_enter_run_body(&mut tokens)?;
                         } else if is_shell {
                             self.maybe_enter_shell_body(&mut tokens)?;
-                        } else if is_command {
+                        } else if is_command && self.should_enter_command_body() {
                             self.lex_command_body(&mut tokens)?;
                         } else if is_exec {
                             self.maybe_enter_exec_body(&mut tokens)?;
@@ -2436,6 +2570,24 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn command_keyword_stays_soft_in_field_and_call_positions() {
+        assert_eq!(
+            lex("type Tool { command: str; exec: str; shell: str; };")
+                .into_iter()
+                .filter(|token| !matches!(token, Token::Eof))
+                .collect::<Vec<_>>()
+                .iter()
+                .filter(|token| matches!(token, Token::KwCommand))
+                .count(),
+            1
+        );
+
+        let tokens = lex("command(name: \"x\");");
+        assert!(tokens.contains(&Token::KwCommand));
+        assert!(!tokens.iter().any(|token| matches!(token, Token::ShellWord(_))));
     }
 
     #[test]

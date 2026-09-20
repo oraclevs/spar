@@ -78,6 +78,15 @@ pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) ->
     }
 }
 
+fn mentions_type_parameter(ty: &SparType) -> bool {
+    match ty {
+        SparType::TypeParameter(_) => true,
+        SparType::List(inner) => mentions_type_parameter(inner),
+        SparType::Applied { arguments, .. } => arguments.iter().any(mentions_type_parameter),
+        _ => false,
+    }
+}
+
 pub(crate) fn unify_generic(
     pattern: &SparType,
     actual: &SparType,
@@ -778,34 +787,58 @@ impl<'a> TypeChecker<'a> {
                 None => {} // optional, fine to omit
                 Some(cf) => match &tf.shape {
                     TypeFieldShape::Primitive(expected_ty) => {
-                        // The field's type is either explicit (Some) or
-                        // inferred from its value (None, under this
-                        // binding) — either way, compare the effective
-                        // type against what the bound type declares.
-                        let actual_ty = match &cf.ty {
-                            Some(t) => Some(t.clone()),
-                            None => match &cf.value {
-                                Some(FieldValue::Expr(e)) => self.infer_type(e),
-                                _ => None,
-                            },
-                        };
-                        match actual_ty {
-                            Some(actual) if &actual != expected_ty => {
+                        match (&cf.ty, &cf.value) {
+                            (Some(actual), _) if actual != expected_ty => {
                                 self.push_type_error(
                                     format!(
                                         "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
-                                        path_str, tf.name, display_type(&actual), type_name, display_type(expected_ty),
+                                        path_str,
+                                        tf.name,
+                                        display_type(actual),
+                                        type_name,
+                                        display_type(expected_ty),
                                     ),
                                     None,
                                     cf.span.clone(),
                                 );
                             }
-                            Some(_) => {} // matches
-                            None => {
+                            (Some(_), _) => {}
+                            (None, Some(FieldValue::Expr(expr))) => {
+                                let scalar_mismatch = match self.infer_type(expr) {
+                                    Some(actual)
+                                        if !matches!(expected_ty, SparType::List(_))
+                                            && &actual != expected_ty =>
+                                    {
+                                        Some(actual)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(actual) = scalar_mismatch {
+                                    self.push_type_error(
+                                        format!(
+                                            "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
+                                            path_str,
+                                            tf.name,
+                                            display_type(&actual),
+                                            type_name,
+                                            display_type(expected_ty),
+                                        ),
+                                        None,
+                                        cf.span.clone(),
+                                    );
+                                } else {
+                                    let label = format!("{}::{}", path_str, tf.name);
+                                    self.check_expr_type(expr, expected_ty, &label, &cf.span);
+                                }
+                            }
+                            (None, _) => {
                                 self.push_type_error(
                                     format!(
                                         "field `{}::{}`'s value type could not be determined; type `{}` expects `{}`",
-                                        path_str, tf.name, type_name, display_type(expected_ty),
+                                        path_str,
+                                        tf.name,
+                                        type_name,
+                                        display_type(expected_ty),
                                     ),
                                     None,
                                     cf.span.clone(),
@@ -1761,7 +1794,7 @@ impl<'a> TypeChecker<'a> {
                     self.push_type_error(
                         format!(
                             "`{label}` has type `{}` but value is an object literal `{{ ... }}` — \
-                             object literals can only be used for a declared `type [X]{{...}}`",
+                             object literals can only be used for a declared `type X {{ ... }}`",
                             display_type(declared_ty)
                         ),
                         None,
@@ -1793,7 +1826,7 @@ impl<'a> TypeChecker<'a> {
                                     format!(
                                         "list element in `{label}` has type `{}` but value is an \
                                          object literal `{{ ... }}` — object literals can only be \
-                                         used for a declared `type [X]{{...}}`",
+                                         used for a declared `type X {{ ... }}`",
                                         display_type(other)
                                     ),
                                     None,
@@ -2210,6 +2243,12 @@ impl<'a> TypeChecker<'a> {
                 Some(locals) => self.infer_type_with_locals(&argument.value, locals),
                 None => self.infer_type(&argument.value),
             };
+            // A fully concrete parameter has nothing to infer; leave any
+            // mismatch to the per-argument check, which words it as
+            // "argument 'x' expects T but got U".
+            if !mentions_type_parameter(pattern) {
+                continue;
+            }
             if let Some(actual) = actual {
                 unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
             }
@@ -2699,9 +2738,21 @@ impl<'a> TypeChecker<'a> {
                 self.check_expr_with_locals_in_context(source, locals, is_async)?;
                 self.check_expr_with_locals_in_context(index, locals, is_async)
             }
-            Expr::Comprehension { source, body, .. } => {
+            Expr::Comprehension {
+                source,
+                body,
+                var_name,
+                ..
+            } => {
                 self.check_expr_with_locals_in_context(source, locals, is_async)?;
-                self.check_expr_with_locals_in_context(body, locals, is_async)?;
+                // The loop variable is in scope for the body; give it the
+                // source's element type so e.g. `await item` type-checks.
+                let mut body_locals = locals.clone();
+                if let Some(SparType::List(elem_ty)) = self.infer_type_with_locals(source, locals)
+                {
+                    body_locals.insert(var_name.clone(), *elem_ty);
+                }
+                self.check_expr_with_locals_in_context(body, &body_locals, is_async)?;
                 Ok(())
             }
             Expr::Literal(_) => Ok(()),
@@ -2844,7 +2895,7 @@ impl<'a> TypeChecker<'a> {
         if let Expr::List(items, _) = expr {
             if items.is_empty() {
                 self.push_type_error(
-                    format!("task '{label}' must be a non-empty [str]"),
+                    format!("task '{label}' must be a non-empty List<str>"),
                     None,
                     span.clone(),
                 );
@@ -2857,7 +2908,7 @@ impl<'a> TypeChecker<'a> {
                 return;
             }
             self.push_type_error(
-                format!("task '{label}' must be a non-empty [str]"),
+                format!("task '{label}' must be a non-empty List<str>"),
                 None,
                 span.clone(),
             );
@@ -2867,14 +2918,14 @@ impl<'a> TypeChecker<'a> {
             Some(SparType::List(inner)) if *inner == SparType::Str => {}
             Some(actual) => self.push_type_error(
                 format!(
-                    "task '{label}' must be a non-empty [str], found {}",
+                    "task '{label}' must be a non-empty List<str>, found {}",
                     display_type(&actual)
                 ),
                 None,
                 span.clone(),
             ),
             None => self.push_type_error(
-                format!("task '{label}' must be a non-empty [str]"),
+                format!("task '{label}' must be a non-empty List<str>"),
                 None,
                 span.clone(),
             ),
@@ -3025,6 +3076,13 @@ impl<'a> TypeChecker<'a> {
                             }
                             (None, Some(actual)) => {
                                 local_types.insert(lv.name.clone(), actual);
+                            }
+                            // `[]` carries no element type of its own; the
+                            // declared list type supplies it.
+                            (Some(declared @ SparType::List(_)), None)
+                                if matches!(&lv.value, Expr::List(items, _) if items.is_empty()) =>
+                            {
+                                local_types.insert(lv.name.clone(), declared.clone());
                             }
                             (_, None) => self.errors.push(SparError::TypeError {
                                 message: format!("cannot infer type of var '{}'", lv.name),

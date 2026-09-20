@@ -182,10 +182,20 @@ impl RuntimeContext {
         &self.environment
     }
 
+    /// Replaces the runtime-local environment without mutating the host
+    /// process. Embedders such as Sparsh use this to keep `$NAME` expansion
+    /// aligned with the shell session's exported environment.
+    pub fn replace_environment(
+        &mut self,
+        entries: impl IntoIterator<Item = (String, String)>,
+    ) {
+        self.environment = entries.into_iter().collect();
+    }
+
     pub fn environment_pairs(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
         self.environment
             .iter()
-            .map(|(key, value)| (key.into(), value.into()))
+            .map(|(key, value)| (key.as_str().into(), value.as_str().into()))
             .collect()
     }
 
@@ -269,6 +279,13 @@ mod tests {
         assert_eq!(first.env_get("SPAR_CONTEXT_TEST"), Some("one"));
         assert_ne!(first.cwd(), second.cwd());
         assert_ne!(second.env_get("SPAR_CONTEXT_TEST"), Some("one"));
+    }
+
+    #[test]
+    fn env_set_accepts_owned_strings() {
+        let mut context = RuntimeContext::new(PathBuf::from("."));
+        context.env_set(String::from("SPAR_OWNED_KEY"), String::from("owned-value"));
+        assert_eq!(context.env_get("SPAR_OWNED_KEY"), Some("owned-value"));
     }
 
     #[test]

@@ -328,14 +328,29 @@ impl CompiledProgram {
         })
     }
 
+    /// Base directory captured when this program was compiled.
+    ///
+    /// Embedders can use this to construct a matching `RuntimeContext`
+    /// without exposing the rest of the compiler's internal options.
+    pub fn base_dir(&self) -> &Path {
+        &self.options.base_dir
+    }
+
     pub fn source_path(&self) -> Option<&Path> {
         self.options.source_path.as_deref()
     }
 
+    /// Number of functions declared by the program's own modules; the
+    /// bundled standard library is an implementation detail and not counted.
     pub fn function_count(&self) -> usize {
         self.modules
             .iter()
-            .map(|module| module.functions.len())
+            .map(|module| {
+                function_declarations(&module.checked.program)
+                    .into_iter()
+                    .filter(|declaration| !declaration.trusted_native)
+                    .count()
+            })
             .sum()
     }
 

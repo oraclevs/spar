@@ -45,6 +45,25 @@ impl Engine {
         self
     }
 
+    /// Sets the source base directory used for local imports in this engine
+    /// and sessions created from it. Embedders use this for rc/source files
+    /// whose imports must resolve relative to the file rather than process cwd.
+    pub fn with_base_dir(mut self, base_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.options.base_dir = base_dir.into();
+        self
+    }
+
+    /// Registers a source-backed package that is available to explicit
+    /// `import pkg` requests in every compiler/session mode.
+    pub fn with_bundled_package_root(
+        mut self,
+        name: impl Into<String>,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, String> {
+        self.options.bundled_packages.register(name, root)?;
+        Ok(self)
+    }
+
     /// A persistent, incrementally-evaluated session over this engine's
     /// hosts and options — see `session::Session`.
     pub fn session(&self) -> crate::session::Session {
@@ -728,6 +747,21 @@ mod tests {
     }
 
     #[test]
+    fn command_substitution_nonzero_is_user_eval_error_not_internal_runtime_error() {
+        let errors = Engine::default()
+            .execute_source(
+                "function main() -> shell {\n    return shell {\n        var value: str = $(false);\n        echo \"${value}\";\n    };\n};\n",
+            )
+            .unwrap_err();
+        let rendered = errors
+            .first()
+            .expect("command substitution failure")
+            .to_string();
+        assert!(rendered.contains("command substitution exited with status 1"), "{rendered}");
+        assert!(!rendered.contains("internal runtime error"), "{rendered}");
+    }
+
+    #[test]
     fn command_substitution_inside_a_shell_word_preserves_one_argv_boundary() {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("inline-substitution");
@@ -788,12 +822,12 @@ mod tests {
         let marker = temp.path().join("stress.txt");
         let source = format!(
             r#"
-            function writeSummary(path: str, files: [str]) -> shell {{
+            function writeSummary(path: str, files: List<str>) -> shell {{
                 return shell {{
                     var mut count: int = 0;
                     for file in files {{
-                        printf "%s\\n" \\
-                            "${{file}}" \\
+                        printf "%s\\n" \
+                            "${{file}}" \
                             >> "${{path}}";
                         count += 1;
                     }}
@@ -803,7 +837,7 @@ mod tests {
 
             function main() -> shell {{
                 return shell {{
-                    var files: [str] = [
+                    var files: List<str> = [
                         "Cargo.toml",
                         "Cargo.lock",
                         "src/main.rs",
@@ -889,7 +923,7 @@ mod tests {
         let source = format!(
             r#"
             function main() -> shell {{
-                var files: [str] = ["one two", "three"];
+                var files: List<str> = ["one two", "three"];
                 return shell {{ printf "%s\n" ...${{files}} > "{}"; }};
             }};
             "#,

@@ -452,15 +452,52 @@ impl<'a> BodyParser<'a> {
             _ => return Err(parse_error(message, token.span)),
         };
         self.pos += 1;
-        let parts = if literal {
+        let mut parts = if literal {
             vec![ShellWordPart::Literal(text.clone())]
         } else {
             parse_word_parts(&text, &token.span)?
         };
+        let mut combined_text = text;
+        let mut end_span = token.span.clone();
+
+        // Shell quoting is compositional: adjacent fragments with no
+        // intervening whitespace form one argv word.  For example:
+        //
+        //     duration="${duration}"
+        //     "prefix-"$name
+        //     pre'literal'post
+        //
+        // The lexer deliberately emits quoted and unquoted fragments as
+        // separate tokens so each fragment keeps its interpolation rules.
+        // Merge only physically-adjacent shell-word tokens here; a real
+        // whitespace gap must remain an argv boundary.
+        loop {
+            let Some(next) = self.tokens.get(self.pos).cloned() else {
+                break;
+            };
+            if next.span.start != end_span.end {
+                break;
+            }
+            let (next_text, next_literal) = match next.token {
+                Token::ShellWord(text) => (text, false),
+                Token::ShellLiteralWord(text) => (text, true),
+                _ => break,
+            };
+            let next_parts = if next_literal {
+                vec![ShellWordPart::Literal(next_text.clone())]
+            } else {
+                parse_word_parts(&next_text, &next.span)?
+            };
+            combined_text.push_str(&next_text);
+            parts.extend(next_parts);
+            end_span.end = next.span.end;
+            self.pos += 1;
+        }
+
         Ok(ShellWord {
-            text,
+            text: combined_text,
             parts,
-            span: token.span,
+            span: end_span,
         })
     }
 
@@ -478,6 +515,9 @@ impl<'a> BodyParser<'a> {
 fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparError> {
     let mut parts = Vec::new();
     let mut cursor = 0;
+    // Where `text[0]` sits in the real source: a quoted fragment's token
+    // span includes its surrounding quotes, its text does not.
+    let origin = span.start + usize::from(span.end - span.start == text.len() + 2);
     while let Some(relative) = text[cursor..].find('$') {
         let dollar = cursor + relative;
         if dollar > cursor {
@@ -494,6 +534,7 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
             let expression_end = expression_start + relative_end;
             parts.push(ShellWordPart::Expr(parse_word_expression(
                 &text[expression_start..expression_end],
+                origin + expression_start,
                 span,
             )?));
             cursor = expression_end + 1;
@@ -505,7 +546,8 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
                 ));
             };
             let source = &text[dollar..=end];
-            let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+            let mut tokens = crate::lexer::Lexer::new(source).tokenize()?;
+            relocate_tokens(&mut tokens, 0, origin + dollar, span);
             let (shell, _) = parse_command_substitution(&tokens)?;
             parts.push(ShellWordPart::CommandSubstitution(shell));
             cursor = end + 1;
@@ -590,9 +632,38 @@ fn command_substitution_end(text: &str, dollar: usize) -> Option<usize> {
     None
 }
 
-fn parse_word_expression(source: &str, span: &Span) -> Result<crate::ast::Expr, SparError> {
-    let wrapped = format!("var __shell_interpolation: str = {source};");
-    let tokens = crate::lexer::Lexer::new(&wrapped).tokenize()?;
+/// Interpolated text is lexed on its own, so its token spans start at zero.
+/// Move them to where the text really sits in the file (`real_origin`), so
+/// spans on the resulting AST are usable for editor features.
+/// `synthetic_origin` is the offset in the lexed text at which the real text
+/// begins (non-zero when it was wrapped in a synthetic declaration).
+fn relocate_tokens(
+    tokens: &mut [crate::token::SpannedToken],
+    synthetic_origin: usize,
+    real_origin: usize,
+    word_span: &Span,
+) {
+    for token in tokens {
+        if token.span.start < synthetic_origin {
+            token.span = word_span.clone();
+            continue;
+        }
+        let start = real_origin + (token.span.start - synthetic_origin);
+        let end = real_origin + token.span.end.saturating_sub(synthetic_origin);
+        let col = word_span.col + start.saturating_sub(word_span.start) as u32;
+        token.span = Span::new(start, end.max(start), word_span.line, col);
+    }
+}
+
+fn parse_word_expression(
+    source: &str,
+    real_origin: usize,
+    span: &Span,
+) -> Result<crate::ast::Expr, SparError> {
+    const PREFIX: &str = "var __shell_interpolation: str = ";
+    let wrapped = format!("{PREFIX}{source};");
+    let mut tokens = crate::lexer::Lexer::new(&wrapped).tokenize()?;
+    relocate_tokens(&mut tokens, PREFIX.len(), real_origin, span);
     let program = crate::parser::Parser::new(tokens).parse()?;
     let Some(TopLevelItem::Var(variable)) = program.items.into_iter().next() else {
         return Err(parse_error("invalid shell interpolation", span.clone()));
@@ -625,7 +696,7 @@ fn parse_error(message: impl Into<String>, span: Span) -> SparError {
 #[cfg(test)]
 mod tests {
     use super::{parse_command_expression, parse_shell_block};
-    use crate::ast::{ShellJoin, ShellStep};
+    use crate::ast::{ShellJoin, ShellStep, ShellWordPart};
     use crate::lexer::Lexer;
     use spar_command::RedirectMode;
 
@@ -716,6 +787,45 @@ mod tests {
     }
 
     #[test]
+    fn shell_lang_concatenates_assignment_and_quoted_interpolation_into_one_argv() {
+        let expression = parse_block(
+            r#"shell { awk -v duration="${duration}" 'BEGIN { print duration }'; }"#,
+        );
+        let ShellStep::Command(command) = &expression.steps[0].1 else {
+            panic!("expected command")
+        };
+        assert_eq!(command.program.text, "awk");
+        assert_eq!(command.args.len(), 3, "argv fragments must not split at quotes");
+        assert_eq!(command.args[0].text, "-v");
+        assert_eq!(command.args[1].text, "duration=${duration}");
+        assert!(matches!(
+            command.args[1].parts.as_slice(),
+            [ShellWordPart::Literal(prefix), ShellWordPart::Expr(_)] if prefix == "duration="
+        ));
+        assert_eq!(command.args[2].text, "BEGIN { print duration }");
+    }
+
+    #[test]
+    fn shell_lang_concatenates_mixed_quote_fragments_without_whitespace() {
+        let expression = parse_block(r#"shell { printf pre'literal'"-${name}"post; }"#);
+        let ShellStep::Command(command) = &expression.steps[0].1 else {
+            panic!("expected command")
+        };
+        assert_eq!(command.args.len(), 1);
+        assert_eq!(command.args[0].text, "preliteral-${name}post");
+        assert!(matches!(
+            command.args[0].parts.as_slice(),
+            [
+                ShellWordPart::Literal(prefix),
+                ShellWordPart::Literal(literal),
+                ShellWordPart::Literal(separator),
+                ShellWordPart::Expr(_),
+                ShellWordPart::Literal(suffix)
+            ] if prefix == "pre" && literal == "literal" && separator == "-" && suffix == "post"
+        ));
+    }
+
+    #[test]
     fn shell_lang_preserves_quoted_argument_boundaries_and_empty_plans() {
         let expression = parse_block(r#"shell { rm "my file.txt"; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
@@ -728,7 +838,7 @@ mod tests {
 
     #[test]
     fn shell_lang_rejects_a_dangling_pipeline() {
-        let tokens = Lexer::new("shell { a | }").tokenize().expect("lex failed");
+        let tokens = Lexer::new("shell { a |; }").tokenize().expect("lex failed");
         let err = parse_shell_block(&tokens).expect_err("dangling pipe must fail");
         assert!(err.to_string().contains("pipe"), "got: {err}");
     }

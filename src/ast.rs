@@ -389,7 +389,7 @@ pub enum SparType {
     Shell,
     Error,
     List(Box<SparType>),
-    Named(String), // a declared `type [X]{...}`, referenced by name
+    Named(String), // a declared `type X { ... }`, referenced by name
     TypeParameter(String),
     Applied {
         name: String,

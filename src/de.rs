@@ -556,6 +556,7 @@ mod tests {
             globals,
             sections: std::collections::HashMap::new(),
             warnings: vec![],
+            interactive_value: None,
         };
         #[derive(Debug, Deserialize)]
         struct P {
@@ -576,6 +577,7 @@ mod tests {
             )]),
             sections: std::collections::HashMap::new(),
             warnings: vec![],
+            interactive_value: None,
         };
         #[derive(Debug, Deserialize)]
         #[allow(dead_code)]

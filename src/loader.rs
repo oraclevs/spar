@@ -32,6 +32,7 @@ pub struct ResolvedImportSource {
 pub struct ImportLoader {
     base_dir: PathBuf,
     locator: Option<crate::package::ModuleLocator>,
+    bundled_packages: crate::compiler::BundledPackageRoots,
 }
 
 impl ImportLoader {
@@ -39,6 +40,7 @@ impl ImportLoader {
         Self {
             base_dir: base.to_path_buf(),
             locator: None,
+            bundled_packages: crate::compiler::BundledPackageRoots::default(),
         }
     }
 
@@ -48,6 +50,14 @@ impl ImportLoader {
     /// call sites are unaffected.
     pub fn with_locator(mut self, locator: crate::package::ModuleLocator) -> Self {
         self.locator = Some(locator);
+        self
+    }
+
+    pub fn with_bundled_packages(
+        mut self,
+        bundled_packages: crate::compiler::BundledPackageRoots,
+    ) -> Self {
+        self.bundled_packages = bundled_packages;
         self
     }
 
@@ -77,6 +87,32 @@ impl ImportLoader {
                         decl.path
                     ),
                     hint: Some("check the std module path; bundled std imports cannot escape the std package".into()),
+                    span: decl.span.clone(),
+                });
+            }
+            if let Some(path) = self.bundled_packages.resolve(&decl.path) {
+                if !path.is_file() {
+                    return Err(SparError::ResolveError {
+                        message: format!(
+                            "cannot resolve bundled package module '{}'",
+                            decl.path
+                        ),
+                        hint: Some("check the bundled package module path".into()),
+                        span: decl.span.clone(),
+                    });
+                }
+                return Ok(ResolvedImportSource {
+                    path,
+                    locator: self.locator.clone(),
+                });
+            }
+            if self.bundled_packages.contains_package(&decl.path) {
+                return Err(SparError::ResolveError {
+                    message: format!(
+                        "cannot resolve bundled package module '{}'",
+                        decl.path
+                    ),
+                    hint: Some("bundled package imports cannot escape their registered source root".into()),
                     span: decl.span.clone(),
                 });
             }
@@ -120,7 +156,11 @@ impl ImportLoader {
 
 fn local_module_path(base_dir: &Path, raw: &str) -> PathBuf {
     let mut path = base_dir.join(raw);
-    if path.extension().is_none() {
+    // Extensionless imports normally use the `.spar` convenience suffix, but
+    // an explicitly existing extensionless path is still a valid file. This
+    // matters for temporary files and generated configs whose exact path was
+    // supplied by the caller.
+    if path.extension().is_none() && !path.exists() {
         path.set_extension("spar");
     }
     path
@@ -362,7 +402,7 @@ fn splice_selective(
     use crate::ast::TopLevelItem;
 
     let resolved = loader.resolve_import(decl).map_err(|error| vec![error])?;
-    let full_path = resolved.path;
+    let full_path = resolved.path.clone();
     if !full_path.exists() {
         return Err(vec![SparError::ResolveError {
             message: format!(
@@ -400,6 +440,27 @@ fn splice_selective(
 
     if crate::stdlib::is_bundled_std_path(&full_path) {
         mark_program_trusted_native(&mut imported_program);
+    }
+
+    // The imported module's own imports (resolved from *its* directory and
+    // package scope) must be visible to the functions we splice, so expand
+    // them inside the module first. They land as private items that the
+    // dependency closure below can pull in on demand. A failure here is left
+    // for the ordinary resolver to report against the unresolved call.
+    let module_dir = full_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut module_loader = ImportLoader::new(module_dir)
+        .with_bundled_packages(loader.bundled_packages.clone());
+    if let Some(locator) = &resolved.locator {
+        module_loader = module_loader.with_locator(locator.clone());
+    }
+    let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
+    let already_expanding = SPLICE_STACK.with(|stack| stack.borrow().contains(&canonical));
+    if !already_expanding {
+        SPLICE_STACK.with(|stack| stack.borrow_mut().push(canonical.clone()));
+        let _ = expand_imports_inner(&mut imported_program, &mut module_loader);
+        SPLICE_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
     }
 
     let available: Vec<(&str, &TopLevelItem)> = imported_program
@@ -494,6 +555,8 @@ fn splice_selective(
                     collect_spar_type_refs(&parameter.ty, &mut type_refs);
                 }
                 collect_spar_type_refs(&function.ret, &mut type_refs);
+                let mut called = HashSet::new();
+                collect_calls_in_statements(&function.body.stmts, &mut called);
                 for name in type_refs {
                     if !available.iter().any(|(candidate, item)| {
                         *candidate == name
@@ -513,6 +576,25 @@ fn splice_selective(
                         decl,
                         |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
                     );
+                }
+                // Functions the spliced body calls travel with it, whether
+                // they are private helpers of the module or came in through
+                // the module's own imports.
+                let mut called = called.into_iter().collect::<Vec<_>>();
+                called.sort();
+                for name in called {
+                    if name.contains("::") || pulled.contains(&name) {
+                        continue;
+                    }
+                    let helper = imported_program.items.iter().find_map(|item| match item {
+                        TopLevelItem::Function(f) if f.name == name => Some(item),
+                        _ => None,
+                    });
+                    if let Some(helper) = helper {
+                        pulled.insert(name);
+                        let localized = localize_visibility(helper.clone());
+                        spliced.push(retag_top_level_span(localized, &decl.span));
+                    }
                 }
             }
             TopLevelItem::FunctionGroup(group) => {
@@ -591,6 +673,161 @@ fn splice_selective(
         Ok(spliced)
     } else {
         Err(errors)
+    }
+}
+
+thread_local! {
+    /// Modules whose own imports are currently being expanded for a
+    /// selective splice; guards against import cycles between modules.
+    static SPLICE_STACK: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every function name called (directly, or inside interpolations and shell
+/// blocks) anywhere in `statements`.
+fn collect_calls_in_statements(statements: &[crate::ast::Statement], out: &mut HashSet<String>) {
+    use crate::ast::{ReturnValue, Statement};
+    for statement in statements {
+        match statement {
+            Statement::LocalVar(local) => collect_calls_in_expr(&local.value, out),
+            Statement::Assignment { value, .. } | Statement::Expression(value, _) => {
+                collect_calls_in_expr(value, out)
+            }
+            Statement::If(branch) => {
+                collect_calls_in_expr(&branch.condition, out);
+                collect_calls_in_statements(&branch.then_stmts, out);
+                collect_calls_in_statements(&branch.else_stmts, out);
+            }
+            Statement::Return(value, _) => match value {
+                ReturnValue::Void => {}
+                ReturnValue::Expr(expr) => collect_calls_in_expr(expr, out),
+                ReturnValue::SectionBlock(fields) => {
+                    for field in fields {
+                        collect_calls_in_expr(&field.value, out);
+                    }
+                }
+            },
+            Statement::For(looped) => {
+                collect_calls_in_expr(&looped.iterable, out);
+                collect_calls_in_statements(&looped.body, out);
+            }
+            Statement::Try(attempt) => {
+                collect_calls_in_statements(&attempt.body, out);
+                collect_calls_in_statements(&attempt.handler, out);
+            }
+            Statement::Break(_) | Statement::Continue(_) => {}
+        }
+    }
+}
+
+fn collect_calls_in_items(items: &[crate::ast::SectionItem], out: &mut HashSet<String>) {
+    use crate::ast::{FieldValue, SectionItem};
+    for item in items {
+        match item {
+            SectionItem::Field(field) => match &field.value {
+                Some(FieldValue::Expr(expr)) => collect_calls_in_expr(expr, out),
+                Some(FieldValue::Nested(nested)) => collect_calls_in_items(nested, out),
+                None => {}
+            },
+            SectionItem::Spread(spread) => collect_calls_in_expr(&spread.expr, out),
+        }
+    }
+}
+
+fn collect_calls_in_expr(expr: &crate::ast::Expr, out: &mut HashSet<String>) {
+    use crate::ast::{Expr, StringPart};
+    match expr {
+        Expr::Call { name, args, .. } => {
+            out.insert(name.clone());
+            for argument in args {
+                collect_calls_in_expr(&argument.value, out);
+            }
+        }
+        Expr::FnCall(call) => {
+            out.insert(call.name.clone());
+            for argument in &call.args {
+                collect_calls_in_expr(argument, out);
+            }
+        }
+        Expr::BinaryOp(operation) => {
+            collect_calls_in_expr(&operation.lhs, out);
+            collect_calls_in_expr(&operation.rhs, out);
+        }
+        Expr::Unary { operand: inner, .. }
+        | Expr::Grouped(inner, _)
+        | Expr::Await { value: inner, .. }
+        | Expr::FieldAccess { base: inner, .. } => collect_calls_in_expr(inner, out),
+        Expr::List(items, _) => {
+            for item in items {
+                collect_calls_in_expr(item, out);
+            }
+        }
+        Expr::Index { source, index, .. } => {
+            collect_calls_in_expr(source, out);
+            collect_calls_in_expr(index, out);
+        }
+        Expr::Comprehension { source, body, .. } => {
+            collect_calls_in_expr(source, out);
+            collect_calls_in_expr(body, out);
+        }
+        Expr::Object(items, _) => collect_calls_in_items(items, out),
+        Expr::String(string) => {
+            for part in &string.parts {
+                if let StringPart::Expr(inner) = part {
+                    collect_calls_in_expr(inner, out);
+                }
+            }
+        }
+        Expr::Shell(shell) | Expr::ExecShell(shell) | Expr::CommandSubstitution(shell) => {
+            collect_calls_in_shell(shell, out)
+        }
+        Expr::Literal(_) | Expr::NamespaceRef(_) => {}
+    }
+}
+
+fn collect_calls_in_shell(shell: &crate::ast::ShellExpr, out: &mut HashSet<String>) {
+    use crate::ast::ShellStep;
+    collect_calls_in_statements(&shell.statements, out);
+    for (_, step) in &shell.steps {
+        match step {
+            ShellStep::Command(command) => collect_calls_in_shell_command(command, out),
+            ShellStep::Pipeline(commands) => {
+                for command in commands {
+                    collect_calls_in_shell_command(command, out);
+                }
+            }
+        }
+    }
+}
+
+fn collect_calls_in_shell_command(
+    command: &crate::ast::ShellCommandExpr,
+    out: &mut HashSet<String>,
+) {
+    use crate::ast::ShellFdRedirectTarget;
+    let mut words = vec![&command.program];
+    words.extend(command.args.iter());
+    for redirect in [&command.stdin, &command.stdout, &command.stderr]
+        .into_iter()
+        .flatten()
+    {
+        words.push(&redirect.target);
+    }
+    for redirect in &command.redirections {
+        if let ShellFdRedirectTarget::File(file) = &redirect.target {
+            words.push(&file.target);
+        }
+    }
+    for word in words {
+        for part in &word.parts {
+            match part {
+                crate::ast::ShellWordPart::Expr(expr) => collect_calls_in_expr(expr, out),
+                crate::ast::ShellWordPart::CommandSubstitution(shell) => {
+                    collect_calls_in_shell(shell, out)
+                }
+                crate::ast::ShellWordPart::Literal(_)
+                | crate::ast::ShellWordPart::Environment(_) => {}
+            }
+        }
     }
 }
 
@@ -2216,4 +2453,37 @@ mod tests {
         let result = validate_schema_imports(&program, dir.path());
         assert!(result.is_err());
     }
+
+    #[test]
+    fn registered_bundled_package_resolves_before_lockfile_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sparsh");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&root.join("config.spar"), "type [SparshConfig]{ enabled?: bool; };\n").unwrap();
+
+        let mut roots = crate::compiler::BundledPackageRoots::default();
+        roots.register("sparsh", root.clone()).unwrap();
+        let loader = ImportLoader::new(temp.path()).with_bundled_packages(roots);
+        let tokens = crate::Lexer::new(r#"import pkg { SparshConfig } from "sparsh/config";"#)
+            .tokenize()
+            .unwrap();
+        let program = crate::Parser::new(tokens).parse().unwrap();
+        let crate::ast::TopLevelItem::Import(decl) = &program.items[0] else {
+            panic!("expected import declaration");
+        };
+
+        let resolved = loader.resolve_import(decl).unwrap();
+        assert_eq!(resolved.path, root.join("config.spar"));
+    }
+
+    #[test]
+    fn registered_bundled_package_rejects_parent_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sparsh");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut roots = crate::compiler::BundledPackageRoots::default();
+        roots.register("sparsh", root).unwrap();
+        assert!(roots.resolve("sparsh/../secret").is_none());
+    }
+
 }

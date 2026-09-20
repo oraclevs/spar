@@ -104,7 +104,7 @@ impl Lockfile {
             ] {
                 out.push_str(&format!("            {name}: \"{}\";\n", escape(value)));
             }
-            out.push_str("            dependencies: List<SparLockedDependency> = [\n");
+            out.push_str("            dependencies: [\n");
             for (alias, dependency_id) in &package.dependencies {
                 out.push_str(&format!(
                     "                {{ alias: \"{}\"; packageId: \"{}\"; }},\n",

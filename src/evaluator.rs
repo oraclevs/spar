@@ -1107,6 +1107,27 @@ impl Evaluator {
         result
     }
 
+    /// Moves the sections registered directly under `path` in `section_cache`
+    /// into `map` as `ConfigValue::Section` values (recursively), removing
+    /// them from the cache.
+    fn inline_nested_sections(&mut self, path: &[String], map: &mut HashMap<String, ConfigValue>) {
+        let children: Vec<Vec<String>> = self
+            .section_cache
+            .keys()
+            .filter(|key| key.len() == path.len() + 1 && key.starts_with(path))
+            .cloned()
+            .collect();
+        for child_path in children {
+            let Some(mut child) = self.section_cache.remove(&child_path) else {
+                continue;
+            };
+            self.inline_nested_sections(&child_path, &mut child);
+            if let Some(name) = child_path.last() {
+                map.insert(name.clone(), ConfigValue::Section(child));
+            }
+        }
+    }
+
     fn eval_spread(
         &mut self,
         expr: &Expr,
@@ -1235,7 +1256,14 @@ impl Evaluator {
                 // documented scope limitation — object literals are
                 // structural data (JSON-object-like), not full
                 // cross-referenceable sections.
-                let map = self.eval_section_fields(items, &[], local_scope);
+                // Nested object literals register their own fields in
+                // `section_cache` under the path they are given. Use a private
+                // scratch prefix, then move those entries into the returned
+                // map so a literal keeps its nested objects inline instead of
+                // leaking them out as root-level sections.
+                let scratch = vec![format!("\u{0}object@{:p}", items.as_ptr())];
+                let mut map = self.eval_section_fields(items, &scratch, local_scope);
+                self.inline_nested_sections(&scratch, &mut map);
                 Ok(ConfigValue::Section(map))
             }
             Expr::List(items, _) => {

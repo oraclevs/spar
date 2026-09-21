@@ -1949,32 +1949,33 @@ mod emit_tests {
 
     #[test]
     fn plain_var_not_in_emit_output() {
-        let json = emit_src(r#"var secret: str = "hidden";"#);
+        let json = emit_src("#[emit]\nvar shown: int = 1;\nvar secret: str = \"hidden\";");
         assert!(
             json.get("secret").is_none(),
-            "plain var must not appear in emit output"
+            "unmarked var must not appear in emit output"
         );
+        assert_eq!(json["shown"], 1);
     }
 
     #[test]
-    fn export_var_in_emit_output() {
-        let json = emit_src(r#"export var name: str = "keel";"#);
+    fn emit_marked_var_in_emit_output() {
+        let json = emit_src("#[emit]\nvar name: str = \"keel\";");
         assert_eq!(json["name"], "keel");
     }
 
     #[test]
     fn regular_section_in_emit_output() {
-        let json = emit_src("[Server]{ port: int = 8080; };");
+        let json = emit_src("#[emit]\n[Server]{ port: int = 8080; };");
         assert!(json.get("Server").is_some());
         assert_eq!(json["Server"]["port"], 8080);
     }
 
     #[test]
-    fn private_section_not_in_emit_output() {
-        let json = emit_src("private [Defaults]{ timeout: int = 30; };");
+    fn unmarked_section_not_in_emit_output() {
+        let json = emit_src("#[emit]\nvar keep: int = 1;\nprivate [Defaults]{ timeout: int = 30; };");
         assert!(
             json.get("Defaults").is_none(),
-            "private section must not appear in emit"
+            "unmarked section must not appear in emit"
         );
     }
 
@@ -1982,6 +1983,7 @@ mod emit_tests {
     fn private_section_still_resolvable_by_public_section() {
         let src = r#"
 private [Defaults]{ timeout: int = 30; };
+#[emit]
 [Server]{ timeout: int = Defaults.timeout; };
 "#;
         let json = emit_src(src);
@@ -1992,6 +1994,7 @@ private [Defaults]{ timeout: int = 30; };
     #[test]
     fn nested_section_embedded_in_parent() {
         let src = r#"
+#[emit]
 [MetaData]{
     tool: str = "stackforge";
     manual: section = { author: str = "occ"; };
@@ -2019,7 +2022,9 @@ private [Defaults]{ timeout: int = 30; };
     fn full_example_matches_expected_output() {
         let src = r#"
 var options: [str] = ["one","two","three"];
+#[emit]
 [Man]{ aster: int = 6; };
+#[emit]
 [MetaData]{
     tool:    str = "stackforge";
     version: int = Man.aster;

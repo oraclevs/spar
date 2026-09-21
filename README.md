@@ -11,6 +11,7 @@ Write your configuration in `.spar` files — with types, computed values, cross
 var host: str = env("HOST") ?? "localhost";
 var port: int = 8080;
 
+#[emit]
 struct Server {
     host:  str  = host;
     port:  int  = port;
@@ -22,6 +23,7 @@ private struct Defaults {
     retries: int = 3;
 };
 
+#[emit]
 struct Database {
     url:     str = env("DATABASE_URL") ?? "postgres://localhost:5432/myapp";
     timeout: int = Defaults.timeout;
@@ -104,7 +106,7 @@ Spar is designed around a different idea: config files should behave more like c
 - **Composable** — import other `.spar` files and reference their sections and exported variables
 - **Computable** — arithmetic, string interpolation, functions with control flow, environment variable lookups
 - **Schema-validated** — declare the expected shape of a config in a schema file; `spar check` and `spar emit` both validate against it
-- **Visibility-controlled** — `private` sections are reusable internally but never appear in output; `export var` surfaces scalar values at the JSON root; plain `var` stays internal
+- **Explicit output** — nothing is written by `spar emit` unless a top-level struct or var carries `#[emit]`, so a value read with `env()` can never leak by accident; `export` and `private` only control what other files can import or spread
 - **Rust-native** — the `spar` crate exposes `from_str::<T>()` and `from_eval::<T>()`: parse, evaluate, and deserialize a config file directly into any `serde::Deserialize` type, the same way `toml::from_str` works
 - **Deterministic output** — `spar emit` always produces keys in sorted order, so diffs are clean
 - **Formattable** — `spar fmt` canonicalizes your source; `spar fmt --check` works in CI
@@ -128,18 +130,24 @@ var tags:    List<str> = ["web", "api", "v2"];
 Scalar types: `str`, `int`, `float`, `bool`.  
 List types: `List<str>`, `List<int>`, `List<float>`, `List<bool>`.
 
-Plain `var` is internal — it will not appear in `spar emit` output. To expose a scalar at the JSON root, use `export`:
+A `var` never appears in `spar emit` output on its own. To write a scalar at the JSON root, mark it with `#[emit]`:
 
 ```spar
-export var version: str = "1.4.2";   // appears in output
+#[emit]
+var version: str = "1.4.2";   // appears in output
 var secret:         str = "hidden";  // does not appear in output
 ```
+
+### Emitting
+
+`spar emit` (and `emit_to_json`/`yaml`/`toml`) writes only top-level `struct`s, sections and `var`s marked `#[emit]`. Everything else stays internal. `export` and `private` do not change this: `export` makes a declaration importable from other files, and `private` keeps a struct usable within its own file (for references and spreads) and out of other files' reach. A file with no `#[emit]` items fails with `nothing to emit: mark top-level structs or vars with #[emit]` instead of printing `{}`. Values inside an `#[emit]` struct are all emitted, including nested structs. Only `emit` is a valid attribute today, and attributes are valid on top-level structs and vars only. The Rust API (`from_str`, `from_eval`) is not gated by `#[emit]`: it reads whatever fields your Rust struct names.
 
 ### Structs
 
 Structs are named concrete configuration values and produce top-level objects in JSON output:
 
 ```spar
+#[emit]
 struct Http {
     host:    str  = "0.0.0.0";
     port:    int  = 8080;
@@ -153,7 +161,7 @@ struct Http {
 
 ### Private structs
 
-A `private` struct is visible within the file for reference and spread, but is excluded from `spar emit` output. Use it for shared defaults:
+A `private` struct is visible within the file for reference and spread, but is not importable from other files. It is emitted only if you mark it `#[emit]`. Use it for shared defaults:
 
 ```spar
 private struct Defaults {
@@ -162,12 +170,14 @@ private struct Defaults {
     keepalive: bool = true;
 };
 
+#[emit]
 struct ApiClient {
     endpoint: str  = "https://api.example.com";
     timeout:  int  = Defaults.timeout;
     retries:  int  = Defaults.retries;
 };
 
+#[emit]
 struct CacheClient {
     endpoint:  str  = "redis://localhost:6379";
     timeout:   int  = Defaults.timeout;
@@ -182,10 +192,12 @@ struct CacheClient {
 Reference any struct field with `Struct.field`:
 
 ```spar
+#[emit]
 struct Build {
     version: str = "2.1.0";
 };
 
+#[emit]
 struct Deploy {
     image: str = "myapp:${Build.version}";
     tag:   str = Build.version;
@@ -203,12 +215,14 @@ private struct CommonHttp {
     max_conns:  int  = 100;
 };
 
+#[emit]
 struct Frontend {
     host: str = "0.0.0.0";
     port: int = 3000;
     ...CommonHttp;
 };
 
+#[emit]
 struct Backend {
     host: str = "0.0.0.0";
     port: int = 8080;
@@ -240,6 +254,7 @@ Embed any expression inside a string with `${}`:
 var major: int = 2;
 var minor: int = 1;
 
+#[emit]
 struct Build {
     version: str = "${major}.${minor}.0";
     tag:     str = "v${major}.${minor}";
@@ -260,6 +275,7 @@ var hosts:   List<str> = ["web-1", "web-2", "web-3"];
 var ports:   List<int> = [8080, 8081, 8082];
 var allowed: List<str> = [env("EXTRA_HOST") ?? "localhost", "127.0.0.1"];
 
+#[emit]
 struct Cluster {
     hosts: List<str> = hosts;
     ports: List<int> = ports;
@@ -271,6 +287,7 @@ struct Cluster {
 A field may hold an inline nested section using the `section` type:
 
 ```spar
+#[emit]
 struct Config {
     name: str = "myapp";
     db: section = {
@@ -303,6 +320,7 @@ function clamp(value: int, lo: int, hi: int) -> int {
 
 var workers: int = clamp(value: 32, lo: 1, hi: 16);
 
+#[emit]
 export var w: int = workers;
 ```
 
@@ -321,11 +339,13 @@ function service(name: str, port: int) -> section {
     };
 };
 
+#[emit]
 struct Frontend {
     ...service(name: "web", port: 3000);
     image: str = "nginx:alpine";
 };
 
+#[emit]
 struct Backend {
     ...service(name: "api", port: 8080);
     image: str = "myapp:latest";
@@ -360,6 +380,7 @@ export struct Retry {
 // api.spar
 import "shared/timeouts.spar" as t;
 
+#[emit]
 struct Api {
     endpoint:       str = "https://api.example.com/v2";
     connect_timeout: int = t::connect;
@@ -383,18 +404,16 @@ Declare the required shape of a config in a schema file, then validate any confi
 
 ```spar
 // schema/server.spar
-@SchemaFile
-
-[Server]<Schema> {
+schema Server {
     host: str;
     port: int;
     ssl?: bool;
-}
+};
 
-[Database]<Schema> {
+schema Database {
     url:  str;
     pool: int;
-}
+};
 ```
 
 `field?: type` marks a field as optional; required fields must be present.
@@ -405,19 +424,23 @@ Declare the required shape of a config in a schema file, then validate any confi
 // production.spar
 import schema "schema/server.spar";
 
+#[emit]
 struct Server {
     host: str = "0.0.0.0";
     port: int = 443;
     ssl:  bool = true;
 };
 
+#[emit]
 struct Database {
     url:  str = env("DATABASE_URL") ?? "postgres://db:5432/prod";
     pool: int = 20;
 };
 ```
 
-`spar check production.spar` validates the config against the schema — missing required fields, extra undeclared fields, and type mismatches are all reported before emit:
+Schemas are matched to structs **by name**: `schema Server` checks `struct Server` in any file that imports the schema. A struct with no schema of that name is an ordinary struct and is ignored. A required `schema` with no matching struct is an error (with a `did you mean` hint for near misses), and `schema? Name { ... };` makes a schema optional. A schema can also be generated from a type with `schema Db from DbType;`. Matching covers `private` structs too, is independent of `#[emit]`, and two imported schema files may not declare the same name.
+
+`spar check production.spar` validates matched structs against their schema — missing required fields, extra undeclared fields, and type mismatches are all reported before emit:
 
 ```
 error[schema]: section `Server` is missing required field `port`
@@ -575,7 +598,7 @@ fn main() -> Result<(), spar::SparDeserError> {
 }
 ```
 
-Spar struct names map to Rust struct fields via `#[serde(rename = "StructName")]` (or rename-all conventions). `export var` values appear as top-level fields alongside structs. Anonymous nested objects map to nested Rust structs. Lists map to `Vec<T>`. Optional fields use `Option<T>`.
+Spar struct names map to Rust struct fields via `#[serde(rename = "StructName")]` (or rename-all conventions). `#[emit]` vars appear as top-level fields alongside structs (the serde API itself ignores `#[emit]`). Anonymous nested objects map to nested Rust structs. Lists map to `Vec<T>`. Optional fields use `Option<T>`.
 
 ### Error handling
 
@@ -618,6 +641,7 @@ configuration values — dependencies, arguments, environment overrides,
 working directories, a default task, and a `--dry-run` preview:
 
 ```spar
+#[emit]
 export var appName: str = "demo";
 
 task Test {

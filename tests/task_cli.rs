@@ -897,7 +897,8 @@ fn load_env_values_are_visible_to_stdlib_env_in_file_level_vars() {
 
 import pkg { getOr } from "std/env";
 
-export var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missing");
+#[emit]
+var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missing");
 "#,
     );
     let output = Command::new(env!("CARGO_BIN_EXE_spar"))

@@ -3657,7 +3657,10 @@ struct Config"#
     fn formatter_keeps_attributes_on_their_own_line_above_the_declaration() {
         let src = "#[emit]   export var  a:int=1;\n#[emit]\nstruct S { x: int = 1; };\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.starts_with("#[emit]\nexport var a: int = 1;\n"), "{formatted}");
+        assert!(
+            formatted.starts_with("#[emit]\nexport var a: int = 1;\n"),
+            "{formatted}"
+        );
         assert!(formatted.contains("\n#[emit]\nstruct S {"), "{formatted}");
         assert_eq!(format_source(&formatted).unwrap(), formatted, "idempotent");
     }
@@ -3666,7 +3669,10 @@ struct Config"#
     fn formatter_places_leading_comment_before_the_attribute() {
         let src = "// the server\n#[emit]\nstruct S { x: int = 1; };\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.starts_with("// the server\n#[emit]\nstruct S"), "{formatted}");
+        assert!(
+            formatted.starts_with("// the server\n#[emit]\nstruct S"),
+            "{formatted}"
+        );
     }
 
     #[test]

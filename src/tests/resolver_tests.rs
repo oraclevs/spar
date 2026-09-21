@@ -540,9 +540,9 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     use tempfile::NamedTempFile;
 
     let mut schema_file = NamedTempFile::new().unwrap();
-    write!(
+    writeln!(
         schema_file,
-        "schema Flutter {{ projectName: str; gitInit: bool; }};\n"
+        "schema Flutter {{ projectName: str; gitInit: bool; }};"
     )
     .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
@@ -578,11 +578,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     use tempfile::NamedTempFile;
 
     let mut schema_file = NamedTempFile::new().unwrap();
-    write!(
-        schema_file,
-        "schema Flutter {{ gitInit: bool; }};\n"
-    )
-    .unwrap();
+    writeln!(schema_file, "schema Flutter {{ gitInit: bool; }};").unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
 
     let config_src =
@@ -696,11 +692,11 @@ fn two_schema_imports_each_owning_one_section_passes() {
 
     // Schema A declares [A]
     let mut schema_a = NamedTempFile::new().unwrap();
-    write!(schema_a, "schema A {{ x: int; }};\n").unwrap();
+    writeln!(schema_a, "schema A {{ x: int; }};").unwrap();
 
     // Schema B declares [B]
     let mut schema_b = NamedTempFile::new().unwrap();
-    write!(schema_b, "schema B {{ y: str; }};\n").unwrap();
+    writeln!(schema_b, "schema B {{ y: str; }};").unwrap();
 
     let path_a = schema_a.path().to_str().unwrap().to_string();
     let path_b = schema_b.path().to_str().unwrap().to_string();

@@ -629,7 +629,10 @@ fn schema_declaration_makes_a_schema_file() {
 #[test]
 fn schema_file_may_only_contain_schema_items_and_type_imports() {
     let err = parse_ok_result("schema X { a: int; };\nvar y: int = 1;").unwrap_err();
-    assert!(err.to_string().contains("schema files may only contain"), "{err}");
+    assert!(
+        err.to_string().contains("schema files may only contain"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -780,7 +783,6 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     assert!(crate::parser::Parser::new(tokens).parse().is_ok());
 }
-
 
 #[test]
 fn parse_type_decl_with_named_and_nested_fields() {
@@ -1001,7 +1003,10 @@ fn parse_schema_file_still_rejects_selective_import() {
 
 #[test]
 fn parse_schema_file_rejects_removed_as_part_of_syntax() {
-    let src = concat!("schema Y { a: int; };\n", "import asPartOf \"types.spar\";\n",);
+    let src = concat!(
+        "schema Y { a: int; };\n",
+        "import asPartOf \"types.spar\";\n",
+    );
     let _ = parse_err(src);
 }
 
@@ -1504,21 +1509,33 @@ fn emit_attribute_attaches_to_struct_and_var() {
     let program = parse_ok(
         "#[emit]\nstruct Server { port: int = 1; };\n#[emit]\nvar version: str = \"1\";\nstruct Plain { a: int = 1; };\n",
     );
-    let TopLevelItem::Section(server) = &program.items[0] else { panic!("section") };
+    let TopLevelItem::Section(server) = &program.items[0] else {
+        panic!("section")
+    };
     assert!(server.is_emit());
-    let TopLevelItem::Var(version) = &program.items[1] else { panic!("var") };
+    let TopLevelItem::Var(version) = &program.items[1] else {
+        panic!("var")
+    };
     assert!(version.is_emit());
-    let TopLevelItem::Section(plain) = &program.items[2] else { panic!("section") };
+    let TopLevelItem::Section(plain) = &program.items[2] else {
+        panic!("section")
+    };
     assert!(!plain.is_emit());
 }
 
 #[test]
 fn emit_attribute_works_with_export_and_private_and_stacking() {
     use crate::ast::TopLevelItem;
-    let program = parse_ok("#[emit]\n#[emit]\nexport var a: int = 1;\n#[emit]\nprivate struct B { x: int = 1; };\n");
-    let TopLevelItem::Var(a) = &program.items[0] else { panic!("var") };
+    let program = parse_ok(
+        "#[emit]\n#[emit]\nexport var a: int = 1;\n#[emit]\nprivate struct B { x: int = 1; };\n",
+    );
+    let TopLevelItem::Var(a) = &program.items[0] else {
+        panic!("var")
+    };
     assert_eq!(a.attributes.len(), 2);
-    let TopLevelItem::Section(b) = &program.items[1] else { panic!("section") };
+    let TopLevelItem::Section(b) = &program.items[1] else {
+        panic!("section")
+    };
     assert!(b.is_emit() && b.private);
 }
 
@@ -1534,7 +1551,8 @@ fn unknown_attribute_is_rejected_with_valid_names() {
 fn attribute_on_function_is_rejected() {
     let err = parse_ok_result("#[emit]\nfunction f() -> int { return 1; };").unwrap_err();
     assert!(
-        err.to_string().contains("only valid on top-level structs and vars"),
+        err.to_string()
+            .contains("only valid on top-level structs and vars"),
         "{err}"
     );
 }
@@ -1543,7 +1561,8 @@ fn attribute_on_function_is_rejected() {
 fn dangling_attribute_at_end_of_file_is_rejected() {
     let err = parse_ok_result("var a: int = 1;\n#[emit]\n").unwrap_err();
     assert!(
-        err.to_string().contains("only valid on top-level structs and vars"),
+        err.to_string()
+            .contains("only valid on top-level structs and vars"),
         "{err}"
     );
 }
@@ -1552,7 +1571,8 @@ fn dangling_attribute_at_end_of_file_is_rejected() {
 fn attribute_on_field_is_rejected() {
     let err = parse_ok_result("struct A {\n    #[emit]\n    x: int = 1;\n};").unwrap_err();
     assert!(
-        err.to_string().contains("only valid on top-level structs and vars"),
+        err.to_string()
+            .contains("only valid on top-level structs and vars"),
         "{err}"
     );
 }

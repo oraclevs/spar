@@ -333,7 +333,8 @@ struct Server {
 
     #[test]
     fn nothing_marked_is_an_error() {
-        let errors = emit_to_json("struct A { x: int = 1; };\nexport var b: int = 2;\n").unwrap_err();
+        let errors =
+            emit_to_json("struct A { x: int = 1; };\nexport var b: int = 2;\n").unwrap_err();
         assert_eq!(
             errors,
             vec!["nothing to emit: mark top-level structs or vars with #[emit]".to_string()]

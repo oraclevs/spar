@@ -36,7 +36,7 @@ var version: str = "1.4.2";
 - Valid targets: top-level `struct`, `[Section]`, and `var`. Any other placement (functions,
   fields, dangling at end of file) is an error:
   ``attribute `#[emit]` is only valid on top-level structs and vars``.
-- The resolver validates attribute names. The only known name is `emit`. An unknown attribute is an
+- Attribute names are validated when the attribute is attached (in the parser, with a source span). The only known name is `emit`. An unknown attribute is an
   error listing valid names. This makes future native attributes a resolver addition, not a grammar
   change.
 

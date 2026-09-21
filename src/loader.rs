@@ -2757,7 +2757,10 @@ mod tests {
         .unwrap_err();
         let joined = messages(errors).join("\n");
         assert!(joined.contains("schema `Server`"), "{joined}");
-        assert!(joined.contains("has no matching struct in this file"), "{joined}");
+        assert!(
+            joined.contains("has no matching struct in this file"),
+            "{joined}"
+        );
         assert!(!joined.contains("did you mean"), "{joined}");
     }
 
@@ -2768,7 +2771,9 @@ mod tests {
             "struct Servr { host: str = \"h\"; };",
         )
         .unwrap_err();
-        assert!(messages(errors).join("\n").contains("did you mean `Servr`?"));
+        assert!(messages(errors)
+            .join("\n")
+            .contains("did you mean `Servr`?"));
     }
 
     #[test]
@@ -2810,8 +2815,14 @@ mod tests {
         );
         let errors = validate_schema_imports(&program, dir.path()).unwrap_err();
         let joined = messages(errors).join("\n");
-        assert!(joined.contains("schema `Server` is declared in both"), "{joined}");
-        assert!(joined.contains("a.spar") && joined.contains("b.spar"), "{joined}");
+        assert!(
+            joined.contains("schema `Server` is declared in both"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("a.spar") && joined.contains("b.spar"),
+            "{joined}"
+        );
     }
 
     #[test]

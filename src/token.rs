@@ -62,7 +62,7 @@ pub enum Token {
     OrOr,
     StructuredPipe, // `|>` Spar structured-value pipe
     Bang,
-    At, // `@`
+    At,          // `@`
     HashBracket, // `#[` opens an attribute
 
     // Function keywords

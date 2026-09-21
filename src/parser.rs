@@ -251,8 +251,10 @@ impl Parser {
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
                     return Err(SparError::ParseError {
-                        message: "schema files may only contain `schema Name {...};` declarations, \
-                                   `schema Name from Type;`, and `import type {...} from \"...\";`".to_string(),
+                        message:
+                            "schema files may only contain `schema Name {...};` declarations, \
+                                   `schema Name from Type;`, and `import type {...} from \"...\";`"
+                                .to_string(),
                         span: item_span,
                     });
                 }
@@ -719,9 +721,9 @@ impl Parser {
 
     fn parse_section_item(&mut self) -> Result<SectionItem, SparError> {
         if self.at(&Token::HashBracket) {
-            return Err(self.error(
-                "attribute `#[...]` is only valid on top-level structs and vars",
-            ));
+            return Err(
+                self.error("attribute `#[...]` is only valid on top-level structs and vars")
+            );
         }
         if self.at(&Token::DotDotDot) {
             Ok(SectionItem::Spread(self.parse_spread()?))
@@ -4044,9 +4046,7 @@ function f(flag: bool) -> int {
     fn unknown_file_pragma_lists_supported_names() {
         let message = parse_err("@Unknown\ntask Build { run { echo build; }; };");
         assert!(
-            message.contains(
-                "unknown file pragma `@Unknown`; only `@LoadEnv` is supported"
-            ),
+            message.contains("unknown file pragma `@Unknown`; only `@LoadEnv` is supported"),
             "got: {message}"
         );
     }

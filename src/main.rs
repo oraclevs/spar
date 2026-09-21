@@ -1972,7 +1972,8 @@ mod emit_tests {
 
     #[test]
     fn unmarked_section_not_in_emit_output() {
-        let json = emit_src("#[emit]\nvar keep: int = 1;\nprivate [Defaults]{ timeout: int = 30; };");
+        let json =
+            emit_src("#[emit]\nvar keep: int = 1;\nprivate [Defaults]{ timeout: int = 30; };");
         assert!(
             json.get("Defaults").is_none(),
             "unmarked section must not appear in emit"

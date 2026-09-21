@@ -341,11 +341,13 @@ fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelIt
     match item {
         TopLevelItem::Var(mut v) => {
             v.exported = false;
+            v.attributes.retain(|attribute| attribute.name != "emit");
             TopLevelItem::Var(v)
         }
         TopLevelItem::Section(mut s) => {
             s.exported = false;
             s.private = true;
+            s.attributes.retain(|attribute| attribute.name != "emit");
             TopLevelItem::Section(s)
         }
         TopLevelItem::Function(mut f) => {
@@ -2661,5 +2663,29 @@ mod tests {
         let mut roots = crate::compiler::BundledPackageRoots::default();
         roots.register("sparsh", root).unwrap();
         assert!(roots.resolve("sparsh/../secret").is_none());
+    }
+
+    #[test]
+    fn imported_emit_marked_struct_is_not_emitted_by_the_importer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.spar"),
+            "#[emit]\nexport struct Shared { x: int = 1; };\n",
+        )
+        .unwrap();
+        let src = "import { Shared } from \"lib.spar\";\n#[emit]\nstruct Mine { y: int = 2; };\n";
+        let mut program = parse_src(src);
+        let mut loader = ImportLoader::new(dir.path());
+        expand_imports(&mut program, &mut loader).expect("expand must succeed");
+        let mut saw_shared = false;
+        for item in &program.items {
+            if let TopLevelItem::Section(s) = item {
+                if s.path == vec!["Shared".to_string()] {
+                    saw_shared = true;
+                    assert!(!s.is_emit(), "imported struct must lose #[emit]");
+                }
+            }
+        }
+        assert!(saw_shared, "Shared should have been spliced in");
     }
 }

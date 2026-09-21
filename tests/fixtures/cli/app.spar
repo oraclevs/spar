@@ -1,5 +1,7 @@
+#[emit]
 export var name: str = "spar";
 
+#[emit]
 struct Server {
     port: int = 8080;
 };

@@ -78,10 +78,27 @@ fn emit_toml_preserves_int_vs_float_typing() {
     let input = temp.path().join("numbers.spar");
     fs::write(
         &input,
-        "export var count: int = 2;\nexport var rate: float = 2.0;\n",
+        "#[emit]\nvar count: int = 2;\n#[emit]\nvar rate: float = 2.0;\n",
     )
     .unwrap();
     let stdout = run_emit(&input, &["-t"]);
     assert!(stdout.contains("count = 2\n"), "{stdout}");
     assert!(stdout.contains("rate = 2.0\n"), "{stdout}");
+}
+
+#[test]
+fn emit_without_marked_items_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain.spar");
+    fs::write(&file, "struct A { x: int = 1; };\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["emit", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nothing to emit: mark top-level structs or vars with #[emit]"),
+        "{stderr}"
+    );
 }

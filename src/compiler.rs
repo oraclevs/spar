@@ -331,6 +331,7 @@ impl Compiler {
                     optional: false,
                     exported: false,
                     mutable: false,
+                    emit: false,
                     span: crate::Span::dummy(),
                 },
             );

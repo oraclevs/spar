@@ -124,6 +124,41 @@ fn resolve_and_materialize(
     })
 }
 
+/// Dependency aliases become field names in the manifest's `Dependencies`
+/// struct, so they must be plain identifiers.
+fn validate_alias(alias: &str) -> Result<(), PackageError> {
+    let mut chars = alias.chars();
+    let valid = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if valid {
+        return Ok(());
+    }
+    let mut suggestion = String::new();
+    let mut upper_next = false;
+    for c in alias.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            if upper_next {
+                suggestion.extend(c.to_uppercase());
+                upper_next = false;
+            } else {
+                suggestion.push(c);
+            }
+        } else {
+            upper_next = !suggestion.is_empty();
+        }
+    }
+    let hint = if suggestion.is_empty() {
+        String::new()
+    } else {
+        format!(" — try '{suggestion}'")
+    };
+    Err(PackageError::InvalidRequest {
+        message: format!(
+            "'{alias}' is not a valid dependency alias (use letters, digits and underscores, starting with a letter){hint}"
+        ),
+    })
+}
+
 /// Adds (or updates) one dependency: validates the request, writes it
 /// into the manifest's `[Dependencies]`, re-resolves the whole graph,
 /// materializes it, and writes both the manifest and the lockfile.
@@ -136,6 +171,7 @@ pub fn add(
     network: NetworkPolicy,
     store: &PackageStore,
 ) -> Result<Lockfile, PackageError> {
+    validate_alias(alias)?;
     PackageSource::parse(request)?; // validate before touching the manifest
     let mut manifest = read_manifest(dir)?;
     manifest

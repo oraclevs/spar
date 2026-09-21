@@ -451,8 +451,7 @@ fn schema_validate(
 
 #[test]
 fn valid_config_against_occ_example_passes() {
-    let schema_src = r#"@SchemaFile
-Schema [MainRoute]{
+    let schema_src = r#"schema MainRoute {
     routeOne: str;
     redirect: bool;
     main: [str];
@@ -480,7 +479,7 @@ Schema [MainRoute]{
 
 #[test]
 fn missing_required_field_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; };\n";
+    let schema_src = "schema X { a: int; b: str; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -493,7 +492,7 @@ fn missing_required_field_is_schema_error() {
 
 #[test]
 fn missing_optional_field_is_fine() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b?: str; };\n";
+    let schema_src = "schema X { a: int; b?: str; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
     assert!(
@@ -505,7 +504,7 @@ fn missing_optional_field_is_fine() {
 
 #[test]
 fn extra_field_not_in_schema_is_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
+    let schema_src = "schema X { a: int; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; extra: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -518,7 +517,7 @@ fn extra_field_not_in_schema_is_error() {
 
 #[test]
 fn wrong_type_on_present_field_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: bool; };\n";
+    let schema_src = "schema X { a: bool; };\n";
     // config declares `a` as `int` instead of `bool`
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
@@ -543,7 +542,7 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     let mut schema_file = NamedTempFile::new().unwrap();
     write!(
         schema_file,
-        "@SchemaFile\nSchema [Flutter]{{ projectName: str; gitInit: bool; }};\n"
+        "schema Flutter {{ projectName: str; gitInit: bool; }};\n"
     )
     .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
@@ -581,7 +580,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     let mut schema_file = NamedTempFile::new().unwrap();
     write!(
         schema_file,
-        "@SchemaFile\nSchema [Flutter]{{ gitInit: bool; }};\n"
+        "schema Flutter {{ gitInit: bool; }};\n"
     )
     .unwrap();
     let schema_path = schema_file.path().to_str().unwrap().to_string();
@@ -609,7 +608,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
 
 #[test]
 fn missing_required_section_is_schema_error() {
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
+    let schema_src = "schema X { a: int; };\n";
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n"; // [Y] not [X]
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
@@ -622,12 +621,12 @@ fn missing_required_section_is_schema_error() {
 
 #[test]
 fn missing_optional_section_is_fine() {
-    let _schema_src = "@SchemaFile\nSchema? [X]{ a: int; };\n";
+    let _schema_src = "schema? X { a: int; };\n";
     // config has no [X] section at all
     let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n";
     // [inference] This will also fail on extra-section check since [Y] isn't in schema.
     // To isolate this test, schema must declare [Y] too.
-    let schema_src2 = "@SchemaFile\nSchema? [X]{ a: int; };\nSchema [Y]{ z: int; };\n";
+    let schema_src2 = "schema? X { a: int; };\nschema Y { z: int; };\n";
     let result = schema_validate(schema_src2, config_src);
     assert!(
         result.is_ok(),
@@ -639,7 +638,7 @@ fn missing_optional_section_is_fine() {
 #[test]
 fn config_section_with_no_schema_entry_is_error() {
     // symmetric strictness: config declares a section the schema never mentions
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; };\n";
+    let schema_src = "schema X { a: int; };\n";
     let config_src =
         "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
@@ -653,8 +652,7 @@ fn config_section_with_no_schema_entry_is_error() {
 
 #[test]
 fn nested_section_field_validated_recursively() {
-    let schema_src = r#"@SchemaFile
-Schema [X]{
+    let schema_src = r#"schema X {
     x: section = {
         host: str;
         port?: int;
@@ -680,12 +678,12 @@ Schema [X]{
 
 #[test]
 fn importing_a_non_schema_file_as_schema_is_error() {
-    let not_a_schema = "var x: int = 1;\n"; // no @SchemaFile
+    let not_a_schema = "var x: int = 1;\n"; // no schema declarations
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
     let errs = schema_validate(not_a_schema, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
-        combined.contains("schema file") || combined.contains("@SchemaFile"),
+        combined.contains("schema file"),
         "must explain that the imported file is not a schema file: {}",
         combined
     );
@@ -704,11 +702,11 @@ fn two_schema_imports_each_owning_one_section_passes() {
 
     // Schema A declares [A]
     let mut schema_a = NamedTempFile::new().unwrap();
-    write!(schema_a, "@SchemaFile\nSchema [A]{{ x: int; }};\n").unwrap();
+    write!(schema_a, "schema A {{ x: int; }};\n").unwrap();
 
     // Schema B declares [B]
     let mut schema_b = NamedTempFile::new().unwrap();
-    write!(schema_b, "@SchemaFile\nSchema [B]{{ y: str; }};\n").unwrap();
+    write!(schema_b, "schema B {{ y: str; }};\n").unwrap();
 
     let path_a = schema_a.path().to_str().unwrap().to_string();
     let path_b = schema_b.path().to_str().unwrap().to_string();
@@ -738,7 +736,7 @@ fn two_schema_imports_each_owning_one_section_passes() {
 #[test]
 fn section_with_spread_skips_field_validation() {
     // Schema requires both `a` and `b`
-    let schema_src = "@SchemaFile\nSchema [X]{ a: int; b: str; };\n";
+    let schema_src = "schema X { a: int; b: str; };\n";
     // Config only has `a` explicitly; `b` is expected to come from the spread
     let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ ...Defaults; a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);

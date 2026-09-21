@@ -76,14 +76,11 @@ pub fn format_program_with_comments(
             out.push_str("\")\n");
         }
     }
-    if program.is_schema_file {
-        out.push_str("@SchemaFile\n");
-    }
 
     for (i, item) in program.items.iter().enumerate() {
         let item_line = item_span_line(item);
         let needs_separator = if i == 0 {
-            program.shebang.is_some() || program.load_env.is_some() || program.is_schema_file
+            program.shebang.is_some() || program.load_env.is_some()
         } else {
             top_level_items_need_blank_line(&program.items[i - 1], item)
         };
@@ -449,13 +446,13 @@ fn format_top_level_item(
         }
 
         TopLevelItem::SchemaSection(sd) => {
-            out.push_str("Schema");
+            out.push_str("schema");
             if sd.marker.optional {
                 out.push('?');
             }
-            out.push_str(" [");
+            out.push(' ');
             out.push_str(&sd.name);
-            out.push_str("]{\n");
+            out.push_str(" {\n");
             for field in &sd.fields {
                 format_schema_field(field, 1, config, out);
             }
@@ -541,15 +538,15 @@ fn format_top_level_item(
         }
 
         TopLevelItem::SchemaFrom(sf) => {
-            out.push_str("SchemaFrom");
+            out.push_str("schema");
             if sf.marker.optional {
                 out.push('?');
             }
-            out.push_str(" [");
+            out.push(' ');
             out.push_str(&sf.name);
-            out.push_str(", ");
+            out.push_str(" from ");
             out.push_str(&sf.source_type);
-            out.push_str("];\n");
+            out.push_str(";\n");
         }
 
         TopLevelItem::Task(td) => format_task_decl_cx(td, config, cx, out),
@@ -2933,16 +2930,16 @@ function pick(flag: bool) -> int {
     }
 
     #[test]
-    fn formats_schema_file_with_pragma() {
-        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n};\n";
+    fn formats_schema_declaration() {
+        let src = "schema X {\n    a: int;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
-            formatted.starts_with("@SchemaFile\n"),
-            "must start with @SchemaFile pragma: {}",
+            formatted.starts_with("schema X {\n"),
+            "must start with the schema header: {}",
             formatted
         );
         assert!(
-            formatted.contains("Schema [X]{"),
+            formatted.contains("schema X {"),
             "must contain schema section header: {}",
             formatted
         );
@@ -3131,10 +3128,10 @@ struct Config"#
 
     #[test]
     fn formats_schema_file_optional_section() {
-        let src = "@SchemaFile\nSchema? [Y]{\n    b: str;\n};\n";
+        let src = "schema? Y {\n    b: str;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
-            formatted.contains("Schema? [Y]{"),
+            formatted.contains("schema? Y {"),
             "optional schema marker: {}",
             formatted
         );
@@ -3142,7 +3139,7 @@ struct Config"#
 
     #[test]
     fn formats_schema_field_required_and_optional() {
-        let src = "@SchemaFile\nSchema [X]{\n    a: int;\n    b?: str;\n};\n";
+        let src = "schema X {\n    a: int;\n    b?: str;\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("    a: int;"),
@@ -3165,7 +3162,7 @@ struct Config"#
 
     #[test]
     fn formats_nested_section_schema_field() {
-        let src = "@SchemaFile\nSchema [X]{\n    x: section = { host: str; };\n};\n";
+        let src = "schema X {\n    x: section = { host: str; };\n};\n";
         let formatted = format_source(src).unwrap();
         assert!(
             formatted.contains("x: section = {"),
@@ -3670,5 +3667,11 @@ struct Config"#
         let src = "// the server\n#[emit]\nstruct S { x: int = 1; };\n";
         let formatted = format_source(src).unwrap();
         assert!(formatted.starts_with("// the server\n#[emit]\nstruct S"), "{formatted}");
+    }
+
+    #[test]
+    fn schema_from_formats_in_new_syntax() {
+        let formatted = format_source("schema?   Db   from   DbType;").unwrap();
+        assert_eq!(formatted, "schema? Db from DbType;\n");
     }
 }

@@ -1466,7 +1466,7 @@ pub fn validate_schema_imports(
         if !schema_prog.is_schema_file {
             errors.push(SparError::SchemaError {
                 message: format!(
-                    "'{}' is not a schema file — add `@SchemaFile` at the top of that file",
+                    "'{}' is not a schema file — declare `schema Name {{ ... }};` in it",
                     decl.path
                 ),
                 span: decl.span.clone(),
@@ -1874,7 +1874,7 @@ mod tests {
         // Schema declares only [Server]
         fs::write(
             dir.path().join("schema.spar"),
-            concat!("@SchemaFile\n", "Schema [Server]{ port: int; };\n",),
+            concat!("", "schema Server { port: int; };\n",),
         )
         .unwrap();
 
@@ -2327,9 +2327,9 @@ mod tests {
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
-                "@SchemaFile\n",
+                "",
                 "import type { PostgresType } from \"types.spar\";\n",
-                "Schema [Postgres]{ image: str; };\n",
+                "schema Postgres { image: str; };\n",
             ),
         )
         .unwrap();
@@ -2359,7 +2359,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
-            "@SchemaFile\nSchema [Container]{ x?: str; };\n",
+            "schema Container { x?: str; };\n",
         )
         .unwrap();
         let src = concat!(
@@ -2556,9 +2556,9 @@ mod tests {
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
-                "@SchemaFile\n",
+                "",
                 "import type { PostgresType } from \"types.spar\";\n",
-                "SchemaFrom [Postgres, PostgresType];\n",
+                "schema Postgres from PostgresType;\n",
             ),
         )
         .unwrap();
@@ -2586,9 +2586,9 @@ mod tests {
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
-                "@SchemaFile\n",
+                "",
                 "import type { ServiceType } from \"types.spar\";\n",
-                "SchemaFrom [Service, ServiceType];\n",
+                "schema Service from ServiceType;\n",
             ),
         )
         .unwrap();
@@ -2614,9 +2614,9 @@ mod tests {
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
-                "@SchemaFile\n",
+                "",
                 "import type { PostgresType } from \"types.spar\";\n",
-                "SchemaFrom [Postgres, PostgresType];\n",
+                "schema Postgres from PostgresType;\n",
             ),
         )
         .unwrap();

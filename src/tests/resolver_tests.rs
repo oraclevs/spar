@@ -636,18 +636,12 @@ fn missing_optional_section_is_fine() {
 }
 
 #[test]
-fn config_section_with_no_schema_entry_is_error() {
-    // symmetric strictness: config declares a section the schema never mentions
+fn config_section_with_no_schema_entry_is_ignored() {
+    // a struct the schema never mentions is an ordinary struct
     let schema_src = "schema X { a: int; };\n";
     let config_src =
         "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
-    let errs = schema_validate(schema_src, config_src).unwrap_err();
-    let combined = format!("{:?}", errs);
-    assert!(
-        combined.contains("Unrelated") || combined.contains("not declared"),
-        "must reject undeclared section: {}",
-        combined
-    );
+    assert!(schema_validate(schema_src, config_src).is_ok());
 }
 
 #[test]

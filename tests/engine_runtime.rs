@@ -276,3 +276,337 @@ fn execute_path_preserves_generics_through_selective_imports() {
         .expect("selectively imported generics should execute");
     assert_eq!(outcome.exit_status, 19);
 }
+
+#[test]
+fn closure_outlives_defining_function_and_invokes_positionally() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function make(min: int) -> fn(int) -> bool {
+                return fn(value) => value >= min;
+            };
+            function main() -> int {
+                var check: fn(int) -> bool = make(min: 10);
+                if check(11) { return 1; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("owned closure should remain callable after make returns");
+    assert_eq!(outcome.exit_status, 1);
+}
+
+#[test]
+fn closure_capture_is_by_value() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function main() -> int {
+                var mut threshold: int = 10;
+                var check: fn(int) -> bool = fn(value) => value > threshold;
+                threshold = 20;
+                if check(11) { return 1; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("closure should retain the value captured at creation time");
+    assert_eq!(outcome.exit_status, 1);
+}
+
+#[test]
+fn named_function_can_be_stored_and_invoked_as_callable_value() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function double(value: int) -> int { return value * 2; };
+            function main() -> int {
+                var callback: fn(int) -> int = double;
+                return callback(7);
+            };
+            "#,
+        )
+        .expect("named function value should be dynamically callable");
+    assert_eq!(outcome.exit_status, 14);
+}
+
+#[test]
+fn struct_constructor_clones_defaults_and_applies_named_overrides() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            struct User { name: str = "Unknown"; age: int = 18; active: bool = true; };
+            function main() -> int {
+                var user = User(name: "Obi", age: 24);
+                if user.name == "Obi" && user.active { return user.age; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("struct constructor should clone canonical values and override fields");
+    assert_eq!(outcome.exit_status, 24);
+}
+
+#[test]
+fn mutable_struct_binding_allows_field_assignment() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            struct User { name: str = "Unknown"; age: int = 18; };
+            function main() -> int {
+                var mut user = User();
+                user.age = 25;
+                return user.age;
+            };
+            "#,
+        )
+        .expect("mutable struct binding should support field mutation");
+    assert_eq!(outcome.exit_status, 25);
+}
+
+#[test]
+fn impl_methods_static_factories_and_mut_self_execute() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            struct User { name: str = "Unknown"; age: int = 18; active: bool = true; };
+            impl User {
+                function isAdult(self) -> bool { return self.age >= 18; };
+                function deactivate(mut self) -> void { self.active = false; };
+                function adult(name: str) -> User { return User(name: name, age: 18); };
+                private function normalized(self) -> str { return self.name; };
+            };
+            function main() -> int {
+                var mut user = User.adult("Obi");
+                if !user.isAdult() { return 1; }
+                user.deactivate();
+                if user.active { return 2; }
+                return user.age;
+            };
+            "#,
+        )
+        .expect("struct methods and static factories should execute");
+    assert_eq!(outcome.exit_status, 18);
+}
+
+#[test]
+fn multiple_impl_blocks_merge_into_one_method_set() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            struct User { name: str = "Obi"; age: int = 24; };
+            impl User { function name(self) -> str { return self.name; }; };
+            impl User { function age(self) -> int { return self.age; }; };
+            function main() -> int {
+                var user = User();
+                if user.name() == "Obi" { return user.age(); }
+                return 0;
+            };
+            "#,
+        )
+        .expect("multiple impl blocks should merge");
+    assert_eq!(outcome.exit_status, 24);
+}
+
+#[test]
+fn structured_pipe_executes_calls_bare_callables_and_closures() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function add(value: int, amount: int) -> int { return value + amount; };
+            function double(value: int) -> int { return value * 2; };
+            function main() -> int {
+                var a: int = 5 |> add(3);
+                var transform: fn(int) -> int = double;
+                var b: int = a |> transform;
+                var c: int = b |> fn(value: int) -> int => value + 1;
+                return c;
+            };
+            "#,
+        )
+        .expect("structured pipe should execute ordinary calls, bare callables, and closures");
+    assert_eq!(outcome.exit_status, 17);
+}
+
+#[test]
+fn structured_pipe_binds_lower_than_arithmetic() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function double(value: int) -> int { return value * 2; };
+            function main() -> int {
+                return 1 + 2 |> double;
+            };
+            "#,
+        )
+        .expect("arithmetic should bind before structured pipe");
+    assert_eq!(outcome.exit_status, 6);
+}
+
+#[test]
+fn schema_inference_over_records_is_public_and_deterministic() {
+    use spar::{Schema, SchemaField, SchemaType, Value};
+
+    let rows = vec![
+        Value::Object(indexmap::IndexMap::from([
+            ("name".into(), Value::String("Obi".into())),
+            ("age".into(), Value::Int(24)),
+        ])),
+        Value::Object(indexmap::IndexMap::from([
+            ("name".into(), Value::String("Ada".into())),
+            ("active".into(), Value::Bool(true)),
+        ])),
+    ];
+
+    let schema = Schema::infer_records(&rows).unwrap();
+    assert_eq!(
+        schema.fields,
+        vec![
+            SchemaField {
+                name: "active".into(),
+                ty: SchemaType::Bool,
+                optional: true,
+            },
+            SchemaField {
+                name: "age".into(),
+                ty: SchemaType::Int,
+                optional: true,
+            },
+            SchemaField {
+                name: "name".into(),
+                ty: SchemaType::Str,
+                optional: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn schema_inference_rejects_non_record_rows() {
+    use spar::{Schema, Value};
+
+    let error = Schema::infer_records(&[Value::Int(1)]).unwrap_err();
+    assert_eq!(error.row_index, 0);
+    assert_eq!(error.actual_type, "int");
+}
+
+#[test]
+fn materialized_table_preserves_rows_schema_and_slice_operations() {
+    use spar::{SchemaType, TableValue, Value};
+
+    let rows = vec![
+        Value::Object(indexmap::IndexMap::from([
+            ("name".into(), Value::String("Obi".into())),
+            ("age".into(), Value::Int(24)),
+        ])),
+        Value::Object(indexmap::IndexMap::from([
+            ("name".into(), Value::String("Ada".into())),
+            ("age".into(), Value::Int(31)),
+        ])),
+    ];
+    let table = TableValue::from_records(rows.clone()).unwrap();
+
+    assert_eq!(table.rows(), rows.as_slice());
+    assert_eq!(table.len(), 2);
+    assert!(!table.is_empty());
+    assert_eq!(table.schema().fields[0].name, "age");
+    assert_eq!(table.schema().fields[0].ty, SchemaType::Int);
+    assert_eq!(table.take(1).rows(), &rows[..1]);
+    assert_eq!(table.skip(1).rows(), &rows[1..]);
+}
+
+#[test]
+fn stream_type_is_a_builtin_single_argument_generic() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function accepts(values: Stream<int>) -> int { return 1; };
+            function main() -> int { return 0; };
+            "#,
+        )
+        .expect("Stream<T> should resolve and type-check as a built-in generic runtime type");
+
+    assert_eq!(outcome.exit_status, 0);
+}
+
+#[test]
+fn completed_stream_is_removed_from_runtime_resources() {
+    use spar::ast::SparType;
+    use spar::{RuntimeContext, StreamResource, Value};
+
+    let mut emitted = false;
+    let mut context = RuntimeContext::new(std::env::temp_dir());
+    let id = context.insert_stream(StreamResource::new(SparType::Int, move || {
+        if emitted {
+            Ok(None)
+        } else {
+            emitted = true;
+            Ok(Some(Value::Int(7)))
+        }
+    }));
+
+    assert!(context.resources().contains(id));
+    assert_eq!(context.stream_next(id).unwrap(), Some(Value::Int(7)));
+    assert!(context.resources().contains(id));
+    assert_eq!(context.stream_next(id).unwrap(), None);
+    assert!(!context.resources().contains(id));
+}
+
+#[test]
+fn failed_stream_is_removed_and_runs_cleanup_hook() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use spar::ast::SparType;
+    use spar::{RuntimeContext, SparError, StreamResource};
+
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let marker = cleanups.clone();
+    let mut context = RuntimeContext::new(std::env::temp_dir());
+    let id = context.insert_stream(StreamResource::with_cancel(
+        SparType::Int,
+        || {
+            Err(SparError::EvalError {
+                message: "boom".into(),
+                span: spar::Span::dummy(),
+            })
+        },
+        move || {
+            marker.fetch_add(1, Ordering::SeqCst);
+        },
+    ));
+
+    assert!(context.stream_next(id).is_err());
+    assert!(!context.resources().contains(id));
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn cancelling_stream_removes_resource_and_invokes_hook_once() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use spar::ast::SparType;
+    use spar::{RuntimeContext, StreamResource, Value};
+
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    let marker = cancellations.clone();
+    let mut context = RuntimeContext::new(std::env::temp_dir());
+    let id = context.insert_stream(StreamResource::with_cancel(
+        SparType::Int,
+        || Ok(Some(Value::Int(1))),
+        move || {
+            marker.fetch_add(1, Ordering::SeqCst);
+        },
+    ));
+
+    assert!(context.cancel_stream(id));
+    assert!(!context.resources().contains(id));
+    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+    assert!(!context.cancel_stream(id));
+    assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+}

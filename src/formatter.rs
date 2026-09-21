@@ -35,11 +35,7 @@ pub fn format_source(src: &str) -> Result<String, SparError> {
     let (tokens, comments) = lexer.tokenize_with_comments()?;
     let mut program = Parser::new(tokens).parse()?;
     program.shebang = shebang;
-    let formatted = format_program_with_comments(
-        &program,
-        &FormatConfig::default(),
-        &comments,
-    );
+    let formatted = format_program_with_comments(&program, &FormatConfig::default(), &comments);
 
     // Formatting must never hand the caller source that Spar itself cannot
     // parse. This is a final safety barrier around the pretty-printer: even
@@ -248,6 +244,7 @@ impl CommentCursor {
 fn item_end_line(item: &TopLevelItem) -> u32 {
     match item {
         TopLevelItem::Section(d) => d.end_line,
+        TopLevelItem::Impl(d) => d.end_line,
         TopLevelItem::Function(d) => d.body.span.line,
         TopLevelItem::Task(d) => d.closing_span.line,
         TopLevelItem::Enum(d) => d.end_line,
@@ -262,6 +259,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Var(d) => d.span.line,
         TopLevelItem::Dynamic(d) => d.span.line,
         TopLevelItem::Section(d) => d.span.line,
+        TopLevelItem::Impl(d) => d.span.line,
         TopLevelItem::Function(d) => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
         TopLevelItem::Type(d) => d.span.line,
@@ -271,7 +269,9 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Task(d) => d.span.line,
         TopLevelItem::Statement(statement) => match statement {
             Statement::LocalVar(declaration) => declaration.span.line,
-            Statement::Assignment { span, .. } => span.line,
+            Statement::Assignment { span, .. } | Statement::FieldAssignment { span, .. } => {
+                span.line
+            }
             Statement::Expression(_, span)
             | Statement::Return(_, span)
             | Statement::Break(span)
@@ -350,6 +350,59 @@ fn format_top_level_item(
             }
             format_section_items(&sd.items, 1, config, cx, out, sd.path.len() == 1);
             cx.emit_before_line(sd.end_line, 1, config, out);
+            out.push_str("};\n");
+        }
+
+        TopLevelItem::Impl(implementation) => {
+            out.push_str("impl");
+            format_type_parameters(&implementation.type_parameters, out);
+            out.push(' ');
+            out.push_str(&format_type(&implementation.target));
+            out.push_str(" {\n");
+            for method in &implementation.methods {
+                let fd = &method.function;
+                if fd.is_private {
+                    out.push_str(&indent(1, config));
+                    out.push_str("private ");
+                } else {
+                    out.push_str(&indent(1, config));
+                }
+                if fd.is_async {
+                    out.push_str("async ");
+                }
+                out.push_str("function ");
+                out.push_str(&fd.name);
+                format_type_parameters(&fd.type_parameters, out);
+                out.push('(');
+                for (index, parameter) in fd.params.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    if index == 0 {
+                        if let Some(receiver) = &method.receiver {
+                            if receiver.mutable {
+                                out.push_str("mut ");
+                            }
+                            out.push_str("self");
+                            continue;
+                        }
+                    }
+                    out.push_str(&parameter.name);
+                    out.push_str(": ");
+                    out.push_str(&format_type(&parameter.ty));
+                    if let Some(default) = &parameter.default {
+                        out.push_str(" = ");
+                        format_expr(default, 0, 1, config, out);
+                    }
+                }
+                out.push_str(") -> ");
+                out.push_str(&format_type(&fd.ret));
+                out.push_str(" {\n");
+                format_func_stmts(&fd.body.stmts, 2, config, cx, out, false);
+                out.push_str(&indent(1, config));
+                out.push_str("};\n");
+            }
+            cx.emit_before_line(implementation.end_line, 1, config, out);
             out.push_str("};\n");
         }
 
@@ -709,7 +762,11 @@ fn format_import_decl(imp: &ImportDecl, out: &mut String) {
             out.push_str("\";\n");
         }
         ImportKind::Aliased(alias) => {
-            out.push_str(if imp.package { "import pkg \"" } else { "import \"" });
+            out.push_str(if imp.package {
+                "import pkg \""
+            } else {
+                "import \""
+            });
             out.push_str(&escape_string_content(&imp.path));
             out.push('"');
             if let Some(alias) = alias {
@@ -838,6 +895,18 @@ fn format_type(ty: &SparType) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        SparType::Function {
+            params,
+            return_type,
+        } => format!(
+            "fn({}) -> {}",
+            params
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_type(return_type)
+        ),
     }
 }
 
@@ -963,6 +1032,16 @@ fn list_prefers_multiline(items: &[Expr]) -> bool {
     items.iter().any(|item| matches!(item, Expr::Object(_, _)))
 }
 
+fn flatten_structured_pipe<'a>(expr: &'a Expr, stages: &mut Vec<&'a Expr>) -> &'a Expr {
+    if let Expr::StructuredPipe { input, stage, .. } = expr {
+        let base = flatten_structured_pipe(input, stages);
+        stages.push(stage);
+        base
+    } else {
+        expr
+    }
+}
+
 pub(crate) fn format_expr(
     expr: &Expr,
     parent_prec: u8,
@@ -990,7 +1069,9 @@ pub(crate) fn format_expr(
                 let field_indent = indent(depth + 1, config);
                 for item in items {
                     let (item_line, item_end_line) = section_item_lines(item);
-                    config.comments.emit_before_line(item_line, depth + 1, config, out);
+                    config
+                        .comments
+                        .emit_before_line(item_line, depth + 1, config, out);
                     out.push_str(&field_indent);
                     format_object_item_wrapped(item, depth + 1, config, out);
                     out.push('\n');
@@ -1077,6 +1158,82 @@ pub(crate) fn format_expr(
                 format_expr(&arg.value, 0, depth, config, out);
             }
             out.push(')');
+        }
+
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } => {
+            format_expr(receiver, 100, depth, config, out);
+            out.push('.');
+            out.push_str(method);
+            out.push('(');
+            for (index, argument) in args.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                format_expr(argument, 0, depth, config, out);
+            }
+            out.push(')');
+        }
+
+        Expr::StructuredPipe { .. } => {
+            let prec = 0;
+            let needs_parens = prec < parent_prec;
+            if needs_parens {
+                out.push('(');
+            }
+            let mut stages = Vec::new();
+            let base = flatten_structured_pipe(expr, &mut stages);
+            format_expr(base, prec, depth, config, out);
+            for stage in stages {
+                out.push('\n');
+                out.push_str(&indent(depth + 1, config));
+                out.push_str("|> ");
+                format_expr(stage, prec + 1, depth + 1, config, out);
+            }
+            if needs_parens {
+                out.push(')');
+            }
+        }
+
+        Expr::Closure {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            out.push_str("fn(");
+            for (index, param) in params.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&param.name);
+                if let Some(ty) = &param.ty {
+                    out.push_str(": ");
+                    out.push_str(&format_type(ty));
+                }
+            }
+            out.push(')');
+            if let Some(ty) = return_type {
+                out.push_str(" -> ");
+                out.push_str(&format_type(ty));
+            }
+            match body {
+                ClosureBody::Expr(value) => {
+                    out.push_str(" => ");
+                    format_expr(value, 0, depth, config, out);
+                }
+                ClosureBody::Block(body) => {
+                    out.push_str(" {\n");
+                    let mut cx = config.comments.clone();
+                    format_func_stmts(&body.stmts, depth + 1, config, &mut cx, out, false);
+                    out.push_str(&indent(depth, config));
+                    out.push('}');
+                }
+            }
         }
 
         Expr::BinaryOp(b) => {
@@ -1196,7 +1353,7 @@ pub(crate) fn format_expr(
         Expr::ExecShell(shell) => format_shell_expr(shell, true, depth, config, out),
         Expr::CommandSubstitution(shell) => {
             out.push_str("$(");
-            format_shell_steps_inline(&shell.steps, out);
+            format_shell_steps_inline(&shell.steps, depth, config, out);
             out.push(')');
         }
     }
@@ -1239,7 +1396,12 @@ fn format_shell_expr(
 
 /// Prints a native shell block's `{ ... }` (no `shell`/`exec` prefix); shared
 /// by `shell {}` values and `run { }` task bodies.
-fn format_native_run_body(shell: &ShellExpr, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_native_run_body(
+    shell: &ShellExpr,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     let mut cx = config.comments.clone();
     format_native_run_body_cx(shell, depth, config, &mut cx, out);
 }
@@ -1271,7 +1433,12 @@ fn format_native_run_body_cx(
     out.push('}');
 }
 
-fn format_shell_steps_inline(steps: &[(ShellJoin, ShellStep)], out: &mut String) {
+fn format_shell_steps_inline(
+    steps: &[(ShellJoin, ShellStep)],
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     for (index, (join, step)) in steps.iter().enumerate() {
         if index > 0 {
             match join {
@@ -1290,6 +1457,9 @@ fn format_shell_steps_inline(steps: &[(ShellJoin, ShellStep)], out: &mut String)
                     format_shell_command(command, out);
                 }
             }
+            ShellStep::MixedPipeline(pipeline) => {
+                format_mixed_shell_pipeline(pipeline, depth, config, out);
+            }
         }
     }
 }
@@ -1298,6 +1468,7 @@ fn shell_step_line(step: &ShellStep) -> u32 {
     match step {
         ShellStep::Command(command) => command.span.line,
         ShellStep::Pipeline(commands) => commands.first().map_or(0, |command| command.span.line),
+        ShellStep::MixedPipeline(pipeline) => pipeline.span.line,
     }
 }
 
@@ -1337,6 +1508,9 @@ fn format_shell_steps(
                     format_shell_command(command, out);
                 }
             }
+            ShellStep::MixedPipeline(pipeline) => {
+                format_mixed_shell_pipeline(pipeline, depth, config, out);
+            }
         }
     }
     if !steps.is_empty() {
@@ -1345,11 +1519,63 @@ fn format_shell_steps(
     }
 }
 
+fn format_mixed_shell_pipeline(
+    pipeline: &ShellMixedPipeline,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
+    for (index, command) in pipeline.input.iter().enumerate() {
+        if index > 0 {
+            out.push_str(" | ");
+        }
+        format_shell_command(command, out);
+    }
+    out.push_str(" | from ");
+    if let Some(namespace) = pipeline.decoder.decoder.namespace {
+        out.push_str(namespace.as_str());
+        out.push_str("::");
+    }
+    out.push_str(&pipeline.decoder.decoder.name);
+    if !pipeline.decoder.args.is_empty() {
+        out.push('(');
+        for (index, arg) in pipeline.decoder.args.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&arg.name);
+            out.push_str(": ");
+            format_expr(&arg.value, 0, depth, config, out);
+        }
+        out.push(')');
+    }
+    for stage in &pipeline.stages {
+        out.push_str(" |> ");
+        format_expr(stage, 0, depth, config, out);
+    }
+    if let Some(encoder) = &pipeline.encoder {
+        out.push_str(" |> to ");
+        out.push_str(&encoder.format);
+    }
+    for command in &pipeline.output {
+        out.push_str(" | ");
+        format_shell_command(command, out);
+    }
+    if let Some(redirect) = &pipeline.encoder_redirect {
+        out.push_str(if redirect.mode == spar_command::RedirectMode::Append {
+            " >> "
+        } else {
+            " > "
+        });
+        format_shell_word(&redirect.target.text, out);
+    }
+}
+
 fn format_shell_command(command: &ShellCommandExpr, out: &mut String) {
     for environment in &command.environment {
         out.push_str(&environment.name);
         out.push('=');
-        format_shell_word(&environment.value, out);
+        format_shell_word(&environment.value.text, out);
         out.push(' ');
     }
     format_shell_word(&command.program.text, out);
@@ -1491,7 +1717,9 @@ fn format_object_item_wrapped(
             format_object_item_flat(item, depth, config, &mut flat);
             drop(speculative);
             flat.pop(); // drop the trailing space after ';'
-            let has_comments = config.comments.has_comment_in_lines(f.span.line, f.end_line);
+            let has_comments = config
+                .comments
+                .has_comment_in_lines(f.span.line, f.end_line);
             if !has_comments && !object_prefers_multiline(nested) && fits_inline(out, &flat) {
                 out.push_str(&flat);
                 return;
@@ -1503,13 +1731,17 @@ fn format_object_item_wrapped(
             out.push_str(": {\n");
             for nested_item in nested {
                 let (item_line, item_end_line) = section_item_lines(nested_item);
-                config.comments.emit_before_line(item_line, depth + 1, config, out);
+                config
+                    .comments
+                    .emit_before_line(item_line, depth + 1, config, out);
                 out.push_str(&indent(depth + 1, config));
                 format_object_item_wrapped(nested_item, depth + 1, config, out);
                 out.push('\n');
                 config.comments.append_trailing(item_end_line, out);
             }
-            config.comments.emit_before_line(f.end_line, depth + 1, config, out);
+            config
+                .comments
+                .emit_before_line(f.end_line, depth + 1, config, out);
             out.push_str(&indent(depth, config));
             out.push_str("};");
             return;
@@ -1540,6 +1772,7 @@ fn func_stmt_line(stmt: &FuncStmt) -> u32 {
     match stmt {
         FuncStmt::LocalVar(lv) => lv.span.line,
         FuncStmt::Assignment { span, .. }
+        | FuncStmt::FieldAssignment { span, .. }
         | FuncStmt::Expression(_, span)
         | FuncStmt::Break(span)
         | FuncStmt::Continue(span)
@@ -1601,6 +1834,23 @@ fn format_func_stmt_body(
         FuncStmt::Assignment { name, value, .. } => {
             out.push_str(&ind);
             out.push_str(name);
+            out.push_str(" = ");
+            format_expr(value, 0, depth, config, out);
+            out.push_str(";\n");
+        }
+
+        FuncStmt::FieldAssignment {
+            base,
+            fields,
+            value,
+            ..
+        } => {
+            out.push_str(&ind);
+            out.push_str(base);
+            for field in fields {
+                out.push('.');
+                out.push_str(field);
+            }
             out.push_str(" = ");
             format_expr(value, 0, depth, config, out);
             out.push_str(";\n");
@@ -1687,15 +1937,38 @@ fn format_func_stmt_body(
             out.push_str("if ");
             format_expr(&if_stmt.condition, 0, depth, config, out);
             out.push_str(" {\n");
-            format_func_stmts(&if_stmt.then_stmts, depth + 1, config, cx, out, shell_context);
+            format_func_stmts(
+                &if_stmt.then_stmts,
+                depth + 1,
+                config,
+                cx,
+                out,
+                shell_context,
+            );
             cx.emit_before_line(if_stmt.then_end_line, depth + 1, config, out);
             if if_stmt.else_stmts.is_empty() {
                 out.push_str(&ind);
                 out.push_str("}\n");
+            } else if let (true, Some(nested @ FuncStmt::If(_))) =
+                (if_stmt.else_if, if_stmt.else_stmts.first())
+            {
+                // `else if`: the nested `if` continues the chain on this line.
+                out.push_str(&ind);
+                out.push_str("} else ");
+                let start = out.len();
+                format_func_stmt_body(nested, depth, config, cx, out, shell_context);
+                out.replace_range(start..start + ind.len(), "");
             } else {
                 out.push_str(&ind);
                 out.push_str("} else {\n");
-                format_func_stmts(&if_stmt.else_stmts, depth + 1, config, cx, out, shell_context);
+                format_func_stmts(
+                    &if_stmt.else_stmts,
+                    depth + 1,
+                    config,
+                    cx,
+                    out,
+                    shell_context,
+                );
                 cx.emit_before_line(if_stmt.end_line, depth + 1, config, out);
                 out.push_str(&ind);
                 out.push_str("}\n");
@@ -1755,7 +2028,9 @@ fn format_schema_field(field: &SchemaField, depth: usize, config: &FormatConfig,
 }
 
 fn format_type_field(field: &TypeField, depth: usize, config: &FormatConfig, out: &mut String) {
-    config.comments.emit_before_line(field.span.line, depth, config, out);
+    config
+        .comments
+        .emit_before_line(field.span.line, depth, config, out);
     let is_section = format_type_field_body(field, depth, config, out);
     if !is_section {
         config.comments.append_trailing(field.span.line, out);
@@ -1903,6 +2178,44 @@ fn format_nested_section_item(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn formats_impl_methods_and_mutable_receivers_canonically() {
+        let source = r#"struct User{name:str="Obi";active:bool=true;};impl User{function name(self)->str{return self.name;};private function normalized(self)->str{return self.name;};function deactivate(mut self)->void{self.active=false;};};"#;
+        let formatted = format_source(source).expect("format should succeed");
+        assert!(formatted.contains("impl User {"), "{formatted}");
+        assert!(
+            formatted.contains("function name(self) -> str"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("private function normalized(self) -> str"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("function deactivate(mut self) -> void"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn formats_callable_types_and_closures_canonically() {
+        let source = "function main() -> int { var double: fn(int) -> int = fn(x:int)->int=>x*2; return 0; };";
+        let formatted = format_source(source).expect("format should succeed");
+        assert!(formatted.contains("fn(int) -> int"), "{formatted}");
+        assert!(
+            formatted.contains("fn(x: int) -> int => x * 2"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn formats_block_closure_vertically() {
+        let source = "function main() -> int { var double: fn(int) -> int = fn(x:int)->int{return x*2;}; return 0; };";
+        let formatted = format_source(source).expect("format should succeed");
+        assert!(formatted.contains("fn(x: int) -> int {\n"), "{formatted}");
+        assert!(formatted.contains("return x * 2;"), "{formatted}");
+    }
     use super::*;
 
     fn fmt(src: &str) -> String {
@@ -1962,8 +2275,7 @@ mod tests {
 
     #[test]
     fn command_substitution_preserves_every_control_chain_step() {
-        let source =
-            "var branch: str = $(git symbolic-ref --short HEAD || echo detached);\n";
+        let source = "var branch: str = $(git symbolic-ref --short HEAD || echo detached);\n";
         let formatted = fmt(source);
 
         assert!(
@@ -2058,7 +2370,10 @@ mod tests {
         );
         let formatted = fmt(src);
 
-        assert!(formatted.contains("python: { enabled: true; };"), "got: {formatted}");
+        assert!(
+            formatted.contains("python: { enabled: true; };"),
+            "got: {formatted}"
+        );
         assert!(formatted.contains("kids: true;"), "got: {formatted}");
         assert_eq!(fmt(&formatted), formatted, "formatting must be idempotent");
     }
@@ -2655,7 +2970,6 @@ function pick(flag: bool) -> int {
         assert_eq!(once, twice, "formatting must be idempotent");
     }
 
-
     #[test]
     fn formats_sparsh_config_with_readable_multiline_layout() {
         let src = r#"// Sparsh startup/config entry point.
@@ -2693,17 +3007,20 @@ function startup() -> shell {
         let formatted = format_source(src).expect("format");
 
         assert!(
-            formatted.contains(r#"import type {
+            formatted.contains(
+                r#"import type {
     SparshAlias,
     SparshEnvironmentVariable,
     SparshPrompt,
     SparshHistory,
     SparshCompletion
-} from "sparsh-types.spar";"#),
+} from "sparsh-types.spar";"#
+            ),
             "type import should wrap cleanly: {formatted}"
         );
         assert!(
-            formatted.contains(r#"import {
+            formatted.contains(
+                r#"import {
     greet,
     build,
     showFile,
@@ -2711,35 +3028,42 @@ function startup() -> shell {
     zipOccLang
 } from "functions.spar";
 
-struct Config"#),
+struct Config"#
+            ),
             "imports should stay grouped with one blank line before the struct: {formatted}"
         );
         assert!(
-            formatted.contains(r#"aliases: List<SparshAlias> = [
+            formatted.contains(
+                r#"aliases: List<SparshAlias> = [
         {
             name: "gs";
             command: ["git", "status"];
-        },"#),
+        },"#
+            ),
             "lists of config objects should be vertical: {formatted}"
         );
         assert!(
-            formatted.contains(r#"environment: List<SparshEnvironmentVariable> = [
+            formatted.contains(
+                r#"environment: List<SparshEnvironmentVariable> = [
         { name: "EDITOR"; value: "nvim"; },
         {
             name: "PATH";
             prepend: ["$HOME/.local/bin", "$HOME/.cargo/bin"];
             append: ["$HOME/.pub-cache/bin"];
         }
-    ];"#),
+    ];"#
+            ),
             "environment PATH edits should format as a readable nested object: {formatted}"
         );
         assert!(
-            formatted.contains(r#"path: {
+            formatted.contains(
+                r#"path: {
             enabled: true;
             parentLength: 64;
             maxLastLength: 96;
             maxWidth: 512;
-        };"#),
+        };"#
+            ),
             "larger nested objects should expand vertically: {formatted}"
         );
         assert!(
@@ -2750,11 +3074,13 @@ struct Config"#),
             "small simple objects should remain compact: {formatted}"
         );
         assert!(
-            formatted.contains(r#"function startup() -> shell {
+            formatted.contains(
+                r#"function startup() -> shell {
     return shell {
         nitch;
     };
-};"#),
+};"#
+            ),
             "startup() should remain a normal formatted Spar function: {formatted}"
         );
         assert_eq!(format_source(&formatted).unwrap(), formatted);
@@ -3213,9 +3539,7 @@ struct Config"#),
 
     #[test]
     fn trailing_comment_after_top_level_items_stays_on_its_line() {
-        assert_comments_stay_put(
-            "var a: int = 1; // one\n\nvar b: int = 2; // two\n",
-        );
+        assert_comments_stay_put("var a: int = 1; // one\n\nvar b: int = 2; // two\n");
     }
 
     #[test]
@@ -3263,5 +3587,60 @@ struct Config"#),
         assert_comments_stay_put(
             "type Config {\n    // name\n    name: str; // the name\n    // port\n    port: int = 80;\n    // tail\n};\n",
         );
+    }
+
+    #[test]
+    fn else_if_chains_round_trip() {
+        let source = "function f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else if a == 2 {\n        // two\n        return 20;\n    } else {\n        return 30;\n    }\n};\n";
+        assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn mixed_shell_pipeline_formatting_preserves_explicit_bridges() {
+        let source = concat!(
+            "function main() -> shell {\n",
+            "    return shell {\n",
+            "        printf '%s\\n' '{\"name\":\"Obi\"}' | from jsonl |> take(1) |> to jsonl | cat;\n",
+            "    };\n",
+            "};\n",
+        );
+        let formatted = fmt(source);
+        assert!(
+            formatted.contains("| from jsonl |> take(1) |> to jsonl | cat"),
+            "{formatted}"
+        );
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn mixed_shell_decoder_options_and_namespace_round_trip() {
+        let source = concat!(
+            "function main() -> shell {\n",
+            "    var useRaw: bool = true;\n",
+            "    return shell {\n",
+            "        printf x | from scoc::ping-s(raw: useRaw, ignoreErrors: choose(\"a,b\"));\n",
+            "    };\n",
+            "};\n",
+        );
+        let formatted = fmt(source);
+        assert!(
+            formatted.contains("| from scoc::ping-s(raw: useRaw, ignoreErrors: choose(\"a,b\"))"),
+            "{formatted}"
+        );
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn structured_pipe_formats_as_a_readable_multiline_chain() {
+        let source = "function main() -> int {\n    var result: int = 5 |> double |> fn(value: int) -> int => value + 1;\n    return result;\n};\n";
+        let formatted = fmt(source);
+        assert!(formatted.contains("var result: int = 5\n        |> double\n        |> fn(value: int) -> int => value + 1;"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn an_if_nested_inside_else_stays_nested() {
+        let source = "function f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else {\n        if a == 2 {\n            return 20;\n        }\n    }\n    return 0;\n};\n";
+        assert_eq!(fmt(source), source);
     }
 }

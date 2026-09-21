@@ -1,6 +1,10 @@
 mod async_runtime;
+// Release-time precompiled-bundle identity is reserved for tooling and not wired yet.
+#[allow(dead_code)]
 mod bundle;
 mod core;
+mod data;
+pub(crate) use data::FUNCTION_NAMES as DATA_FUNCTIONS;
 mod env;
 mod fs;
 mod http;
@@ -17,8 +21,6 @@ mod text;
 mod time;
 
 use std::path::{Path, PathBuf};
-
-pub use bundle::{configured_precompiled_bundle, StdlibBundleIdentity, STDLIB_CACHE_FORMAT_VERSION};
 
 pub const STD_PACKAGE_NAME: &str = "std";
 
@@ -45,14 +47,15 @@ pub fn resolve_bundled_import(request: &str) -> Option<PathBuf> {
     }
 }
 
-
 const PRELUDE_NAMES: &[&str] = &["print", "println", "len", "assert", "panic"];
 
 /// Inject Spar-written prelude functions into an ordinary source module.
 /// Explicit imports of the same canonical std symbols suppress implicit
 /// injection; direct user declarations with reserved prelude names are
 /// rejected so behavior never depends on accidental shadowing.
-pub(crate) fn inject_prelude(program: &mut crate::ast::Program) -> Result<(), Vec<crate::SparError>> {
+pub(crate) fn inject_prelude(
+    program: &mut crate::ast::Program,
+) -> Result<(), Vec<crate::SparError>> {
     use crate::ast::{ImportKind, TopLevelItem};
 
     let mut errors = Vec::new();
@@ -103,15 +106,24 @@ pub(crate) fn inject_prelude(program: &mut crate::ast::Program) -> Result<(), Ve
         return Err(errors);
     }
 
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/stdlib/src/prelude.spar"));
-    let tokens = crate::Lexer::new(source).tokenize().map_err(|error| vec![error])?;
-    let mut prelude = crate::Parser::new(tokens).parse().map_err(|error| vec![error])?;
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/stdlib/src/prelude.spar"
+    ));
+    let tokens = crate::Lexer::new(source)
+        .tokenize()
+        .map_err(|error| vec![error])?;
+    let mut prelude = crate::Parser::new(tokens)
+        .parse()
+        .map_err(|error| vec![error])?;
     crate::loader::mark_program_trusted_native(&mut prelude);
 
-    program.items.extend(prelude.items.into_iter().filter(|item| match item {
-        TopLevelItem::Function(function) => !explicitly_imported.contains(&function.name),
-        _ => false,
-    }));
+    program
+        .items
+        .extend(prelude.items.into_iter().filter(|item| match item {
+            TopLevelItem::Function(function) => !explicitly_imported.contains(&function.name),
+            _ => false,
+        }));
     Ok(())
 }
 
@@ -122,7 +134,6 @@ pub fn is_bundled_std_path(path: &Path) -> bool {
     path.starts_with(root)
 }
 
-
 /// Native capability registry used by the bundled standard library.
 /// Public Spar programs do not receive direct access to private entries; the
 /// resolver enforces the trust marker on stdlib-originating functions.
@@ -130,6 +141,7 @@ pub fn native_registry() -> crate::runtime::NativeRegistry {
     let mut registry = crate::runtime::NativeRegistry::new();
     async_runtime::register(&mut registry);
     core::register(&mut registry);
+    data::register(&mut registry);
     io::register(&mut registry);
     fs::register(&mut registry);
     path::register(&mut registry);

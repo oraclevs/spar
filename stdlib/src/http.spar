@@ -1,6 +1,7 @@
 export type [HttpResponse] {
     status: int;
     body: str;
+    contentType: str;
 };
 
 async function request(method: str, url: str, body: str = "") -> HttpResponse {

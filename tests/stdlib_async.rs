@@ -64,7 +64,9 @@ fn async_race_rejects_an_empty_list() {
             "#,
         )
         .expect_err("empty race must fail deterministically");
-    assert!(errors.iter().any(|error| error.to_string().contains("race requires at least one promise")));
+    assert!(errors.iter().any(|error| error
+        .to_string()
+        .contains("race requires at least one promise")));
 }
 
 #[test]
@@ -84,15 +86,15 @@ fn async_timeout_reports_deadline_after_slow_task_finishes() {
             "#,
         )
         .expect_err("slow promise must report timeout");
-    assert!(errors.iter().any(|error| error.to_string().contains("timed out")));
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("timed out")));
 }
 
 #[test]
 fn empty_list_var_takes_its_declared_type() {
     let outcome = Engine::new(CompileOptions::default())
-        .execute_source(
-            "function main() -> int { var values: [int] = []; return 3; };",
-        )
+        .execute_source("function main() -> int { var values: [int] = []; return 3; };")
         .expect("a declared empty list should type-check");
     assert_eq!(outcome.exit_status, 3);
 }

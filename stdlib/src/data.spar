@@ -1,0 +1,77 @@
+// Canonical structured-data transforms. `Sequence<T>` and `Lookup<K, V>` are
+// stdlib-only type patterns that preserve List/Table/Stream shape at call sites.
+function map<T, U>(source: Sequence<T>, transform: fn(T) -> U) -> Sequence<U> {
+    return nativeData::map(source: source, transform: transform);
+};
+
+function filter<T>(source: Sequence<T>, predicate: fn(T) -> bool) -> Sequence<T> {
+    return nativeData::filter(source: source, predicate: predicate);
+};
+
+function where<T>(source: Sequence<T>, predicate: fn(T) -> bool) -> Sequence<T> {
+    return nativeData::where(source: source, predicate: predicate);
+};
+
+function take<T>(source: Sequence<T>, count: int) -> Sequence<T> {
+    return nativeData::take(source: source, count: count);
+};
+
+function skip<T>(source: Sequence<T>, count: int) -> Sequence<T> {
+    return nativeData::skip(source: source, count: count);
+};
+
+function first<T>(source: Sequence<T>) -> T {
+    return nativeData::first(source: source);
+};
+
+function last<T>(source: Sequence<T>) -> T {
+    return nativeData::last(source: source);
+};
+
+function collect<T>(source: Sequence<T>) -> [T] {
+    return nativeData::collect(source: source);
+};
+
+function collectTable<T>(source: Sequence<T>) -> Table<T> {
+    return nativeData::collectTable(source: source);
+};
+
+function count<T>(source: Sequence<T>) -> int {
+    return nativeData::count(source: source);
+};
+
+function sortBy<T, K>(source: Sequence<T>, key: fn(T) -> K) -> Sequence<T> {
+    return nativeData::sortBy(source: source, key: key);
+};
+
+function groupBy<T, K>(source: Sequence<T>, key: fn(T) -> K) -> Map<K, Table<T>> {
+    return nativeData::groupBy(source: source, key: key);
+};
+
+function unique<T>(source: Sequence<T>) -> Sequence<T> {
+    return nativeData::unique(source: source);
+};
+
+function uniqueBy<T, K>(source: Sequence<T>, key: fn(T) -> K) -> Sequence<T> {
+    return nativeData::uniqueBy(source: source, key: key);
+};
+
+function flatten<T>(source: Sequence<[T]>) -> Sequence<T> {
+    return nativeData::flatten(source: source);
+};
+
+function get<K, V>(source: Lookup<K, V>, key: K) -> V {
+    return nativeData::get(source: source, key: key);
+};
+
+function select<T>(source: Sequence<T>, fields: [str]) -> Sequence<Record> {
+    return nativeData::select(source: source, fields: fields);
+};
+
+function schema<T>(source: Sequence<T>) -> Schema {
+    return nativeData::schema(source: source);
+};
+
+function inspect<T>(source: Sequence<T>) -> Sequence<T> {
+    return nativeData::inspect(source: source);
+};

@@ -96,7 +96,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                     .map_err(|error_value| error(format!("stdin read failed: {error_value}")))?;
                 let text = String::from_utf8(bytes)
                     .map_err(|_| error("stdin contains bytes that are not valid UTF-8"))?;
-                Ok(Value::String(text.trim_end_matches(&['\r', '\n'][..]).to_string()))
+                Ok(Value::String(
+                    text.trim_end_matches(&['\r', '\n'][..]).to_string(),
+                ))
             },
         ))
         .expect("nativeIo::readLine registration must be unique");
@@ -145,5 +147,4 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             },
         ))
         .expect("nativeIo::writeErrorBytes registration must be unique");
-
 }

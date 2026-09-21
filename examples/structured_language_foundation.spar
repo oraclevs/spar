@@ -1,0 +1,44 @@
+struct User {
+    name: str = "Unknown";
+    age: int = 18;
+    active: bool = true;
+};
+
+impl User {
+    function isAdult(self) -> bool {
+        return self.age >= 18;
+    };
+
+    function deactivate(mut self) -> void {
+        self.active = false;
+    };
+
+    private function normalizedName(self) -> str {
+        return self.name.trim();
+    };
+};
+
+function mapAge(user: User, amount: int) -> int {
+    return user.age + amount;
+};
+
+function main() -> int {
+    var minimumAge: int = 21;
+    var adultCheck: fn(User) -> bool = fn(user) => user.age >= minimumAge;
+    var mut user = User(name: "OCC", age: 24);
+
+    if !user.isAdult() { return 1; }
+    if !adultCheck(user) { return 2; }
+
+    var mapped: int = user |> mapAge(6);
+    if mapped != 30 { return 3; }
+
+    user.deactivate();
+    if user.active { return 4; }
+
+    var values: List<int> = [1, 2, 3];
+    if values.length() != 3 { return 5; }
+    if "spar".length() != 4 { return 6; }
+
+    return 0;
+};

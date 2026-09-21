@@ -3,7 +3,11 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::resource::ResourceTable;
+use crate::error::{Span, SparError};
+
+use super::resource::{ResourceId, ResourceTable};
+use super::stream::StreamResource;
+use super::value::Value;
 
 #[derive(Clone, Debug)]
 pub enum RuntimeOutput {
@@ -28,7 +32,7 @@ impl RuntimeOutput {
             RuntimeOutput::Buffer(buffer) => {
                 let mut guard = buffer
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "runtime output buffer lock poisoned"))?;
+                    .map_err(|_| io::Error::other("runtime output buffer lock poisoned"))?;
                 guard.extend_from_slice(bytes);
                 Ok(())
             }
@@ -44,16 +48,11 @@ impl RuntimeOutput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum RuntimeInput {
+    #[default]
     Stdin,
     Buffer(Arc<Mutex<VecDeque<u8>>>),
-}
-
-impl Default for RuntimeInput {
-    fn default() -> Self {
-        Self::Stdin
-    }
 }
 
 impl RuntimeInput {
@@ -71,7 +70,7 @@ impl RuntimeInput {
             RuntimeInput::Buffer(bytes) => {
                 let mut guard = bytes
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned"))?;
+                    .map_err(|_| io::Error::other("runtime input buffer lock poisoned"))?;
                 Ok(guard.drain(..).collect())
             }
         }
@@ -87,7 +86,7 @@ impl RuntimeInput {
             RuntimeInput::Buffer(bytes) => {
                 let mut guard = bytes
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned"))?;
+                    .map_err(|_| io::Error::other("runtime input buffer lock poisoned"))?;
                 let end = guard
                     .iter()
                     .position(|byte| *byte == b'\n')
@@ -99,6 +98,14 @@ impl RuntimeInput {
     }
 }
 
+/// Result of a mixed pipeline that ended at an interactive terminal: the
+/// structured value itself (fully collected) and the `to FORMAT` it named, so
+/// the shell can render it instead of receiving serialized bytes.
+pub(crate) struct MixedCapture {
+    pub value: Value,
+    pub format: Option<&'static str>,
+}
+
 pub struct RuntimeContext {
     cwd: PathBuf,
     args: Vec<String>,
@@ -107,6 +114,10 @@ pub struct RuntimeContext {
     stdout: RuntimeOutput,
     stderr: RuntimeOutput,
     resources: ResourceTable,
+    previous_value: Option<Value>,
+    structured_terminal: bool,
+    capture_mixed: bool,
+    mixed_capture: Option<MixedCapture>,
     cancelled: bool,
     requested_exit: Option<i32>,
 }
@@ -121,6 +132,10 @@ impl RuntimeContext {
             stdout: RuntimeOutput::Stdout,
             stderr: RuntimeOutput::Stderr,
             resources: ResourceTable::new(),
+            previous_value: None,
+            structured_terminal: false,
+            capture_mixed: false,
+            mixed_capture: None,
             cancelled: false,
             requested_exit: None,
         }
@@ -185,10 +200,7 @@ impl RuntimeContext {
     /// Replaces the runtime-local environment without mutating the host
     /// process. Embedders such as Sparsh use this to keep `$NAME` expansion
     /// aligned with the shell session's exported environment.
-    pub fn replace_environment(
-        &mut self,
-        entries: impl IntoIterator<Item = (String, String)>,
-    ) {
+    pub fn replace_environment(&mut self, entries: impl IntoIterator<Item = (String, String)>) {
         self.environment = entries.into_iter().collect();
     }
 
@@ -243,6 +255,85 @@ impl RuntimeContext {
         &mut self.resources
     }
 
+    /// Sets the materialized value exposed to interactive code as `_`.
+    /// Sparsh updates this before evaluating each interactive expression.
+    pub fn set_previous_value(&mut self, value: Option<Value>) {
+        self.previous_value = value;
+    }
+
+    /// Marks the output as an interactive terminal that renders structured
+    /// results itself (see `MixedCapture`).
+    pub fn set_structured_terminal(&mut self, enabled: bool) {
+        self.structured_terminal = enabled;
+    }
+
+    pub(crate) fn structured_terminal(&self) -> bool {
+        self.structured_terminal
+    }
+
+    pub(crate) fn set_capture_mixed(&mut self, enabled: bool) {
+        self.capture_mixed = enabled;
+    }
+
+    pub(crate) fn capture_mixed(&self) -> bool {
+        self.capture_mixed
+    }
+
+    pub(crate) fn set_mixed_capture(&mut self, capture: MixedCapture) {
+        self.mixed_capture = Some(capture);
+    }
+
+    pub(crate) fn take_mixed_capture(&mut self) -> Option<MixedCapture> {
+        self.mixed_capture.take()
+    }
+
+    pub fn previous_value(&self) -> Option<&Value> {
+        self.previous_value.as_ref()
+    }
+
+    /// Stores a lazy structured stream in this runtime and returns the resource id
+    /// carried by the corresponding Spar runtime value.
+    pub fn insert_stream(&mut self, stream: StreamResource) -> ResourceId {
+        self.resources.insert(stream)
+    }
+
+    /// Pulls one value from a stream resource. Completed and failed streams are
+    /// removed immediately so one-shot producers do not leave stale runtime
+    /// resources behind.
+    pub fn stream_next(&mut self, id: ResourceId) -> Result<Option<Value>, SparError> {
+        let result = {
+            let stream = self
+                .resources
+                .get_mut::<StreamResource>(id)
+                .ok_or_else(|| SparError::EvalError {
+                    message: "stream handle is no longer valid".into(),
+                    span: Span::dummy(),
+                })?;
+            stream.next()
+        };
+
+        match result {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => {
+                let _ = self.resources.remove::<StreamResource>(id);
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = self.resources.remove::<StreamResource>(id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Cancels and removes a live structured stream. Returns `false` when the
+    /// handle is already completed, cancelled, failed, or otherwise invalid.
+    pub fn cancel_stream(&mut self, id: ResourceId) -> bool {
+        let Some(mut stream) = self.resources.remove::<StreamResource>(id) else {
+            return false;
+        };
+        stream.cancel();
+        true
+    }
 
     pub fn request_exit(&mut self, code: i32) {
         self.requested_exit = Some(code);

@@ -36,7 +36,7 @@ pub enum ConfigValue {
     Float(f64),
     Bool(bool),
     List(Vec<ConfigValue>),
-    Section(HashMap<String, ConfigValue>),
+    Section(indexmap::IndexMap<String, ConfigValue>),
     Shell(spar_command::ShellPlan),
     ShellProgram(crate::runtime::ShellProgramValue),
     Promise(PromiseHandle),
@@ -89,7 +89,7 @@ impl ConfigValue {
 #[derive(Debug)]
 pub struct EvalResult {
     pub globals: HashMap<String, ConfigValue>,
-    pub sections: HashMap<Vec<String>, HashMap<String, ConfigValue>>,
+    pub sections: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     pub warnings: Vec<String>,
     pub(crate) interactive_value: Option<ConfigValue>,
 }
@@ -167,9 +167,9 @@ impl EvalErr {
             | EvalErr::DivisionByZero(span)
             | EvalErr::NotScalar { span, .. }
             | EvalErr::PathNotFound { span, .. } => span.line == 0,
-            EvalErr::TypeMismatch { .. }
-            | EvalErr::MaxCallDepth { .. }
-            | EvalErr::Host { .. } => true,
+            EvalErr::TypeMismatch { .. } | EvalErr::MaxCallDepth { .. } | EvalErr::Host { .. } => {
+                true
+            }
             // Caught by the `??` fallback, and downgraded to a warning by
             // `push_eval_error`; both must keep seeing the original variant.
             EvalErr::ImportRef { .. } => false,
@@ -286,7 +286,7 @@ pub struct Evaluator {
     symbols: SymbolTable,
     call_depth: usize,
     global_cache: HashMap<String, ConfigValue>,
-    section_cache: HashMap<Vec<String>, HashMap<String, ConfigValue>>,
+    section_cache: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     evaluating: HashSet<String>,
     evaluating_sects: HashSet<Vec<String>>,
     self_stack: Vec<SelfFrame>,
@@ -449,7 +449,9 @@ impl Evaluator {
             imported_programs: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             natives: crate::stdlib::native_registry(),
-            runtime_context: crate::runtime::RuntimeContext::for_base_dir(std::path::Path::new(".")),
+            runtime_context: crate::runtime::RuntimeContext::for_base_dir(std::path::Path::new(
+                ".",
+            )),
             effect_ledger: None,
             next_promise_id: 1,
             pending_promises: Vec::new(),
@@ -564,6 +566,7 @@ impl Evaluator {
         Ok(context)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_with_imports_base_effects_natives_and_context(
         program: &Program,
         symbols: &SymbolTable,
@@ -675,14 +678,31 @@ impl Evaluator {
         local_scope: &HashMap<String, ConfigValue>,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> Result<ConfigValue, SparError> {
+        Self::eval_task_block(program, symbols, result, expr, local_scope, environment)
+            .map(|(value, _)| value)
+    }
+
+    /// Evaluates a task's native `run { }` block to its shell plan, also
+    /// returning the exit code the block requested through `exit(code: N)`,
+    /// if it did.
+    pub fn eval_task_block(
+        program: &Program,
+        symbols: &SymbolTable,
+        result: &EvalResult,
+        expr: &Expr,
+        local_scope: &HashMap<String, ConfigValue>,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(ConfigValue, Option<i32>), SparError> {
         let mut ev = Evaluator::new(symbols.clone(), program.clone());
         ev.global_cache = result.globals.clone();
         ev.section_cache = result.sections.clone();
         for (key, value) in environment {
             ev.runtime_context.env_set(key.clone(), value.clone());
         }
-        ev.eval_expr(expr, local_scope)
-            .map_err(EvalErr::into_kl_error)
+        let value = ev
+            .eval_expr(expr, local_scope)
+            .map_err(EvalErr::into_kl_error)?;
+        Ok((value, ev.runtime_context.requested_exit()))
     }
 
     pub fn run(&mut self) -> Result<EvalResult, SparError> {
@@ -908,6 +928,27 @@ impl Evaluator {
     fn collect_expr_deps(&self, expr: &Expr, deps: &mut HashSet<DeclId>) {
         match expr {
             Expr::Object(items, _) => self.collect_items_deps(items, deps),
+            Expr::Closure { body, .. } => match body {
+                ClosureBody::Expr(value) => self.collect_expr_deps(value, deps),
+                ClosureBody::Block(body) => {
+                    for stmt in &body.stmts {
+                        match stmt {
+                            Statement::LocalVar(local) => {
+                                self.collect_expr_deps(&local.value, deps)
+                            }
+                            Statement::Assignment { value, .. }
+                            | Statement::FieldAssignment { value, .. }
+                            | Statement::Expression(value, _) => {
+                                self.collect_expr_deps(value, deps)
+                            }
+                            Statement::Return(ReturnValue::Expr(value), _) => {
+                                self.collect_expr_deps(value, deps)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
             Expr::NamespaceRef(nr) => {
                 if let Some(top) = nr.segments.first() {
                     if self.symbols.globals.contains_key(top.as_str()) {
@@ -957,6 +998,16 @@ impl Evaluator {
                 self.collect_expr_deps(source, deps);
                 self.collect_expr_deps(index, deps);
             }
+            Expr::MethodCall { receiver, args, .. } => {
+                self.collect_expr_deps(receiver, deps);
+                for argument in args {
+                    self.collect_expr_deps(argument, deps);
+                }
+            }
+            Expr::StructuredPipe { input, stage, .. } => {
+                self.collect_expr_deps(input, deps);
+                self.collect_expr_deps(stage, deps);
+            }
             Expr::FieldAccess { base, .. } => self.collect_expr_deps(base, deps),
             Expr::Shell(_)
             | Expr::ExecShell(_)
@@ -969,6 +1020,32 @@ impl Evaluator {
 // ── Global evaluation ─────────────────────────────────────────────────────────
 
 impl Evaluator {
+    /// Why `eval_global` gave nothing for `name`: a real cycle, a name that was
+    /// never declared, or a declaration whose own evaluation already failed.
+    fn unresolved_global(&self, name: &str, span: &Span) -> EvalErr {
+        if self.evaluating.contains(name) {
+            return EvalErr::CyclicRef {
+                name: name.to_string(),
+                span: span.clone(),
+            };
+        }
+        let declared = self.symbols.globals.contains_key(name)
+            || self.program.items.iter().any(|item| match item {
+                TopLevelItem::Var(decl) => decl.name == name,
+                TopLevelItem::Dynamic(decl) => decl.name == name,
+                _ => false,
+            });
+        let message = if declared {
+            format!("`{name}` could not be evaluated (see the error above)")
+        } else {
+            format!("undefined reference: `{name}` is not declared in the global scope")
+        };
+        EvalErr::Fatal {
+            message,
+            span: span.clone(),
+        }
+    }
+
     fn eval_global(&mut self, name: &str) -> Option<ConfigValue> {
         if let Some(cached) = self.global_cache.get(name) {
             return Some(cached.clone());
@@ -1032,7 +1109,10 @@ impl Evaluator {
         }
     }
 
-    fn eval_section_by_path(&mut self, path: &[String]) -> Option<HashMap<String, ConfigValue>> {
+    fn eval_section_by_path(
+        &mut self,
+        path: &[String],
+    ) -> Option<indexmap::IndexMap<String, ConfigValue>> {
         let path_vec = path.to_vec();
         if let Some(cached) = self.section_cache.get(&path_vec) {
             return Some(cached.clone());
@@ -1075,7 +1155,7 @@ impl Evaluator {
         Some(fields)
     }
 
-    fn eval_section_decl(&mut self, decl: &SectionDecl) -> HashMap<String, ConfigValue> {
+    fn eval_section_decl(&mut self, decl: &SectionDecl) -> indexmap::IndexMap<String, ConfigValue> {
         let path = decl.path.clone();
         let mut items = decl.items.clone();
         if let Some(binding) = &decl.type_binding {
@@ -1135,8 +1215,8 @@ impl Evaluator {
         items: &[SectionItem],
         parent_path: &[String],
         local_scope: &HashMap<String, ConfigValue>,
-    ) -> HashMap<String, ConfigValue> {
-        let mut result: HashMap<String, ConfigValue> = HashMap::new();
+    ) -> indexmap::IndexMap<String, ConfigValue> {
+        let mut result: indexmap::IndexMap<String, ConfigValue> = indexmap::IndexMap::new();
 
         for item in items {
             match item {
@@ -1205,7 +1285,11 @@ impl Evaluator {
     /// Moves the sections registered directly under `path` in `section_cache`
     /// into `map` as `ConfigValue::Section` values (recursively), removing
     /// them from the cache.
-    fn inline_nested_sections(&mut self, path: &[String], map: &mut HashMap<String, ConfigValue>) {
+    fn inline_nested_sections(
+        &mut self,
+        path: &[String],
+        map: &mut indexmap::IndexMap<String, ConfigValue>,
+    ) {
         let children: Vec<Vec<String>> = self
             .section_cache
             .keys()
@@ -1227,7 +1311,7 @@ impl Evaluator {
         &mut self,
         expr: &Expr,
         local_scope: &HashMap<String, ConfigValue>,
-    ) -> Option<HashMap<String, ConfigValue>> {
+    ) -> Option<indexmap::IndexMap<String, ConfigValue>> {
         match expr {
             Expr::NamespaceRef(nr) => match nr.segments.as_slice() {
                 [name] => self.eval_section_by_path(std::slice::from_ref(name)),
@@ -1302,7 +1386,7 @@ impl Evaluator {
                 }
             }
             (ConfigValue::Section(mut fields), ConfigValue::Int(i)) => {
-                let Some(ConfigValue::List(items)) = fields.remove("values") else {
+                let Some(ConfigValue::List(items)) = fields.shift_remove("values") else {
                     return Err(EvalErr::TypeMismatch {
                         expected: "list or Bytes",
                         got: "section",
@@ -1375,6 +1459,12 @@ impl Evaluator {
                 self.inline_nested_sections(&scratch, &mut map);
                 Ok(ConfigValue::Section(map))
             }
+            Expr::Closure { .. } => Err(EvalErr::Fatal {
+                message:
+                    "closure runtime evaluation is not available until the closure-runtime phase"
+                        .into(),
+                span: expr.span().cloned().unwrap_or_else(Span::dummy),
+            }),
             Expr::List(items, _) => {
                 let mut vals = Vec::with_capacity(items.len());
                 for item in items {
@@ -1384,6 +1474,14 @@ impl Evaluator {
             }
             Expr::Grouped(inner, _) => self.eval_expr(inner, local_scope),
             Expr::NamespaceRef(nr) => self.eval_namespace_ref(nr, local_scope),
+            Expr::MethodCall { span, .. } => Err(EvalErr::Fatal {
+                message: "method calls require the compiled runtime".into(),
+                span: span.clone(),
+            }),
+            Expr::StructuredPipe { span, .. } => Err(EvalErr::Fatal {
+                message: "structured value pipes require the compiled runtime".into(),
+                span: span.clone(),
+            }),
             Expr::FieldAccess {
                 base, field, span, ..
             } => self.eval_field_access(base, field, span, local_scope),
@@ -1395,7 +1493,9 @@ impl Evaluator {
                 let op = op.clone();
                 self.eval_binop(&op, local_scope)
             }
-            Expr::Call { name, args, span, .. } => {
+            Expr::Call {
+                name, args, span, ..
+            } => {
                 let name = name.clone();
                 let args = args.clone();
                 let span = span.clone();
@@ -1462,11 +1562,20 @@ impl Evaluator {
             )),
             Expr::ExecShell(shell) => {
                 let plan = self.eval_deferred_shell(shell, local_scope)?;
+                // The child sees the runtime's environment (`set()`, a loaded
+                // `.env`, a task's `env:`), like `$( )` already does.
+                let options = spar_process::ExecutionOptions {
+                    environment: Some(self.runtime_context.environment_pairs()),
+                    ..spar_process::ExecutionOptions::default()
+                };
                 let run = || {
-                    let outcome = execute_shell_plan(&plan).map_err(|error| EvalErr::Host {
-                        message: format!("could not execute shell plan: {error}"),
-                    })?;
-                    Ok(ConfigValue::Section(HashMap::from([
+                    let outcome =
+                        execute_shell_plan_with_options(&plan, &options).map_err(|error| {
+                            EvalErr::Host {
+                                message: format!("could not execute shell plan: {error}"),
+                            }
+                        })?;
+                    Ok(ConfigValue::Section(indexmap::IndexMap::from([
                         ("success".to_string(), ConfigValue::Bool(outcome.success)),
                         (
                             "exitCode".to_string(),
@@ -1493,10 +1602,8 @@ impl Evaluator {
     ) -> Result<spar_command::ShellPlan, EvalErr> {
         if !shell.statements.is_empty() {
             let mut mixed_scope = local_scope.clone();
-            let (plan, _) = self.eval_deferred_shell_statements(
-                &shell.statements,
-                &mut mixed_scope,
-            )?;
+            let (plan, _) =
+                self.eval_deferred_shell_statements(&shell.statements, &mut mixed_scope)?;
             return Ok(plan);
         }
 
@@ -1516,9 +1623,13 @@ impl Evaluator {
                     for command in commands {
                         lowered.push(self.eval_deferred_shell_command(command, local_scope)?);
                     }
-                    spar_command::Step::Pipeline(spar_command::PipelinePlan {
-                        commands: lowered,
-                    })
+                    spar_command::Step::Pipeline(spar_command::PipelinePlan { commands: lowered })
+                }
+                ShellStep::MixedPipeline(pipeline) => {
+                    return Err(EvalErr::Fatal {
+                        message: "mixed structured pipelines require the compiled runtime".into(),
+                        span: pipeline.span.clone(),
+                    });
                 }
             };
             steps.push((join, step));
@@ -1534,6 +1645,14 @@ impl Evaluator {
         let mut steps = Vec::new();
 
         for statement in statements {
+            // `exit(code: N)` ends the block: nothing after it contributes to
+            // the plan (commands queued before it still run).
+            if let Some(code) = self.runtime_context.requested_exit() {
+                return Ok((
+                    spar_command::ShellPlan { steps },
+                    StatementFlow::Return(ConfigValue::Int(i64::from(code))),
+                ));
+            }
             match statement {
                 Statement::LocalVar(declaration) => {
                     let value = self.eval_expr(&declaration.value, local_scope)?;
@@ -1547,6 +1666,24 @@ impl Evaluator {
                         self.global_cache.insert(name.clone(), value);
                     }
                 }
+                Statement::FieldAssignment {
+                    base,
+                    fields,
+                    value,
+                    span,
+                } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    if let Some(target) = local_scope.get_mut(base) {
+                        assign_config_field_path(target, fields, value, span)?;
+                    } else if let Some(target) = self.global_cache.get_mut(base) {
+                        assign_config_field_path(target, fields, value, span)?;
+                    } else {
+                        return Err(EvalErr::PathNotFound {
+                            path: base.clone(),
+                            span: span.clone(),
+                        });
+                    }
+                }
                 Statement::Expression(expression, _) => {
                     if let ConfigValue::Shell(plan) = self.eval_expr(expression, local_scope)? {
                         steps.extend(plan.steps);
@@ -1557,7 +1694,7 @@ impl Evaluator {
                         ReturnValue::Void => ConfigValue::Int(0),
                         ReturnValue::Expr(expression) => self.eval_expr(expression, local_scope)?,
                         ReturnValue::SectionBlock(fields) => {
-                            let mut section = HashMap::new();
+                            let mut section = indexmap::IndexMap::new();
                             for field in fields {
                                 section.insert(
                                     field.name.clone(),
@@ -1610,17 +1747,13 @@ impl Evaluator {
                                 value_name,
                                 ..
                             } => {
-                                local_scope.insert(
-                                    index_name.clone(),
-                                    ConfigValue::Int(index as i64),
-                                );
+                                local_scope
+                                    .insert(index_name.clone(), ConfigValue::Int(index as i64));
                                 local_scope.insert(value_name.clone(), item);
                             }
                         }
-                        let (iteration_plan, flow) = self.eval_deferred_shell_statements(
-                            &for_statement.body,
-                            local_scope,
-                        )?;
+                        let (iteration_plan, flow) =
+                            self.eval_deferred_shell_statements(&for_statement.body, local_scope)?;
                         restore_block_scope(
                             local_scope,
                             &snapshot,
@@ -1639,17 +1772,9 @@ impl Evaluator {
                 }
                 Statement::Try(try_statement) => {
                     let snapshot = local_scope.clone();
-                    match self.eval_deferred_shell_statements(
-                        &try_statement.body,
-                        local_scope,
-                    ) {
+                    match self.eval_deferred_shell_statements(&try_statement.body, local_scope) {
                         Ok((body_plan, flow)) => {
-                            restore_block_scope(
-                                local_scope,
-                                &snapshot,
-                                &try_statement.body,
-                                None,
-                            );
+                            restore_block_scope(local_scope, &snapshot, &try_statement.body, None);
                             steps.extend(body_plan.steps);
                             if !matches!(flow, StatementFlow::Normal) {
                                 return Ok((spar_command::ShellPlan { steps }, flow));
@@ -1657,12 +1782,7 @@ impl Evaluator {
                         }
                         Err(error @ EvalErr::Fatal { .. }) => return Err(error),
                         Err(error) => {
-                            restore_block_scope(
-                                local_scope,
-                                &snapshot,
-                                &try_statement.body,
-                                None,
-                            );
+                            restore_block_scope(local_scope, &snapshot, &try_statement.body, None);
                             let handler_snapshot = local_scope.clone();
                             if let Some(name) = &try_statement.catch_name {
                                 local_scope.insert(
@@ -1717,7 +1837,10 @@ impl Evaluator {
         for argument in &command.args {
             let spread = match argument.parts.as_slice() {
                 [ShellWordPart::Literal(prefix), ShellWordPart::Expr(expression)]
-                    if prefix == "..." => Some(expression),
+                    if prefix == "..." =>
+                {
+                    Some(expression)
+                }
                 _ => None,
             };
             if let Some(expression) = spread {
@@ -1739,17 +1862,17 @@ impl Evaluator {
             }
         }
 
+        let mut env = Vec::with_capacity(command.environment.len());
+        for entry in &command.environment {
+            env.push(spar_command::EnvironmentOverride {
+                key: entry.name.clone(),
+                value: self.eval_deferred_shell_word(&entry.value, local_scope)?,
+            });
+        }
         Ok(spar_command::CommandPlan {
             program: self.eval_deferred_shell_word(&command.program, local_scope)?,
             args,
-            env: command
-                .environment
-                .iter()
-                .map(|entry| spar_command::EnvironmentOverride {
-                    key: entry.name.clone(),
-                    value: entry.value.clone(),
-                })
-                .collect(),
+            env,
             cwd: None,
             stdin: self.eval_deferred_shell_redirect(command.stdin.as_ref(), local_scope)?,
             stdout: self.eval_deferred_shell_redirect(command.stdout.as_ref(), local_scope)?,
@@ -1761,12 +1884,10 @@ impl Evaluator {
                     Ok(spar_command::OrderedRedirection {
                         fd: redirect.fd,
                         target: match &redirect.target {
-                            ShellFdRedirectTarget::File(file) => {
-                                spar_command::Redirection::File {
-                                    path: self.eval_deferred_shell_word(&file.target, local_scope)?,
-                                    mode: file.mode.clone(),
-                                }
-                            }
+                            ShellFdRedirectTarget::File(file) => spar_command::Redirection::File {
+                                path: self.eval_deferred_shell_word(&file.target, local_scope)?,
+                                mode: file.mode.clone(),
+                            },
                             ShellFdRedirectTarget::Duplicate(fd) => {
                                 spar_command::Redirection::DuplicateFd(*fd)
                             }
@@ -1810,9 +1931,7 @@ impl Evaluator {
                 ShellWordPart::Environment(name) => {
                     if name == "?" || name == "!" {
                         return Err(EvalErr::Host {
-                            message: format!(
-                                "${name} requires an active shell execution context"
-                            ),
+                            message: format!("${name} requires an active shell execution context"),
                         });
                     }
                     output.push_str(self.runtime_context.env_get(name).unwrap_or_default());
@@ -1864,7 +1983,9 @@ impl Evaluator {
                 spar_command::Step::Command(command) => {
                     if command.background {
                         return Err(EvalErr::Host {
-                            message: "background commands are not allowed inside command substitution".into(),
+                            message:
+                                "background commands are not allowed inside command substitution"
+                                    .into(),
                         });
                     }
                     if command.program == "cd" {
@@ -1879,10 +2000,16 @@ impl Evaluator {
                 spar_command::Step::Pipeline(pipeline) => {
                     if pipeline.commands.iter().any(|command| command.background) {
                         return Err(EvalErr::Host {
-                            message: "background commands are not allowed inside command substitution".into(),
+                            message:
+                                "background commands are not allowed inside command substitution"
+                                    .into(),
                         });
                     }
-                    if pipeline.commands.iter().any(|command| command.program == "cd") {
+                    if pipeline
+                        .commands
+                        .iter()
+                        .any(|command| command.program == "cd")
+                    {
                         return Err(EvalErr::Host {
                             message: "'cd' inside command substitution is not supported".into(),
                         });
@@ -1896,8 +2023,12 @@ impl Evaluator {
             }
 
             let output = match step {
-                spar_command::Step::Command(command) => spar_process::run_command(command, &options),
-                spar_command::Step::Pipeline(pipeline) => spar_process::run_pipeline(pipeline, &options),
+                spar_command::Step::Command(command) => {
+                    spar_process::run_command(command, &options)
+                }
+                spar_command::Step::Pipeline(pipeline) => {
+                    spar_process::run_pipeline(pipeline, &options)
+                }
             }
             .map_err(|error| EvalErr::Host {
                 message: format!("command substitution failed to start: {error}"),
@@ -2042,14 +2173,27 @@ impl Evaluator {
     ) -> EvalResult_ {
         match nr.segments.as_slice() {
             [name] => {
+                if name == "_" {
+                    let value =
+                        self.runtime_context
+                            .previous_value()
+                            .cloned()
+                            .ok_or_else(|| EvalErr::PathNotFound {
+                                path: "_".into(),
+                                span: nr.span.clone(),
+                            })?;
+                    return value
+                        .try_into_config(&nr.span)
+                        .map_err(|error| EvalErr::Host {
+                            message: error.to_string(),
+                        });
+                }
                 // Check local scope first
                 if let Some(val) = local_scope.get(name.as_str()) {
                     return Ok(val.clone());
                 }
-                self.eval_global(name).ok_or_else(|| EvalErr::CyclicRef {
-                    name: name.clone(),
-                    span: nr.span.clone(),
-                })
+                self.eval_global(name)
+                    .ok_or_else(|| self.unresolved_global(name, &nr.span))
             }
 
             // ── 2 segments — enum variant or import-alias item ONLY ────────
@@ -2062,7 +2206,8 @@ impl Evaluator {
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
                     sub.natives = self.natives.clone();
-                    sub.runtime_context = crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
+                    sub.runtime_context =
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
                     sub.effect_ledger = self.effect_ledger.clone();
                     let result = if imported
                         .symbols
@@ -2115,7 +2260,8 @@ impl Evaluator {
                     sub.imported_programs = imported.imports;
                     sub.hosts = self.hosts.clone();
                     sub.natives = self.natives.clone();
-                    sub.runtime_context = crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
+                    sub.runtime_context =
+                        crate::runtime::RuntimeContext::for_base_dir(&imported.base_dir);
                     sub.effect_ledger = self.effect_ledger.clone();
 
                     if imported.symbols.enums.contains_key(rest[0].as_str()) {
@@ -2212,10 +2358,9 @@ impl Evaluator {
                 return self.eval_section_field_direct(&section_path, field, span);
             }
             if rest.is_empty() {
-                return self.eval_global(field).ok_or_else(|| EvalErr::CyclicRef {
-                    name: field.to_string(),
-                    span: span.clone(),
-                });
+                return self
+                    .eval_global(field)
+                    .ok_or_else(|| self.unresolved_global(field, span));
             }
             return self.eval_section_field_direct(&rest, field, span);
         }
@@ -2314,6 +2459,98 @@ impl Evaluator {
         fc: &FnCall,
         local_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
+        // Positional calls are now also used for first-class callables. Preserve
+        // compatibility for ordinary Spar functions by binding positional
+        // arguments to the declaration's parameter order before falling back to
+        // the legacy built-ins below.
+        if let Some(function) = self.program.items.iter().find_map(|item| match item {
+            TopLevelItem::Function(function) if function.name == fc.name => Some(function.clone()),
+            _ => None,
+        }) {
+            if fc.args.len() > function.params.len() {
+                return Err(EvalErr::Fatal {
+                    message: format!(
+                        "function '{}' expects at most {} argument(s), got {}",
+                        fc.name,
+                        function.params.len(),
+                        fc.args.len()
+                    ),
+                    span: fc.span.clone(),
+                });
+            }
+            let args = function
+                .params
+                .iter()
+                .zip(fc.args.iter())
+                .map(|(parameter, value)| CallArg {
+                    param_name: parameter.name.clone(),
+                    param_name_span: fc.span.clone(),
+                    value: value.clone(),
+                    span: fc.span.clone(),
+                })
+                .collect::<Vec<_>>();
+            return self.eval_call(&fc.name, &args, &fc.span, local_scope);
+        }
+
+        // Selective imports keep the imported function under its local name. The
+        // compatibility evaluator does not carry the resolver's module identity,
+        // so locate the unique imported module that actually exports that name.
+        if self.symbols.imported_functions.contains_key(&fc.name) {
+            let imported = self.imported_programs.values().find_map(|program| {
+                let function = program.program.items.iter().find_map(|item| match item {
+                    TopLevelItem::Function(function)
+                        if function.name == fc.name && !function.is_private =>
+                    {
+                        Some(function.clone())
+                    }
+                    _ => None,
+                })?;
+                Some((program.clone(), function))
+            });
+            if let Some((imported, function)) = imported {
+                if fc.args.len() > function.params.len() {
+                    return Err(EvalErr::Fatal {
+                        message: format!(
+                            "function '{}' expects at most {} argument(s), got {}",
+                            fc.name,
+                            function.params.len(),
+                            fc.args.len()
+                        ),
+                        span: fc.span.clone(),
+                    });
+                }
+                let mut bound = HashMap::new();
+                for (parameter, expression) in function.params.iter().zip(fc.args.iter()) {
+                    bound.insert(
+                        parameter.name.clone(),
+                        self.eval_expr(expression, local_scope)?,
+                    );
+                }
+                if function.is_async {
+                    return self.allocate_opaque_promise(
+                        None,
+                        None,
+                        fc.name.clone(),
+                        &function,
+                        &bound,
+                    );
+                }
+                let mut sub = Evaluator::new(imported.symbols, imported.program);
+                sub.imported_programs = imported.imports;
+                sub.hosts = self.hosts.clone();
+                sub.natives = self.natives.clone();
+                sub.effect_ledger = self.effect_ledger.clone();
+                sub.call_depth = self.call_depth + 1;
+                sub.eval_default_args(&function, &mut bound)?;
+                let result = sub
+                    .eval_func_stmts(&function.body.stmts, &mut bound)?
+                    .into_return()
+                    .unwrap_or(ConfigValue::Int(0));
+                self.absorb_diagnostics(&mut sub);
+                return Ok(result);
+            }
+        }
+
         match fc.name.as_str() {
             "env" => {
                 let key = match self.eval_expr(&fc.args[0], local_scope)? {
@@ -2570,6 +2807,9 @@ pub(crate) fn lower_shell_expr(expression: &ShellExpr) -> spar_command::ShellPla
                             commands: commands.iter().map(lower_shell_command).collect(),
                         })
                     }
+                    ShellStep::MixedPipeline(_) => unreachable!(
+                        "mixed structured pipelines must not enter the byte-only shell lowerer"
+                    ),
                 };
                 (join, step)
             })
@@ -2586,7 +2826,7 @@ fn lower_shell_command(command: &ShellCommandExpr) -> spar_command::CommandPlan 
             .iter()
             .map(|entry| spar_command::EnvironmentOverride {
                 key: entry.name.clone(),
-                value: entry.value.clone(),
+                value: entry.value.text.clone(),
             })
             .collect(),
         cwd: None,
@@ -2657,6 +2897,13 @@ pub fn execute_shell_plan_with_options(
                     .map_err(|_| std::io::Error::other("exit status must be an integer"))?
                     .unwrap_or(0);
                 self.stop = true;
+                // The builtin decides the plan's final status, not whatever
+                // command ran before it.
+                self.last_status = Some(spar_process::PipelineStatus {
+                    code,
+                    success: code == 0,
+                    processes: vec![],
+                });
                 return Ok(spar_process::ExitStatus {
                     success: code == 0,
                     code: Some(code),
@@ -2737,6 +2984,34 @@ impl Evaluator {
             arguments,
         });
         Ok(ConfigValue::Promise(handle))
+    }
+
+    /// `Struct(field: value, ...)` outside function bodies: clone the struct's
+    /// canonical section and apply the named overrides.
+    fn eval_struct_constructor(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        call_span: &Span,
+        caller_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
+        let path = vec![name.to_string()];
+        let mut section =
+            self.eval_section_by_path(&path)
+                .ok_or_else(|| EvalErr::PathNotFound {
+                    path: name.to_string(),
+                    span: call_span.clone(),
+                })?;
+        for (field, value) in self.eval_explicit_args(args, caller_scope)? {
+            if !section.contains_key(&field) {
+                return Err(EvalErr::Fatal {
+                    message: format!("struct '{name}' has no field '{field}'"),
+                    span: call_span.clone(),
+                });
+            }
+            section.insert(field, value);
+        }
+        Ok(ConfigValue::Section(section))
     }
 
     fn eval_call(
@@ -2977,19 +3252,20 @@ impl Evaluator {
         }
 
         // 1 segment: local plain function call.
-        let func_decl = self
-            .program
-            .items
-            .iter()
-            .find_map(|item| {
-                if let TopLevelItem::Function(f) = item {
-                    if f.name == name {
-                        return Some(f.clone());
-                    }
+        let func_decl = self.program.items.iter().find_map(|item| {
+            if let TopLevelItem::Function(f) = item {
+                if f.name == name {
+                    return Some(f.clone());
                 }
-                None
-            })
-            .unwrap(); // resolver ensures function exists
+            }
+            None
+        });
+        let Some(func_decl) = func_decl else {
+            // Not a function: a canonical struct called as a constructor.
+            // The resolver guarantees one of the two exists.
+            self.call_depth -= 1;
+            return self.eval_struct_constructor(name, args, call_span, caller_scope);
+        };
 
         let mut local_scope = self.eval_explicit_args(args, caller_scope)?;
         if func_decl.is_async {
@@ -3068,6 +3344,24 @@ impl Evaluator {
                         self.global_cache.insert(name.clone(), value);
                     }
                 }
+                FuncStmt::FieldAssignment {
+                    base,
+                    fields,
+                    value,
+                    span,
+                } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    if let Some(target) = local_scope.get_mut(base) {
+                        assign_config_field_path(target, fields, value, span)?;
+                    } else if let Some(target) = self.global_cache.get_mut(base) {
+                        assign_config_field_path(target, fields, value, span)?;
+                    } else {
+                        return Err(EvalErr::PathNotFound {
+                            path: base.clone(),
+                            span: span.clone(),
+                        });
+                    }
+                }
                 FuncStmt::Return(ret_value, _) => {
                     let val = match ret_value {
                         // `void` functions never let this value escape — the
@@ -3077,7 +3371,7 @@ impl Evaluator {
                         ReturnValue::Expr(e) => self.eval_expr(&e.clone(), local_scope)?,
                         ReturnValue::SectionBlock(fields) => {
                             let fields = fields.clone();
-                            let mut map = HashMap::new();
+                            let mut map = indexmap::IndexMap::new();
                             for rf in &fields {
                                 let v = self.eval_expr(&rf.value, local_scope)?;
                                 map.insert(rf.name.clone(), v);
@@ -3191,6 +3485,44 @@ impl Evaluator {
         }
         Ok(StatementFlow::Normal)
     }
+}
+
+fn assign_config_field_path(
+    target: &mut ConfigValue,
+    fields: &[String],
+    value: ConfigValue,
+    span: &Span,
+) -> Result<(), EvalErr> {
+    let Some((field, rest)) = fields.split_first() else {
+        return Err(EvalErr::Fatal {
+            message: "field assignment requires a field path".into(),
+            span: span.clone(),
+        });
+    };
+    let got = target.type_name();
+    let ConfigValue::Section(section) = target else {
+        return Err(EvalErr::TypeMismatch {
+            expected: "section",
+            got,
+        });
+    };
+    if rest.is_empty() {
+        if !section.contains_key(field) {
+            return Err(EvalErr::PathNotFound {
+                path: field.clone(),
+                span: span.clone(),
+            });
+        }
+        section.insert(field.clone(), value);
+        return Ok(());
+    }
+    let nested = section
+        .get_mut(field)
+        .ok_or_else(|| EvalErr::PathNotFound {
+            path: field.clone(),
+            span: span.clone(),
+        })?;
+    assign_config_field_path(nested, rest, value, span)
 }
 
 fn restore_block_scope(

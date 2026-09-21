@@ -155,3 +155,17 @@ fn task_named_exec_and_script_exec_remain_distinct() {
     let script = spar_in(&["exec", "app.spar"], directory.path());
     assert_eq!(script.status.code(), Some(7), "{script:?}");
 }
+
+#[test]
+fn unix_shell_pipe_keeps_existing_process_semantics() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            function main() -> shell {
+                return shell { printf spar | cat; };
+            };
+            "#,
+        )
+        .expect("ordinary shell pipe must remain a Unix process pipe");
+    assert_eq!(outcome.exit_status, 0);
+}

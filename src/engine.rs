@@ -16,7 +16,7 @@ use crate::ast::{Program, TopLevelItem};
 use crate::compiled::CompiledProgram;
 use crate::compiler::{validate_entry_signature, Compilation, CompileOptions, Compiler};
 use crate::error::{Span, SparError};
-use crate::evaluator::{ConfigValue, Evaluator};
+use crate::evaluator::Evaluator;
 use crate::runtime::Value;
 
 /// The result of running Execute mode's `main` to completion.
@@ -261,6 +261,7 @@ fn require_entry_signature(program: &Program) -> Result<(), SparError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluator::ConfigValue;
     use crate::host::{HostFunction, HostRegistry};
 
     #[test]
@@ -757,7 +758,10 @@ mod tests {
             .first()
             .expect("command substitution failure")
             .to_string();
-        assert!(rendered.contains("command substitution exited with status 1"), "{rendered}");
+        assert!(
+            rendered.contains("command substitution exited with status 1"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("internal runtime error"), "{rendered}");
     }
 
@@ -868,7 +872,10 @@ mod tests {
         let Some(SparError::EvalError { span, .. }) = errors.first() else {
             panic!("expected an eval error, got {errors:?}");
         };
-        assert!(span.line > 0, "runtime error must never use the dummy 0:0 span");
+        assert!(
+            span.line > 0,
+            "runtime error must never use the dummy 0:0 span"
+        );
     }
 
     #[test]

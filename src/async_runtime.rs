@@ -53,11 +53,7 @@ pub(crate) struct TaskTable {
 }
 
 impl TaskTable {
-    pub(crate) fn spawn(
-        &mut self,
-        function: FunctionId,
-        arguments: Vec<Value>,
-    ) -> PromiseHandle {
+    pub(crate) fn spawn(&mut self, function: FunctionId, arguments: Vec<Value>) -> PromiseHandle {
         let handle = PromiseHandle::new(self.next_id);
         self.next_id += 1;
         self.states.insert(
@@ -113,11 +109,7 @@ impl TaskTable {
         }
     }
 
-    pub(crate) fn complete(
-        &mut self,
-        handle: PromiseHandle,
-        result: Result<Value, RuntimeFault>,
-    ) {
+    pub(crate) fn complete(&mut self, handle: PromiseHandle, result: Result<Value, RuntimeFault>) {
         self.states.insert(handle, TaskState::Ready(result));
     }
 

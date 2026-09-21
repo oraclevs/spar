@@ -212,7 +212,9 @@ mod tests {
     #[test]
     fn package_submodule_cannot_escape_the_package_root() {
         let locator = ModuleLocator::for_root(sample_lockfile(), test_store());
-        assert!(locator.resolve_import(Path::new("."), "http/../secret").is_none());
+        assert!(locator
+            .resolve_import(Path::new("."), "http/../secret")
+            .is_none());
     }
 
     #[test]
@@ -292,9 +294,13 @@ mod tests {
     #[test]
     fn visible_import_aliases_are_sorted_and_offline() {
         let mut lockfile = sample_lockfile();
-        lockfile.root.insert("alpha".to_string(), "github-owner-http-abc123".to_string());
+        lockfile
+            .root
+            .insert("alpha".to_string(), "github-owner-http-abc123".to_string());
         let locator = ModuleLocator::for_root(lockfile, test_store());
-        assert_eq!(locator.visible_import_aliases(), vec!["alpha".to_string(), "http".to_string()]);
+        assert_eq!(
+            locator.visible_import_aliases(),
+            vec!["alpha".to_string(), "http".to_string()]
+        );
     }
-
 }

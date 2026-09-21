@@ -314,9 +314,7 @@ fn package_imports_inside_dependencies_use_that_dependencies_lock_edges() {
         locator: Some(locator),
         ..CompileOptions::default()
     })
-    .compile(
-        "import pkg \"http\" as http;\nexport var value: str = http::dependencyName;\n",
-    );
+    .compile("import pkg \"http\" as http;\nexport var value: str = http::dependencyName;\n");
 
     assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
     assert_eq!(
@@ -354,5 +352,58 @@ fn bundled_std_submodule_resolves_without_lockfile() {
     assert_eq!(
         compilation.result.unwrap().globals["present"],
         spar::ConfigValue::Bool(false)
+    );
+}
+
+#[test]
+fn selective_struct_import_carries_public_impl_methods_but_hides_private_helpers() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("user.spar"),
+        r#"
+        export struct User { name: str = "Obi"; };
+        impl User {
+            function displayName(self) -> str { return self.normalized(); };
+            private function normalized(self) -> str { return self.name; };
+        };
+        "#,
+    )
+    .unwrap();
+
+    let public_call = Compiler::new(CompileOptions {
+        base_dir: temp.path().to_path_buf(),
+        ..CompileOptions::default()
+    })
+    .compile(
+        r#"
+        import { User } from "./user";
+        function main() -> str {
+            var user = User();
+            return user.displayName();
+        };
+        "#,
+    );
+    assert!(public_call.errors.is_empty(), "{:?}", public_call.errors);
+
+    let private_call = Compiler::new(CompileOptions {
+        base_dir: temp.path().to_path_buf(),
+        ..CompileOptions::default()
+    })
+    .compile(
+        r#"
+        import { User } from "./user";
+        function main() -> str {
+            var user = User();
+            return user.normalized();
+        };
+        "#,
+    );
+    assert!(
+        private_call.errors.iter().any(|error| {
+            let message = error.to_string();
+            message.contains("private") && message.contains("normalized")
+        }),
+        "{:?}",
+        private_call.errors
     );
 }

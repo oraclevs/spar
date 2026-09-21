@@ -1,8 +1,12 @@
 use crate::ast::{
-    ShellCommandExpr, ShellEnvironmentEntry, ShellExpr, ShellFdRedirect, ShellFdRedirectTarget,
-    ShellJoin, ShellRedirect, ShellStep, ShellWord, ShellWordPart, TopLevelItem,
+    DecoderNamespace, DecoderRef, Expr, NamedDecoderArg, ShellCodecStage, ShellCommandExpr,
+    ShellDecodeStage, ShellEnvironmentEntry, ShellExpr, ShellFdRedirect, ShellFdRedirectTarget,
+    ShellJoin, ShellMixedPipeline, ShellRedirect, ShellStep, ShellWord, ShellWordPart,
+    TopLevelItem,
 };
 use crate::error::{Span, SparError};
+use crate::lexer::Lexer;
+use crate::parser::parse_expression_tokens;
 use crate::token::{SpannedToken, Token};
 use spar_command::RedirectMode;
 
@@ -140,6 +144,11 @@ pub(crate) fn parse_command_substitution(
     if steps.iter().any(|(_, step)| match step {
         ShellStep::Command(command) => command.background,
         ShellStep::Pipeline(commands) => commands.iter().any(|command| command.background),
+        ShellStep::MixedPipeline(pipeline) => pipeline
+            .input
+            .iter()
+            .chain(pipeline.output.iter())
+            .any(|command| command.background),
     }) {
         return Err(parse_error(
             "background commands are not allowed inside command substitution",
@@ -156,6 +165,316 @@ pub(crate) fn parse_command_substitution(
         },
         end + 1,
     ))
+}
+
+fn command_has_stdout_redirect(command: &ShellCommandExpr) -> bool {
+    command.stdout.is_some() || command.redirections.iter().any(|redirect| redirect.fd == 1)
+}
+
+fn command_has_stdin_redirect(command: &ShellCommandExpr) -> bool {
+    command.stdin.is_some() || command.redirections.iter().any(|redirect| redirect.fd == 0)
+}
+
+fn decode_bridge_from_command(
+    command: &ShellCommandExpr,
+) -> Result<Option<ShellDecodeStage>, SparError> {
+    if command.program.text != "from" {
+        return Ok(None);
+    }
+    if !command.environment.is_empty()
+        || command.background
+        || command.stdin.is_some()
+        || command.stdout.is_some()
+        || command.stderr.is_some()
+        || !command.redirections.is_empty()
+    {
+        return Err(parse_error(
+            "`from FORMAT` is a byte-to-value bridge and cannot carry shell environment/redirection/background syntax",
+            command.span.clone(),
+        ));
+    }
+    if command.args.len() != 1 || !word_is_literal(&command.args[0]) {
+        return Err(parse_error(
+            "`from` expects exactly one literal format name, for example `| from jsonl`",
+            command.span.clone(),
+        ));
+    }
+    Ok(Some(ShellDecodeStage {
+        decoder: DecoderRef {
+            namespace: None,
+            name: command.args[0].text.clone(),
+            span: command.args[0].span.clone(),
+        },
+        args: Vec::new(),
+        span: command.span.clone(),
+    }))
+}
+
+fn encode_bridge_from_stage(raw: &str, span: &Span) -> Result<Option<ShellCodecStage>, SparError> {
+    let mut words = raw.split_whitespace();
+    if words.next() != Some("to") {
+        return Ok(None);
+    }
+    let Some(format) = words.next() else {
+        return Err(parse_error(
+            "`to` expects a literal format name, for example `|> to jsonl`",
+            span.clone(),
+        ));
+    };
+    if words.next().is_some()
+        || format
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+    {
+        return Err(parse_error(
+            "`to` expects exactly one literal format name, for example `|> to jsonl`",
+            span.clone(),
+        ));
+    }
+    Ok(Some(ShellCodecStage {
+        format: format.to_string(),
+        span: span.clone(),
+    }))
+}
+
+fn word_is_literal(word: &ShellWord) -> bool {
+    word.parts
+        .iter()
+        .all(|part| matches!(part, ShellWordPart::Literal(_)))
+}
+
+fn parse_structured_stage_expression(raw: &str, span: &Span) -> Result<Expr, SparError> {
+    let mut tokens = Lexer::new(raw).tokenize()?;
+    for token in &mut tokens {
+        let relative_line = token.span.line;
+        let relative_col = token.span.col;
+        token.span.start = span.start.saturating_add(token.span.start);
+        token.span.end = span.start.saturating_add(token.span.end);
+        token.span.line = span.line.saturating_add(relative_line.saturating_sub(1));
+        token.span.col = if relative_line <= 1 {
+            span.col.saturating_add(relative_col.saturating_sub(1))
+        } else {
+            relative_col
+        };
+    }
+    parse_expression_tokens(tokens).map_err(|error| match error {
+        SparError::LexError { message, .. } => SparError::LexError {
+            message,
+            span: span.clone(),
+        },
+        SparError::ParseError { message, .. } => SparError::ParseError {
+            message,
+            span: span.clone(),
+        },
+        other => other,
+    })
+}
+
+fn decoder_name_valid(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn decoder_subspan(raw: &str, parent: &Span, start: usize, end: usize) -> Span {
+    let prefix = &raw[..start.min(raw.len())];
+    let line_offset = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let line = parent.line.saturating_add(line_offset);
+    let col = if let Some(last_newline) = prefix.rfind('\n') {
+        (start - last_newline) as u32
+    } else {
+        parent.col.saturating_add(start as u32)
+    };
+    Span::new(
+        parent.start.saturating_add(start),
+        parent.start.saturating_add(end),
+        line,
+        col,
+    )
+}
+
+fn top_level_positions(text: &str, needle: u8) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut positions = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut paren = 0_u32;
+    let mut bracket = 0_u32;
+    let mut brace = 0_u32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = if quote == Some(byte) {
+                None
+            } else if quote.is_none() {
+                Some(byte)
+            } else {
+                quote
+            };
+            i += 1;
+            continue;
+        }
+        if quote.is_none() {
+            match byte {
+                b'(' => paren += 1,
+                b')' => paren = paren.saturating_sub(1),
+                b'[' => bracket += 1,
+                b']' => bracket = bracket.saturating_sub(1),
+                b'{' => brace += 1,
+                b'}' => brace = brace.saturating_sub(1),
+                _ => {}
+            }
+            if byte == needle && paren == 0 && bracket == 0 && brace == 0 {
+                positions.push(i);
+            }
+        }
+        i += 1;
+    }
+    positions
+}
+
+fn split_decoder_args(text: &str) -> Vec<(usize, usize)> {
+    let commas = top_level_positions(text, b',');
+    let mut result = Vec::new();
+    let mut start = 0usize;
+    for comma in commas {
+        result.push((start, comma));
+        start = comma + 1;
+    }
+    result.push((start, text.len()));
+    result
+}
+
+fn parse_decoder_stage(raw: &str, span: &Span) -> Result<ShellDecodeStage, SparError> {
+    let raw = raw.trim();
+    let (head, args_text, args_base) = if let Some(open) = raw.find('(') {
+        if !raw.ends_with(')') {
+            return Err(parse_error(
+                "decoder option list must end with ')'",
+                span.clone(),
+            ));
+        }
+        (&raw[..open], Some(&raw[open + 1..raw.len() - 1]), open + 1)
+    } else {
+        (raw, None, raw.len())
+    };
+    let head = head.trim();
+    let (namespace, name) = if let Some((prefix, name)) = head.split_once("::") {
+        if name.contains("::") {
+            return Err(parse_error(
+                "decoder reference may contain only one namespace separator",
+                span.clone(),
+            ));
+        }
+        let namespace = match prefix {
+            "codec" => DecoderNamespace::Codec,
+            "scoc" => DecoderNamespace::Scoc,
+            "custom" => DecoderNamespace::Custom,
+            _ => {
+                return Err(parse_error(
+                    format!("unknown decoder namespace `{prefix}`"),
+                    span.clone(),
+                ))
+            }
+        };
+        (Some(namespace), name)
+    } else {
+        (None, head)
+    };
+    if !decoder_name_valid(name) {
+        return Err(parse_error(
+            "decoder name must start with a letter and contain only letters, digits, '_' or '-'",
+            span.clone(),
+        ));
+    }
+    let name_offset = raw.find(name).unwrap_or(0);
+    let decoder_span = decoder_subspan(raw, span, name_offset, name_offset + name.len());
+    let decoder = DecoderRef {
+        namespace,
+        name: name.to_string(),
+        span: decoder_span,
+    };
+
+    let mut args = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(args_text) = args_text {
+        if !args_text.trim().is_empty() {
+            for (part_start, part_end) in split_decoder_args(args_text) {
+                let part = &args_text[part_start..part_end];
+                let leading = part.len() - part.trim_start().len();
+                let trailing = part.trim_end().len();
+                if trailing <= leading {
+                    return Err(parse_error("empty decoder argument", span.clone()));
+                }
+                let trimmed = &part[leading..trailing];
+                let colons = top_level_positions(trimmed, b':');
+                if colons.len() != 1 {
+                    return Err(parse_error(
+                        "decoder arguments use `name: expression` syntax",
+                        span.clone(),
+                    ));
+                }
+                let colon = colons[0];
+                let arg_name = trimmed[..colon].trim();
+                if arg_name.is_empty()
+                    || !arg_name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                    || !arg_name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                {
+                    return Err(parse_error("invalid decoder option name", span.clone()));
+                }
+                if !seen.insert(arg_name.to_string()) {
+                    return Err(parse_error(
+                        format!("duplicate decoder option `{arg_name}`"),
+                        span.clone(),
+                    ));
+                }
+                let expr_source = trimmed[colon + 1..].trim();
+                if expr_source.is_empty() {
+                    return Err(parse_error(
+                        format!("decoder option `{arg_name}` requires a value"),
+                        span.clone(),
+                    ));
+                }
+                let expr_in_trimmed =
+                    trimmed[colon + 1..].find(expr_source).unwrap_or(0) + colon + 1;
+                let value_start = args_base + part_start + leading + expr_in_trimmed;
+                let value_span =
+                    decoder_subspan(raw, span, value_start, value_start + expr_source.len());
+                let value = parse_structured_stage_expression(expr_source, &value_span)?;
+                let arg_start = args_base + part_start + leading;
+                let arg_end = args_base + part_start + trailing;
+                args.push(NamedDecoderArg {
+                    name: arg_name.to_string(),
+                    value,
+                    span: decoder_subspan(raw, span, arg_start, arg_end),
+                });
+            }
+        }
+    }
+    Ok(ShellDecodeStage {
+        decoder,
+        args,
+        span: span.clone(),
+    })
 }
 
 struct BodyParser<'a> {
@@ -216,28 +535,173 @@ impl<'a> BodyParser<'a> {
     }
 
     fn parse_pipeline(&mut self) -> Result<ShellStep, SparError> {
-        let mut commands = vec![self.parse_command()?];
-        while self.at(&Token::ShellPipe) {
-            let pipe_span = self.advance().span.clone();
-            if self.pos == self.tokens.len() || self.at(&Token::Semicolon) {
-                return Err(parse_error("expected a command after pipe", pipe_span));
+        let first = self.parse_command()?;
+        let start_span = first.span.clone();
+        let mut input = vec![first];
+        let mut decoder: Option<ShellDecodeStage> = None;
+        let mut stages = Vec::new();
+        let mut encoder: Option<ShellCodecStage> = None;
+        let mut output = Vec::new();
+
+        loop {
+            if self.at(&Token::ShellPipe) {
+                let pipe_span = self.advance().span.clone();
+                if self.pos == self.tokens.len() || self.at(&Token::Semicolon) {
+                    return Err(parse_error("expected a command after pipe", pipe_span));
+                }
+                if self.at(&Token::StructuredPipe) {
+                    return Err(parse_error("expected a byte command after '|'", pipe_span));
+                }
+                if let Some(token) = self.tokens.get(self.pos).cloned() {
+                    if let Token::ShellDecoderStage(raw) = token.token {
+                        if decoder.is_some() {
+                            return Err(parse_error(
+                                "a mixed pipeline can contain only one `from` decoder",
+                                token.span,
+                            ));
+                        }
+                        if command_has_stdout_redirect(input.last().expect("input command")) {
+                            return Err(parse_error(
+                                "the command before `from` cannot redirect stdout; `from` must receive that byte stream",
+                                token.span,
+                            ));
+                        }
+                        self.pos += 1;
+                        decoder = Some(parse_decoder_stage(&raw, &token.span)?);
+                        continue;
+                    }
+                }
+                let command = self.parse_command()?;
+                if decoder.is_none() {
+                    if let Some(stage) = decode_bridge_from_command(&command)? {
+                        if command_has_stdout_redirect(input.last().expect("input command")) {
+                            return Err(parse_error(
+                                "the command before `from` cannot redirect stdout; `from` must receive that byte stream",
+                                command.span.clone(),
+                            ));
+                        }
+                        decoder = Some(stage);
+                    } else {
+                        if command_has_stdin_redirect(&command) {
+                            return Err(parse_error(
+                                "pipeline input already comes from previous stage",
+                                command.span.clone(),
+                            ));
+                        }
+                        input.push(command);
+                    }
+                } else if encoder.is_none() {
+                    return Err(parse_error(
+                        "structured values cannot enter a Unix `|` pipeline directly; add `|> to FORMAT` first",
+                        pipe_span,
+                    ));
+                } else {
+                    if output.is_empty() && command_has_stdin_redirect(&command) {
+                        return Err(parse_error(
+                            "the first command after `to` receives stdin from the structured serializer",
+                            command.span.clone(),
+                        ));
+                    }
+                    output.push(command);
+                }
+                continue;
             }
-            commands.push(self.parse_command()?);
+
+            if self.at(&Token::StructuredPipe) {
+                let pipe_span = self.advance().span.clone();
+                if decoder.is_none() {
+                    return Err(parse_error(
+                        "Unix bytes cannot enter `|>` directly; add `| from FORMAT` first",
+                        pipe_span,
+                    ));
+                }
+                if encoder.is_some() {
+                    return Err(parse_error(
+                        "structured stages cannot follow `to`; use Unix `|` after `|> to FORMAT`",
+                        pipe_span,
+                    ));
+                }
+                let token = self.tokens.get(self.pos).cloned().ok_or_else(|| {
+                    parse_error("expected a Spar stage after '|>'", pipe_span.clone())
+                })?;
+                let Token::ShellStructuredStage(raw) = token.token else {
+                    return Err(parse_error("expected a Spar stage after '|>'", token.span));
+                };
+                self.pos += 1;
+                if let Some(stage) = encode_bridge_from_stage(&raw, &token.span)? {
+                    encoder = Some(stage);
+                } else {
+                    stages.push(parse_structured_stage_expression(&raw, &token.span)?);
+                }
+                continue;
+            }
+            break;
         }
-        if commands.len() == 1 {
-            Ok(ShellStep::Command(Box::new(
-                commands.pop().expect("one command"),
-            )))
-        } else {
-            if commands
-                .iter()
-                .skip(1)
-                .any(|command| command.stdin.is_some())
-            {
+
+        // `|> to FORMAT > file`: the serializer writes straight to a file.
+        let mut encoder_redirect = None;
+        if encoder.is_some()
+            && decoder.is_some()
+            && (self.at(&Token::Gt) || self.at(&Token::ShellRedirectAppend))
+        {
+            if !output.is_empty() {
+                return Err(self
+                    .error("`to FORMAT` cannot both redirect to a file and pipe into a command"));
+            }
+            let operator = self.advance().clone();
+            let target = self.expect_word("expected a redirect target after `to FORMAT >`")?;
+            let span = joined_span(&operator.span, &target.span);
+            encoder_redirect = Some(ShellRedirect {
+                target,
+                mode: if operator.token == Token::ShellRedirectAppend {
+                    RedirectMode::Append
+                } else {
+                    RedirectMode::Truncate
+                },
+                span,
+            });
+        }
+
+        let Some(decoder) = decoder else {
+            if input.len() == 1 {
+                return Ok(ShellStep::Command(Box::new(
+                    input.pop().expect("one command"),
+                )));
+            }
+            if input.iter().skip(1).any(command_has_stdin_redirect) {
                 return Err(self.error("pipeline input already comes from previous stage"));
             }
-            Ok(ShellStep::Pipeline(commands))
+            return Ok(ShellStep::Pipeline(input));
+        };
+
+        if input.iter().any(|command| command.background)
+            || output.iter().any(|command| command.background)
+        {
+            return Err(parse_error(
+                "background execution is not supported for mixed structured pipelines",
+                start_span.clone(),
+            ));
         }
+        let end_span = output
+            .last()
+            .map(|command| command.span.clone())
+            .or_else(|| {
+                encoder_redirect
+                    .as_ref()
+                    .map(|redirect| redirect.span.clone())
+            })
+            .or_else(|| encoder.as_ref().map(|stage| stage.span.clone()))
+            .or_else(|| stages.last().and_then(|stage| stage.span().cloned()))
+            .unwrap_or_else(|| decoder.span.clone());
+        Ok(ShellStep::MixedPipeline(Box::new(ShellMixedPipeline {
+            input,
+            decoder,
+            stages,
+            encoder,
+            output,
+            encoder_redirect,
+            span: joined_span(&start_span, &end_span),
+        })))
     }
 
     fn parse_command(&mut self) -> Result<ShellCommandExpr, SparError> {
@@ -255,10 +719,29 @@ impl<'a> BodyParser<'a> {
                 ));
             }
             self.pos += 1;
+            let value_span = Span::new(
+                token.span.start + name.len() + 1,
+                token.span.end,
+                token.span.line,
+                token.span.col + name.chars().count() as u32 + 1,
+            );
+            let mut parts = parse_word_parts(value, &value_span)?;
+            let mut value_text = value.to_string();
+            let mut end_span = token.span.clone();
+            self.merge_adjacent_fragments(&mut parts, &mut value_text, &mut end_span)?;
             environment.push(ShellEnvironmentEntry {
                 name: name.to_string(),
-                value: value.to_string(),
-                span: token.span,
+                value: ShellWord {
+                    text: value_text,
+                    parts,
+                    span: value_span,
+                },
+                span: Span::new(
+                    token.span.start,
+                    end_span.end,
+                    token.span.line,
+                    token.span.col,
+                ),
             });
         }
         if self.pos == self.tokens.len()
@@ -266,10 +749,11 @@ impl<'a> BodyParser<'a> {
             || self.at(&Token::AndAnd)
             || self.at(&Token::OrOr)
             || self.at(&Token::ShellPipe)
+            || self.at(&Token::StructuredPipe)
         {
             let assignment = environment
                 .first()
-                .map(|entry| format!("{}={}", entry.name, entry.value))
+                .map(|entry| format!("{}={}", entry.name, entry.value.text))
                 .unwrap_or_default();
             let variable = environment
                 .first()
@@ -308,6 +792,7 @@ impl<'a> BodyParser<'a> {
         while self.pos < self.tokens.len()
             && !self.at(&Token::Semicolon)
             && !self.at(&Token::ShellPipe)
+            && !self.at(&Token::StructuredPipe)
             && !self.at(&Token::AndAnd)
             && !self.at(&Token::OrOr)
             && !self.at(&Token::ShellBackground)
@@ -446,24 +931,14 @@ impl<'a> BodyParser<'a> {
         token
     }
 
-    fn expect_word(&mut self, message: &str) -> Result<ShellWord, SparError> {
-        let Some(token) = self.tokens.get(self.pos).cloned() else {
-            return Err(self.error(message));
-        };
-        let (text, literal) = match token.token {
-            Token::ShellWord(text) => (text, false),
-            Token::ShellLiteralWord(text) => (text, true),
-            _ => return Err(parse_error(message, token.span)),
-        };
-        self.pos += 1;
-        let mut parts = if literal {
-            vec![ShellWordPart::Literal(text.clone())]
-        } else {
-            parse_word_parts(&text, &token.span)?
-        };
-        let mut combined_text = text;
-        let mut end_span = token.span.clone();
-
+    /// Appends every physically adjacent shell-word fragment to a word being
+    /// built (see the note below on why the lexer emits fragments).
+    fn merge_adjacent_fragments(
+        &mut self,
+        parts: &mut Vec<ShellWordPart>,
+        combined_text: &mut String,
+        end_span: &mut Span,
+    ) -> Result<(), SparError> {
         // Shell quoting is compositional: adjacent fragments with no
         // intervening whitespace form one argv word.  For example:
         //
@@ -475,10 +950,7 @@ impl<'a> BodyParser<'a> {
         // separate tokens so each fragment keeps its interpolation rules.
         // Merge only physically-adjacent shell-word tokens here; a real
         // whitespace gap must remain an argv boundary.
-        loop {
-            let Some(next) = self.tokens.get(self.pos).cloned() else {
-                break;
-            };
+        while let Some(next) = self.tokens.get(self.pos).cloned() {
             if next.span.start != end_span.end {
                 break;
             }
@@ -497,6 +969,28 @@ impl<'a> BodyParser<'a> {
             end_span.end = next.span.end;
             self.pos += 1;
         }
+        Ok(())
+    }
+
+    fn expect_word(&mut self, message: &str) -> Result<ShellWord, SparError> {
+        let Some(token) = self.tokens.get(self.pos).cloned() else {
+            return Err(self.error(message));
+        };
+        let (text, literal) = match token.token {
+            Token::ShellWord(text) => (text, false),
+            Token::ShellLiteralWord(text) => (text, true),
+            _ => return Err(parse_error(message, token.span)),
+        };
+        self.pos += 1;
+        let mut parts = if literal {
+            vec![ShellWordPart::Literal(text.clone())]
+        } else {
+            parse_word_parts(&text, &token.span)?
+        };
+        let mut combined_text = text;
+        let mut end_span = token.span.clone();
+
+        self.merge_adjacent_fragments(&mut parts, &mut combined_text, &mut end_span)?;
 
         Ok(ShellWord {
             text: combined_text,
@@ -598,8 +1092,7 @@ fn command_substitution_end(text: &str, dollar: usize) -> Option<usize> {
     let mut depth = 1_u32;
     let mut quote = None;
     let mut escaped = false;
-    let mut iter = text[dollar + 2..].char_indices();
-    while let Some((relative, ch)) = iter.next() {
+    for (relative, ch) in text[dollar + 2..].char_indices() {
         let index = dollar + 2 + relative;
         if escaped {
             escaped = false;
@@ -700,7 +1193,7 @@ fn parse_error(message: impl Into<String>, span: Span) -> SparError {
 #[cfg(test)]
 mod tests {
     use super::{parse_command_expression, parse_shell_block};
-    use crate::ast::{ShellJoin, ShellStep, ShellWordPart};
+    use crate::ast::{DecoderNamespace, ShellJoin, ShellStep, ShellWordPart};
     use crate::lexer::Lexer;
     use spar_command::RedirectMode;
 
@@ -792,14 +1285,17 @@ mod tests {
 
     #[test]
     fn shell_lang_concatenates_assignment_and_quoted_interpolation_into_one_argv() {
-        let expression = parse_block(
-            r#"shell { awk -v duration="${duration}" 'BEGIN { print duration }'; }"#,
-        );
+        let expression =
+            parse_block(r#"shell { awk -v duration="${duration}" 'BEGIN { print duration }'; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
         assert_eq!(command.program.text, "awk");
-        assert_eq!(command.args.len(), 3, "argv fragments must not split at quotes");
+        assert_eq!(
+            command.args.len(),
+            3,
+            "argv fragments must not split at quotes"
+        );
         assert_eq!(command.args[0].text, "-v");
         assert_eq!(command.args[1].text, "duration=${duration}");
         assert!(matches!(
@@ -863,9 +1359,7 @@ mod tests {
 
     #[test]
     fn command_substitution_rejects_background_commands() {
-        let tokens = Lexer::new("$(sleep 1 &)")
-            .tokenize()
-            .expect("lex failed");
+        let tokens = Lexer::new("$(sleep 1 &)").tokenize().expect("lex failed");
         let error = super::parse_command_substitution(&tokens)
             .expect_err("background substitution must fail");
         assert!(error.to_string().contains("background"), "got: {error}");
@@ -873,9 +1367,7 @@ mod tests {
 
     #[test]
     fn shell_word_supports_embedded_command_substitution() {
-        let expression = parse_block(
-            r#"shell { printf "%s" "prefix-$(printf value)-suffix"; }"#,
-        );
+        let expression = parse_block(r#"shell { printf "%s" "prefix-$(printf value)-suffix"; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
@@ -887,6 +1379,86 @@ mod tests {
                 ShellWordPart::Literal(suffix)
             ] if prefix == "prefix-" && suffix == "-suffix"
         ));
+    }
+
+    #[test]
+    fn shell_lang_parses_explicit_mixed_structured_pipeline_boundaries() {
+        let expression = parse_block(
+            r#"shell { printf '%s\n' '{"name":"Obi"}' | from jsonl |> take(1) |> to jsonl | cat; }"#,
+        );
+        assert_eq!(expression.steps.len(), 1);
+        let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
+            panic!("expected mixed structured pipeline")
+        };
+        assert_eq!(pipeline.input.len(), 1);
+        assert_eq!(pipeline.input[0].program.text, "printf");
+        assert_eq!(pipeline.decoder.decoder.name, "jsonl");
+        assert_eq!(pipeline.stages.len(), 1);
+        assert_eq!(pipeline.encoder.as_ref().unwrap().format, "jsonl");
+        assert_eq!(pipeline.output.len(), 1);
+        assert_eq!(pipeline.output[0].program.text, "cat");
+    }
+
+    #[test]
+    fn shell_lang_parses_scoc_decoder_namespace_and_named_args() {
+        let expression =
+            parse_block(r#"shell { printf x | from scoc::ping(raw: true, streaming: false); }"#);
+        let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
+            panic!("expected mixed structured pipeline")
+        };
+        assert_eq!(
+            pipeline.decoder.decoder.namespace,
+            Some(DecoderNamespace::Scoc)
+        );
+        assert_eq!(pipeline.decoder.decoder.name, "ping");
+        assert_eq!(pipeline.decoder.args.len(), 2);
+        assert_eq!(pipeline.decoder.args[0].name, "raw");
+        assert_eq!(pipeline.decoder.args[1].name, "streaming");
+    }
+
+    #[test]
+    fn shell_lang_keeps_hyphenated_decoder_names_literal() {
+        let expression = parse_block(r#"shell { printf x | from scoc::ping-s; }"#);
+        let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
+            panic!("expected mixed structured pipeline")
+        };
+        assert_eq!(pipeline.decoder.decoder.name, "ping-s");
+    }
+
+    #[test]
+    fn shell_lang_rejects_duplicate_decoder_args() {
+        let tokens = Lexer::new(r#"shell { printf x | from df(raw: true, raw: false); }"#)
+            .tokenize()
+            .expect("lex failed");
+        let error = parse_shell_block(&tokens).expect_err("duplicate decoder args must fail");
+        assert!(
+            error.to_string().contains("duplicate decoder option `raw`"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn shell_lang_requires_from_before_structured_pipe() {
+        let tokens = Lexer::new("shell { printf x |> take(1) |> to lines; }")
+            .tokenize()
+            .expect("lex failed");
+        let error = parse_shell_block(&tokens).expect_err("bytes must cross through from first");
+        assert!(
+            error.to_string().contains("add `| from FORMAT` first"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn shell_lang_requires_to_before_returning_to_unix_pipe() {
+        let tokens = Lexer::new("shell { printf x | from lines | cat; }")
+            .tokenize()
+            .expect("lex failed");
+        let error = parse_shell_block(&tokens).expect_err("values must cross through to first");
+        assert!(
+            error.to_string().contains("add `|> to FORMAT` first"),
+            "{error}"
+        );
     }
 
     #[test]

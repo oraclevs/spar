@@ -1,3 +1,4 @@
+use crate::ast::ShellStep;
 use crate::error::SparError;
 use crate::lexer::Lexer;
 use crate::token::Token;
@@ -21,6 +22,17 @@ fn parse_shell_plan_exact(source: &str) -> Result<spar_command::ShellPlan, SparE
         tokens.get(consumed).map(|token| &token.token),
         Some(Token::Eof)
     ));
+    if expression
+        .steps
+        .iter()
+        .any(|(_, step)| matches!(step, ShellStep::MixedPipeline(_)))
+    {
+        return Err(SparError::ParseError {
+            message: "mixed structured pipelines cannot be converted to a byte-only ShellPlan"
+                .into(),
+            span: expression.span.clone(),
+        });
+    }
     Ok(crate::evaluator::lower_shell_expr(&expression))
 }
 
@@ -62,6 +74,18 @@ mod tests {
                 path: "result.txt".into(),
                 mode: RedirectMode::Truncate,
             })
+        );
+    }
+
+    #[test]
+    fn byte_only_shell_plan_api_rejects_mixed_structured_pipeline() {
+        let error = super::parse_shell_plan("printf x | from lines |> take(1) |> to lines | cat")
+            .expect_err("byte-only ShellPlan must not erase structured stages");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be converted to a byte-only ShellPlan"),
+            "{error}"
         );
     }
 

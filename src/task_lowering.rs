@@ -309,6 +309,7 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         | SparType::Named(_)
         | SparType::TypeParameter(_)
         | SparType::Applied { .. }
+        | SparType::Function { .. }
         | SparType::Void
         | SparType::Shell
         | SparType::Error => ScalarKind::Str,
@@ -368,16 +369,60 @@ fn bare_param_ref(expr: &Expr, param_names: &HashSet<String>) -> Option<String> 
 /// values inside one `${...}` (e.g. `${environment + "-x"}`, or a function
 /// call taking a parameter as an argument) — lowered to `TemplatePart::Expr`
 /// and evaluated at task-run time instead of here.
+fn stmts_mention_any(stmts: &[crate::ast::FuncStmt], param_names: &HashSet<String>) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        crate::ast::Statement::LocalVar(local) => expr_mentions_any(&local.value, param_names),
+        crate::ast::Statement::Assignment { value, .. }
+        | crate::ast::Statement::FieldAssignment { value, .. }
+        | crate::ast::Statement::Expression(value, _) => expr_mentions_any(value, param_names),
+        crate::ast::Statement::Return(crate::ast::ReturnValue::Expr(value), _) => {
+            expr_mentions_any(value, param_names)
+        }
+        crate::ast::Statement::Return(crate::ast::ReturnValue::SectionBlock(fields), _) => fields
+            .iter()
+            .any(|field| expr_mentions_any(&field.value, param_names)),
+        crate::ast::Statement::If(statement) => {
+            expr_mentions_any(&statement.condition, param_names)
+                || stmts_mention_any(&statement.then_stmts, param_names)
+                || stmts_mention_any(&statement.else_stmts, param_names)
+        }
+        crate::ast::Statement::For(statement) => {
+            expr_mentions_any(&statement.iterable, param_names)
+                || stmts_mention_any(&statement.body, param_names)
+        }
+        crate::ast::Statement::Try(statement) => {
+            stmts_mention_any(&statement.body, param_names)
+                || stmts_mention_any(&statement.handler, param_names)
+        }
+        crate::ast::Statement::Return(crate::ast::ReturnValue::Void, _)
+        | crate::ast::Statement::Break(_)
+        | crate::ast::Statement::Continue(_) => false,
+    })
+}
+
 fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
     match expr {
         Expr::NamespaceRef(nr) => nr.segments.len() == 1 && param_names.contains(&nr.segments[0]),
         Expr::Literal(_) | Expr::Shell(_) | Expr::ExecShell(_) | Expr::CommandSubstitution(_) => {
             false
         }
+        Expr::Closure { body, .. } => match body {
+            crate::ast::ClosureBody::Expr(value) => expr_mentions_any(value, param_names),
+            crate::ast::ClosureBody::Block(body) => stmts_mention_any(&body.stmts, param_names),
+        },
         Expr::String(s) => s.parts.iter().any(|p| match p {
             StringPart::Literal(_) => false,
             StringPart::Expr(e) => expr_mentions_any(e, param_names),
         }),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_mentions_any(receiver, param_names)
+                || args
+                    .iter()
+                    .any(|argument| expr_mentions_any(argument, param_names))
+        }
+        Expr::StructuredPipe { input, stage, .. } => {
+            expr_mentions_any(input, param_names) || expr_mentions_any(stage, param_names)
+        }
         Expr::FieldAccess { base, .. } => expr_mentions_any(base, param_names),
         Expr::FnCall(fc) => fc.args.iter().any(|a| expr_mentions_any(a, param_names)),
         Expr::BinaryOp(op) => {

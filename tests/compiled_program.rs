@@ -82,3 +82,49 @@ fn compiled_program_preserves_async_calls_and_await() {
 
     assert_eq!(compiled.function_count(), 2);
 }
+
+#[test]
+fn compiled_program_preserves_owned_closure_bodies() {
+    let engine = Engine::default();
+    let compiled = engine
+        .compile_source(
+            r#"
+            function make(min: int) -> fn(int) -> bool {
+                return fn(value) => value >= min;
+            };
+            function main() -> int {
+                var check: fn(int) -> bool = make(min: 5);
+                if check(6) { return 1; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("closure-bearing program should compile");
+
+    assert_eq!(engine.execute_compiled(&compiled).unwrap().exit_status, 1);
+    assert_eq!(engine.execute_compiled(&compiled).unwrap().exit_status, 1);
+}
+
+#[test]
+fn callable_values_are_not_comparable() {
+    let errors = Engine::default()
+        .check_source(
+            r#"
+            function double(value: int) -> int { return value * 2; };
+            function main() -> int {
+                var callback: fn(int) -> int = double;
+                if callback == callback { return 1; }
+                return 0;
+            };
+            "#,
+        )
+        .expect_err("function equality must be rejected");
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("operator `==`")
+                || error.to_string().contains("incompatible")),
+        "{errors:?}"
+    );
+}

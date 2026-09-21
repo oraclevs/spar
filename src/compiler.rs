@@ -3,16 +3,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::Program;
+use crate::ast::{Program, SparType};
 use crate::error::SparError;
 use crate::evaluator::{EvalResult, Evaluator};
 use crate::loader::{self, ImportLoader, LoadedImport};
-use crate::resolver::{Resolver, SymbolTable};
+use crate::resolver::{GlobalEntry, Resolver, SymbolTable};
 use crate::runner::TaskSet;
 use crate::task_lowering::TaskExprEntry;
 use crate::typechecker::TypeChecker;
 use crate::{Lexer, Parser};
-
 
 #[derive(Clone, Debug, Default)]
 pub struct BundledPackageRoots {
@@ -100,6 +99,10 @@ pub struct CompileOptions {
     /// compilation leaves this unset; persistent sessions install one
     /// shared ledger across every replay.
     pub effect_ledger: Option<crate::session::EffectLedger>,
+    /// Make the `std/data` functions (`where`, `map`, `take`, ...) available
+    /// without an `import`, for every name the program does not declare or
+    /// import itself. Off by default; interactive shells turn it on.
+    pub data_prelude: bool,
 }
 
 impl Default for CompileOptions {
@@ -114,6 +117,7 @@ impl Default for CompileOptions {
             locator: None,
             bundled_packages: BundledPackageRoots::default(),
             effect_ledger: None,
+            data_prelude: false,
         }
     }
 }
@@ -171,6 +175,8 @@ impl Compilation {
 #[derive(Clone, Debug, Default)]
 pub struct Compiler {
     options: CompileOptions,
+    interactive_previous_type: Option<SparType>,
+    interactive_expressions: bool,
 }
 
 impl Compiler {
@@ -181,7 +187,21 @@ impl Compiler {
         options
             .natives
             .extend_missing(&crate::stdlib::native_registry());
-        Self { options }
+        Self {
+            options,
+            interactive_previous_type: None,
+            interactive_expressions: false,
+        }
+    }
+
+    pub(crate) fn with_interactive_expressions(mut self) -> Self {
+        self.interactive_expressions = true;
+        self
+    }
+
+    pub(crate) fn with_interactive_previous_type(mut self, ty: Option<SparType>) -> Self {
+        self.interactive_previous_type = ty;
+        self
     }
 
     pub fn options(&self) -> &CompileOptions {
@@ -190,7 +210,8 @@ impl Compiler {
 
     fn import_loader(&self) -> ImportLoader {
         let loader = ImportLoader::new(&self.options.base_dir)
-            .with_bundled_packages(self.options.bundled_packages.clone());
+            .with_bundled_packages(self.options.bundled_packages.clone())
+            .with_data_prelude(self.options.data_prelude);
         match &self.options.locator {
             Some(locator) => loader.with_locator(locator.clone()),
             None => loader,
@@ -217,7 +238,12 @@ impl Compiler {
                 return compilation;
             }
         };
-        let mut program = match Parser::new(tokens).parse() {
+        let parser = if self.interactive_expressions {
+            Parser::new(tokens).interactive()
+        } else {
+            Parser::new(tokens)
+        };
+        let mut program = match parser.parse() {
             Ok(program) => program,
             Err(error) => {
                 compilation.errors.push(error);
@@ -282,7 +308,7 @@ impl Compiler {
             Err(errors) => compilation.errors.extend(errors),
         }
 
-        let symbols = match Resolver::resolve_with_imports_hosts_and_natives(
+        let mut symbols = match Resolver::resolve_with_imports_hosts_and_natives(
             &program,
             &compilation.imports,
             self.options.hosts.clone(),
@@ -295,6 +321,20 @@ impl Compiler {
                 return compilation;
             }
         };
+
+        symbols.top_level_await = self.interactive_expressions;
+        if let Some(ty) = self.interactive_previous_type.clone() {
+            symbols.globals.insert(
+                "_".into(),
+                GlobalEntry::Var {
+                    ty,
+                    optional: false,
+                    exported: false,
+                    mutable: false,
+                    span: crate::Span::dummy(),
+                },
+            );
+        }
 
         let schema_bindings =
             match loader::validate_schema_imports(&program, &self.options.base_dir) {
@@ -471,6 +511,45 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
                 },
             ],
         ),
+        (
+            "Command",
+            vec![
+                TypeField {
+                    name: "program".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Str),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "args".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Str))),
+                    default: None,
+                    span: span.clone(),
+                },
+            ],
+        ),
+        (
+            "ProcessChunk",
+            vec![
+                TypeField {
+                    name: "source".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Primitive(SparType::Str),
+                    default: None,
+                    span: span.clone(),
+                },
+                TypeField {
+                    name: "bytes".into(),
+                    optional: false,
+                    shape: TypeFieldShape::Named("Bytes".into()),
+                    default: None,
+                    span: span.clone(),
+                },
+            ],
+        ),
+        ("ProcessStream", vec![]),
         (
             "ProcessResult",
             vec![

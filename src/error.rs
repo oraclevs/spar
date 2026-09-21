@@ -56,6 +56,30 @@ pub enum SparError {
     },
 }
 
+impl SparError {
+    pub fn span(&self) -> &Span {
+        match self {
+            SparError::LexError { span, .. }
+            | SparError::ParseError { span, .. }
+            | SparError::ResolveError { span, .. }
+            | SparError::TypeError { span, .. }
+            | SparError::EvalError { span, .. }
+            | SparError::SchemaError { span, .. } => span,
+        }
+    }
+
+    pub fn span_mut(&mut self) -> &mut Span {
+        match self {
+            SparError::LexError { span, .. }
+            | SparError::ParseError { span, .. }
+            | SparError::ResolveError { span, .. }
+            | SparError::TypeError { span, .. }
+            | SparError::EvalError { span, .. }
+            | SparError::SchemaError { span, .. } => span,
+        }
+    }
+}
+
 impl std::fmt::Display for SparError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

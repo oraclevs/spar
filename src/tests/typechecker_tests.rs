@@ -148,7 +148,10 @@ fn generic_inference_rejects_conflicts_and_unresolved_parameters() {
     );
     assert!(conflict.contains("conflicting inference"), "{conflict}");
 
-    let unresolved = check_err("function make<T>() -> T { return 1; }; var x: int = make();");
+    // With an expected type the parameter is inferred from it; without one it
+    // stays unresolved.
+    check_ok("function make<T>() -> T { return 1; }; var x: int = make();");
+    let unresolved = check_err("function make<T>() -> T { return 1; }; make();");
     assert!(
         unresolved.contains("explicit type argument"),
         "{unresolved}"
@@ -1266,4 +1269,3 @@ fn contextual_native_shell_words_typecheck_as_ordinary_names() {
         "#,
     );
 }
-

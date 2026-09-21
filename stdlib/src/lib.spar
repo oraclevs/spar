@@ -23,3 +23,22 @@ function assert(condition: bool, message: str) -> void {
 function version() -> str {
     return "0.3.0";
 };
+
+// Constructors for Spar's first-class optional/result values. These remain
+// free functions because they create values; instance behavior lives on the
+// values themselves.
+function some<T>(value: T) -> Option<T> {
+    return nativeCore::some(value: value);
+};
+
+function none<T>() -> Option<T> {
+    return nativeCore::none();
+};
+
+function ok<T, E>(value: T) -> Result<T, E> {
+    return nativeCore::ok(value: value);
+};
+
+function err<T, E>(error: E) -> Result<T, E> {
+    return nativeCore::err(error: error);
+};

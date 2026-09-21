@@ -1252,3 +1252,14 @@ fn defined_interpolations_and_task_params_in_shell_commands_resolve() {
     resolve_ok("var name: str = \"a\"; task T { run { echo ${name}; }; };");
     resolve_ok("task Greet(who: str) { run { echo ${who} | cat > out.txt; }; };");
 }
+
+#[test]
+fn builtin_stream_type_requires_exactly_one_type_argument() {
+    resolve_ok("function consume(values: Stream<int>) -> int { return 0; };");
+
+    let bare = resolve_err("function consume(values: Stream) -> int { return 0; };");
+    assert!(bare.contains("expects 1 type argument"), "{bare}");
+
+    let excess = resolve_err("function consume(values: Stream<int, str>) -> int { return 0; };");
+    assert!(excess.contains("expects 1 type argument"), "{excess}");
+}

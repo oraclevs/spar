@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Program, ShellExpr, ShellJoin, SparType, TopLevelItem};
+use crate::ast::{DecoderNamespace, Program, ShellJoin, SparType, TopLevelItem};
 use crate::compiler::Compiler;
 use crate::compiler::{Compilation, CompileOptions};
 use crate::error::{Span, SparError};
@@ -45,6 +45,13 @@ pub(crate) enum TypedOperation {
     FloatNotEq,
     StringNotEq,
     BoolNotEq,
+    /// Equality where at least one side is a dynamic (Record) value.
+    DynamicEq,
+    DynamicNotEq,
+    DynamicLt,
+    DynamicGt,
+    DynamicLtEq,
+    DynamicGtEq,
     IntLt,
     FloatLt,
     IntGt,
@@ -61,7 +68,14 @@ pub(crate) enum TypedOperation {
     Fallback,
 }
 
-#[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CompiledMethodTarget {
+    Function(FunctionId),
+    Native(crate::runtime::NativeMethodId),
+}
+
+// Spans are retained on every node so later diagnostics can point at them.
+#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) enum CompiledExpression {
     Constant(crate::ConfigValue, Span),
@@ -69,6 +83,32 @@ pub(crate) enum CompiledExpression {
     Global(String, Span),
     DirectCall {
         function: FunctionId,
+        arguments: Vec<CompiledExpression>,
+        span: Span,
+    },
+    MethodCall {
+        target: CompiledMethodTarget,
+        receiver: Option<Box<CompiledExpression>>,
+        receiver_slot: Option<LocalSlot>,
+        receiver_global: Option<String>,
+        arguments: Vec<CompiledExpression>,
+        mutates_receiver: bool,
+        span: Span,
+    },
+    FunctionRef {
+        function: FunctionId,
+        span: Span,
+    },
+    Closure {
+        captures: Vec<(LocalSlot, CompiledExpression)>,
+        parameter_slots: Vec<LocalSlot>,
+        slot_count: usize,
+        body: Vec<CompiledStatement>,
+        module: ModuleId,
+        span: Span,
+    },
+    Invoke {
+        callee: Box<CompiledExpression>,
         arguments: Vec<CompiledExpression>,
         span: Span,
     },
@@ -90,6 +130,12 @@ pub(crate) enum CompiledExpression {
     ImportedValue {
         module: ModuleId,
         path: Vec<String>,
+        span: Span,
+    },
+    StructConstruct {
+        module: ModuleId,
+        name: String,
+        overrides: Vec<(String, CompiledExpression)>,
         span: Span,
     },
     List(Vec<CompiledExpression>, Span),
@@ -121,11 +167,15 @@ pub(crate) enum CompiledExpression {
         span: Span,
     },
     Shell(CompiledShellExpr),
+    /// Deferred shell value whose plan contains byte/value bridge stages.
+    /// It captures the current frame at runtime like a statement-backed shell
+    /// program because a mixed pipeline cannot be represented by spar-command.
+    MixedShell(CompiledShellExpr),
     ShellProgram {
         body: Vec<CompiledStatement>,
         span: Span,
     },
-    ExecShell(ShellExpr),
+    ExecShell(CompiledShellExpr),
     CommandSubstitution(CompiledShellExpr),
 }
 
@@ -139,11 +189,48 @@ pub(crate) struct CompiledShellExpr {
 pub(crate) enum CompiledShellStep {
     Command(Box<CompiledShellCommand>),
     Pipeline(Vec<CompiledShellCommand>),
+    MixedPipeline(Box<CompiledShellMixedPipeline>),
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct CompiledDecoderArg {
+    pub name: String,
+    pub value: CompiledExpression,
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellDecodeStage {
+    pub namespace: Option<DecoderNamespace>,
+    pub name: String,
+    pub args: Vec<CompiledDecoderArg>,
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellMixedPipeline {
+    pub input: Vec<CompiledShellCommand>,
+    pub decoder: CompiledShellDecodeStage,
+    pub stages: Vec<CompiledShellStructuredStage>,
+    /// `None` when the pipeline has no `to`; see `ShellMixedPipeline::encoder`.
+    pub encoder_format: Option<String>,
+    pub encoder_span: Span,
+    pub encoder_redirect: Option<CompiledShellRedirect>,
+    pub output: Vec<CompiledShellCommand>,
+    pub span: Span,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledShellStructuredStage {
+    pub input_slot: LocalSlot,
+    pub expression: CompiledExpression,
+    pub span: Span,
 }
 
 #[derive(Clone)]
 pub(crate) struct CompiledShellCommand {
-    pub environment: Vec<(String, String)>,
+    pub environment: Vec<(String, CompiledShellWord)>,
     pub program: CompiledShellWord,
     pub args: Vec<CompiledShellWord>,
     pub stdin: Option<CompiledShellRedirect>,
@@ -212,6 +299,18 @@ pub(crate) enum CompiledStatement {
     },
     StoreGlobal {
         name: String,
+        value: CompiledExpression,
+        span: Span,
+    },
+    StoreFieldLocal {
+        slot: LocalSlot,
+        fields: Vec<String>,
+        value: CompiledExpression,
+        span: Span,
+    },
+    StoreFieldGlobal {
+        name: String,
+        fields: Vec<String>,
         value: CompiledExpression,
         span: Span,
     },
@@ -449,6 +548,8 @@ fn visit_statements(statements: &[CompiledStatement], visit: &mut impl FnMut(&Co
         match statement {
             CompiledStatement::StoreLocal { value, .. }
             | CompiledStatement::StoreGlobal { value, .. }
+            | CompiledStatement::StoreFieldLocal { value, .. }
+            | CompiledStatement::StoreFieldGlobal { value, .. }
             | CompiledStatement::Expression(value, _) => visit_expression(value, visit),
             CompiledStatement::If {
                 condition,
@@ -479,6 +580,18 @@ fn visit_statements(statements: &[CompiledStatement], visit: &mut impl FnMut(&Co
 fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&CompiledExpression)) {
     visit(expression);
     match expression {
+        CompiledExpression::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                visit_expression(receiver, visit);
+            }
+            for argument in arguments {
+                visit_expression(argument, visit);
+            }
+        }
         CompiledExpression::DirectCall { arguments, .. }
         | CompiledExpression::HostCall { arguments, .. }
         | CompiledExpression::NativeCall { arguments, .. }
@@ -491,6 +604,11 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
                 visit_expression(argument, visit);
             }
         }
+        CompiledExpression::StructConstruct { overrides, .. } => {
+            for (_, value) in overrides {
+                visit_expression(value, visit);
+            }
+        }
         CompiledExpression::Object(items, _) => {
             for item in items {
                 match item {
@@ -501,6 +619,20 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
             }
         }
         CompiledExpression::Await { promise, .. } => visit_expression(promise, visit),
+        CompiledExpression::Invoke {
+            callee, arguments, ..
+        } => {
+            visit_expression(callee, visit);
+            for argument in arguments {
+                visit_expression(argument, visit);
+            }
+        }
+        CompiledExpression::Closure { captures, body, .. } => {
+            for (_, capture) in captures {
+                visit_expression(capture, visit);
+            }
+            visit_statements(body, visit);
+        }
         CompiledExpression::Panic { message, .. } => visit_expression(message, visit),
         CompiledExpression::Index { source, index, .. } => {
             visit_expression(source, visit);
@@ -519,9 +651,19 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
             visit_expression(body, visit);
         }
         CompiledExpression::ShellProgram { body, .. } => visit_statements(body, visit),
+        CompiledExpression::MixedShell(shell) => {
+            for (_, step) in &shell.steps {
+                if let CompiledShellStep::MixedPipeline(pipeline) = step {
+                    for stage in &pipeline.stages {
+                        visit_expression(&stage.expression, visit);
+                    }
+                }
+            }
+        }
         CompiledExpression::Constant(_, _)
         | CompiledExpression::Local(_, _)
         | CompiledExpression::Global(_, _)
+        | CompiledExpression::FunctionRef { .. }
         | CompiledExpression::ImportedValue { .. }
         | CompiledExpression::Shell(_)
         | CompiledExpression::ExecShell(_)
@@ -740,6 +882,21 @@ impl ModuleGraphBuilder {
                         ));
                     }
                 }
+                TopLevelItem::Impl(implementation) => {
+                    let owner = match &implementation.target {
+                        SparType::Named(name) => name.clone(),
+                        SparType::Applied { name, .. } => name.clone(),
+                        _ => continue,
+                    };
+                    for method in &implementation.methods {
+                        functions.push(self.function_header(
+                            module,
+                            Some(format!("impl:{owner}")),
+                            &method.function,
+                            symbols,
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -783,6 +940,11 @@ fn function_declarations(program: &Program) -> Vec<&crate::ast::FunctionDecl> {
         .flat_map(|item| match item {
             TopLevelItem::Function(function) => vec![function],
             TopLevelItem::FunctionGroup(group) => group.functions.iter().collect(),
+            TopLevelItem::Impl(implementation) => implementation
+                .methods
+                .iter()
+                .map(|method| &method.function)
+                .collect(),
             _ => Vec::new(),
         })
         .collect()

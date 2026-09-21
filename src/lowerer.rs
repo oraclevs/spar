@@ -1,19 +1,64 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BinOp, Expr, FieldValue, ForBinding, FunctionDecl, Literal, ReturnValue, SectionItem,
-    ShellCommandExpr, ShellExpr, ShellFdRedirectTarget, ShellRedirect, ShellStep, ShellWord,
-    ShellWordPart, SparType, Statement, StringPart, UnOp,
+    BinOp, ClosureBody, Expr, FieldValue, ForBinding, FunctionDecl, Literal, ReturnValue,
+    SectionItem, ShellCommandExpr, ShellExpr, ShellFdRedirectTarget, ShellRedirect, ShellStep,
+    ShellWord, ShellWordPart, SparType, Statement, StringPart, UnOp,
 };
 use crate::compiled::{
-    CompiledExpression, CompiledObjectItem, CompiledShellCommand, CompiledShellExpr,
-    CompiledShellRedirect, CompiledShellStep, CompiledShellWord, CompiledShellWordPart,
-    CompiledStatement, CompiledStringPart, FunctionId, FunctionKey, LocalLayout, LocalSlot,
-    ModuleId, TypedOperation,
+    CompiledDecoderArg, CompiledExpression, CompiledMethodTarget, CompiledObjectItem,
+    CompiledShellCommand, CompiledShellDecodeStage, CompiledShellExpr, CompiledShellMixedPipeline,
+    CompiledShellRedirect, CompiledShellStep, CompiledShellStructuredStage, CompiledShellWord,
+    CompiledShellWordPart, CompiledStatement, CompiledStringPart, FunctionId, FunctionKey,
+    LocalLayout, LocalSlot, ModuleId, TypedOperation,
 };
 use crate::error::{Span, SparError};
 use crate::resolver::SymbolTable;
-use crate::typechecker::infer_expression_with_locals;
+use crate::typechecker::{
+    infer_expression_with_locals, substitute_type, unify_generic, TypeSubstitution,
+};
+
+fn method_owner_name(ty: &SparType) -> Option<String> {
+    match ty {
+        SparType::Named(name) => Some(name.clone()),
+        SparType::Applied { name, .. } => Some(name.clone()),
+        SparType::Str => Some("str".into()),
+        SparType::List(_) => Some("List".into()),
+        _ => None,
+    }
+}
+
+fn mixed_decoder_stream_type(decoder: &crate::ast::ShellDecodeStage) -> SparType {
+    let registry = crate::structured_input::StructuredInputRegistry::builtin();
+    let element = registry
+        .resolve(
+            decoder.decoder.namespace,
+            &decoder.decoder.name,
+            &decoder.decoder.span,
+        )
+        .ok()
+        .map(|resolved| {
+            use crate::structured_input::DecoderOutputShape;
+            match resolved
+                .descriptor
+                .stream_item
+                .unwrap_or(resolved.descriptor.normalized_output)
+            {
+                DecoderOutputShape::Scalar => SparType::Str,
+                DecoderOutputShape::List => {
+                    SparType::List(Box::new(SparType::Named("Record".into())))
+                }
+                DecoderOutputShape::Record | DecoderOutputShape::Table => {
+                    SparType::Named("Record".into())
+                }
+            }
+        })
+        .unwrap_or_else(|| SparType::Named("Record".into()));
+    SparType::Applied {
+        name: "Stream".into(),
+        arguments: vec![element],
+    }
+}
 
 pub(crate) fn allocate_local_layout(function: &FunctionDecl, symbols: &SymbolTable) -> LocalLayout {
     let mut allocator = LocalAllocator::new(symbols);
@@ -30,6 +75,7 @@ pub(crate) fn allocate_local_layout(function: &FunctionDecl, symbols: &SymbolTab
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct LoweringContext<'a> {
     pub module: ModuleId,
     pub imports: &'a HashMap<String, ModuleId>,
@@ -51,6 +97,7 @@ pub(crate) fn lower_function(
     let mut lowerer = FunctionLowerer {
         locals: LocalAllocator::new(symbols),
         context,
+        return_type: function.ret.clone(),
     };
     let parameter_slots = function
         .params
@@ -118,6 +165,19 @@ impl<'a> LocalAllocator<'a> {
             .find_map(|scope| scope.get(name).map(|(slot, _)| *slot))
     }
 
+    fn visible_bindings(&self) -> Vec<(String, LocalSlot, SparType)> {
+        let mut bindings = HashMap::<String, (LocalSlot, SparType)>::new();
+        for scope in &self.scopes {
+            for (name, (slot, ty)) in scope {
+                bindings.insert(name.clone(), (*slot, ty.clone()));
+            }
+        }
+        bindings
+            .into_iter()
+            .map(|(name, (slot, ty))| (name, slot, ty))
+            .collect()
+    }
+
     fn visible_types(&self) -> HashMap<String, SparType> {
         let mut types = HashMap::new();
         for scope in &self.scopes {
@@ -151,7 +211,9 @@ impl<'a> LocalAllocator<'a> {
                         self.allocate(local.name.clone(), ty);
                     }
                 }
-                Statement::Assignment { value, .. } | Statement::Expression(value, _) => {
+                Statement::Assignment { value, .. }
+                | Statement::FieldAssignment { value, .. }
+                | Statement::Expression(value, _) => {
                     self.visit_expression(value);
                 }
                 Statement::If(statement) => {
@@ -223,6 +285,19 @@ impl<'a> LocalAllocator<'a> {
                     this.visit_expression(body);
                 });
             }
+            Expr::Closure { params, body, .. } => {
+                self.with_scope(|this| {
+                    for param in params {
+                        if let Some(ty) = &param.ty {
+                            this.allocate(param.name.clone(), ty.clone());
+                        }
+                    }
+                    match body {
+                        ClosureBody::Expr(value) => this.visit_expression(value),
+                        ClosureBody::Block(body) => this.visit_statements(&body.stmts),
+                    }
+                });
+            }
             Expr::FnCall(call) => {
                 for argument in &call.args {
                     self.visit_expression(argument);
@@ -250,6 +325,16 @@ impl<'a> LocalAllocator<'a> {
             Expr::Index { source, index, .. } => {
                 self.visit_expression(source);
                 self.visit_expression(index);
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                self.visit_expression(receiver);
+                for argument in args {
+                    self.visit_expression(argument);
+                }
+            }
+            Expr::StructuredPipe { input, stage, .. } => {
+                self.visit_expression(input);
+                self.visit_expression(stage);
             }
             Expr::FieldAccess { base, .. } => self.visit_expression(base),
             Expr::Object(items, _) => {
@@ -282,6 +367,7 @@ impl<'a> LocalAllocator<'a> {
 struct FunctionLowerer<'a> {
     locals: LocalAllocator<'a>,
     context: LoweringContext<'a>,
+    return_type: SparType,
 }
 
 impl FunctionLowerer<'_> {
@@ -308,12 +394,12 @@ impl FunctionLowerer<'_> {
     fn lower_statement(&mut self, statement: &Statement) -> Result<CompiledStatement, SparError> {
         Ok(match statement {
             Statement::LocalVar(local) => {
-                let value = self.lower_expression(&local.value)?;
                 let ty = local
                     .ty
                     .clone()
                     .or_else(|| self.locals.expression_type(&local.value))
                     .ok_or_else(|| internal_lowering("missing checked local type", &local.span))?;
+                let value = self.lower_expression_expected(&local.value, Some(&ty))?;
                 let slot = self.locals.allocate(local.name.clone(), ty);
                 CompiledStatement::StoreLocal {
                     slot,
@@ -336,6 +422,28 @@ impl FunctionLowerer<'_> {
                     },
                 }
             }
+            Statement::FieldAssignment {
+                base,
+                fields,
+                value,
+                span,
+            } => {
+                let value = self.lower_expression(value)?;
+                match self.locals.lookup(base) {
+                    Some(slot) => CompiledStatement::StoreFieldLocal {
+                        slot,
+                        fields: fields.clone(),
+                        value,
+                        span: span.clone(),
+                    },
+                    None => CompiledStatement::StoreFieldGlobal {
+                        name: base.clone(),
+                        fields: fields.clone(),
+                        value,
+                        span: span.clone(),
+                    },
+                }
+            }
             Statement::Expression(expression, span) => {
                 CompiledStatement::Expression(self.lower_expression(expression)?, span.clone())
             }
@@ -348,7 +456,10 @@ impl FunctionLowerer<'_> {
             Statement::Return(value, span) => {
                 let value = match value {
                     ReturnValue::Void => None,
-                    ReturnValue::Expr(expression) => Some(self.lower_expression(expression)?),
+                    ReturnValue::Expr(expression) => {
+                        let expected = self.return_type.clone();
+                        Some(self.lower_expression_expected(expression, Some(&expected))?)
+                    }
                     ReturnValue::SectionBlock(fields) => Some(CompiledExpression::Object(
                         fields
                             .iter()
@@ -420,6 +531,14 @@ impl FunctionLowerer<'_> {
     }
 
     fn lower_expression(&mut self, expression: &Expr) -> Result<CompiledExpression, SparError> {
+        self.lower_expression_expected(expression, None)
+    }
+
+    fn lower_expression_expected(
+        &mut self,
+        expression: &Expr,
+        expected: Option<&SparType>,
+    ) -> Result<CompiledExpression, SparError> {
         let span = expression_span(expression);
         Ok(match expression {
             Expr::Literal(value) => CompiledExpression::Constant(
@@ -461,10 +580,22 @@ impl FunctionLowerer<'_> {
                             span: reference.span.clone(),
                         }
                     } else {
-                        CompiledExpression::Global(
-                            reference.segments[0].clone(),
-                            reference.span.clone(),
-                        )
+                        let key = FunctionKey {
+                            module: self.context.module,
+                            group: None,
+                            name: reference.segments[0].clone(),
+                        };
+                        if let Some(function) = self.context.functions.get(&key).copied() {
+                            CompiledExpression::FunctionRef {
+                                function,
+                                span: reference.span.clone(),
+                            }
+                        } else {
+                            CompiledExpression::Global(
+                                reference.segments[0].clone(),
+                                reference.span.clone(),
+                            )
+                        }
                     }
                 } else if let Some(module) = self.context.imports.get(&reference.segments[0]) {
                     CompiledExpression::ImportedValue {
@@ -479,27 +610,200 @@ impl FunctionLowerer<'_> {
                     )
                 }
             }
+            Expr::Closure {
+                params,
+                return_type,
+                body,
+                span,
+            } => self.lower_closure(params, return_type.as_ref(), body, span, expected)?,
             Expr::Call {
                 name, args, span, ..
             } => self.lower_call(name, args, span)?,
-            Expr::FnCall(call) => CompiledExpression::HostCall {
-                namespace: String::new(),
-                name: call.name.clone(),
-                arguments: call
+            Expr::FnCall(call) => {
+                if call.args.is_empty()
+                    && self
+                        .locals
+                        .symbols
+                        .lookup_section(std::slice::from_ref(&call.name))
+                        .is_some_and(|section| section.canonical)
+                {
+                    return Ok(CompiledExpression::StructConstruct {
+                        module: self.context.module,
+                        name: call.name.clone(),
+                        overrides: Vec::new(),
+                        span: call.span.clone(),
+                    });
+                }
+                let arguments = call
                     .args
                     .iter()
                     .map(|argument| self.lower_expression(argument))
-                    .collect::<Result<Vec<_>, _>>()?,
-                span: call.span.clone(),
-            },
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(slot) = self.locals.lookup(&call.name) {
+                    CompiledExpression::Invoke {
+                        callee: Box::new(CompiledExpression::Local(slot, call.span.clone())),
+                        arguments,
+                        span: call.span.clone(),
+                    }
+                } else {
+                    let key = FunctionKey {
+                        module: self.context.module,
+                        group: None,
+                        name: call.name.clone(),
+                    };
+                    if let Some(function) = self.context.functions.get(&key).copied() {
+                        CompiledExpression::Invoke {
+                            callee: Box::new(CompiledExpression::FunctionRef {
+                                function,
+                                span: call.span.clone(),
+                            }),
+                            arguments,
+                            span: call.span.clone(),
+                        }
+                    } else {
+                        CompiledExpression::HostCall {
+                            namespace: String::new(),
+                            name: call.name.clone(),
+                            arguments,
+                            span: call.span.clone(),
+                        }
+                    }
+                }
+            }
+            Expr::StructuredPipe { input, stage, span } => {
+                let input_value = self.lower_expression(input)?;
+                match stage.as_ref() {
+                    Expr::FnCall(call) => {
+                        let mut arguments = Vec::with_capacity(call.args.len() + 1);
+                        arguments.push(input_value);
+                        // Closures with untyped parameters get them from the
+                        // stage signature instantiated for the piped input.
+                        let inferred = if call.args.iter().any(is_untyped_closure) {
+                            crate::typechecker::pipe_stage_parameters_with_locals(
+                                input,
+                                stage,
+                                self.locals.symbols,
+                                &self.locals.visible_types(),
+                            )
+                        } else {
+                            None
+                        };
+                        for (index, argument) in call.args.iter().enumerate() {
+                            let expected = inferred
+                                .as_ref()
+                                .and_then(|parameters| parameters.get(index + 1))
+                                .map(|(_, ty)| ty);
+                            arguments.push(self.lower_expression_expected(argument, expected)?);
+                        }
+                        let callee = if let Some(slot) = self.locals.lookup(&call.name) {
+                            CompiledExpression::Local(slot, call.span.clone())
+                        } else {
+                            let key = FunctionKey {
+                                module: self.context.module,
+                                group: None,
+                                name: call.name.clone(),
+                            };
+                            if let Some(function) = self.context.functions.get(&key).copied() {
+                                CompiledExpression::FunctionRef {
+                                    function,
+                                    span: call.span.clone(),
+                                }
+                            } else {
+                                return Err(internal_lowering(
+                                    "structured pipe stage is not a checked callable",
+                                    span,
+                                ));
+                            }
+                        };
+                        CompiledExpression::Invoke {
+                            callee: Box::new(callee),
+                            arguments,
+                            span: span.clone(),
+                        }
+                    }
+                    Expr::Call {
+                        name,
+                        args,
+                        span: call_span,
+                        ..
+                    } => {
+                        let entry = self.locals.symbols.lookup_function(name).ok_or_else(|| {
+                            internal_lowering(
+                                "structured pipe named stage has no local function signature",
+                                span,
+                            )
+                        })?;
+                        let first = entry.params.first().ok_or_else(|| {
+                            internal_lowering("structured pipe stage has no first parameter", span)
+                        })?;
+                        let mut injected = Vec::with_capacity(args.len() + 1);
+                        injected.push(crate::ast::CallArg {
+                            param_name: first.0.clone(),
+                            param_name_span: span.clone(),
+                            value: input.as_ref().clone(),
+                            span: span.clone(),
+                        });
+                        injected.extend(args.iter().cloned());
+                        if args.iter().any(|arg| is_untyped_closure(&arg.value)) {
+                            // Give each untyped closure its inferred type by
+                            // spelling it out, so `lower_call` sees a typed closure.
+                            let inferred = crate::typechecker::pipe_stage_parameters_with_locals(
+                                input,
+                                stage,
+                                self.locals.symbols,
+                                &self.locals.visible_types(),
+                            );
+                            for arg in injected.iter_mut() {
+                                if let (true, Some(parameters)) =
+                                    (is_untyped_closure(&arg.value), inferred.as_ref())
+                                {
+                                    if let Some((_, SparType::Function { params, .. })) = parameters
+                                        .iter()
+                                        .find(|(param, _)| param == &arg.param_name)
+                                    {
+                                        annotate_closure_parameters(&mut arg.value, params);
+                                    }
+                                }
+                            }
+                        }
+                        self.lower_call(name, &injected, call_span)?
+                    }
+                    _ => CompiledExpression::Invoke {
+                        callee: Box::new(self.lower_expression(stage)?),
+                        arguments: vec![input_value],
+                        span: span.clone(),
+                    },
+                }
+            }
             Expr::BinaryOp(binary) => {
                 let left_type = self.locals.expression_type(&binary.lhs).ok_or_else(|| {
                     internal_lowering("missing checked operand type", &binary.span)
                 })?;
+                let is_dynamic =
+                    |ty: &SparType| matches!(ty, SparType::Named(name) if name == "Record");
+                let dynamic_equality = matches!(
+                    binary.op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                ) && (is_dynamic(&left_type)
+                    || self
+                        .locals
+                        .expression_type(&binary.rhs)
+                        .is_some_and(|ty| is_dynamic(&ty)));
                 CompiledExpression::Operation {
-                    operation: typed_binary(&binary.op, &left_type).ok_or_else(|| {
-                        internal_lowering("unsupported checked operation", &binary.span)
-                    })?,
+                    operation: if dynamic_equality {
+                        match binary.op {
+                            BinOp::Eq => TypedOperation::DynamicEq,
+                            BinOp::NotEq => TypedOperation::DynamicNotEq,
+                            BinOp::Lt => TypedOperation::DynamicLt,
+                            BinOp::Gt => TypedOperation::DynamicGt,
+                            BinOp::LtEq => TypedOperation::DynamicLtEq,
+                            _ => TypedOperation::DynamicGtEq,
+                        }
+                    } else {
+                        typed_binary(&binary.op, &left_type).ok_or_else(|| {
+                            internal_lowering("unsupported checked operation", &binary.span)
+                        })?
+                    },
                     operands: vec![
                         self.lower_expression(&binary.lhs)?,
                         self.lower_expression(&binary.rhs)?,
@@ -540,6 +844,143 @@ impl FunctionLowerer<'_> {
                 index: Box::new(self.lower_expression(index)?),
                 span: span.clone(),
             },
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                span,
+                ..
+            } => {
+                let (owner, is_static) = if let Expr::NamespaceRef(reference) = receiver.as_ref() {
+                    if reference.segments.len() == 1
+                        && self
+                            .locals
+                            .symbols
+                            .lookup_section(&reference.segments)
+                            .is_some_and(|section| section.canonical)
+                    {
+                        (reference.segments[0].clone(), true)
+                    } else {
+                        let ty = self.locals.expression_type(receiver).ok_or_else(|| {
+                            internal_lowering("missing checked method receiver type", span)
+                        })?;
+                        (
+                            method_owner_name(&ty).ok_or_else(|| {
+                                internal_lowering("unsupported method receiver type", span)
+                            })?,
+                            false,
+                        )
+                    }
+                } else {
+                    let ty = self.locals.expression_type(receiver).ok_or_else(|| {
+                        internal_lowering("missing checked method receiver type", span)
+                    })?;
+                    (
+                        method_owner_name(&ty).ok_or_else(|| {
+                            internal_lowering("unsupported method receiver type", span)
+                        })?,
+                        false,
+                    )
+                };
+                let entry = self
+                    .locals
+                    .symbols
+                    .lookup_method(&owner, method)
+                    .ok_or_else(|| internal_lowering("missing checked method metadata", span))?;
+                if is_static == entry.has_receiver {
+                    return Err(internal_lowering(
+                        "checked method receiver/static mismatch",
+                        span,
+                    ));
+                }
+                let target = if let Some(native_method) = entry.native_method {
+                    CompiledMethodTarget::Native(native_method)
+                } else {
+                    let key = FunctionKey {
+                        module: self.context.module,
+                        group: Some(format!("impl:{owner}")),
+                        name: method.clone(),
+                    };
+                    let function = self.context.functions.get(&key).copied().ok_or_else(|| {
+                        internal_lowering("missing compiled method function", span)
+                    })?;
+                    CompiledMethodTarget::Function(function)
+                };
+                let parameter_types = if entry.has_receiver {
+                    &entry.function.params[1..]
+                } else {
+                    &entry.function.params[..]
+                };
+                let mut substitution = TypeSubstitution::new();
+                if entry.has_receiver {
+                    let receiver_type = self.locals.expression_type(receiver).ok_or_else(|| {
+                        internal_lowering("missing checked method receiver type", span)
+                    })?;
+                    let (_, expected_receiver) =
+                        entry.function.params.first().ok_or_else(|| {
+                            internal_lowering("method receiver metadata is missing", span)
+                        })?;
+                    unify_generic(expected_receiver, &receiver_type, &mut substitution, span)?;
+                }
+                let arguments = args
+                    .iter()
+                    .zip(parameter_types.iter())
+                    .map(|(argument, (_, expected))| {
+                        let expected = substitute_type(expected, &substitution);
+                        self.lower_expression_expected(argument, Some(&expected))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (receiver_expr, receiver_slot, receiver_global) = if entry.has_receiver {
+                    let slot = if entry.receiver_mutable {
+                        if let Expr::NamespaceRef(reference) = receiver.as_ref() {
+                            if reference.segments.len() == 1 {
+                                self.locals.lookup(&reference.segments[0])
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let global = if entry.receiver_mutable && slot.is_none() {
+                        if let Expr::NamespaceRef(reference) = receiver.as_ref() {
+                            if reference.segments.len() == 1 {
+                                Some(reference.segments[0].clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if entry.receiver_mutable && slot.is_none() && global.is_none() {
+                        return Err(internal_lowering(
+                            "mutable method receiver must be a binding",
+                            span,
+                        ));
+                    }
+                    (
+                        Some(Box::new(self.lower_expression(receiver)?)),
+                        slot,
+                        global,
+                    )
+                } else {
+                    (None, None, None)
+                };
+                CompiledExpression::MethodCall {
+                    target,
+                    receiver: receiver_expr,
+                    receiver_slot,
+                    receiver_global,
+                    arguments,
+                    mutates_receiver: entry.receiver_mutable,
+                    span: span.clone(),
+                }
+            }
             Expr::FieldAccess {
                 base, field, span, ..
             } => CompiledExpression::Field {
@@ -576,14 +1017,23 @@ impl FunctionLowerer<'_> {
             Expr::Object(items, span) => {
                 CompiledExpression::Object(self.lower_object_items(items)?, span.clone())
             }
-            Expr::Shell(shell) if shell.statements.is_empty() => {
+            Expr::Shell(shell)
+                if shell.statements.is_empty()
+                    && !shell
+                        .steps
+                        .iter()
+                        .any(|(_, step)| matches!(step, ShellStep::MixedPipeline(_))) =>
+            {
                 CompiledExpression::Shell(self.lower_shell(shell)?)
+            }
+            Expr::Shell(shell) if shell.statements.is_empty() => {
+                CompiledExpression::MixedShell(self.lower_shell(shell)?)
             }
             Expr::Shell(shell) => CompiledExpression::ShellProgram {
                 body: self.lower_block(&shell.statements)?,
                 span: shell.span.clone(),
             },
-            Expr::ExecShell(shell) => CompiledExpression::ExecShell(shell.clone()),
+            Expr::ExecShell(shell) => CompiledExpression::ExecShell(self.lower_shell(shell)?),
             Expr::CommandSubstitution(shell) => {
                 CompiledExpression::CommandSubstitution(self.lower_shell(shell)?)
             }
@@ -608,11 +1058,108 @@ impl FunctionLowerer<'_> {
                                     .map(|command| self.lower_shell_command(command))
                                     .collect::<Result<Vec<_>, SparError>>()?,
                             ),
+                            ShellStep::MixedPipeline(pipeline) => CompiledShellStep::MixedPipeline(
+                                Box::new(self.lower_mixed_shell_pipeline(pipeline)?),
+                            ),
                         },
                     ))
                 })
                 .collect::<Result<Vec<_>, SparError>>()?,
             span: shell.span.clone(),
+        })
+    }
+
+    fn lower_mixed_shell_pipeline(
+        &mut self,
+        pipeline: &crate::ast::ShellMixedPipeline,
+    ) -> Result<CompiledShellMixedPipeline, SparError> {
+        let input = pipeline
+            .input
+            .iter()
+            .map(|command| self.lower_shell_command(command))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = pipeline
+            .output
+            .iter()
+            .map(|command| self.lower_shell_command(command))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut current_type = mixed_decoder_stream_type(&pipeline.decoder);
+        let mut stages = Vec::with_capacity(pipeline.stages.len());
+        for (index, stage) in pipeline.stages.iter().enumerate() {
+            self.locals.scopes.push(HashMap::new());
+            let temp_name = format!("__sparMixedInput{index}");
+            let input_slot = self
+                .locals
+                .allocate(temp_name.clone(), current_type.clone());
+            let input_expr = Expr::NamespaceRef(crate::ast::NamespaceRef {
+                segments: vec![temp_name],
+                span: pipeline.decoder.span.clone(),
+            });
+            let expression = Expr::StructuredPipe {
+                input: Box::new(input_expr),
+                stage: Box::new(stage.clone()),
+                span: stage
+                    .span()
+                    .cloned()
+                    .unwrap_or_else(|| pipeline.span.clone()),
+            };
+            let next_type = self.locals.expression_type(&expression).ok_or_else(|| {
+                internal_lowering(
+                    "missing checked type for mixed structured pipeline stage",
+                    &pipeline.span,
+                )
+            })?;
+            let compiled = self.lower_expression(&expression);
+            self.locals.scopes.pop();
+            stages.push(CompiledShellStructuredStage {
+                input_slot,
+                expression: compiled?,
+                span: stage
+                    .span()
+                    .cloned()
+                    .unwrap_or_else(|| pipeline.span.clone()),
+            });
+            current_type = next_type;
+        }
+
+        let decoder = CompiledShellDecodeStage {
+            namespace: pipeline.decoder.decoder.namespace,
+            name: pipeline.decoder.decoder.name.clone(),
+            args: pipeline
+                .decoder
+                .args
+                .iter()
+                .map(|arg| {
+                    Ok(CompiledDecoderArg {
+                        name: arg.name.clone(),
+                        value: self.lower_expression(&arg.value)?,
+                        span: arg.span.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, SparError>>()?,
+            span: pipeline.decoder.span.clone(),
+        };
+
+        Ok(CompiledShellMixedPipeline {
+            input,
+            decoder,
+            stages,
+            encoder_format: pipeline
+                .encoder
+                .as_ref()
+                .map(|encoder| encoder.format.clone()),
+            encoder_span: pipeline.encoder.as_ref().map_or_else(
+                || pipeline.decoder.span.clone(),
+                |encoder| encoder.span.clone(),
+            ),
+            encoder_redirect: pipeline
+                .encoder_redirect
+                .as_ref()
+                .map(|redirect| self.lower_shell_redirect(redirect))
+                .transpose()?,
+            output,
+            span: pipeline.span.clone(),
         })
     }
 
@@ -624,8 +1171,8 @@ impl FunctionLowerer<'_> {
             environment: command
                 .environment
                 .iter()
-                .map(|entry| (entry.name.clone(), entry.value.clone()))
-                .collect(),
+                .map(|entry| Ok((entry.name.clone(), self.lower_shell_word(&entry.value)?)))
+                .collect::<Result<Vec<_>, SparError>>()?,
             program: self.lower_shell_word(&command.program)?,
             args: command
                 .args
@@ -695,14 +1242,75 @@ impl FunctionLowerer<'_> {
                     ShellWordPart::Environment(name) => {
                         Ok(CompiledShellWordPart::Environment(name.clone()))
                     }
-                    ShellWordPart::CommandSubstitution(shell) => {
-                        Ok(CompiledShellWordPart::CommandSubstitution(
-                            self.lower_shell(shell)?,
-                        ))
-                    }
+                    ShellWordPart::CommandSubstitution(shell) => Ok(
+                        CompiledShellWordPart::CommandSubstitution(self.lower_shell(shell)?),
+                    ),
                 })
                 .collect::<Result<Vec<_>, SparError>>()?,
             span: word.span.clone(),
+        })
+    }
+
+    fn lower_closure(
+        &mut self,
+        params: &[crate::ast::ClosureParam],
+        explicit_return: Option<&SparType>,
+        body: &crate::ast::ClosureBody,
+        span: &Span,
+        expected: Option<&SparType>,
+    ) -> Result<CompiledExpression, SparError> {
+        let expected_signature = match expected {
+            Some(SparType::Function {
+                params,
+                return_type,
+            }) => Some((params.as_slice(), return_type.as_ref())),
+            _ => None,
+        };
+        let captures = self.locals.visible_bindings();
+        let mut nested = FunctionLowerer {
+            locals: LocalAllocator::new(self.locals.symbols),
+            context: self.context,
+            return_type: explicit_return
+                .cloned()
+                .or_else(|| expected_signature.map(|(_, ret)| ret.clone()))
+                .unwrap_or(SparType::Void),
+        };
+        let mut compiled_captures = Vec::with_capacity(captures.len());
+        for (name, source_slot, ty) in captures {
+            let target_slot = nested.locals.allocate(name, ty);
+            compiled_captures.push((
+                target_slot,
+                CompiledExpression::Local(source_slot, span.clone()),
+            ));
+        }
+        let mut parameter_slots = Vec::with_capacity(params.len());
+        for (index, param) in params.iter().enumerate() {
+            let ty = param
+                .ty
+                .clone()
+                .or_else(|| expected_signature.and_then(|(types, _)| types.get(index).cloned()))
+                .ok_or_else(|| {
+                    internal_lowering("missing checked closure parameter type", &param.span)
+                })?;
+            parameter_slots.push(nested.locals.allocate(param.name.clone(), ty));
+        }
+        let compiled_body = match body {
+            crate::ast::ClosureBody::Expr(value) => {
+                let expected_return = nested.return_type.clone();
+                vec![CompiledStatement::Return(
+                    Some(nested.lower_expression_expected(value, Some(&expected_return))?),
+                    span.clone(),
+                )]
+            }
+            crate::ast::ClosureBody::Block(body) => nested.lower_statements(&body.stmts)?,
+        };
+        Ok(CompiledExpression::Closure {
+            captures: compiled_captures,
+            parameter_slots,
+            slot_count: nested.locals.names.len(),
+            body: compiled_body,
+            module: self.context.module,
+            span: span.clone(),
         })
     }
 
@@ -712,6 +1320,30 @@ impl FunctionLowerer<'_> {
         arguments: &[crate::ast::CallArg],
         span: &Span,
     ) -> Result<CompiledExpression, SparError> {
+        if !name.contains("::") {
+            let path = vec![name.to_string()];
+            if self
+                .locals
+                .symbols
+                .lookup_section(&path)
+                .is_some_and(|section| section.canonical)
+            {
+                return Ok(CompiledExpression::StructConstruct {
+                    module: self.context.module,
+                    name: name.to_string(),
+                    overrides: arguments
+                        .iter()
+                        .map(|argument| {
+                            Ok((
+                                argument.param_name.clone(),
+                                self.lower_expression(&argument.value)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, SparError>>()?,
+                    span: span.clone(),
+                });
+            }
+        }
         if name == "panic" {
             let message = arguments
                 .iter()
@@ -854,6 +1486,21 @@ impl FunctionLowerer<'_> {
     }
 }
 
+fn is_untyped_closure(expression: &Expr) -> bool {
+    matches!(expression, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+}
+
+/// Fills in untyped closure parameters from an inferred parameter list.
+fn annotate_closure_parameters(expression: &mut Expr, types: &[SparType]) {
+    if let Expr::Closure { params, .. } = expression {
+        for (param, ty) in params.iter_mut().zip(types) {
+            if param.ty.is_none() {
+                param.ty = Some(ty.clone());
+            }
+        }
+    }
+}
+
 fn typed_binary(operation: &BinOp, operand: &SparType) -> Option<TypedOperation> {
     Some(match (operation, operand) {
         (BinOp::Add, SparType::Int) => TypedOperation::IntAdd,
@@ -908,11 +1555,14 @@ fn expression_span(expression: &Expr) -> Span {
         Expr::List(_, span)
         | Expr::Grouped(_, span)
         | Expr::Call { span, .. }
+        | Expr::Closure { span, .. }
         | Expr::Unary { span, .. }
         | Expr::Await { span, .. }
         | Expr::Comprehension { span, .. }
         | Expr::Index { span, .. }
         | Expr::FieldAccess { span, .. }
+        | Expr::MethodCall { span, .. }
+        | Expr::StructuredPipe { span, .. }
         | Expr::Object(_, span) => span.clone(),
         Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => {
             value.span.clone()

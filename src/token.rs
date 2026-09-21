@@ -60,6 +60,7 @@ pub enum Token {
     GtEq,
     AndAnd,
     OrOr,
+    StructuredPipe, // `|>` Spar structured-value pipe
     Bang,
     At, // `@`
 
@@ -67,6 +68,7 @@ pub enum Token {
     KwAsync,
     KwAwait,
     KwFunction,
+    KwFn,
     KwReturn,
     KwIf,
     KwElse,
@@ -77,11 +79,13 @@ pub enum Token {
     KwTry,
     KwCatch,
     KwStruct,
+    KwImpl,
     KwCommand,
     KwExec,
 
-    // Arrow
+    // Arrows
     Arrow,
+    FatArrow,
 
     // Punctuation
     Colon,
@@ -98,12 +102,26 @@ pub enum Token {
     ShellBlockEnd,
     ShellWord(String),
     ShellLiteralWord(String),
+    /// Raw Spar expression immediately following `|>` inside native shell syntax.
+    /// The shell lexer preserves it as text so the ordinary Spar parser can
+    /// parse/type-check the structured stage instead of treating it as argv.
+    ShellStructuredStage(String),
+    /// Raw decoder specification captured after a native `| from` bridge.
+    ShellDecoderStage(String),
     ShellPipe,
     ShellRedirectAppend,
     ShellRedirectStderr,
-    ShellFdRedirect { fd: u32, append: bool },
-    ShellFdDuplicate { fd: u32, target: u32 },
-    ShellRedirectBoth { append: bool },
+    ShellFdRedirect {
+        fd: u32,
+        append: bool,
+    },
+    ShellFdDuplicate {
+        fd: u32,
+        target: u32,
+    },
+    ShellRedirectBoth {
+        append: bool,
+    },
     ShellBackground,
 
     // Delimiters
@@ -191,6 +209,7 @@ impl Token {
             Token::KwAsync => "'async'",
             Token::KwAwait => "'await'",
             Token::KwFunction => "'function'",
+            Token::KwFn => "'fn'",
             Token::KwReturn => "'return'",
             Token::KwIf => "'if'",
             Token::KwElse => "'else'",
@@ -201,9 +220,12 @@ impl Token {
             Token::KwTry => "'try'",
             Token::KwCatch => "'catch'",
             Token::KwStruct => "'struct'",
+            Token::KwImpl => "'impl'",
             Token::KwCommand => "'command'",
             Token::KwExec => "'exec'",
             Token::Arrow => "'->'",
+            Token::FatArrow => "'=>'",
+            Token::StructuredPipe => "'|>'",
             Token::Ident(_) => "identifier",
             Token::StringStart => "string",
             Token::StringFragment(_) => "string content",
@@ -222,6 +244,8 @@ impl Token {
             Token::ShellBlockEnd => "end of shell block",
             Token::ShellWord(_) => "shell word",
             Token::ShellLiteralWord(_) => "literal shell word",
+            Token::ShellStructuredStage(_) => "structured shell stage",
+            Token::ShellDecoderStage(_) => "shell decoder stage",
             Token::ShellPipe => "'|'",
             Token::ShellRedirectAppend => "'>>'",
             Token::ShellRedirectStderr => "'2>'",
@@ -256,6 +280,7 @@ pub fn keyword_or_ident(s: String) -> Token {
         "async" => Token::KwAsync,
         "await" => Token::KwAwait,
         "function" => Token::KwFunction,
+        "fn" => Token::KwFn,
         "return" => Token::KwReturn,
         "if" => Token::KwIf,
         "else" => Token::KwElse,
@@ -266,6 +291,7 @@ pub fn keyword_or_ident(s: String) -> Token {
         "try" => Token::KwTry,
         "catch" => Token::KwCatch,
         "struct" => Token::KwStruct,
+        "impl" => Token::KwImpl,
         "command" => Token::KwCommand,
         "exec" => Token::KwExec,
         _ => Token::Ident(s),

@@ -13,46 +13,93 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         ("normalize", normalize),
     ];
     for (name, function) in unary {
-        registry.register(NativeFunction::sync(
-            "nativePath", name, vec![("path", SparType::Str)], SparType::Str, true,
-            move |_context, args| Ok(Value::String(function(Path::new(string_arg(args, 0, "path")?)))),
-        )).expect("nativePath unary registration must be unique");
+        registry
+            .register(NativeFunction::sync(
+                "nativePath",
+                name,
+                vec![("path", SparType::Str)],
+                SparType::Str,
+                true,
+                move |_context, args| {
+                    Ok(Value::String(function(Path::new(string_arg(
+                        args, 0, "path",
+                    )?))))
+                },
+            ))
+            .expect("nativePath unary registration must be unique");
     }
-    registry.register(NativeFunction::sync(
-        "nativePath", "join", vec![("left", SparType::Str), ("right", SparType::Str)], SparType::Str, true,
-        |_context, args| {
-            let joined = Path::new(string_arg(args, 0, "left")?).join(string_arg(args, 1, "right")?);
-            Ok(Value::String(joined.to_string_lossy().into_owned()))
-        },
-    )).expect("nativePath::join registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativePath", "isAbsolute", vec![("path", SparType::Str)], SparType::Bool, true,
-        |_context, args| Ok(Value::Bool(Path::new(string_arg(args, 0, "path")?).is_absolute())),
-    )).expect("nativePath::isAbsolute registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativePath", "absolute", vec![("path", SparType::Str)], SparType::Str, true,
-        |context, args| Ok(Value::String(normalize(&context.resolve_path(string_arg(args, 0, "path")?)))),
-    )).expect("nativePath::absolute registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativePath", "relative",
-        vec![("from", SparType::Str), ("to", SparType::Str)],
-        SparType::Str, true,
-        |context, args| {
-            let from = normalize_path(&context.resolve_path(string_arg(args, 0, "from")?));
-            let to = normalize_path(&context.resolve_path(string_arg(args, 1, "to")?));
-            Ok(Value::String(relative(&from, &to)))
-        },
-    )).expect("nativePath::relative registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativePath",
+            "join",
+            vec![("left", SparType::Str), ("right", SparType::Str)],
+            SparType::Str,
+            true,
+            |_context, args| {
+                let joined =
+                    Path::new(string_arg(args, 0, "left")?).join(string_arg(args, 1, "right")?);
+                Ok(Value::String(joined.to_string_lossy().into_owned()))
+            },
+        ))
+        .expect("nativePath::join registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativePath",
+            "isAbsolute",
+            vec![("path", SparType::Str)],
+            SparType::Bool,
+            true,
+            |_context, args| {
+                Ok(Value::Bool(
+                    Path::new(string_arg(args, 0, "path")?).is_absolute(),
+                ))
+            },
+        ))
+        .expect("nativePath::isAbsolute registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativePath",
+            "absolute",
+            vec![("path", SparType::Str)],
+            SparType::Str,
+            true,
+            |context, args| {
+                Ok(Value::String(normalize(
+                    &context.resolve_path(string_arg(args, 0, "path")?),
+                )))
+            },
+        ))
+        .expect("nativePath::absolute registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativePath",
+            "relative",
+            vec![("from", SparType::Str), ("to", SparType::Str)],
+            SparType::Str,
+            true,
+            |context, args| {
+                let from = normalize_path(&context.resolve_path(string_arg(args, 0, "from")?));
+                let to = normalize_path(&context.resolve_path(string_arg(args, 1, "to")?));
+                Ok(Value::String(relative(&from, &to)))
+            },
+        ))
+        .expect("nativePath::relative registration must be unique");
 }
 
 fn basename(path: &Path) -> String {
-    path.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 fn dirname(path: &Path) -> String {
-    path.parent().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default()
+    path.parent()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 fn extension(path: &Path) -> String {
-    path.extension().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default()
+    path.extension()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 fn normalize(path: &Path) -> String {
     normalize_path(path).to_string_lossy().into_owned()

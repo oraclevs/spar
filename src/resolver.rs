@@ -18,6 +18,12 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
             StringPart::Expr(expr) => find_exec_shell_span(expr),
         }),
         Expr::FieldAccess { base, .. } | Expr::Grouped(base, _) => find_exec_shell_span(base),
+        Expr::MethodCall { receiver, args, .. } => {
+            find_exec_shell_span(receiver).or_else(|| args.iter().find_map(find_exec_shell_span))
+        }
+        Expr::StructuredPipe { input, stage, .. } => {
+            find_exec_shell_span(input).or_else(|| find_exec_shell_span(stage))
+        }
         Expr::FnCall(call) => call.args.iter().find_map(find_exec_shell_span),
         Expr::BinaryOp(binary) => {
             find_exec_shell_span(&binary.lhs).or_else(|| find_exec_shell_span(&binary.rhs))
@@ -35,6 +41,18 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
             find_exec_shell_span(source).or_else(|| find_exec_shell_span(body))
         }
         Expr::Object(items, _) => find_exec_shell_span_in_items(items),
+        Expr::Closure { body, .. } => match body {
+            ClosureBody::Expr(value) => find_exec_shell_span(value),
+            ClosureBody::Block(body) => body.stmts.iter().find_map(|stmt| match stmt {
+                Statement::Expression(expr, _) => find_exec_shell_span(expr),
+                Statement::LocalVar(local) => find_exec_shell_span(&local.value),
+                Statement::Assignment { value, .. } | Statement::FieldAssignment { value, .. } => {
+                    find_exec_shell_span(value)
+                }
+                Statement::Return(ReturnValue::Expr(value), _) => find_exec_shell_span(value),
+                _ => None,
+            }),
+        },
     }
 }
 
@@ -63,7 +81,7 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             }
             FuncStmt::Expression(Expr::Call { name, .. }, _) if name == "panic" => return None,
             FuncStmt::Expression(_, _) => {}
-            FuncStmt::Assignment { .. } => {}
+            FuncStmt::Assignment { .. } | FuncStmt::FieldAssignment { .. } => {}
             FuncStmt::Break(_) | FuncStmt::Continue(_) => {}
             FuncStmt::If(if_stmt) => {
                 let then_exit = sequence_exit_scope(&if_stmt.then_stmts);
@@ -102,7 +120,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
     match stmt {
         FuncStmt::LocalVar(l) => l.span.clone(),
         FuncStmt::Expression(_, span) => span.clone(),
-        FuncStmt::Assignment { span, .. } => span.clone(),
+        FuncStmt::Assignment { span, .. } | FuncStmt::FieldAssignment { span, .. } => span.clone(),
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For(statement) => statement.span.clone(),
@@ -129,6 +147,7 @@ pub enum GlobalEntry {
 #[derive(Debug, Clone)]
 pub struct SectionEntry {
     pub fields: HashMap<String, FieldEntry>,
+    pub canonical: bool,
     pub exported: bool,
     pub private: bool,
     /// The section's `-> TypeName` binding, if any. Only ever set for a
@@ -168,6 +187,16 @@ pub struct FunctionEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct MethodEntry {
+    pub function: FunctionEntry,
+    pub owner: String,
+    pub has_receiver: bool,
+    pub receiver_mutable: bool,
+    /// Present for runtime-native methods. User `impl` methods leave this unset.
+    pub native_method: Option<crate::runtime::NativeMethodId>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TypeEntry {
     pub type_parameters: Vec<TypeParameter>,
     pub fields: Vec<TypeField>,
@@ -204,6 +233,7 @@ pub struct SymbolTable {
     pub imports: HashMap<String, ImportEntry>,
     pub functions: HashMap<String, FunctionEntry>,
     pub imported_functions: HashMap<String, FunctionEntry>,
+    pub methods: HashMap<String, HashMap<String, MethodEntry>>,
     pub types: HashMap<String, TypeEntry>,
     pub enums: HashMap<String, EnumEntry>,
     pub function_groups: HashMap<String, FunctionGroupEntry>,
@@ -213,6 +243,9 @@ pub struct SymbolTable {
     pub hosts: HashMap<(String, String), crate::host::HostSignature>,
     /// Built-in/private runtime-native function signatures.
     pub natives: HashMap<(String, String), crate::runtime::NativeSignature>,
+    /// Interactive input may `await` at the top level (the session runs the
+    /// expression inside an async wrapper); ordinary programs may not.
+    pub top_level_await: bool,
 }
 
 impl SymbolTable {
@@ -237,6 +270,12 @@ impl SymbolTable {
 
     pub fn lookup_function_group(&self, name: &str) -> Option<&FunctionGroupEntry> {
         self.function_groups.get(name)
+    }
+
+    pub fn lookup_method(&self, owner: &str, name: &str) -> Option<&MethodEntry> {
+        self.methods
+            .get(owner)
+            .and_then(|methods| methods.get(name))
     }
 
     pub fn lookup_type(&self, name: &str) -> Option<&TypeEntry> {
@@ -298,12 +337,14 @@ pub struct Resolver {
     tasks: HashMap<String, TaskEntry>,
     loaded_exports: HashMap<String, HashSet<String>>, // alias → exported names
     imported_functions: HashMap<String, FunctionEntry>,
+    methods: HashMap<String, HashMap<String, MethodEntry>>,
     hosts: crate::host::HostRegistry,
     natives: crate::runtime::NativeRegistry,
     errors: Vec<SparError>,
     current_section: Option<Vec<String>>,
     current_type_parameters: Vec<TypeParameter>,
     current_native_trusted: bool,
+    current_impl: Option<String>,
 }
 
 impl Resolver {
@@ -385,13 +426,31 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if name == "Promise" {
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result")
+                    && !self.types.contains_key(name)
+                {
                     Err(SparError::ResolveError {
-                        message: "type 'Promise' expects 1 type argument".into(),
+                        message: format!("type '{name}' expects 2 type arguments"),
                         hint: None,
                         span: span.clone(),
                     })
-                } else if self.types.contains_key(name) || self.enums.contains_key(name) {
+                } else if matches!(
+                    name.as_str(),
+                    "Promise" | "Table" | "Stream" | "Sequence" | "Option"
+                ) {
+                    Err(SparError::ResolveError {
+                        message: format!("type '{name}' expects 1 type argument"),
+                        hint: None,
+                        span: span.clone(),
+                    })
+                } else if matches!(name.as_str(), "Record" | "Schema")
+                    || self.types.contains_key(name)
+                    || self.enums.contains_key(name)
+                    || self
+                        .sections
+                        .get(&vec![name.clone()])
+                        .is_some_and(|section| section.canonical)
+                {
                     Ok(())
                 } else {
                     Err(SparError::ResolveError {
@@ -402,11 +461,30 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
-                if name == "Promise" {
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result") {
+                    if arguments.len() != 2 {
+                        return Err(SparError::ResolveError {
+                            message: format!(
+                                "type '{name}' expects 2 type arguments, found {}",
+                                arguments.len()
+                            ),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    }
+                    for argument in arguments {
+                        self.validate_explicit_type_argument(argument, span)?;
+                    }
+                    return Ok(());
+                }
+                if matches!(
+                    name.as_str(),
+                    "Promise" | "Table" | "Stream" | "Sequence" | "Option"
+                ) {
                     if arguments.len() != 1 {
                         return Err(SparError::ResolveError {
                             message: format!(
-                                "type 'Promise' expects 1 type argument, found {}",
+                                "type '{name}' expects 1 type argument, found {}",
                                 arguments.len()
                             ),
                             hint: None,
@@ -444,6 +522,15 @@ impl Resolver {
                 Ok(())
             }
             SparType::List(inner) => self.validate_explicit_type_argument(inner, span),
+            SparType::Function {
+                params,
+                return_type,
+            } => {
+                for param in params {
+                    self.validate_explicit_type_argument(param, span)?;
+                }
+                self.validate_explicit_type_argument(return_type, span)
+            }
             SparType::Str
             | SparType::Int
             | SparType::Float
@@ -467,12 +554,14 @@ impl Resolver {
             tasks: HashMap::new(),
             loaded_exports: HashMap::new(),
             imported_functions: HashMap::new(),
+            methods: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             natives: crate::stdlib::native_registry(),
             errors: Vec::new(),
             current_section: None,
             current_type_parameters: Vec::new(),
             current_native_trusted: false,
+            current_impl: None,
         }
     }
 
@@ -501,6 +590,7 @@ impl Resolver {
             tasks: HashMap::new(),
             loaded_exports: exports,
             imported_functions: HashMap::new(),
+            methods: HashMap::new(),
             hosts: crate::host::HostRegistry::default(),
             // Imported-module resolution is still ordinary Spar resolution.
             // In particular, bundled std/prelude functions may contain
@@ -516,6 +606,7 @@ impl Resolver {
             current_section: None,
             current_type_parameters: Vec::new(),
             current_native_trusted: false,
+            current_impl: None,
         }
     }
 
@@ -551,6 +642,7 @@ impl Resolver {
                 );
             }
         }
+        self.register_native_methods();
         self.register(program);
         self.check_function_group_import_collisions();
         self.resolve_program(program);
@@ -562,12 +654,14 @@ impl Resolver {
                 imports: self.imports,
                 functions: self.functions,
                 imported_functions: self.imported_functions,
+                methods: self.methods,
                 types: self.types,
                 enums: self.enums,
                 function_groups: self.function_groups,
                 tasks: self.tasks,
                 hosts: self.hosts.signatures(),
                 natives: self.natives.signatures(),
+                top_level_await: false,
             })
         } else {
             Err(self.errors)
@@ -609,6 +703,7 @@ impl Resolver {
         let mut r = Resolver::with_loaded(exports);
         r.hosts = hosts;
         r.natives = natives;
+        r.register_native_methods();
         for (alias, loaded_import) in loaded {
             for (name, declaration) in &loaded_import.functions {
                 let entry = r.build_function_entry(declaration);
@@ -627,12 +722,14 @@ impl Resolver {
                 imports: r.imports,
                 functions: r.functions,
                 imported_functions: r.imported_functions,
+                methods: r.methods,
                 types: r.types,
                 enums: r.enums,
                 function_groups: r.function_groups,
                 tasks: r.tasks,
                 hosts: r.hosts.signatures(),
                 natives: r.natives.signatures(),
+                top_level_await: false,
             })
         } else {
             Err(r.errors)
@@ -682,8 +779,11 @@ impl Resolver {
         args: &[CallArg],
         name_span: &Span,
     ) {
-        let param_names: HashSet<&str> =
-            signature.params.iter().map(|(name, _)| name.as_str()).collect();
+        let param_names: HashSet<&str> = signature
+            .params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         for arg in args {
             if !param_names.contains(arg.param_name.as_str()) {
                 self.push_error(
@@ -749,6 +849,28 @@ impl Default for Resolver {
     }
 }
 
+fn collect_type_parameters(ty: &SparType, out: &mut Vec<String>) {
+    match ty {
+        SparType::TypeParameter(name) => out.push(name.clone()),
+        SparType::List(inner) => collect_type_parameters(inner, out),
+        SparType::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_type_parameters(argument, out);
+            }
+        }
+        SparType::Function {
+            params,
+            return_type,
+        } => {
+            for param in params {
+                collect_type_parameters(param, out);
+            }
+            collect_type_parameters(return_type, out);
+        }
+        _ => {}
+    }
+}
+
 // ── Pass 1: Registration ──────────────────────────────────────────────────────
 
 impl Resolver {
@@ -759,6 +881,7 @@ impl Resolver {
                 TopLevelItem::Var(decl) => self.register_var(decl),
                 TopLevelItem::Dynamic(decl) => self.register_dynamic(decl),
                 TopLevelItem::Section(decl) => self.register_section(decl),
+                TopLevelItem::Impl(_) => {}
                 TopLevelItem::Function(decl) => self.register_function(decl),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.register_type(decl),
@@ -767,6 +890,11 @@ impl Resolver {
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the resolver — schema files aren't resolved (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.register_task(decl),
                 TopLevelItem::Statement(_) => {}
+            }
+        }
+        for item in &program.items {
+            if let TopLevelItem::Impl(decl) = item {
+                self.register_impl(decl);
             }
         }
     }
@@ -981,6 +1109,113 @@ impl Resolver {
         );
     }
 
+    fn impl_target_name(&self, ty: &SparType) -> Option<String> {
+        match ty {
+            SparType::Named(name) => Some(name.clone()),
+            SparType::Applied { name, .. } => Some(name.clone()),
+            SparType::Str => Some("str".into()),
+            SparType::List(_) => Some("List".into()),
+            _ => None,
+        }
+    }
+
+    fn register_native_methods(&mut self) {
+        for ((_owner, name), signature) in self.natives.method_signatures() {
+            let owner = signature.owner.clone();
+            let mut type_parameter_names = Vec::new();
+            collect_type_parameters(&signature.receiver, &mut type_parameter_names);
+            for (_, ty) in &signature.params {
+                collect_type_parameters(ty, &mut type_parameter_names);
+            }
+            collect_type_parameters(&signature.ret, &mut type_parameter_names);
+            type_parameter_names.sort();
+            type_parameter_names.dedup();
+            let type_parameters = type_parameter_names
+                .into_iter()
+                .map(|name| TypeParameter {
+                    name,
+                    span: Span::dummy(),
+                })
+                .collect();
+            let mut params = vec![("self".to_string(), signature.receiver.clone())];
+            params.extend(signature.params.clone());
+            let function = FunctionEntry {
+                type_parameters,
+                params,
+                default_params: HashSet::new(),
+                ret: signature.ret.clone(),
+                is_async: matches!(
+                    signature.execution,
+                    crate::runtime::NativeExecutionKind::Async
+                ),
+                span: Span::dummy(),
+                closure_deps: HashSet::new(),
+                is_private: signature.private,
+            };
+            self.methods.entry(owner.clone()).or_default().insert(
+                name,
+                MethodEntry {
+                    function,
+                    owner,
+                    has_receiver: true,
+                    receiver_mutable: false,
+                    native_method: Some(signature.id),
+                },
+            );
+        }
+    }
+
+    fn register_impl(&mut self, decl: &ImplDecl) {
+        let Some(owner) = self.impl_target_name(&decl.target) else {
+            self.push_error("impl target must be a struct", decl.span.clone());
+            return;
+        };
+        let path = vec![owner.clone()];
+        let Some(section) = self.sections.get(&path) else {
+            self.push_error(
+                format!("impl target '{owner}' must be a struct"),
+                decl.span.clone(),
+            );
+            return;
+        };
+        if !section.canonical {
+            self.push_error(
+                format!("impl target '{owner}' must be a struct"),
+                decl.span.clone(),
+            );
+            return;
+        }
+        for method in &decl.methods {
+            let name = method.function.name.clone();
+            if self
+                .methods
+                .get(&owner)
+                .is_some_and(|methods| methods.contains_key(&name))
+            {
+                self.errors.push(SparError::ResolveError {
+                    message: format!("method '{name}' is already defined for struct '{owner}'"),
+                    hint: None,
+                    span: method.function.name_span.clone(),
+                });
+                continue;
+            }
+            let entry = MethodEntry {
+                function: self.build_function_entry(&method.function),
+                owner: owner.clone(),
+                has_receiver: method.receiver.is_some(),
+                receiver_mutable: method
+                    .receiver
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.mutable),
+                native_method: None,
+            };
+            self.methods
+                .entry(owner.clone())
+                .or_default()
+                .insert(name, entry);
+        }
+    }
+
     fn register_task(&mut self, decl: &TaskDecl) {
         if self.tasks.contains_key(&decl.name) {
             self.push_error(
@@ -1189,6 +1424,7 @@ impl Resolver {
             decl.path.clone(),
             SectionEntry {
                 fields,
+                canonical: decl.canonical,
                 type_binding: decl.type_binding.as_ref().map(|b| b.ty.clone()),
                 exported: decl.exported,
                 private: decl.private,
@@ -1302,6 +1538,7 @@ impl Resolver {
             path.clone(),
             SectionEntry {
                 fields: field_map,
+                canonical: false,
                 type_binding: None, // a nested section can't declare its own `-> Type` binding
                 exported: false,
                 private: false, // nested sections inherit parent privacy at emit time only
@@ -1332,6 +1569,22 @@ impl Resolver {
                     }
                 }
                 TopLevelItem::Section(decl) => self.resolve_section(decl),
+                TopLevelItem::Impl(decl) => {
+                    for method in &decl.methods {
+                        for parameter in &method.function.params {
+                            self.resolve_type_reference(
+                                &parameter.ty,
+                                &method.function.type_parameters,
+                                &parameter.span,
+                            );
+                        }
+                        self.resolve_type_reference(
+                            &method.function.ret,
+                            &method.function.type_parameters,
+                            &method.function.ret_span,
+                        );
+                    }
+                }
                 TopLevelItem::Function(f) => {
                     for p in &f.params {
                         self.resolve_type_reference(&p.ty, &f.type_parameters, &p.span);
@@ -1386,6 +1639,32 @@ impl Resolver {
                         }
                     }
                 }
+                TopLevelItem::Impl(decl) => {
+                    let Some(owner) = self.impl_target_name(&decl.target) else {
+                        continue;
+                    };
+                    for method in &decl.methods {
+                        let previous_impl = self.current_impl.replace(owner.clone());
+                        let mut mutable = HashSet::new();
+                        if method
+                            .receiver
+                            .as_ref()
+                            .is_some_and(|receiver| receiver.mutable)
+                        {
+                            mutable.insert("self".to_string());
+                        }
+                        let deps =
+                            self.resolve_one_function_body_with_mutable(&method.function, mutable);
+                        self.current_impl = previous_impl;
+                        if let Some(entry) = self
+                            .methods
+                            .get_mut(&owner)
+                            .and_then(|methods| methods.get_mut(&method.function.name))
+                        {
+                            entry.function.closure_deps = deps;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1397,13 +1676,20 @@ impl Resolver {
     /// functionGroup. Returns the computed closure deps; the caller decides
     /// which map to store them in.
     fn resolve_one_function_body(&mut self, f: &FunctionDecl) -> HashSet<DeclId> {
+        self.resolve_one_function_body_with_mutable(f, HashSet::new())
+    }
+
+    fn resolve_one_function_body_with_mutable(
+        &mut self,
+        f: &FunctionDecl,
+        mut mutable_names: HashSet<String>,
+    ) -> HashSet<DeclId> {
         let previous_type_parameters =
             std::mem::replace(&mut self.current_type_parameters, f.type_parameters.clone());
         let previous_native_trusted =
             std::mem::replace(&mut self.current_native_trusted, f.trusted_native);
         let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
         let mut local_names = param_names.clone();
-        let mut mutable_names = HashSet::new();
 
         for param in &f.params {
             if let Some(default) = &param.default {
@@ -1458,7 +1744,7 @@ impl Resolver {
                 }
                 FuncStmt::LocalVar(_) => {}
                 FuncStmt::Expression(_, _) => {}
-                FuncStmt::Assignment { .. } => {}
+                FuncStmt::Assignment { .. } | FuncStmt::FieldAssignment { .. } => {}
                 FuncStmt::If(if_stmt) => {
                     let then_stmts = if_stmt.then_stmts.clone();
                     let else_stmts = if_stmt.else_stmts.clone();
@@ -1673,8 +1959,21 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if name == "Promise" {
-                    self.push_error("type 'Promise' expects 1 type argument", span.clone());
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result")
+                    && !self.types.contains_key(name)
+                {
+                    self.push_error(
+                        format!("type '{name}' expects 2 type arguments"),
+                        span.clone(),
+                    );
+                } else if matches!(
+                    name.as_str(),
+                    "Promise" | "Table" | "Stream" | "Sequence" | "Option"
+                ) {
+                    self.push_error(
+                        format!("type '{name}' expects 1 type argument"),
+                        span.clone(),
+                    );
                 } else if let Some(entry) = self.types.get(name) {
                     if !entry.type_parameters.is_empty() {
                         self.push_error(
@@ -1690,11 +1989,25 @@ impl Resolver {
                             span.clone(),
                         );
                     }
+                } else if matches!(name.as_str(), "Record" | "Schema") {
+                    // Built-in structured runtime types.
+                } else if self
+                    .sections
+                    .get(&vec![name.clone()])
+                    .is_some_and(|section| section.canonical)
+                {
+                    // Canonical structs are nominal runtime types as well as values.
                 } else if !self.enums.contains_key(name) {
                     let candidates: Vec<String> = self
                         .types
                         .keys()
                         .chain(self.enums.keys())
+                        .chain(
+                            self.sections
+                                .iter()
+                                .filter(|(path, section)| section.canonical && path.len() == 1)
+                                .map(|(path, _)| &path[0]),
+                        )
                         .cloned()
                         .collect();
                     let hint = suggest(name, candidates.iter().map(|candidate| candidate.as_str()));
@@ -1706,11 +2019,24 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
-                if name == "Promise" {
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result") {
+                    if arguments.len() != 2 {
+                        self.push_error(
+                            format!(
+                                "type '{name}' expects 2 type arguments, found {}",
+                                arguments.len()
+                            ),
+                            span.clone(),
+                        );
+                    }
+                } else if matches!(
+                    name.as_str(),
+                    "Promise" | "Table" | "Stream" | "Sequence" | "Option"
+                ) {
                     if arguments.len() != 1 {
                         self.push_error(
                             format!(
-                                "type 'Promise' expects 1 type argument, found {}",
+                                "type '{name}' expects 1 type argument, found {}",
                                 arguments.len()
                             ),
                             span.clone(),
@@ -1744,6 +2070,15 @@ impl Resolver {
                 }
             }
             SparType::List(inner) => self.resolve_type_reference(inner, parameters, span),
+            SparType::Function {
+                params,
+                return_type,
+            } => {
+                for param in params {
+                    self.resolve_type_reference(param, parameters, span);
+                }
+                self.resolve_type_reference(return_type, parameters, span);
+            }
             SparType::Str
             | SparType::Int
             | SparType::Float
@@ -1763,6 +2098,89 @@ impl Resolver {
         self.resolve_type_reference(ty, &[], span);
     }
 
+    fn resolve_struct_constructor_args(
+        &mut self,
+        name: &str,
+        type_arguments: &[SparType],
+        args: &[CallArg],
+        span: &Span,
+    ) -> bool {
+        let path = vec![name.to_string()];
+        let Some(section) = self.sections.get(&path).cloned() else {
+            return false;
+        };
+        if !section.canonical {
+            return false;
+        }
+        if !type_arguments.is_empty() {
+            self.push_error(
+                format!("struct constructor '{name}' does not accept call-site type arguments"),
+                span.clone(),
+            );
+        }
+        let mut seen = HashSet::new();
+        for arg in args {
+            if !section.fields.contains_key(&arg.param_name) {
+                self.push_error(
+                    format!("struct '{name}' has no field '{}'", arg.param_name),
+                    arg.param_name_span.clone(),
+                );
+            } else if !seen.insert(arg.param_name.clone()) {
+                self.push_error(
+                    format!("duplicate constructor field '{}'", arg.param_name),
+                    arg.param_name_span.clone(),
+                );
+            }
+            self.resolve_expr(&arg.value);
+        }
+        true
+    }
+
+    fn resolve_struct_constructor_args_with_locals(
+        &self,
+        name: &str,
+        type_arguments: &[SparType],
+        args: &[CallArg],
+        span: &Span,
+        locals: &HashSet<String>,
+    ) -> Result<bool, SparError> {
+        let path = vec![name.to_string()];
+        let Some(section) = self.sections.get(&path) else {
+            return Ok(false);
+        };
+        if !section.canonical {
+            return Ok(false);
+        }
+        if !type_arguments.is_empty() {
+            return Err(SparError::ResolveError {
+                message: format!(
+                    "struct constructor '{name}' does not accept call-site type arguments"
+                ),
+                hint: None,
+                span: span.clone(),
+            });
+        }
+        let mut seen = HashSet::new();
+        for arg in args {
+            if !section.fields.contains_key(&arg.param_name) {
+                return Err(SparError::ResolveError {
+                    message: format!("struct '{name}' has no field '{}'", arg.param_name),
+                    hint: None,
+                    span: arg.param_name_span.clone(),
+                });
+            }
+            if !seen.insert(arg.param_name.clone()) {
+                return Err(SparError::ResolveError {
+                    message: format!("duplicate constructor field '{}'", arg.param_name),
+                    hint: None,
+                    span: arg.param_name_span.clone(),
+                });
+            }
+            self.resolve_expr_with_locals(&arg.value, locals)?;
+        }
+        Ok(true)
+    }
+
     fn resolve_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Object(items, _) => self.resolve_nested_fields(items),
@@ -1771,6 +2189,51 @@ impl Resolver {
             Expr::FieldAccess {
                 base, field, span, ..
             } => self.resolve_field_access(base, field, span),
+            Expr::MethodCall { receiver, args, .. } => {
+                if !self.is_static_method_receiver(receiver, &HashSet::new()) {
+                    self.resolve_expr(receiver);
+                }
+                for argument in args {
+                    self.resolve_expr(argument);
+                }
+            }
+            Expr::StructuredPipe { input, stage, .. } => {
+                self.resolve_expr(input);
+                match self.pipe_stage_with_input(input, stage) {
+                    Some(injected) => self.resolve_expr(&injected),
+                    None => self.resolve_expr(stage),
+                }
+            }
+            Expr::Closure {
+                params,
+                return_type,
+                body,
+                span,
+            } => {
+                for param in params {
+                    if let Some(ty) = &param.ty {
+                        self.check_named_type_exists(ty, &param.span);
+                    }
+                }
+                if let Some(ty) = return_type {
+                    self.check_named_type_exists(ty, span);
+                }
+                let mut locals = HashSet::new();
+                for param in params {
+                    locals.insert(param.name.clone());
+                }
+                match body {
+                    ClosureBody::Expr(value) => {
+                        if let Err(error) = self.resolve_expr_with_locals(value, &locals) {
+                            self.errors.push(error);
+                        }
+                    }
+                    ClosureBody::Block(body) => {
+                        let mut mutable = HashSet::new();
+                        self.resolve_func_stmts(&body.stmts, &mut locals, &mut mutable, 0, true);
+                    }
+                }
+            }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.resolve_expr(arg);
@@ -1813,6 +2276,11 @@ impl Resolver {
                     for argument in args {
                         self.resolve_expr(&argument.value);
                     }
+                    return;
+                }
+                if !name.contains("::")
+                    && self.resolve_struct_constructor_args(name, type_arguments, args, name_span)
+                {
                     return;
                 }
                 if let Err(error) =
@@ -1893,7 +2361,9 @@ impl Resolver {
                                     name_span.clone(),
                                 );
                             } else {
-                                self.check_native_call_args(ns, fn_name, &signature, args, name_span);
+                                self.check_native_call_args(
+                                    ns, fn_name, &signature, args, name_span,
+                                );
                             }
                             for arg in args {
                                 self.resolve_expr(&arg.value);
@@ -1987,10 +2457,80 @@ impl Resolver {
         }
     }
 
+    /// `value |> f(name: arg)` passes `value` as `f`'s first parameter. Returns
+    /// the stage as an ordinary named call with that argument filled in, so the
+    /// usual argument checks see the complete call. `None` when the stage is not
+    /// a named call to a function whose signature is known here.
+    fn pipe_stage_with_input(&self, input: &Expr, stage: &Expr) -> Option<Expr> {
+        let Expr::Call {
+            name,
+            name_span,
+            type_arguments,
+            args,
+            span,
+        } = stage
+        else {
+            return None;
+        };
+        let segments: Vec<&str> = name.split("::").collect();
+        let first_param = match segments.as_slice() {
+            [function] => self
+                .functions
+                .get(*function)
+                .or_else(|| self.imported_functions.get(*function)),
+            [group, function] => self
+                .function_groups
+                .get(*group)
+                .and_then(|entry| entry.functions.get(*function))
+                .or_else(|| self.imported_functions.get(name.as_str())),
+            _ => None,
+        }?
+        .params
+        .first()?
+        .0
+        .clone();
+        let mut injected = Vec::with_capacity(args.len() + 1);
+        injected.push(CallArg {
+            param_name: first_param,
+            param_name_span: span.clone(),
+            value: input.clone(),
+            span: span.clone(),
+        });
+        injected.extend(args.iter().cloned());
+        Some(Expr::Call {
+            name: name.clone(),
+            name_span: name_span.clone(),
+            type_arguments: type_arguments.clone(),
+            args: injected,
+            span: span.clone(),
+        })
+    }
+
+    /// `Struct.function(...)`: the receiver names a canonical struct (and no
+    /// local shadows it), so it is a type path rather than a value reference.
+    fn is_static_method_receiver(&self, receiver: &Expr, locals: &HashSet<String>) -> bool {
+        let Expr::NamespaceRef(reference) = receiver else {
+            return false;
+        };
+        let [name] = reference.segments.as_slice() else {
+            return false;
+        };
+        !locals.contains(name)
+            && self
+                .sections
+                .get(&vec![name.clone()])
+                .is_some_and(|section| section.canonical)
+    }
+
     fn resolve_namespace_ref(&mut self, nr: &NamespaceRef) {
         match nr.segments.as_slice() {
             // ── 1 segment ────────────────────────────────────────────────────
             [name] => {
+                if name == "_" {
+                    // `_` is the embedder-provided previous interactive value.
+                    // The runtime reports a useful error when no value exists yet.
+                    return;
+                }
                 if name == "self" || name == "global" {
                     // Bare self/global (not followed by `.field`) is never
                     // a value on its own — FieldAccess resolution handles
@@ -2004,8 +2544,17 @@ impl Resolver {
                     );
                     return;
                 }
-                if !self.globals.contains_key(name.as_str()) {
-                    let candidates: Vec<String> = self.globals.keys().cloned().collect();
+                if !self.globals.contains_key(name.as_str())
+                    && !self.functions.contains_key(name.as_str())
+                    && !self.imported_functions.contains_key(name.as_str())
+                {
+                    let candidates: Vec<String> = self
+                        .globals
+                        .keys()
+                        .chain(self.functions.keys())
+                        .chain(self.imported_functions.keys())
+                        .cloned()
+                        .collect();
                     let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                     self.push_error_hint(
                         format!(
@@ -2194,9 +2743,16 @@ impl Resolver {
                 return Ok(());
             }
             if nr.segments == ["self"] {
-                let Some(section_path) = self.current_section.clone() else {
+                let section_path = self.current_section.clone().or_else(|| {
+                    if locals.contains("self") {
+                        self.current_impl.as_ref().map(|owner| vec![owner.clone()])
+                    } else {
+                        None
+                    }
+                });
+                let Some(section_path) = section_path else {
                     return Err(SparError::ResolveError {
-                        message: "`self` can only be used inside a section's own field values"
+                        message: "`self` can only be used inside a section field value or instance impl method"
                             .to_string(),
                         hint: None,
                         span: span.clone(),
@@ -2323,6 +2879,57 @@ impl Resolver {
                         });
                     }
                 }
+                FuncStmt::FieldAssignment {
+                    base,
+                    fields,
+                    value,
+                    span,
+                } => {
+                    self.reject_module_exec_shell(value, allow_exec_shell);
+                    if let Err(error) = self.resolve_expr_with_locals(value, local_names) {
+                        self.errors.push(error);
+                    }
+                    let exists_locally = local_names.contains(base);
+                    let exists_globally = self.globals.contains_key(base);
+                    let mutable = if exists_locally {
+                        mutable_names.contains(base)
+                    } else {
+                        matches!(
+                            self.globals.get(base),
+                            Some(GlobalEntry::Var { mutable: true, .. })
+                        )
+                    };
+                    if !exists_locally && !exists_globally {
+                        self.errors.push(SparError::ResolveError {
+                            message: format!("cannot assign to '{base}': binding is not declared"),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    } else if !mutable {
+                        self.errors.push(SparError::ResolveError {
+                            message: format!("cannot assign to immutable binding '{base}'"),
+                            hint: Some(format!(
+                                "declare it as `var mut {base}: ...` to allow assignment"
+                            )),
+                            span: span.clone(),
+                        });
+                    }
+                    let mut expression = Expr::NamespaceRef(NamespaceRef {
+                        segments: vec![base.clone()],
+                        span: span.clone(),
+                    });
+                    for field in fields {
+                        expression = Expr::FieldAccess {
+                            base: Box::new(expression),
+                            field: field.clone(),
+                            field_span: span.clone(),
+                            span: span.clone(),
+                        };
+                    }
+                    if let Err(error) = self.resolve_expr_with_locals(&expression, local_names) {
+                        self.errors.push(error);
+                    }
+                }
                 FuncStmt::Return(ret_value, _) => match ret_value {
                     ReturnValue::Void => {}
                     ReturnValue::Expr(e) => {
@@ -2444,6 +3051,70 @@ impl Resolver {
         }
     }
 
+    fn resolve_closure_stmts_with_locals(
+        &self,
+        stmts: &[FuncStmt],
+        outer: &HashSet<String>,
+    ) -> Result<(), SparError> {
+        let mut locals = outer.clone();
+        for stmt in stmts {
+            match stmt {
+                FuncStmt::LocalVar(local) => {
+                    self.resolve_expr_with_locals(&local.value, &locals)?;
+                    locals.insert(local.name.clone());
+                }
+                FuncStmt::Assignment { value, .. }
+                | FuncStmt::FieldAssignment { value, .. }
+                | FuncStmt::Expression(value, _) => {
+                    self.resolve_expr_with_locals(value, &locals)?;
+                }
+                FuncStmt::Return(ReturnValue::Expr(value), _) => {
+                    self.resolve_expr_with_locals(value, &locals)?;
+                }
+                FuncStmt::Return(ReturnValue::SectionBlock(fields), _) => {
+                    for field in fields {
+                        self.resolve_expr_with_locals(&field.value, &locals)?;
+                    }
+                }
+                FuncStmt::Return(ReturnValue::Void, _)
+                | FuncStmt::Break(_)
+                | FuncStmt::Continue(_) => {}
+                FuncStmt::If(statement) => {
+                    self.resolve_expr_with_locals(&statement.condition, &locals)?;
+                    self.resolve_closure_stmts_with_locals(&statement.then_stmts, &locals)?;
+                    self.resolve_closure_stmts_with_locals(&statement.else_stmts, &locals)?;
+                }
+                FuncStmt::For(statement) => {
+                    self.resolve_expr_with_locals(&statement.iterable, &locals)?;
+                    let mut loop_locals = locals.clone();
+                    match &statement.binding {
+                        ForBinding::Value { name, .. } => {
+                            loop_locals.insert(name.clone());
+                        }
+                        ForBinding::Indexed {
+                            index_name,
+                            value_name,
+                            ..
+                        } => {
+                            loop_locals.insert(index_name.clone());
+                            loop_locals.insert(value_name.clone());
+                        }
+                    }
+                    self.resolve_closure_stmts_with_locals(&statement.body, &loop_locals)?;
+                }
+                FuncStmt::Try(statement) => {
+                    self.resolve_closure_stmts_with_locals(&statement.body, &locals)?;
+                    let mut catch_locals = locals.clone();
+                    if let Some(name) = &statement.catch_name {
+                        catch_locals.insert(name.clone());
+                    }
+                    self.resolve_closure_stmts_with_locals(&statement.handler, &catch_locals)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Locals-aware sibling of `resolve_nested_fields`, for an object
     /// literal appearing inside a function body (a local var's value, a
     /// return value, ...) where names may refer to locals/params instead
@@ -2491,6 +3162,36 @@ impl Resolver {
             Expr::FieldAccess {
                 base, field, span, ..
             } => self.check_field_access_with_locals(base, field, span, locals),
+            Expr::MethodCall { receiver, args, .. } => {
+                if !self.is_static_method_receiver(receiver, locals) {
+                    self.resolve_expr_with_locals(receiver, locals)?;
+                }
+                for argument in args {
+                    self.resolve_expr_with_locals(argument, locals)?;
+                }
+                Ok(())
+            }
+            Expr::StructuredPipe { input, stage, .. } => {
+                self.resolve_expr_with_locals(input, locals)?;
+                match self.pipe_stage_with_input(input, stage) {
+                    Some(injected) => self.resolve_expr_with_locals(&injected, locals),
+                    None => self.resolve_expr_with_locals(stage, locals),
+                }
+            }
+            Expr::Closure { params, body, .. } => {
+                let mut closure_locals = locals.clone();
+                for param in params {
+                    closure_locals.insert(param.name.clone());
+                }
+                match body {
+                    ClosureBody::Expr(value) => {
+                        self.resolve_expr_with_locals(value, &closure_locals)
+                    }
+                    ClosureBody::Block(body) => {
+                        self.resolve_closure_stmts_with_locals(&body.stmts, &closure_locals)
+                    }
+                }
+            }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.resolve_expr_with_locals(arg, locals)?;
@@ -2531,6 +3232,17 @@ impl Resolver {
                         });
                     }
                     return self.resolve_expr_with_locals(&args[0].value, locals);
+                }
+                if !name.contains("::")
+                    && self.resolve_struct_constructor_args_with_locals(
+                        name,
+                        type_arguments,
+                        args,
+                        name_span,
+                        locals,
+                    )?
+                {
+                    return Ok(());
                 }
                 self.resolve_call_type_arguments(name, type_arguments, name_span)?;
                 let segments: Vec<&str> = name.split("::").collect();
@@ -2784,6 +3496,17 @@ impl Resolver {
                         self.resolve_shell_command_words(command, outer_locals)?;
                     }
                 }
+                ShellStep::MixedPipeline(pipeline) => {
+                    for command in pipeline.input.iter().chain(pipeline.output.iter()) {
+                        self.resolve_shell_command_words(command, outer_locals)?;
+                    }
+                    for arg in &pipeline.decoder.args {
+                        self.resolve_expr_with_locals(&arg.value, outer_locals)?;
+                    }
+                    for stage in &pipeline.stages {
+                        self.resolve_expr_with_locals(stage, outer_locals)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -2800,11 +3523,17 @@ impl Resolver {
             .chain(command.stdout.iter())
             .chain(command.stderr.iter())
             .map(|redirect| &redirect.target)
-            .chain(command.redirections.iter().filter_map(|fd| match &fd.target {
-                ShellFdRedirectTarget::File(redirect) => Some(&redirect.target),
-                ShellFdRedirectTarget::Duplicate(_) => None,
-            }));
+            .chain(
+                command
+                    .redirections
+                    .iter()
+                    .filter_map(|fd| match &fd.target {
+                        ShellFdRedirectTarget::File(redirect) => Some(&redirect.target),
+                        ShellFdRedirectTarget::Duplicate(_) => None,
+                    }),
+            );
         for word in std::iter::once(&command.program)
+            .chain(command.environment.iter().map(|entry| &entry.value))
             .chain(command.args.iter())
             .chain(redirect_words)
         {
@@ -2839,6 +3568,18 @@ impl Resolver {
                     if captured.contains(name) && !shell_locals.contains(name) {
                         return Err(SparError::ResolveError {
                             message: format!("cannot mutate captured binding `{name}` inside deferred shell program"),
+                            hint: Some("copy it into a local mutable shell variable first".into()),
+                            span: span.clone(),
+                        });
+                    }
+                    self.resolve_expr_with_locals(value, visible)?;
+                }
+                Statement::FieldAssignment {
+                    base, value, span, ..
+                } => {
+                    if captured.contains(base) && !shell_locals.contains(base) {
+                        return Err(SparError::ResolveError {
+                            message: format!("cannot mutate captured binding `{base}` inside deferred shell program"),
                             hint: Some("copy it into a local mutable shell variable first".into()),
                             span: span.clone(),
                         });
@@ -2937,7 +3678,7 @@ impl Resolver {
     ) -> Result<(), SparError> {
         match nr.segments.as_slice() {
             [name] => {
-                if name == "status" || name == "lastJob" {
+                if name == "status" || name == "lastJob" || name == "_" {
                     return Ok(());
                 }
                 if locals.contains(name) {
@@ -2952,10 +3693,19 @@ impl Resolver {
                         span: nr.span.clone(),
                     });
                 }
-                if self.globals.contains_key(name.as_str()) {
+                if self.globals.contains_key(name.as_str())
+                    || self.functions.contains_key(name.as_str())
+                    || self.imported_functions.contains_key(name.as_str())
+                {
                     return Ok(());
                 }
-                let candidates: Vec<String> = self.globals.keys().cloned().collect();
+                let candidates: Vec<String> = self
+                    .globals
+                    .keys()
+                    .chain(self.functions.keys())
+                    .chain(self.imported_functions.keys())
+                    .cloned()
+                    .collect();
                 let hint = suggest(name, candidates.iter().map(|s| s.as_str()));
                 Err(SparError::ResolveError {
                     message: format!(
@@ -3060,6 +3810,44 @@ impl Resolver {
                     }
                     [] => {}
                 }
+            }
+            Expr::Closure { params, body, .. } => {
+                let mut inner = local_names.clone();
+                for param in params {
+                    inner.insert(param.name.clone());
+                }
+                match body {
+                    ClosureBody::Expr(value) => self.collect_closure_deps_expr(value, &inner, deps),
+                    ClosureBody::Block(body) => {
+                        for stmt in &body.stmts {
+                            match stmt {
+                                Statement::LocalVar(local) => {
+                                    self.collect_closure_deps_expr(&local.value, &inner, deps);
+                                    inner.insert(local.name.clone());
+                                }
+                                Statement::Assignment { value, .. }
+                                | Statement::FieldAssignment { value, .. }
+                                | Statement::Expression(value, _) => {
+                                    self.collect_closure_deps_expr(value, &inner, deps);
+                                }
+                                Statement::Return(ReturnValue::Expr(value), _) => {
+                                    self.collect_closure_deps_expr(value, &inner, deps)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                self.collect_closure_deps_expr(receiver, local_names, deps);
+                for argument in args {
+                    self.collect_closure_deps_expr(argument, local_names, deps);
+                }
+            }
+            Expr::StructuredPipe { input, stage, .. } => {
+                self.collect_closure_deps_expr(input, local_names, deps);
+                self.collect_closure_deps_expr(stage, local_names, deps);
             }
             Expr::FieldAccess { base, .. } => {
                 self.collect_closure_deps_expr(base, local_names, deps);
@@ -3169,7 +3957,7 @@ impl Resolver {
                 FuncStmt::Expression(expr, _) => {
                     self.collect_closure_deps_expr(expr, &locals, deps);
                 }
-                FuncStmt::Assignment { value, .. } => {
+                FuncStmt::Assignment { value, .. } | FuncStmt::FieldAssignment { value, .. } => {
                     self.collect_closure_deps_expr(value, &locals, deps);
                 }
                 FuncStmt::Break(_) | FuncStmt::Continue(_) => {}

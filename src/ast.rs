@@ -18,6 +18,7 @@ pub enum TopLevelItem {
     Var(VarDecl),
     Dynamic(DynamicDecl),
     Section(SectionDecl),
+    Impl(ImplDecl),
     Function(FunctionDecl),
     SchemaSection(SchemaSectionDecl),
     Type(TypeDecl),
@@ -155,6 +156,74 @@ pub enum ShellJoin {
 pub enum ShellStep {
     Command(Box<ShellCommandExpr>),
     Pipeline(Vec<ShellCommandExpr>),
+    /// A shell pipeline that crosses explicitly from Unix bytes into Spar
+    /// structured values and back into bytes. The process/value boundary is
+    /// intentionally represented here instead of smuggling `from`/`to` in as
+    /// executable command names.
+    MixedPipeline(Box<ShellMixedPipeline>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecoderNamespace {
+    Codec,
+    Scoc,
+    Custom,
+}
+
+impl DecoderNamespace {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codec => "codec",
+            Self::Scoc => "scoc",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecoderRef {
+    pub namespace: Option<DecoderNamespace>,
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedDecoderArg {
+    pub name: String,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellDecodeStage {
+    pub decoder: DecoderRef,
+    pub args: Vec<NamedDecoderArg>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellCodecStage {
+    pub format: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellMixedPipeline {
+    /// One or more external commands whose stdout is decoded by `from`.
+    pub input: Vec<ShellCommandExpr>,
+    pub decoder: ShellDecodeStage,
+    /// Ordinary Spar expressions appearing on the right-hand side of `|>`.
+    pub stages: Vec<Expr>,
+    /// `|> to FORMAT`. Absent when the pipeline ends in a structured stage: the
+    /// interactive shell then renders the result itself, and everywhere else
+    /// it is written as JSON Lines.
+    pub encoder: Option<ShellCodecStage>,
+    /// Optional external byte pipeline fed from `to`.
+    pub output: Vec<ShellCommandExpr>,
+    /// `|> to FORMAT > file` / `>> file`: the serialized bytes go straight to a
+    /// file, with no command in between. Mutually exclusive with `output`.
+    pub encoder_redirect: Option<ShellRedirect>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +255,9 @@ pub enum ShellFdRedirectTarget {
 #[derive(Debug, Clone)]
 pub struct ShellEnvironmentEntry {
     pub name: String,
-    pub value: String,
+    /// The assigned value, a full word: `NAME=${expr}`, `NAME="a-${b}"` and
+    /// `NAME=$OTHER` interpolate like any other command word.
+    pub value: ShellWord,
     pub span: Span,
 }
 
@@ -375,6 +446,27 @@ pub struct SectionDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub target: SparType,
+    pub type_parameters: Vec<TypeParameter>,
+    pub methods: Vec<ImplMethodDecl>,
+    pub span: Span,
+    pub end_line: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplMethodDecl {
+    pub function: FunctionDecl,
+    pub receiver: Option<MethodReceiver>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodReceiver {
+    pub mutable: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub enum SectionItem {
     Field(FieldDecl),
     Spread(SpreadStmt),
@@ -422,6 +514,10 @@ pub enum SparType {
         name: String,
         arguments: Vec<SparType>,
     },
+    Function {
+        params: Vec<SparType>,
+        return_type: Box<SparType>,
+    },
 }
 
 /// The right-hand side of a field declaration.
@@ -434,6 +530,19 @@ pub enum FieldValue {
     /// also contain `...SourceSection;` spreads, same as a top-level
     /// section body already can.
     Nested(Vec<SectionItem>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClosureParam {
+    pub name: String,
+    pub ty: Option<SparType>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClosureBody {
+    Expr(Box<Expr>),
+    Block(FunctionBody),
 }
 
 #[derive(Debug, Clone)]
@@ -450,6 +559,12 @@ pub enum Expr {
         name_span: Span,
         type_arguments: Vec<SparType>,
         args: Vec<CallArg>,
+        span: Span,
+    },
+    Closure {
+        params: Vec<ClosureParam>,
+        return_type: Option<SparType>,
+        body: ClosureBody,
         span: Span,
     },
     Unary {
@@ -479,6 +594,18 @@ pub enum Expr {
         field_span: Span,
         span: Span,
     },
+    MethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        method_span: Span,
+        args: Vec<Expr>,
+        span: Span,
+    },
+    StructuredPipe {
+        input: Box<Expr>,
+        stage: Box<Expr>,
+        span: Span,
+    },
     /// An anonymous object literal — `{ field: value; ...Spread; }`. Reuses
     /// `SectionItem` verbatim, the same Field/Spread payload a nested
     /// section body (`FieldValue::Nested`) already carries. Only reachable
@@ -505,11 +632,14 @@ impl Expr {
             Expr::List(_, span)
             | Expr::Grouped(_, span)
             | Expr::Call { span, .. }
+            | Expr::Closure { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Await { span, .. }
             | Expr::Comprehension { span, .. }
             | Expr::Index { span, .. }
             | Expr::FieldAccess { span, .. }
+            | Expr::MethodCall { span, .. }
+            | Expr::StructuredPipe { span, .. }
             | Expr::Object(_, span) => Some(span),
             Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => {
                 Some(&value.span)
@@ -643,6 +773,12 @@ pub enum Statement {
         value: Expr,
         span: Span,
     },
+    FieldAssignment {
+        base: String,
+        fields: Vec<String>,
+        value: Expr,
+        span: Span,
+    },
     Expression(Expr, Span),
     If(IfStmt),
     Return(ReturnValue, Span),
@@ -708,6 +844,9 @@ pub struct IfStmt {
     /// Source line of the `}` closing the `then` block (the `else` line
     /// when there is an else branch).
     pub then_end_line: u32,
+    /// True when written `else if ...`: `else_stmts` is then exactly one
+    /// nested `if`, printed back as an `else if` chain.
+    pub else_if: bool,
     /// Source line of the last closing `}`.
     pub end_line: u32,
 }

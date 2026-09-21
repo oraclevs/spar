@@ -25,7 +25,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         .register(NativeFunction::intrinsic(
             "nativeAsync",
             "timeout",
-            vec![("promise", promise_of(t.clone())), ("millis", SparType::Int)],
+            vec![
+                ("promise", promise_of(t.clone())),
+                ("millis", SparType::Int),
+            ],
             t,
             true,
             NativeIntrinsic::PromiseTimeout,

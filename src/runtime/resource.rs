@@ -31,6 +31,9 @@ impl ResourceTable {
     }
 
     pub fn remove<T: Any + Send>(&mut self, id: ResourceId) -> Option<T> {
+        if !self.resources.get(&id)?.is::<T>() {
+            return None;
+        }
         self.resources
             .remove(&id)?
             .downcast::<T>()
@@ -68,5 +71,15 @@ mod tests {
         assert!(table.contains(id));
         assert_eq!(table.remove::<String>(id).as_deref(), Some("hello"));
         assert!(!table.contains(id));
+    }
+
+    #[test]
+    fn wrong_typed_remove_preserves_resource() {
+        let mut table = ResourceTable::new();
+        let id = table.insert(String::from("hello"));
+
+        assert_eq!(table.remove::<u64>(id), None);
+        assert!(table.contains(id));
+        assert_eq!(table.get::<String>(id).map(String::as_str), Some("hello"));
     }
 }

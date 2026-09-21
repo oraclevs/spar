@@ -23,8 +23,10 @@ pub mod resolver;
 pub mod runner;
 pub(crate) mod runtime;
 pub mod session;
-pub(crate) mod stdlib;
 mod shell_lang;
+pub(crate) mod stdlib;
+pub mod structured_codec;
+pub mod structured_input;
 pub mod task_lowering;
 #[cfg(test)]
 pub mod tests;
@@ -48,8 +50,25 @@ pub use lexer::Lexer;
 pub use parser::Parser;
 pub use renderer::ErrorRenderer;
 pub use resolver::{Resolver, SymbolTable};
-pub use runtime::{NativeExecutionKind, NativeFunction, NativeFunctionId, NativeRegistry, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput, Value};
-pub use session::{input_completeness, InputCompleteness, InteractiveEvalResult, Session};
+pub use runtime::{
+    NativeExecutionKind, NativeFunction, NativeFunctionId, NativeMethod, NativeMethodId,
+    NativeMethodSignature, NativeRegistry, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput,
+    Schema, SchemaField, SchemaInferenceError, SchemaType, StreamResource, StreamState, TableValue,
+    Value,
+};
+pub use session::{
+    input_completeness, InputCompleteness, InteractiveEvalResult, InteractivePresentation,
+    InteractivePreviewResult, InteractiveRuntimeValue, Session,
+};
+pub use structured_codec::{
+    CodecDescriptor, CodecMode, StructuredFormat, StructuredFormatRegistry, StructuredParser,
+    StructuredSerializer,
+};
+pub use structured_input::{
+    structured_decoder_descriptors, DecoderCapabilities, DecoderDescriptor, DecoderKind,
+    DecoderNamespace, DecoderOptionKind, DecoderOptionSpec, DecoderOutputShape, StreamingMode,
+    StructuredInputRegistry,
+};
 pub use token::{SpannedToken, Token};
 pub use typechecker::TypeChecker;
 

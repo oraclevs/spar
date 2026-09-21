@@ -5,16 +5,30 @@ use crate::shell_lang::{
 };
 use crate::token::{SpannedToken, Token};
 
+type RunHeader = (RunShell, Option<Span>, Option<String>, Option<Span>);
+
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
     active_type_parameters: Vec<TypeParameter>,
+    /// Interactive sessions accept a bare expression as a module-level
+    /// statement, so `answer + 1` or `users |> take(2)` can be previewed.
+    interactive: bool,
+}
+
+fn parse_error_start(error: &SparError) -> usize {
+    match error {
+        SparError::ParseError { span, .. } | SparError::LexError { span, .. } => span.start,
+        _ => 0,
+    }
 }
 
 fn statement_span(statement: &Statement) -> Span {
     match statement {
         Statement::LocalVar(declaration) => declaration.span.clone(),
-        Statement::Assignment { span, .. } => span.clone(),
+        Statement::Assignment { span, .. } | Statement::FieldAssignment { span, .. } => {
+            span.clone()
+        }
         Statement::Expression(_, span) | Statement::Return(_, span) => span.clone(),
         Statement::Break(span) | Statement::Continue(span) => span.clone(),
         Statement::If(statement) => statement.span.clone(),
@@ -40,13 +54,35 @@ fn mark_type_parameters(ty: SparType, parameters: &[TypeParameter]) -> SparType 
     }
 }
 
+/// Parses exactly one ordinary Spar expression from an already-tokenized
+/// fragment. Native-shell mixed pipelines use this to turn the raw text after
+/// `|>` back into the same expression AST used everywhere else.
+pub(crate) fn parse_expression_tokens(tokens: Vec<SpannedToken>) -> Result<Expr, SparError> {
+    let mut parser = Parser::new(tokens);
+    let expression = parser.parse_expr()?;
+    if !parser.at(&Token::Eof) {
+        return Err(parser.error(format!(
+            "unexpected {} after structured pipeline stage",
+            parser.peek().human_name()
+        )));
+    }
+    Ok(expression)
+}
+
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
         Self {
             tokens,
             pos: 0,
             active_type_parameters: Vec::new(),
+            interactive: false,
         }
+    }
+
+    /// Accept bare expression statements at module level (interactive only).
+    pub(crate) fn interactive(mut self) -> Self {
+        self.interactive = true;
+        self
     }
 
     fn peek(&self) -> &Token {
@@ -176,7 +212,7 @@ impl Parser {
             if self.at(&Token::Eof) {
                 break;
             }
-            items.push(self.parse_top_level_item()?);
+            items.push(self.parse_top_level_item_or_expression()?);
         }
 
         // Validate schema-file exclusivity rules
@@ -195,6 +231,7 @@ impl Parser {
                         TopLevelItem::Type(d) => d.span.clone(),
                         TopLevelItem::Enum(d) => d.span.clone(),
                         TopLevelItem::FunctionGroup(d) => d.span.clone(),
+                        TopLevelItem::Impl(d) => d.span.clone(),
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
                         TopLevelItem::Task(d) => d.span.clone(),
                         TopLevelItem::Statement(s) => statement_span(s),
@@ -270,6 +307,43 @@ impl Parser {
         Ok(path)
     }
 
+    fn parse_top_level_item_or_expression(&mut self) -> Result<TopLevelItem, SparError> {
+        if !self.interactive {
+            return self.parse_top_level_item();
+        }
+        let start = self.pos;
+        let original = match self.parse_top_level_item() {
+            Ok(item) => return Ok(item),
+            Err(error) => error,
+        };
+        self.pos = start;
+        let span = self.peek_span();
+        let expression_error = match self.parse_expr() {
+            Ok(expression) if self.at(&Token::Semicolon) => {
+                self.advance();
+                return Ok(TopLevelItem::Statement(Statement::Expression(
+                    expression, span,
+                )));
+            }
+            Ok(expression) if self.at(&Token::Eof) => {
+                return Ok(TopLevelItem::Statement(Statement::Expression(
+                    expression, span,
+                )));
+            }
+            Ok(_) => self.error(format!(
+                "unexpected {} after interactive expression",
+                self.peek().human_name()
+            )),
+            Err(error) => error,
+        };
+        self.pos = start;
+        if parse_error_start(&expression_error) > parse_error_start(&original) {
+            Err(expression_error)
+        } else {
+            Err(original)
+        }
+    }
+
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
         match self.peek() {
             Token::Import     => Ok(TopLevelItem::Import(self.parse_import()?)),
@@ -277,6 +351,7 @@ impl Parser {
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
             Token::LBracket   => self.parse_section(false, false),
             Token::KwStruct   => self.parse_struct(false, false),
+            Token::KwImpl     => Ok(TopLevelItem::Impl(self.parse_impl_decl()?)),
             Token::KwFunction => Ok(TopLevelItem::Function(
                 self.parse_top_level_function_decl(false, false)?,
             )),
@@ -371,7 +446,9 @@ impl Parser {
         // `import schema "path";`
         if matches!(self.peek(), Token::Ident(s) if s == "schema") {
             if package {
-                return Err(self.error("`import pkg schema` is not supported; schema imports are local modules"));
+                return Err(self.error(
+                    "`import pkg schema` is not supported; schema imports are local modules",
+                ));
             }
             self.advance();
             let path = self.parse_import_path()?;
@@ -662,6 +739,7 @@ impl Parser {
                         | Some(Token::TypeInt)
                         | Some(Token::TypeFloat)
                         | Some(Token::TypeBool)
+                        | Some(Token::KwFn)
                 ) || (
                     // `[Ident] =` — list of a named type, same `=`-disambiguation.
                     matches!(
@@ -1047,6 +1125,154 @@ impl Parser {
         }))
     }
 
+    fn parse_impl_decl(&mut self) -> Result<ImplDecl, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::KwImpl)?;
+        let type_parameters = self.parse_type_parameters()?;
+        let previous_type_parameters =
+            std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
+        let target = mark_type_parameters(self.parse_type()?, &type_parameters);
+        self.expect(&Token::LBrace)?;
+        let mut methods = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            let is_private = if self.at(&Token::Private) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            methods.push(self.parse_impl_method(target.clone(), is_private)?);
+            self.expect(&Token::Semicolon)?;
+        }
+        let end_line = self.peek_span().line;
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
+        self.active_type_parameters = previous_type_parameters;
+        Ok(ImplDecl {
+            target,
+            type_parameters,
+            methods,
+            span,
+            end_line,
+        })
+    }
+
+    fn parse_impl_method(
+        &mut self,
+        target: SparType,
+        is_private: bool,
+    ) -> Result<ImplMethodDecl, SparError> {
+        let span = self.peek_span();
+        let is_async = if self.at(&Token::KwAsync) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&Token::KwFunction)?;
+        let (name, name_span) = self.expect_ident()?;
+        let type_parameters = self.parse_type_parameters()?;
+        let previous_type_parameters =
+            std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        let mut receiver = None;
+        let mut saw_default = false;
+        let mut first = true;
+        while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+            let param_span = self.peek_span();
+            if first && self.at(&Token::KwMut) {
+                self.advance();
+                let (name, _) = self.expect_ident()?;
+                if name != "self" {
+                    return Err(self.error("`mut` in a method receiver must be followed by `self`"));
+                }
+                receiver = Some(MethodReceiver {
+                    mutable: true,
+                    span: param_span.clone(),
+                });
+                params.push(Param {
+                    name,
+                    ty: target.clone(),
+                    default: None,
+                    span: param_span,
+                });
+            } else if first && matches!(self.peek(), Token::Ident(name) if name == "self") {
+                let (name, _) = self.expect_ident()?;
+                receiver = Some(MethodReceiver {
+                    mutable: false,
+                    span: param_span.clone(),
+                });
+                params.push(Param {
+                    name,
+                    ty: target.clone(),
+                    default: None,
+                    span: param_span,
+                });
+            } else {
+                let (param_name, _) = self.expect_ident()?;
+                if param_name == "self" {
+                    return Err(self.error("`self` must be the first method parameter"));
+                }
+                self.expect(&Token::Colon)?;
+                let ty = mark_type_parameters(self.parse_type()?, &type_parameters);
+                let default = if self.at(&Token::Eq) {
+                    self.advance();
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                if default.is_none() && saw_default {
+                    return Err(self.error(
+                        "a required function parameter cannot follow a parameter with a default",
+                    ));
+                }
+                saw_default |= default.is_some();
+                params.push(Param {
+                    name: param_name,
+                    ty,
+                    default,
+                    span: param_span,
+                });
+            }
+            first = false;
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Arrow)?;
+        let ret_span = self.peek_span();
+        let ret = mark_type_parameters(self.parse_function_return_type()?, &type_parameters);
+        self.expect(&Token::LBrace)?;
+        let mut stmts = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            stmts.push(self.parse_func_stmt()?);
+        }
+        let body_span = self.peek_span();
+        self.expect(&Token::RBrace)?;
+        self.active_type_parameters = previous_type_parameters;
+        Ok(ImplMethodDecl {
+            function: FunctionDecl {
+                name,
+                name_span,
+                type_parameters,
+                params,
+                ret,
+                ret_span,
+                body: FunctionBody {
+                    stmts,
+                    span: body_span,
+                },
+                is_async,
+                is_private,
+                trusted_native: false,
+                span,
+            },
+            receiver,
+        })
+    }
+
     fn parse_struct(&mut self, exported: bool, private: bool) -> Result<TopLevelItem, SparError> {
         let span = self.peek_span();
         self.expect(&Token::KwStruct)?;
@@ -1191,6 +1417,9 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<SparType, SparError> {
+        if self.at(&Token::KwFn) {
+            return self.parse_callable_type();
+        }
         if self.at(&Token::LBracket) {
             self.advance();
             let inner = self.parse_type()?;
@@ -1203,8 +1432,38 @@ impl Parser {
         self.parse_scalar_type()
     }
 
+    fn parse_callable_type(&mut self) -> Result<SparType, SparError> {
+        self.expect(&Token::KwFn)?;
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+            params.push(self.parse_type()?);
+            if self.at(&Token::Comma) {
+                self.advance();
+                if self.at(&Token::RParen) {
+                    break;
+                }
+            } else if !self.at(&Token::RParen) {
+                return Err(self.error(format!(
+                    "expected ',' or ')', found {}",
+                    self.peek().human_name()
+                )));
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Arrow)?;
+        let return_type = self.parse_function_return_type()?;
+        Ok(SparType::Function {
+            params,
+            return_type: Box::new(return_type),
+        })
+    }
+
     fn parse_scalar_type(&mut self) -> Result<SparType, SparError> {
-        if matches!(self.peek(), Token::Ident(_) | Token::KwCommand | Token::KwExec) {
+        if matches!(
+            self.peek(),
+            Token::Ident(_) | Token::KwCommand | Token::KwExec
+        ) {
             // Native-shell words are contextual here too: a user-declared
             // type named `command` or `exec` remains referenceable outside
             // the actual native-shell construct positions.
@@ -1242,7 +1501,22 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, SparError> {
-        self.parse_fallback_expr()
+        self.parse_structured_pipe_expr()
+    }
+
+    fn parse_structured_pipe_expr(&mut self) -> Result<Expr, SparError> {
+        let mut input = self.parse_fallback_expr()?;
+        while self.at(&Token::StructuredPipe) {
+            let span = self.peek_span();
+            self.advance();
+            let stage = self.parse_fallback_expr()?;
+            input = Expr::StructuredPipe {
+                input: Box::new(input),
+                stage: Box::new(stage),
+                span,
+            };
+        }
+        Ok(input)
     }
 
     fn parse_fallback_expr(&mut self) -> Result<Expr, SparError> {
@@ -1423,6 +1697,7 @@ impl Parser {
                 let s = self.parse_interp_string()?;
                 Ok(Expr::String(s))
             }
+            Token::KwFn => self.parse_closure_expr(),
             Token::LBracket => self.parse_list_literal(),
             Token::LBrace => self.parse_object_literal(),
             Token::LParen => {
@@ -1514,16 +1789,107 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance(); // consume '.'
                 let (field, field_span) = self.expect_ident()?;
-                expr = Expr::FieldAccess {
-                    base: Box::new(expr),
-                    field,
-                    field_span,
-                    span,
-                };
+                if self.at(&Token::LParen) {
+                    self.advance();
+                    let mut args = Vec::new();
+                    while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+                        args.push(self.parse_expr()?);
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    expr = Expr::MethodCall {
+                        receiver: Box::new(expr),
+                        method: field,
+                        method_span: field_span,
+                        args,
+                        span,
+                    };
+                } else {
+                    expr = Expr::FieldAccess {
+                        base: Box::new(expr),
+                        field,
+                        field_span,
+                        span,
+                    };
+                }
             }
         }
 
         Ok(expr)
+    }
+
+    fn parse_closure_expr(&mut self) -> Result<Expr, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::KwFn)?;
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+            let param_span = self.peek_span();
+            let (name, _) = self.expect_ident()?;
+            let ty = if self.at(&Token::Colon) {
+                self.advance();
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            params.push(ClosureParam {
+                name,
+                ty,
+                span: param_span,
+            });
+            if self.at(&Token::Comma) {
+                self.advance();
+                if self.at(&Token::RParen) {
+                    break;
+                }
+            } else if !self.at(&Token::RParen) {
+                return Err(self.error(format!(
+                    "expected ',' or ')' in closure parameter list, found {}",
+                    self.peek().human_name()
+                )));
+            }
+        }
+        self.expect(&Token::RParen)?;
+
+        let return_type = if self.at(&Token::Arrow) {
+            self.advance();
+            Some(self.parse_function_return_type()?)
+        } else {
+            None
+        };
+
+        let body = if self.at(&Token::FatArrow) {
+            self.advance();
+            ClosureBody::Expr(Box::new(self.parse_fallback_expr()?))
+        } else if self.at(&Token::LBrace) {
+            self.advance();
+            let mut stmts = Vec::new();
+            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                stmts.push(self.parse_func_stmt()?);
+            }
+            let body_span = self.peek_span();
+            self.expect(&Token::RBrace)?;
+            ClosureBody::Block(FunctionBody {
+                stmts,
+                span: body_span,
+            })
+        } else {
+            return Err(self.error(format!(
+                "expected '=>' or '{{' to start closure body, found {}",
+                self.peek().human_name()
+            )));
+        };
+
+        Ok(Expr::Closure {
+            params,
+            return_type,
+            body,
+            span,
+        })
     }
 
     fn parse_mixed_shell_block(&mut self) -> Result<Expr, SparError> {
@@ -1546,6 +1912,7 @@ impl Parser {
                     && !shell.steps.iter().any(|(_, step)| match step {
                         ShellStep::Command(command) => command.background,
                         ShellStep::Pipeline(commands) => commands.last().is_some_and(|command| command.background),
+                        ShellStep::MixedPipeline(_) => false,
                     }))
         });
         let steps = if all_commands {
@@ -1688,7 +2055,7 @@ impl Parser {
         }
 
         if self.at(&Token::LParen) {
-            if name == "env" || name == "str" {
+            if name == "env" || name == "str" || !self.call_uses_named_arguments() {
                 return self.parse_fn_call(name, span);
             } else {
                 return self.parse_user_call(name, name_span, Vec::new());
@@ -1712,6 +2079,17 @@ impl Parser {
         }
 
         Ok(Expr::NamespaceRef(NamespaceRef { segments, span }))
+    }
+
+    fn call_uses_named_arguments(&self) -> bool {
+        matches!(
+            (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
+            (Some(first), Some(second))
+                if matches!(
+                    first.token,
+                    Token::Ident(_) | Token::KwCommand | Token::KwExec | Token::TypeShell
+                ) && second.token == Token::Colon
+        )
     }
 
     fn parse_fn_call(&mut self, name: String, span: Span) -> Result<Expr, SparError> {
@@ -1746,7 +2124,7 @@ impl Parser {
             let param_name_span = self.peek_span();
             let (param_name, _) = self.expect_ident()?;
             self.expect(&Token::Colon)?;
-            let value = self.parse_or()?;
+            let value = self.parse_expr()?;
             args.push(CallArg {
                 param_name,
                 param_name_span: param_name_span.clone(),
@@ -1772,9 +2150,9 @@ impl Parser {
         self.expect(&Token::KwFor)?;
         let (var_name, var_name_span) = self.expect_ident()?;
         self.expect(&Token::KwIn)?;
-        let source = self.parse_or()?;
+        let source = self.parse_expr()?;
         self.expect(&Token::LBrace)?;
-        let body = self.parse_or()?;
+        let body = self.parse_expr()?;
         self.expect(&Token::RBrace)?;
         Ok(Expr::Comprehension {
             var_name,
@@ -1899,6 +2277,33 @@ impl Parser {
         })
     }
 
+    fn looks_like_field_assignment(&self) -> bool {
+        if !matches!(self.peek(), Token::Ident(_)) {
+            return false;
+        }
+        let mut index = self.pos + 1;
+        let mut saw_field = false;
+        while self
+            .tokens
+            .get(index)
+            .is_some_and(|token| token.token == Token::Dot)
+        {
+            let Some(name) = self.tokens.get(index + 1) else {
+                return false;
+            };
+            if !matches!(name.token, Token::Ident(_)) {
+                return false;
+            }
+            saw_field = true;
+            index += 2;
+        }
+        saw_field
+            && self
+                .tokens
+                .get(index)
+                .is_some_and(|token| token.token == Token::Eq || token.token == Token::PlusEq)
+    }
+
     fn parse_func_stmt(&mut self) -> Result<FuncStmt, SparError> {
         if matches!(self.peek(), Token::ShellWord(_)) {
             let span = self.peek_span();
@@ -1930,9 +2335,9 @@ impl Parser {
                     let (ty, value) = if self.at_type_start() {
                         let ty = self.parse_type()?;
                         self.expect(&Token::Eq)?;
-                        (Some(ty), self.parse_or()?)
+                        (Some(ty), self.parse_expr()?)
                     } else {
-                        (None, self.parse_or()?)
+                        (None, self.parse_expr()?)
                     };
                     self.expect(&Token::Semicolon)?;
                     fields.push(ReturnField {
@@ -1945,7 +2350,7 @@ impl Parser {
                 self.expect(&Token::RBrace)?;
                 ReturnValue::SectionBlock(fields)
             } else {
-                ReturnValue::Expr(self.parse_or()?)
+                ReturnValue::Expr(self.parse_expr()?)
             };
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Return(ret_value, start_span));
@@ -1964,6 +2369,49 @@ impl Parser {
         }
         if self.at(&Token::Var) {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
+        }
+
+        if self.looks_like_field_assignment() {
+            let span = self.peek_span();
+            let (base, _) = self.expect_ident()?;
+            let mut fields = Vec::new();
+            while self.at(&Token::Dot) {
+                self.advance();
+                let (field, _) = self.expect_ident()?;
+                fields.push(field);
+            }
+            let compound = self.at(&Token::PlusEq);
+            self.advance();
+            let rhs = self.parse_expr()?;
+            let value = if compound {
+                let mut base_expr = Expr::NamespaceRef(NamespaceRef {
+                    segments: vec![base.clone()],
+                    span: span.clone(),
+                });
+                for field in &fields {
+                    base_expr = Expr::FieldAccess {
+                        base: Box::new(base_expr),
+                        field: field.clone(),
+                        field_span: span.clone(),
+                        span: span.clone(),
+                    };
+                }
+                Expr::BinaryOp(BinaryOp {
+                    op: BinOp::Add,
+                    lhs: Box::new(base_expr),
+                    rhs: Box::new(rhs),
+                    span: span.clone(),
+                })
+            } else {
+                rhs
+            };
+            self.expect(&Token::Semicolon)?;
+            return Ok(FuncStmt::FieldAssignment {
+                base,
+                fields,
+                value,
+                span,
+            });
         }
 
         if self.at_ident() && (self.next_is(&Token::Eq) || self.next_is(&Token::PlusEq)) {
@@ -1993,7 +2441,12 @@ impl Parser {
         let expression = self.parse_expr()?;
         if !matches!(
             expression,
-            Expr::Call { .. } | Expr::FnCall(_) | Expr::Shell(_)
+            Expr::Call { .. }
+                | Expr::FnCall(_)
+                | Expr::MethodCall { .. }
+                | Expr::Shell(_)
+                | Expr::ExecShell(_)
+                | Expr::StructuredPipe { .. }
         ) {
             return Err(SparError::ParseError {
                 message: "only function calls may be used as expression statements".into(),
@@ -2065,7 +2518,7 @@ impl Parser {
             }
         };
         self.expect(&Token::KwIn)?;
-        let iterable = self.parse_or()?;
+        let iterable = self.parse_expr()?;
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -2098,7 +2551,7 @@ impl Parser {
             None
         };
         self.expect(&Token::Eq)?;
-        let value = self.parse_or()?;
+        let value = self.parse_expr()?;
         self.expect(&Token::Semicolon)?;
         Ok(LocalVarDecl {
             name,
@@ -2112,7 +2565,7 @@ impl Parser {
     fn parse_if_stmt(&mut self) -> Result<IfStmt, SparError> {
         let span = self.peek_span();
         self.expect(&Token::KwIf)?;
-        let condition = self.parse_or()?;
+        let condition = self.parse_expr()?;
         self.expect(&Token::LBrace)?;
         let mut then_stmts = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -2120,15 +2573,23 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         let then_end_line = self.prev_line();
+        let mut else_if = false;
         let else_stmts = if self.at(&Token::KwElse) {
             self.advance();
-            self.expect(&Token::LBrace)?;
-            let mut stmts = Vec::new();
-            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                stmts.push(self.parse_func_stmt()?);
+            if self.at(&Token::KwIf) {
+                // `else if ...` is an `else` holding one nested `if`.
+                else_if = true;
+                let nested = self.parse_if_stmt()?;
+                vec![FuncStmt::If(nested)]
+            } else {
+                self.expect(&Token::LBrace)?;
+                let mut stmts = Vec::new();
+                while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                    stmts.push(self.parse_func_stmt()?);
+                }
+                self.expect(&Token::RBrace)?;
+                stmts
             }
-            self.expect(&Token::RBrace)?;
-            stmts
         } else {
             Vec::new()
         };
@@ -2138,6 +2599,7 @@ impl Parser {
             else_stmts,
             span,
             then_end_line,
+            else_if,
             end_line: self.prev_line(),
         })
     }
@@ -2388,9 +2850,7 @@ impl Parser {
 
     /// Parses the optional `[spar|bash] [linux|macos|windows]` words between
     /// `run` and its body. Shell first, OS second; both optional.
-    fn parse_run_header(
-        &mut self,
-    ) -> Result<(RunShell, Option<Span>, Option<String>, Option<Span>), SparError> {
+    fn parse_run_header(&mut self) -> Result<RunHeader, SparError> {
         const OS: [&str; 3] = ["linux", "macos", "windows"];
         let mut shell = RunShell::Spar;
         let mut shell_span = None;
@@ -2608,6 +3068,90 @@ mod tests {
     }
 
     #[test]
+    fn parses_callable_type_annotations() {
+        let item = first_item("var f: fn(int) -> int;");
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        assert_eq!(
+            decl.ty,
+            SparType::Function {
+                params: vec![SparType::Int],
+                return_type: Box::new(SparType::Int),
+            }
+        );
+
+        let item = first_item("var map: fn(str, int) -> bool;");
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
+        };
+        assert_eq!(
+            decl.ty,
+            SparType::Function {
+                params: vec![SparType::Str, SparType::Int],
+                return_type: Box::new(SparType::Bool),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_expression_and_block_closures() {
+        let program = parse_str(
+            "function main() -> int {\n\
+                 var a: fn(int) -> int = fn(x: int) -> int => x + 1;\n\
+                 var b: fn(int) -> int = fn(x: int) -> int { return x + 1; };\n\
+                 return 0;\n\
+             };",
+        );
+        let TopLevelItem::Function(function) = &program.items[0] else {
+            panic!("not function")
+        };
+        let Statement::LocalVar(a) = &function.body.stmts[0] else {
+            panic!("not local var a")
+        };
+        let Expr::Closure {
+            params,
+            return_type,
+            body,
+            ..
+        } = &a.value
+        else {
+            panic!("a is not closure")
+        };
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "x");
+        assert_eq!(params[0].ty, Some(SparType::Int));
+        assert_eq!(return_type.as_ref(), Some(&SparType::Int));
+        assert!(matches!(body, ClosureBody::Expr(_)));
+
+        let Statement::LocalVar(b) = &function.body.stmts[1] else {
+            panic!("not local var b")
+        };
+        let Expr::Closure { body, .. } = &b.value else {
+            panic!("b is not closure")
+        };
+        assert!(matches!(body, ClosureBody::Block(_)));
+    }
+
+    #[test]
+    fn rejects_incomplete_callable_and_closure_syntax() {
+        let err = parse_err("var f: fn(int -> int;");
+        assert!(
+            err.contains("expected ')'") || err.contains("found '->'"),
+            "got: {err}"
+        );
+
+        let err = parse_err("var f: fn(int) int;");
+        assert!(err.contains("expected '->'"), "got: {err}");
+
+        let err = parse_err("function main() -> int { var f = fn(x: int) -> int; return 0; };");
+        assert!(
+            err.contains("expected '=>' or '{'") || err.contains("closure"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn test_import_no_alias() {
         let item = first_item(r#"import "base.spar";"#);
         let TopLevelItem::Import(decl) = item else {
@@ -2635,7 +3179,9 @@ mod tests {
         };
         assert!(decl.package);
         assert_eq!(decl.path, "std");
-        assert!(matches!(decl.kind, ImportKind::Selective(ref items) if items.len() == 1 && items[0].name == "println"));
+        assert!(
+            matches!(decl.kind, ImportKind::Selective(ref items) if items.len() == 1 && items[0].name == "println")
+        );
     }
 
     #[test]
@@ -2900,10 +3446,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_fn_error() {
-        // User-defined function calls require named args; positional args cause a parse error
-        let err = parse_err(r#"var x: str = foo("bar");"#);
-        assert!(err.contains("expected a name"), "got: {err}");
+    fn positional_call_syntax_is_parsed_before_semantic_resolution() {
+        let program = parse_str(r#"var x: str = foo("bar");"#);
+        let TopLevelItem::Var(var) = &program.items[0] else {
+            panic!("expected var");
+        };
+        assert!(matches!(var.value, Some(Expr::FnCall(_))));
     }
 
     #[test]
@@ -3474,7 +4022,7 @@ function f(flag: bool) -> int {
             };
             function command(exec: str) -> str { return exec; };
             var commandValue: str = command(exec: "ok");
-            "#
+            "#,
         );
     }
 
@@ -3520,11 +4068,8 @@ function f(flag: bool) -> int {
     fn removed_and_invalid_task_syntax_gives_hints() {
         assert!(parse_err("task [Build] { run { true; }; };")
             .contains("task [Name] is removed; write task Name"));
-        assert!(
-            parse_err("task B { shell: [\"sh\"]; run { true; }; };").contains(
-                "the task 'shell' field is removed; use run bash { ... } to select a shell"
-            )
-        );
+        assert!(parse_err("task B { shell: [\"sh\"]; run { true; }; };")
+            .contains("the task 'shell' field is removed; use run bash { ... } to select a shell"));
         assert!(parse_err("task B { run windows bash { true; }; };")
             .contains("expected shell before OS: run <shell> <os> { }"));
         assert!(parse_err("task B { run zsh { true; }; };")

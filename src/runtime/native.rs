@@ -10,6 +10,9 @@ use super::value::Value;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NativeFunctionId(pub(crate) u32);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeMethodId(pub(crate) u32);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeExecutionKind {
     Sync,
@@ -20,11 +23,93 @@ pub enum NativeExecutionKind {
 pub enum NativeIntrinsic {
     PromiseRace,
     PromiseTimeout,
+    DataMap,
+    DataFilter,
+    DataTake,
+    DataSkip,
+    DataFirst,
+    DataLast,
+    DataCollect,
+    DataCollectTable,
+    DataCount,
+    DataSortBy,
+    DataGroupBy,
+    DataUnique,
+    DataUniqueBy,
+    DataFlatten,
+    DataGet,
+    DataSelect,
+    DataSchema,
+    DataInspect,
 }
 
-pub type NativeCallback = Arc<
-    dyn Fn(&mut RuntimeContext, &[Value]) -> Result<Value, SparError> + Send + Sync + 'static,
->;
+pub type NativeCallback =
+    Arc<dyn Fn(&mut RuntimeContext, &[Value]) -> Result<Value, SparError> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub struct NativeMethod {
+    pub owner: String,
+    pub name: String,
+    pub receiver: SparType,
+    pub params: Vec<(String, SparType)>,
+    pub ret: SparType,
+    pub execution: NativeExecutionKind,
+    pub private: bool,
+    pub(crate) handler: NativeHandler,
+}
+
+impl NativeMethod {
+    pub fn sync(
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        receiver: SparType,
+        params: Vec<(&str, SparType)>,
+        ret: SparType,
+        private: bool,
+        callback: impl Fn(&mut RuntimeContext, &[Value]) -> Result<Value, SparError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            receiver,
+            params: params
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect(),
+            ret,
+            execution: NativeExecutionKind::Sync,
+            private,
+            handler: NativeHandler::Callback(Arc::new(callback)),
+        }
+    }
+
+    pub fn intrinsic(
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        receiver: SparType,
+        params: Vec<(&str, SparType)>,
+        ret: SparType,
+        private: bool,
+        intrinsic: NativeIntrinsic,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            receiver,
+            params: params
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect(),
+            ret,
+            execution: NativeExecutionKind::Sync,
+            private,
+            handler: NativeHandler::Intrinsic(intrinsic),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct NativeFunction {
@@ -90,6 +175,28 @@ impl NativeFunction {
             handler: NativeHandler::Intrinsic(intrinsic),
         }
     }
+
+    pub fn sync_intrinsic(
+        module: impl Into<String>,
+        name: impl Into<String>,
+        params: Vec<(&str, SparType)>,
+        ret: SparType,
+        private: bool,
+        intrinsic: NativeIntrinsic,
+    ) -> Self {
+        Self {
+            module: module.into(),
+            name: name.into(),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect(),
+            ret,
+            execution: NativeExecutionKind::Sync,
+            private,
+            handler: NativeHandler::Intrinsic(intrinsic),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -101,10 +208,24 @@ pub struct NativeSignature {
     pub private: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct NativeMethodSignature {
+    pub id: NativeMethodId,
+    pub owner: String,
+    pub receiver: SparType,
+    pub params: Vec<(String, SparType)>,
+    pub ret: SparType,
+    pub execution: NativeExecutionKind,
+    pub private: bool,
+    pub native: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct NativeRegistry {
     functions: Vec<NativeFunction>,
     by_name: HashMap<(String, String), NativeFunctionId>,
+    methods: Vec<NativeMethod>,
+    methods_by_name: HashMap<(String, String), NativeMethodId>,
 }
 
 impl NativeRegistry {
@@ -129,6 +250,20 @@ impl NativeRegistry {
         Ok(id)
     }
 
+    pub fn register_method(&mut self, method: NativeMethod) -> Result<NativeMethodId, SparError> {
+        let key = (method.owner.clone(), method.name.clone());
+        if self.methods_by_name.contains_key(&key) {
+            return Err(SparError::EvalError {
+                message: format!("native method '{}.{}' is already registered", key.0, key.1),
+                span: Span::dummy(),
+            });
+        }
+        let id = NativeMethodId(self.methods.len() as u32);
+        self.methods.push(method);
+        self.methods_by_name.insert(key, id);
+        Ok(id)
+    }
+
     /// Registers every function of `other` that is not already present.
     /// Existing entries (and their ids) win, so an embedder's own natives
     /// are never shadowed by the ones merged in behind them.
@@ -139,11 +274,19 @@ impl NativeRegistry {
                 let _ = self.register(function.clone());
             }
         }
+        for method in &other.methods {
+            let key = (method.owner.clone(), method.name.clone());
+            if !self.methods_by_name.contains_key(&key) {
+                let _ = self.register_method(method.clone());
+            }
+        }
     }
 
     pub fn get(&self, module: &str, name: &str) -> Option<(NativeFunctionId, &NativeFunction)> {
         let id = *self.by_name.get(&(module.to_string(), name.to_string()))?;
-        self.functions.get(id.0 as usize).map(|function| (id, function))
+        self.functions
+            .get(id.0 as usize)
+            .map(|function| (id, function))
     }
 
     pub fn signature(&self, module: &str, name: &str) -> Option<NativeSignature> {
@@ -177,9 +320,57 @@ impl NativeRegistry {
             .collect()
     }
 
+    pub fn method_signature(&self, owner: &str, name: &str) -> Option<NativeMethodSignature> {
+        let id = *self
+            .methods_by_name
+            .get(&(owner.to_string(), name.to_string()))?;
+        let method = self.methods.get(id.0 as usize)?;
+        Some(NativeMethodSignature {
+            id,
+            owner: method.owner.clone(),
+            receiver: method.receiver.clone(),
+            params: method.params.clone(),
+            ret: method.ret.clone(),
+            execution: method.execution,
+            private: method.private,
+            native: true,
+        })
+    }
+
+    pub fn method_signatures(&self) -> HashMap<(String, String), NativeMethodSignature> {
+        self.methods_by_name
+            .iter()
+            .filter_map(|(key, id)| {
+                self.methods.get(id.0 as usize).map(|method| {
+                    (
+                        key.clone(),
+                        NativeMethodSignature {
+                            id: *id,
+                            owner: method.owner.clone(),
+                            receiver: method.receiver.clone(),
+                            params: method.params.clone(),
+                            ret: method.ret.clone(),
+                            execution: method.execution,
+                            private: method.private,
+                            native: true,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn intrinsic(&self, id: NativeFunctionId) -> Option<NativeIntrinsic> {
         let function = self.functions.get(id.0 as usize)?;
         match &function.handler {
+            NativeHandler::Intrinsic(intrinsic) => Some(*intrinsic),
+            NativeHandler::Callback(_) => None,
+        }
+    }
+
+    pub fn method_intrinsic(&self, id: NativeMethodId) -> Option<NativeIntrinsic> {
+        let method = self.methods.get(id.0 as usize)?;
+        match &method.handler {
             NativeHandler::Intrinsic(intrinsic) => Some(*intrinsic),
             NativeHandler::Callback(_) => None,
         }
@@ -192,10 +383,13 @@ impl NativeRegistry {
         args: &[Value],
         span: &Span,
     ) -> Result<Value, SparError> {
-        let function = self.functions.get(id.0 as usize).ok_or_else(|| SparError::EvalError {
-            message: format!("unknown native function ID {}", id.0),
-            span: span.clone(),
-        })?;
+        let function = self
+            .functions
+            .get(id.0 as usize)
+            .ok_or_else(|| SparError::EvalError {
+                message: format!("unknown native function ID {}", id.0),
+                span: span.clone(),
+            })?;
         match &function.handler {
             NativeHandler::Callback(callback) => {
                 callback(context, args).map_err(|error| with_call_span(error, span))
@@ -204,6 +398,34 @@ impl NativeRegistry {
                 message: format!(
                     "native runtime intrinsic '{}::{}' can only execute in the compiled runtime",
                     function.module, function.name
+                ),
+                span: span.clone(),
+            }),
+        }
+    }
+
+    pub fn call_method(
+        &self,
+        id: NativeMethodId,
+        context: &mut RuntimeContext,
+        args: &[Value],
+        span: &Span,
+    ) -> Result<Value, SparError> {
+        let method = self
+            .methods
+            .get(id.0 as usize)
+            .ok_or_else(|| SparError::EvalError {
+                message: format!("unknown native method ID {}", id.0),
+                span: span.clone(),
+            })?;
+        match &method.handler {
+            NativeHandler::Callback(callback) => {
+                callback(context, args).map_err(|error| with_call_span(error, span))
+            }
+            NativeHandler::Intrinsic(_) => Err(SparError::EvalError {
+                message: format!(
+                    "native runtime intrinsic '{}.{}' cannot execute as a method",
+                    method.owner, method.name
                 ),
                 span: span.clone(),
             }),
@@ -225,14 +447,20 @@ fn with_call_span(error: SparError, call_span: &Span) -> SparError {
             message,
             span: call_span.clone(),
         },
-        SparError::ResolveError { message, hint, span } if span_is_dummy(&span) => {
-            SparError::ResolveError {
-                message,
-                hint,
-                span: call_span.clone(),
-            }
-        }
-        SparError::TypeError { message, hint, span } if span_is_dummy(&span) => SparError::TypeError {
+        SparError::ResolveError {
+            message,
+            hint,
+            span,
+        } if span_is_dummy(&span) => SparError::ResolveError {
+            message,
+            hint,
+            span: call_span.clone(),
+        },
+        SparError::TypeError {
+            message,
+            hint,
+            span,
+        } if span_is_dummy(&span) => SparError::TypeError {
             message,
             hint,
             span: call_span.clone(),
@@ -241,10 +469,12 @@ fn with_call_span(error: SparError, call_span: &Span) -> SparError {
             message,
             span: call_span.clone(),
         },
-        SparError::SchemaError { message, span } if span_is_dummy(&span) => SparError::SchemaError {
-            message,
-            span: call_span.clone(),
-        },
+        SparError::SchemaError { message, span } if span_is_dummy(&span) => {
+            SparError::SchemaError {
+                message,
+                span: call_span.clone(),
+            }
+        }
         other => other,
     }
 }

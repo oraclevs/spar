@@ -504,7 +504,8 @@ task Build { run { build; }; };
     assert_eq!(deploy["dependencies"], serde_json::json!(["Build"]));
     assert_eq!(deploy["parameters"][0]["default"], "staging");
     assert_eq!(deploy["parameters"][1]["variadic"], true);
-    assert_eq!(deploy["environment"]["MODE"], "release");
+    // Environment values are never printed; only the key names.
+    assert_eq!(deploy["environment"]["MODE"], "<redacted>");
     assert_eq!(deploy["cwd"], "deploy");
     assert_eq!(deploy["commands"][0]["kind"], "bash");
     assert_eq!(
@@ -851,7 +852,10 @@ task ShowEnv {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "from-dotenv");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "from-dotenv"
+    );
 }
 
 #[test]
@@ -902,7 +906,11 @@ export var value: str = getOr(name: "SPAR_LOADENV_TEST_VALUE", fallback: "missin
         .env_remove("SPAR_LOADENV_TEST_VALUE")
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("\"from-dotenv\""),
         "{}",
@@ -919,7 +927,11 @@ fn pound_brace_escape_is_not_interpreted_in_native_run_blocks() {
         "task Show {\n    run {\n        echo \"#{HOME}\";\n    };\n};\n",
     );
     let output = spar_in(&["run", "Show", "-f", "tasks.spar"], dir.path());
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "#{HOME}");
 }
 
@@ -932,6 +944,289 @@ fn trailing_comment_on_native_command_does_not_swallow_next_command() {
         "task Cmds {\n    run {\n        echo a; // ta\n        echo b;\n    };\n};\n",
     );
     let output = spar_in(&["run", "Cmds", "-f", "tasks.spar"], dir.path());
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\n");
+}
+
+#[test]
+fn exit_in_a_native_run_body_ends_the_task_with_that_code() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"import pkg { exit } from "std/process";
+
+task Guard {
+    run {
+        echo before;
+        exit(code: 3);
+        echo after;
+    };
+};
+"#,
+    );
+    let output = spar_in(&["run", "Guard", "-f", "tasks.spar"], dir.path());
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exited with status 3"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Commands queued before `exit` still run; nothing after it does.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+}
+
+#[test]
+fn exit_zero_in_a_native_run_body_succeeds_and_skips_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"import pkg { exit } from "std/process";
+
+task Done {
+    run {
+        echo before;
+        exit(code: 0);
+        false;
+    };
+};
+"#,
+    );
+    let output = spar_in(&["run", "Done", "-f", "tasks.spar"], dir.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exit_command_in_a_native_run_body_sets_the_task_status_after_earlier_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        "task Leave {\n    run {\n        echo one;\n        exit 3;\n        echo two;\n    };\n};\n",
+    );
+    let output = spar_in(&["run", "Leave", "-f", "tasks.spar"], dir.path());
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exited with status 3"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one\n");
+}
+
+#[test]
+fn exec_shell_can_be_used_as_a_statement_and_runs_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        "task Ordered {\n    run {\n        exec shell { echo first; };\n        exec shell { echo second; };\n        echo third;\n    };\n};\n",
+    );
+    let output = spar_in(&["run", "Ordered", "-f", "tasks.spar"], dir.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `exec` runs while the body is evaluated; queued commands run after it.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "first\nsecond\nthird\n"
+    );
+}
+
+#[test]
+fn exec_children_see_variables_set_with_std_env_and_loaded_from_dotenv() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_EXEC_FROM_DOTENV=dot\n");
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"@LoadEnv
+
+import pkg { set } from "std/env";
+
+task Show {
+    env: { SPAR_EXEC_FROM_TASK: "task"; };
+    run {
+        set(name: "SPAR_EXEC_FROM_SET", value: "set");
+        exec { printenv SPAR_EXEC_FROM_SET; };
+        exec { printenv SPAR_EXEC_FROM_DOTENV; };
+        exec { printenv SPAR_EXEC_FROM_TASK; };
+    };
+};
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["run", "Show", "-f", "tasks.spar"])
+        .current_dir(dir.path())
+        .env_remove("SPAR_EXEC_FROM_DOTENV")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "set\ndot\ntask\n");
+}
+
+#[test]
+fn else_if_chains_work_in_native_run_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        "task Pick(n: int) {\n    run {\n        if n == 1 {\n            echo one;\n        } else if n == 2 {\n            echo two;\n        } else {\n            echo many;\n        }\n    };\n};\n",
+    );
+    for (arg, expected) in [("1", "one\n"), ("2", "two\n"), ("9", "many\n")] {
+        let output = spar_in(&["run", "Pick", arg, "-f", "tasks.spar"], dir.path());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}
+
+#[test]
+fn single_line_control_blocks_work_in_native_run_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        concat!(
+            "task Inline(n: int) {\n    run {\n",
+            "        if n == 1 { echo one; } else { echo other; }\n",
+            "        for i in [1, 2] { echo item-${i}; }\n",
+            "        if n > 5 { echo big; } else if n > 1 { echo mid; } else { echo small; }\n",
+            "        echo done;\n",
+            "    };\n};\n",
+        ),
+    );
+    let output = spar_in(&["run", "Inline", "1", "-f", "tasks.spar"], dir.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "one\nitem-1\nitem-2\nsmall\ndone\n"
+    );
+}
+
+#[test]
+fn env_prefix_values_interpolate_in_native_run_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"var secret: str = "sec ret";
+var port: int = 5432;
+
+task Show {
+    run {
+        SPAR_A=${secret} printenv SPAR_A;
+        SPAR_B="${secret}" printenv SPAR_B;
+        SPAR_C="db://u:${secret}@h:${port}/x" printenv SPAR_C;
+        SPAR_D=plain printenv SPAR_D;
+        SPAR_E=$SPAR_OUTER printenv SPAR_E;
+    };
+};
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["run", "Show", "-f", "tasks.spar"])
+        .current_dir(dir.path())
+        .env("SPAR_OUTER", "outer")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "sec ret\nsec ret\ndb://u:sec ret@h:5432/x\nplain\nouter\n"
+    );
+}
+
+#[test]
+fn env_prefix_values_interpolate_in_scripts_run_by_the_compiled_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        dir.path(),
+        "script.spar",
+        r#"function main() -> shell {
+    var secret: str = "s3";
+    return shell {
+        SPAR_X="${secret}-x" printenv SPAR_X;
+    };
+};
+"#,
+    );
+    let output = spar_in(&["exec", file.to_str().unwrap()], dir.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "s3-x\n");
+}
+
+#[test]
+fn env_prefix_values_survive_formatting() {
+    let source = "task Show {\n    run {\n        SPAR_A=\"${secret}\" printenv SPAR_A;\n        SPAR_B=plain printenv SPAR_B;\n    };\n};\n";
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path(), "f.spar", source);
+    let output = spar_in(&["fmt", "--check", file.to_str().unwrap()], dir.path());
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn dump_lists_environment_keys_but_never_their_values() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_DUMP_SECRET=hunter2-from-dotenv\n");
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"@LoadEnv
+
+task Serve {
+    env: { PORT: "8080"; TOKEN: "hunter2-from-task"; };
+    run { echo hi; };
+};
+"#,
+    );
+    let output = spar_in(&["dump", "-f", "tasks.spar"], dir.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("hunter2"), "secret leaked:\n{text}");
+    assert!(!text.contains("8080"), "value leaked:\n{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let environment = &json["tasks"][0]["environment"];
+    assert_eq!(environment["SPAR_DUMP_SECRET"], "<redacted>", "{text}");
+    assert_eq!(environment["PORT"], "<redacted>", "{text}");
+    assert_eq!(environment["TOKEN"], "<redacted>", "{text}");
 }

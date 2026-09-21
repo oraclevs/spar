@@ -8,37 +8,62 @@ use super::support::{error, int_arg, string_arg};
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
-    registry.register(NativeFunction::sync(
-        "nativeTime", "nowMillis", vec![], SparType::Int, true,
-        |_context, _args| {
-            let millis = SystemTime::now().duration_since(UNIX_EPOCH)
-                .map_err(|e| error(format!("system clock is before Unix epoch: {e}")))?
-                .as_millis();
-            Ok(Value::Int(i64::try_from(millis).unwrap_or(i64::MAX)))
-        },
-    )).expect("nativeTime::nowMillis registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativeTime", "sleepMillis", vec![("millis", SparType::Int)], SparType::Void, true,
-        |_context, args| {
-            let millis = int_arg(args, 0, "millis")?;
-            if millis < 0 {
-                return Err(error("sleep duration cannot be negative"));
-            }
-            std::thread::sleep(Duration::from_millis(millis as u64));
-            Ok(Value::Void)
-        },
-    )).expect("nativeTime::sleepMillis registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativeTime", "formatIso8601", vec![("millis", SparType::Int)], SparType::Str, true,
-        |_context, args| {
-            let millis = int_arg(args, 0, "millis")?;
-            format_iso8601(millis).map(Value::String)
-        },
-    )).expect("nativeTime::formatIso8601 registration must be unique");
-    registry.register(NativeFunction::sync(
-        "nativeTime", "parseIso8601", vec![("value", SparType::Str)], SparType::Int, true,
-        |_context, args| parse_iso8601(string_arg(args, 0, "value")?).map(Value::Int),
-    )).expect("nativeTime::parseIso8601 registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativeTime",
+            "nowMillis",
+            vec![],
+            SparType::Int,
+            true,
+            |_context, _args| {
+                let millis = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| error(format!("system clock is before Unix epoch: {e}")))?
+                    .as_millis();
+                Ok(Value::Int(i64::try_from(millis).unwrap_or(i64::MAX)))
+            },
+        ))
+        .expect("nativeTime::nowMillis registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativeTime",
+            "sleepMillis",
+            vec![("millis", SparType::Int)],
+            SparType::Void,
+            true,
+            |_context, args| {
+                let millis = int_arg(args, 0, "millis")?;
+                if millis < 0 {
+                    return Err(error("sleep duration cannot be negative"));
+                }
+                std::thread::sleep(Duration::from_millis(millis as u64));
+                Ok(Value::Void)
+            },
+        ))
+        .expect("nativeTime::sleepMillis registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativeTime",
+            "formatIso8601",
+            vec![("millis", SparType::Int)],
+            SparType::Str,
+            true,
+            |_context, args| {
+                let millis = int_arg(args, 0, "millis")?;
+                format_iso8601(millis).map(Value::String)
+            },
+        ))
+        .expect("nativeTime::formatIso8601 registration must be unique");
+    registry
+        .register(NativeFunction::sync(
+            "nativeTime",
+            "parseIso8601",
+            vec![("value", SparType::Str)],
+            SparType::Int,
+            true,
+            |_context, args| parse_iso8601(string_arg(args, 0, "value")?).map(Value::Int),
+        ))
+        .expect("nativeTime::parseIso8601 registration must be unique");
 }
 
 fn format_iso8601(millis: i64) -> Result<String, crate::SparError> {
@@ -46,7 +71,9 @@ fn format_iso8601(millis: i64) -> Result<String, crate::SparError> {
     let day_millis = millis.rem_euclid(MILLIS_PER_DAY);
     let (year, month, day) = civil_from_days(days);
     if !(0..=9999).contains(&year) {
-        return Err(error("ISO-8601 formatting supports years 0000 through 9999"));
+        return Err(error(
+            "ISO-8601 formatting supports years 0000 through 9999",
+        ));
     }
     let hour = day_millis / 3_600_000;
     let minute = (day_millis % 3_600_000) / 60_000;

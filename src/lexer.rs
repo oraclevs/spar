@@ -41,6 +41,7 @@ pub struct Lexer<'a> {
 /// literals, named calls, multi-line conditions) turn into shell words.  This
 /// normalizer tracks an in-progress Spar statement or command until its real
 /// syntactic terminator is reached.
+#[allow(dead_code)] // kept for callers that only need the normalized text
 fn normalize_shell_body(body: &str) -> String {
     normalize_shell_body_tracked(body).0
 }
@@ -56,6 +57,11 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
         SparControlHeader,
         NativeCommand,
     }
+
+    // `if x { echo a; } else { echo b; }` on one line: give each block its
+    // own lines so the statements inside are classified like any others.
+    let expanded = split_inline_blocks(body);
+    let body = expanded.as_str();
 
     let mut output = String::with_capacity(body.len() + 32);
     let mut pending = String::new();
@@ -104,7 +110,11 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
                 if native_command_complete(&pending) {
                     output.push_str(&pending_indent);
                     let base = output.len();
-                    output.push_str(&prefix_native_command_segments(&pending, base, &mut inserted));
+                    output.push_str(&prefix_native_command_segments(
+                        &pending,
+                        base,
+                        &mut inserted,
+                    ));
                     output.push_str(&std::mem::take(&mut pending_comment));
                     if had_newline {
                         output.push('\n');
@@ -167,7 +177,11 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
         if native_command_complete(&pending) {
             output.push_str(&pending_indent);
             let base = output.len();
-            output.push_str(&prefix_native_command_segments(&pending, base, &mut inserted));
+            output.push_str(&prefix_native_command_segments(
+                &pending,
+                base,
+                &mut inserted,
+            ));
             output.push_str(&std::mem::take(&mut pending_comment));
             if had_newline {
                 output.push('\n');
@@ -248,13 +262,7 @@ impl NormalizedOffsets {
         let last = (start..end.min(self.mapped.len()))
             .rev()
             .find_map(|index| self.mapped[index])
-            .map(|index| {
-                index
-                    + original[index..]
-                        .chars()
-                        .next()
-                        .map_or(1, char::len_utf8)
-            })
+            .map(|index| index + original[index..].chars().next().map_or(1, char::len_utf8))
             .unwrap_or(first);
         (first, last.max(first))
     }
@@ -288,7 +296,12 @@ fn remap_nested_lex_error(
     let (line, col) = offsets.line_col(original, start, body_line, body_col);
     SparError::LexError {
         message,
-        span: Span::new(body_start + start, body_start + end.max(start + 1), line, col),
+        span: Span::new(
+            body_start + start,
+            body_start + end.max(start + 1),
+            line,
+            col,
+        ),
     }
 }
 
@@ -430,9 +443,7 @@ fn prefix_native_command_segments(
 }
 
 fn native_command_complete(source: &str) -> bool {
-    if last_top_level_semicolon(source)
-        .is_some_and(|index| source[index + 1..].trim().is_empty())
-    {
+    if last_top_level_semicolon(source).is_some_and(|index| source[index + 1..].trim().is_empty()) {
         return true;
     }
     top_level_background_terminator(source)
@@ -476,7 +487,9 @@ fn top_level_background_terminator(source: &str) -> Option<usize> {
             ']' => bracket = bracket.saturating_sub(1),
             '{' => brace += 1,
             '}' => brace = brace.saturating_sub(1),
-            '&' if paren == 0 && bracket == 0 && brace == 0
+            '&' if paren == 0
+                && bracket == 0
+                && brace == 0
                 && bytes.get(index.wrapping_sub(1)) != Some(&b'&')
                 && bytes.get(index.wrapping_sub(1)) != Some(&b'>')
                 && bytes.get(index + 1) != Some(&b'&')
@@ -488,6 +501,115 @@ fn top_level_background_terminator(source: &str) -> Option<usize> {
         }
     }
     last
+}
+
+/// Re-flows control-flow lines that hold their block on the same line
+/// (`if a { x; } else { y; }`) onto separate lines. Only whitespace is
+/// added, so source offsets still line up. Lines that are not control flow,
+/// and quoted text, `${...}` and `$(...)`, are left alone.
+fn split_inline_blocks(body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 16);
+    for raw_line in body.split_inclusive('\n') {
+        let (line, newline) = match raw_line.strip_suffix('\n') {
+            Some(line) => (line, "\n"),
+            None => (raw_line, ""),
+        };
+        let trimmed = line.trim_start();
+        let is_control = ["if", "for", "try", "else", "catch"]
+            .iter()
+            .any(|keyword| starts_with_keyword(trimmed, keyword))
+            || trimmed.starts_with('}');
+        if !is_control || !has_inline_block_content(trimmed) {
+            out.push_str(raw_line);
+            continue;
+        }
+        let indent = &line[..line.len() - trimmed.len()];
+        out.push_str(indent);
+        let mut quote = None;
+        let mut escaped = false;
+        let mut interpolation = 0_u32;
+        let mut parens = 0_u32;
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            let ch = chars[index];
+            let previous = index.checked_sub(1).map(|at| chars[at]);
+            if escaped {
+                escaped = false;
+                out.push(ch);
+            } else if ch == '\\' && quote != Some('\'') {
+                escaped = true;
+                out.push(ch);
+            } else if matches!(ch, '\'' | '"') {
+                quote = if quote == Some(ch) {
+                    None
+                } else if quote.is_none() {
+                    Some(ch)
+                } else {
+                    quote
+                };
+                out.push(ch);
+            } else if quote.is_some() {
+                out.push(ch);
+            } else if ch == '$' && chars.get(index + 1) == Some(&'{') {
+                interpolation += 1;
+                out.push_str("${");
+                index += 1;
+            } else if ch == '(' {
+                parens += 1;
+                out.push(ch);
+            } else if ch == ')' {
+                parens = parens.saturating_sub(1);
+                out.push(ch);
+            } else if ch == '}' && interpolation > 0 {
+                interpolation -= 1;
+                out.push(ch);
+            } else if ch == '{' && interpolation == 0 && parens == 0 && previous != Some('$') {
+                out.push('{');
+                if chars[index + 1..].iter().any(|c| !c.is_whitespace()) {
+                    out.push('\n');
+                    out.push_str(indent);
+                }
+            } else if ch == '}' && interpolation == 0 && parens == 0 {
+                // Close on its own line, then keep `} else {` / `} catch e {`
+                // together on the following line.
+                if !out.trim_end_matches(' ').ends_with('\n')
+                    && !out[out.rfind('\n').map_or(0, |i| i + 1)..]
+                        .trim()
+                        .is_empty()
+                {
+                    out.push('\n');
+                    out.push_str(indent);
+                }
+                out.push('}');
+                let rest: String = chars[index + 1..].iter().collect();
+                let rest_trimmed = rest.trim_start();
+                if !rest_trimmed.is_empty()
+                    && !starts_with_keyword(rest_trimmed, "else")
+                    && !starts_with_keyword(rest_trimmed, "catch")
+                    && !rest_trimmed.starts_with(';')
+                {
+                    out.push('\n');
+                    out.push_str(indent);
+                }
+            } else {
+                out.push(ch);
+            }
+            index += 1;
+        }
+        out.push_str(newline);
+    }
+    out
+}
+
+/// Whether a control-flow line carries statements after its `{` or a `}`
+/// followed by more text — that is, whether it needs splitting at all.
+fn has_inline_block_content(line: &str) -> bool {
+    let after_first_brace = match line.find('{') {
+        Some(at) => &line[at + 1..],
+        None => return false,
+    };
+    after_first_brace.chars().any(|c| !c.is_whitespace())
 }
 
 /// Splits a trailing `// comment` (outside quotes, starting a word) off a
@@ -512,7 +634,7 @@ fn split_trailing_line_comment(line: &str) -> (&str, &str) {
         } else if quote.is_none()
             && ch == '/'
             && line[index + 1..].starts_with('/')
-            && previous.map_or(true, |p| p.is_whitespace() || p == ';')
+            && previous.is_none_or(|p| p.is_whitespace() || p == ';')
         {
             return (line[..index].trim_end(), &line[index..]);
         }
@@ -528,7 +650,11 @@ fn hold_comment(pending_comment: &mut String, comment: &str) {
     if comment.is_empty() {
         return;
     }
-    pending_comment.push(if pending_comment.is_empty() { ' ' } else { '\n' });
+    pending_comment.push(if pending_comment.is_empty() {
+        ' '
+    } else {
+        '\n'
+    });
     pending_comment.push_str(comment);
 }
 
@@ -536,8 +662,7 @@ fn spar_statement_complete(source: &str) -> bool {
     // A trailing `// comment` after the `;` must not make the statement look
     // unfinished, or the next line gets swallowed into it.
     let source = strip_line_comments(source);
-    last_top_level_semicolon(&source)
-        .is_some_and(|index| source[index + 1..].trim().is_empty())
+    last_top_level_semicolon(&source).is_some_and(|index| source[index + 1..].trim().is_empty())
 }
 
 /// Removes `//` line comments that sit outside quoted strings, keeping the
@@ -671,14 +796,21 @@ fn is_spar_control_header(line: &str) -> bool {
 }
 
 fn is_spar_shell_statement_start(line: &str) -> bool {
-    const SIMPLE_KEYWORDS: &[&str] = &[
-        "var", "return", "break", "continue", "command", "shell", "exec",
-    ];
+    const SIMPLE_KEYWORDS: &[&str] = &["var", "return", "break", "continue", "command", "shell"];
     if SIMPLE_KEYWORDS
         .iter()
         .any(|keyword| starts_with_keyword(line, keyword))
     {
         return true;
+    }
+
+    // `exec { ... }` / `exec shell { ... }` is Spar; `exec printf ok` is the
+    // exec builtin.
+    if starts_with_keyword(line, "exec") {
+        let rest = line["exec".len()..].trim_start();
+        if rest.starts_with('{') || starts_with_keyword(rest, "shell") {
+            return true;
+        }
     }
 
     looks_like_spar_call(line) || looks_like_spar_assignment(line)
@@ -689,7 +821,7 @@ fn starts_with_keyword(source: &str, keyword: &str) -> bool {
         && source[keyword.len()..]
             .chars()
             .next()
-            .map_or(true, |ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
 }
 
 fn looks_like_spar_call(line: &str) -> bool {
@@ -721,7 +853,10 @@ fn looks_like_spar_call(line: &str) -> bool {
         }
         break;
     }
-    while bytes.get(pos).is_some_and(|byte| byte.is_ascii_whitespace()) {
+    while bytes
+        .get(pos)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
         pos += 1;
     }
     bytes.get(pos) == Some(&b'(')
@@ -1078,6 +1213,10 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.advance();
                     Token::EqEq
+                } else if self.peek_at(1) == Some(b'>') {
+                    self.advance();
+                    self.advance();
+                    Token::FatArrow
                 } else {
                     self.advance();
                     Token::Eq
@@ -1194,13 +1333,19 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'|' => {
-                if self.peek_at(1) == Some(b'|') {
+                if self.peek_at(1) == Some(b'>') {
+                    self.advance();
+                    self.advance();
+                    Token::StructuredPipe
+                } else if self.peek_at(1) == Some(b'|') {
                     self.advance();
                     self.advance();
                     Token::OrOr
                 } else {
                     return Err(SparError::LexError {
-                        message: "unexpected '|' — did you mean '||'?".into(),
+                        message:
+                            "unexpected '|' — use '|>' for structured values or '||' for boolean OR"
+                                .into(),
                         span: self.span_at(start, line, col),
                     });
                 }
@@ -1617,7 +1762,8 @@ impl<'a> Lexer<'a> {
                         let close_col = self.col;
                         self.advance();
                         let original = &self.source[body_start..body_end];
-                        let (normalized, inserted_prefixes) = normalize_shell_body_tracked(original);
+                        let (normalized, inserted_prefixes) =
+                            normalize_shell_body_tracked(original);
                         let (nested, nested_comments) =
                             match Lexer::new(&normalized).tokenize_with_comments() {
                                 Ok(lexed) => lexed,
@@ -1625,8 +1771,11 @@ impl<'a> Lexer<'a> {
                                     // The error's span is relative to the
                                     // normalized text; put it back on the
                                     // real source line.
-                                    let offsets =
-                                        NormalizedOffsets::new(original, &normalized, &inserted_prefixes);
+                                    let offsets = NormalizedOffsets::new(
+                                        original,
+                                        &normalized,
+                                        &inserted_prefixes,
+                                    );
                                     return Err(remap_nested_lex_error(
                                         error, &offsets, original, body_start, body_line, body_col,
                                     ));
@@ -1645,12 +1794,10 @@ impl<'a> Lexer<'a> {
                         for mut token in nested.into_iter().filter(|token| {
                             token.token != Token::Eof && token.token != Token::KwCommand
                         }) {
-                            let (start, end) = offsets.original_range(
-                                original,
-                                token.span.start,
-                                token.span.end,
-                            );
-                            let (line, col) = offsets.line_col(original, start, body_line, body_col);
+                            let (start, end) =
+                                offsets.original_range(original, token.span.start, token.span.end);
+                            let (line, col) =
+                                offsets.line_col(original, start, body_line, body_col);
                             token.span = Span::new(body_start + start, body_start + end, line, col);
                             tokens.push(token);
                         }
@@ -1710,21 +1857,41 @@ impl<'a> Lexer<'a> {
         // native command expression sugar.
         if matches!(
             next,
-            b';' | b':' | b'?' | b'=' | b',' | b')' | b']' | b'}' | b'('
-                | b'+' | b'*' | b'<' | b'>' | b'!'
+            b';' | b':'
+                | b'?'
+                | b'='
+                | b','
+                | b')'
+                | b']'
+                | b'}'
+                | b'('
+                | b'+'
+                | b'*'
+                | b'<'
+                | b'>'
+                | b'!'
         ) {
             return false;
         }
         if next == b'.' {
             let rest = &self.source[self.pos + offset..];
-            return rest.starts_with("./") || rest.starts_with("../");
+            // `./script`, `../script`, and the POSIX `. file` builtin.
+            return rest.starts_with("./")
+                || rest.starts_with("../")
+                || rest
+                    .get(1..)
+                    .is_some_and(|after| after.starts_with(char::is_whitespace));
         }
         if next == b'-' {
             // A bare `command - ...` is not a valid native program name and
             // is overwhelmingly a Spar operator use.
             return false;
         }
-        if next == b'/' && self.peek_at(offset + 1).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        if next == b'/'
+            && self
+                .peek_at(offset + 1)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
             return false;
         }
         true
@@ -1763,13 +1930,26 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'|') => {
                     self.advance();
-                    let token = if self.peek() == Some(b'|') {
+                    if self.peek() == Some(b'>') {
                         self.advance();
-                        Token::OrOr
+                        tokens.push(SpannedToken::new(
+                            Token::StructuredPipe,
+                            self.span_at(start, line, col),
+                        ));
+                        self.lex_shell_structured_stage(tokens)?;
+                    } else if self.peek() == Some(b'|') {
+                        self.advance();
+                        tokens.push(SpannedToken::new(
+                            Token::OrOr,
+                            self.span_at(start, line, col),
+                        ));
                     } else {
-                        Token::ShellPipe
-                    };
-                    tokens.push(SpannedToken::new(token, self.span_at(start, line, col)));
+                        tokens.push(SpannedToken::new(
+                            Token::ShellPipe,
+                            self.span_at(start, line, col),
+                        ));
+                        self.maybe_lex_shell_decoder_stage(tokens)?;
+                    }
                 }
                 Some(byte) if byte.is_ascii_digit() => {
                     let mut offset = 0usize;
@@ -1862,6 +2042,190 @@ impl<'a> Lexer<'a> {
                 Some(_) => self.lex_bare_shell_word(tokens, start, line, col),
             }
         }
+    }
+
+    /// If a native byte pipe is immediately followed by the standalone
+    /// `from` bridge, preserve the complete decoder specification as raw text.
+    /// This keeps quotes and nested Spar expressions intact for `shell_lang`.
+    fn maybe_lex_shell_decoder_stage(
+        &mut self,
+        tokens: &mut Vec<SpannedToken>,
+    ) -> Result<(), SparError> {
+        let mut offset = 0usize;
+        while matches!(self.peek_at(offset), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            offset += 1;
+        }
+        let word = self.pos + offset;
+        let rest = &self.source[word..];
+        if !rest.starts_with("from") {
+            return Ok(());
+        }
+        let after = rest.as_bytes().get(4).copied();
+        if !matches!(after, Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            return Ok(());
+        }
+
+        for _ in 0..offset + 4 {
+            self.advance_char();
+        }
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.advance_char();
+        }
+
+        let start = self.pos;
+        let line = self.line;
+        let col = self.col;
+        let mut quote = None;
+        let mut escaped = false;
+        let mut paren = 0_u32;
+        let mut bracket = 0_u32;
+        let mut brace = 0_u32;
+
+        while let Some(byte) = self.peek() {
+            if escaped {
+                escaped = false;
+                self.advance_char();
+                continue;
+            }
+            if byte == b'\\' && quote != Some(b'\'') {
+                escaped = true;
+                self.advance();
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = if quote == Some(byte) {
+                    None
+                } else if quote.is_none() {
+                    Some(byte)
+                } else {
+                    quote
+                };
+                self.advance();
+                continue;
+            }
+            if quote.is_none() {
+                match byte {
+                    b'(' => paren += 1,
+                    b')' => paren = paren.saturating_sub(1),
+                    b'[' => bracket += 1,
+                    b']' => bracket = bracket.saturating_sub(1),
+                    b'{' => brace += 1,
+                    b'}' => brace = brace.saturating_sub(1),
+                    b';' | b'|' | b'&' if paren == 0 && bracket == 0 && brace == 0 => break,
+                    _ => {}
+                }
+            }
+            self.advance_char();
+        }
+
+        let end = self.pos;
+        let raw = self.source[start..end].trim_end();
+        if raw.is_empty() {
+            return Err(SparError::LexError {
+                message: "`from` expects a decoder name".into(),
+                span: Span::new(start, end.max(start + 1), line, col),
+            });
+        }
+        let trimmed_end = start + raw.len();
+        tokens.push(SpannedToken::new(
+            Token::ShellDecoderStage(raw.to_string()),
+            Span::new(start, trimmed_end, line, col),
+        ));
+        Ok(())
+    }
+
+    /// Captures one ordinary Spar expression after a shell-level `|>`.
+    ///
+    /// The outer native-command lexer cannot tokenize a closure/call/list as
+    /// shell argv without losing Spar syntax. Instead it preserves the stage
+    /// source verbatim until the next top-level shell/structured pipe or the
+    /// command terminator. `shell_lang` feeds this text back through the
+    /// ordinary Spar lexer/parser.
+    fn lex_shell_structured_stage(
+        &mut self,
+        tokens: &mut Vec<SpannedToken>,
+    ) -> Result<(), SparError> {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.advance_char();
+        }
+        let start = self.pos;
+        let line = self.line;
+        let col = self.col;
+        let mut quote = None;
+        let mut escaped = false;
+        let mut paren = 0_u32;
+        let mut bracket = 0_u32;
+        let mut brace = 0_u32;
+        // `to FORMAT > file` ends the stage at the redirect, which the shell
+        // lexer then reads as an ordinary output redirection.
+        let is_encoder_stage = {
+            let rest = &self.source[start..];
+            rest.starts_with("to") && rest[2..].starts_with([' ', '\t'])
+        };
+
+        while let Some(byte) = self.peek() {
+            if escaped {
+                escaped = false;
+                self.advance_char();
+                continue;
+            }
+            if byte == b'\\' && quote != Some(b'\'') {
+                escaped = true;
+                self.advance();
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = if quote == Some(byte) {
+                    None
+                } else if quote.is_none() {
+                    Some(byte)
+                } else {
+                    quote
+                };
+                self.advance();
+                continue;
+            }
+            if quote.is_none() {
+                match byte {
+                    b'>' if is_encoder_stage && paren == 0 && bracket == 0 && brace == 0 => break,
+                    b'(' => paren += 1,
+                    b')' => paren = paren.saturating_sub(1),
+                    b'[' => bracket += 1,
+                    b']' => bracket = bracket.saturating_sub(1),
+                    b'{' => brace += 1,
+                    b'}' => brace = brace.saturating_sub(1),
+                    b';' if paren == 0 && bracket == 0 && brace == 0 => break,
+                    b'|' if paren == 0 && bracket == 0 && brace == 0 => {
+                        // `||` is an ordinary Spar boolean operator. Consume
+                        // both bytes here so the second `|` is not mistaken
+                        // for a shell boundary on the next iteration.
+                        if self.peek_at(1) == Some(b'|') {
+                            self.advance();
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            self.advance_char();
+        }
+
+        let end = self.pos;
+        let raw = self.source[start..end].trim_end();
+        if raw.is_empty() {
+            return Err(SparError::LexError {
+                message: "expected a Spar expression after '|>'".into(),
+                span: Span::new(start, end.max(start + 1), line, col),
+            });
+        }
+        let trimmed_end = start + raw.len();
+        tokens.push(SpannedToken::new(
+            Token::ShellStructuredStage(raw.to_string()),
+            Span::new(start, trimmed_end, line, col),
+        ));
+        Ok(())
     }
 
     fn lex_quoted_shell_word(
@@ -2169,20 +2533,23 @@ impl<'a> Lexer<'a> {
                         }
                         let normalized_body = normalized_body.trim();
                         let wrapped = format!("command {normalized_body};");
-                        let nested = Lexer::new(&wrapped).tokenize().map_err(|error| match error {
-                            // Spans in `wrapped` mean nothing in the file;
-                            // point at the substitution instead.
-                            SparError::LexError { message, .. } => SparError::LexError {
-                                message,
-                                span: Span::new(
-                                    expression_start,
-                                    self.pos,
-                                    expression_line,
-                                    expression_col,
-                                ),
-                            },
-                            other => other,
-                        })?;
+                        let nested =
+                            Lexer::new(&wrapped)
+                                .tokenize()
+                                .map_err(|error| match error {
+                                    // Spans in `wrapped` mean nothing in the file;
+                                    // point at the substitution instead.
+                                    SparError::LexError { message, .. } => SparError::LexError {
+                                        message,
+                                        span: Span::new(
+                                            expression_start,
+                                            self.pos,
+                                            expression_line,
+                                            expression_col,
+                                        ),
+                                    },
+                                    other => other,
+                                })?;
                         // `wrapped` inserts a `command ` prefix and a `;` terminator and
                         // re-flows whitespace, so nested spans do not exist in the file.
                         // Map them back onto the original body like the `shell { }` path.
@@ -2268,7 +2635,10 @@ mod tests {
         assert_eq!(words[2], ("error".to_string(), 26, 31));
         // The quoted interpolation word sits after `error` and inside the parens.
         let (_, start, end) = &words[3];
-        assert!(*start >= 32 && *end <= 42, "quoted word span was {start}..{end}");
+        assert!(
+            *start >= 32 && *end <= 42,
+            "quoted word span was {start}..{end}"
+        );
         // No word may span the whole substitution body any more.
         assert!(words.iter().all(|(_, s, e)| !(*s == 15 && *e == 42)));
     }
@@ -2591,6 +2961,14 @@ mod tests {
     }
 
     #[test]
+    fn lexes_fn_and_fat_arrow_for_closures() {
+        let tokens = lex("fn(x: int) -> int => x + 1");
+        assert!(tokens.contains(&Token::KwFn));
+        assert!(tokens.contains(&Token::FatArrow));
+        assert!(tokens.contains(&Token::Arrow));
+    }
+
+    #[test]
     fn lex_keywords_function_return_if_else_for_in_break_continue() {
         let cases: &[(&str, Token)] = &[
             ("function", Token::KwFunction),
@@ -2827,8 +3205,12 @@ mod tests {
         .tokenize()
         .expect("background command followed by Spar call should lex");
 
-        assert!(tokens.iter().any(|token| token.token == Token::ShellBackground));
-        assert!(tokens.iter().any(|token| matches!(&token.token, Token::Ident(name) if name == "println")));
+        assert!(tokens
+            .iter()
+            .any(|token| token.token == Token::ShellBackground));
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(&token.token, Token::Ident(name) if name == "println")));
     }
 
     #[test]
@@ -2868,7 +3250,9 @@ mod tests {
 
         let tokens = lex("command(name: \"x\");");
         assert!(tokens.contains(&Token::KwCommand));
-        assert!(!tokens.iter().any(|token| matches!(token, Token::ShellWord(_))));
+        assert!(!tokens
+            .iter()
+            .any(|token| matches!(token, Token::ShellWord(_))));
     }
 
     #[test]

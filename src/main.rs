@@ -42,6 +42,7 @@ fn task_expr_evaluator(
 /// evaluates the block's `Expr::Shell` to a `ShellPlan`, and executes it
 /// through `spar-process`. `task_exprs` holds the block's expression (the
 /// same table parameter-dependent `${...}` interpolations use).
+#[allow(clippy::type_complexity)]
 fn native_block_runner(
     compilation: &Compilation,
 ) -> impl Fn(
@@ -65,7 +66,7 @@ fn native_block_runner(
                 local_scope.insert(name.clone(), bound_to_config(value, *kind));
             }
         }
-        let value = Evaluator::eval_standalone_with_environment(
+        let (value, requested_exit) = Evaluator::eval_task_block(
             program,
             symbols,
             eval_result,
@@ -96,7 +97,11 @@ fn native_block_runner(
         if let Some(previous) = previous {
             let _ = std::env::set_current_dir(previous);
         }
-        outcome.map(|o| o.exit_code).map_err(|e| e.to_string())
+        // `exit(code: N)` decides the block's status once its queued commands
+        // have run.
+        outcome
+            .map(|o| requested_exit.unwrap_or(o.exit_code))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1330,7 +1335,13 @@ fn task_json(task: &spar::runner::Task) -> serde_json::Value {
         "confirm": task.confirm,
         "dependencies": task.dependencies,
         "parameters": parameters,
-        "environment": task.environment,
+        // Keys only. Values come from `.env` files and `env:` blocks and are
+        // often secrets; a catalog dump must never print them.
+        "environment": task
+            .environment
+            .keys()
+            .map(|key| (key.clone(), serde_json::Value::from("<redacted>")))
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
         "cwd": task.cwd.as_ref().map(|path| path.display().to_string()),
         "commands": commands,
     })

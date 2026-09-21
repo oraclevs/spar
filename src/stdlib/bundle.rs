@@ -83,7 +83,9 @@ mod tests {
 
     #[test]
     fn source_module_resolution_rejects_escape() {
-        assert!(source_module_path("fs").unwrap().ends_with("stdlib/src/fs.spar"));
+        assert!(source_module_path("fs")
+            .unwrap()
+            .ends_with("stdlib/src/fs.spar"));
         assert!(source_module_path("../secret").is_none());
     }
 }

@@ -69,7 +69,7 @@ pub fn from_eval<T: serde::de::DeserializeOwned>(result: &EvalResult) -> Result<
 
 struct SparDeserializer<'de> {
     globals: &'de HashMap<String, ConfigValue>,
-    sections: &'de HashMap<Vec<String>, HashMap<String, ConfigValue>>,
+    sections: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
 }
 
 impl<'de> de::Deserializer<'de> for SparDeserializer<'de> {
@@ -250,7 +250,7 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
 // ── SectionDeserializer ───────────────────────────────────────────────────────
 
 struct SectionDeserializer<'de> {
-    fields: &'de HashMap<String, ConfigValue>,
+    fields: &'de indexmap::IndexMap<String, ConfigValue>,
 }
 
 impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
@@ -291,7 +291,7 @@ impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
 
 enum RootEntry<'de> {
     Value(&'de ConfigValue),
-    Section(&'de HashMap<String, ConfigValue>),
+    Section(&'de indexmap::IndexMap<String, ConfigValue>),
 }
 
 struct RootMapAccess<'de> {
@@ -302,7 +302,7 @@ struct RootMapAccess<'de> {
 impl<'de> RootMapAccess<'de> {
     fn new(
         globals: &'de HashMap<String, ConfigValue>,
-        sections: &'de HashMap<Vec<String>, HashMap<String, ConfigValue>>,
+        sections: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     ) -> Self {
         let mut entries: Vec<(&'de str, RootEntry<'de>)> = Vec::new();
 
@@ -352,7 +352,7 @@ impl<'de> MapAccess<'de> for RootMapAccess<'de> {
 // ── SectionMapAccess ──────────────────────────────────────────────────────────
 
 struct SectionMapAccess<'de> {
-    iter: std::collections::hash_map::Iter<'de, String, ConfigValue>,
+    iter: indexmap::map::Iter<'de, String, ConfigValue>,
     next_value: Option<&'de ConfigValue>,
 }
 

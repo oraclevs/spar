@@ -107,7 +107,29 @@ pub fn build_emit_json(
         }
     }
 
-    Ok(serde_json::Value::Object(root))
+    Ok(sort_keys(serde_json::Value::Object(root)))
+}
+
+/// Recursively sort object keys. `serde_json` preserves insertion order when
+/// any crate in the build enables `preserve_order` (scoc does), so emitted
+/// output sorts explicitly to stay deterministic.
+fn sort_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sort_keys(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(sort_keys).collect())
+        }
+        other => other,
+    }
 }
 
 fn build_section_value(path: &[String], result: &EvalResult) -> Result<serde_json::Value, String> {

@@ -38,7 +38,10 @@ fn fs_path_env_and_time_modules_execute_against_runtime_context() {
         .execute_compiled_with_context(&program, context)
         .expect("OS std modules should execute");
     assert_eq!(outcome.exit_status, 0);
-    assert_eq!(std::fs::read_to_string(temp.path().join("hello.txt")).unwrap(), "hello spar");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("hello.txt")).unwrap(),
+        "hello spar"
+    );
 }
 
 #[test]
@@ -73,7 +76,9 @@ fn time_module_rejects_invalid_iso_timestamp() {
             "#,
         )
         .expect_err("invalid calendar dates must be rejected");
-    assert!(errors.iter().any(|error| error.to_string().contains("invalid ISO-8601 UTC timestamp")));
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("invalid ISO-8601 UTC timestamp")));
 }
 
 #[test]
@@ -123,7 +128,9 @@ fn random_choose_rejects_empty_list() {
             "#,
         )
         .expect_err("random choose must reject an empty list");
-    assert!(errors.iter().any(|error| error.to_string().contains("cannot choose from an empty list")));
+    assert!(errors.iter().any(|error| error
+        .to_string()
+        .contains("cannot choose from an empty list")));
 }
 
 #[test]

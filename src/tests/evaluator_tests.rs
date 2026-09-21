@@ -1112,7 +1112,9 @@ fn runtime_errors_without_their_own_span_point_at_the_failing_expression() {
     let src = "var pad: int = 1;\n\nfunction loop(n: int) -> int {\n    return loop(n: n);\n};\n\nvar result: int = loop(n: 1);\n";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    let symbols = crate::resolver::Resolver::new().resolve(&prog, &[]).unwrap();
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .unwrap();
     crate::typechecker::TypeChecker::check(&prog, &symbols).unwrap();
     let error = crate::evaluator::Evaluator::new(symbols, prog)
         .run()

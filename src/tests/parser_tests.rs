@@ -888,7 +888,10 @@ fn parse_import_type_selective() {
 #[test]
 fn parse_import_as_part_of_reports_removed_syntax() {
     let err = parse_err(r#"import asPartOf "common.spar";"#);
-    assert!(err.contains("asPartOf") && err.contains("removed"), "got: {err}");
+    assert!(
+        err.contains("asPartOf") && err.contains("removed"),
+        "got: {err}"
+    );
     assert!(err.contains("import {"), "got: {err}");
 }
 
@@ -1463,7 +1466,6 @@ fn rejects_generic_struct_declarations_with_actionable_message() {
     );
     assert!(error.contains("generic `type`"), "{error}");
 }
-
 
 #[test]
 fn native_shell_words_are_contextual_names_outside_construct_position() {

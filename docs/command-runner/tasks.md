@@ -300,6 +300,53 @@ both optional.
 
 There is no `shell:` field any more; pick the shell per `run` block.
 
+## Writing logic in a native `run { }` body
+
+A native body mixes ordinary Spar statements (`var`, `if`, `for`, `try`,
+function calls) with shell commands.
+
+```spar
+import pkg { getOr, set } from "std/env";
+import pkg { exit } from "std/process";
+
+task Query(sql: str) {
+    run {
+        if getOr(name: "DB_PASSWORD", fallback: "") == "" {
+            echo "DB_PASSWORD is not set";
+            exit(code: 1);
+        }
+        set(name: "PGPASSWORD", value: getOr(name: "DB_PASSWORD", fallback: ""));
+        var result = exec { psql -c ${sql}; };
+        if result.success {
+            echo "done";
+        } else if result.exitCode == 2 {
+            echo "bad query";
+        } else {
+            echo "failed with ${result.exitCode}";
+        }
+        exit(code: result.exitCode);
+    };
+};
+```
+
+- **Order.** Plain commands are queued and run, in order, after the
+  statements have been evaluated. When a later statement depends on a
+  command's result, run that command with `exec { ... }` (or capture its
+  output with `$(...)`). `exec` runs immediately and yields a value with
+  `success` and `exitCode`; it can also stand alone as a statement when you
+  don't need the result.
+- **Exit status.** `exit(code: N)` (from `std/process`) or a queued `exit N;`
+  ends the body with that status. Commands queued before it still run;
+  nothing after it does. A body that never calls `exit` takes the status of
+  its last command.
+- **Environment.** `exec { }` and `$( )` see the same environment as the
+  task's commands: your shell, the `.env` loaded by `@LoadEnv`, the task's
+  `env:` block, and anything set with `set()`. A prefix assignment
+  (`NAME=value command;`) interpolates like any other word:
+  `URL="db://u:${password}@host/x" sqlx migrate run;`.
+- **Control flow.** `if / else if / else`, `for` and `try / catch` all work,
+  including on one line: `if a == 1 { echo one; } else { echo other; }`.
+
 ## Script (shebang) recipes
 
 ```spar
@@ -430,6 +477,10 @@ loaded via `@LoadEnv` often interpolate secret values into the rendered
 command line, and quiet-by-default keeps those values out of the shell
 and logs. `--dry-run` always shows the full command plan regardless of
 `quiet`, since previewing commands is the point of `--dry-run`.
+
+`spar dump` lists each task's `environment` as key names only; the values,
+whether they come from an `env:` block or a `.env` file, are printed as
+`"<redacted>"`.
 
 ## Migrating from the old task syntax
 

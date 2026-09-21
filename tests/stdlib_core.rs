@@ -74,7 +74,9 @@ fn reserved_prelude_name_cannot_be_redeclared() {
     let errors = engine
         .check_source("function println(message: str) -> void { return; };")
         .expect_err("reserved prelude declaration must be rejected");
-    assert!(errors.iter().any(|error| error.to_string().contains("reserved Spar prelude name")));
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("reserved Spar prelude name")));
 }
 
 #[test]
@@ -83,7 +85,9 @@ fn intrinsic_panic_name_is_reserved_by_the_prelude() {
     let errors = engine
         .check_source("function panic(message: str) -> void { return; };")
         .expect_err("panic must remain a reserved prelude/intrinsic binding");
-    assert!(errors.iter().any(|error| error.to_string().contains("reserved Spar prelude name")));
+    assert!(errors
+        .iter()
+        .any(|error| error.to_string().contains("reserved Spar prelude name")));
 }
 
 #[test]
@@ -163,3 +167,18 @@ fn stdlib_smoke_fixture_runs_through_normal_runtime() {
     assert!(!temp.path().join("spar-stdlib-smoke.txt").exists());
 }
 
+#[test]
+fn core_builtin_length_methods_share_normal_method_syntax() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            function main() -> int {
+                var text: int = "spar".length();
+                var items: int = [1, 2, 3].length();
+                return text + items;
+            };
+            "#,
+        )
+        .expect("str.length and List<T>.length should be registered built-in methods");
+    assert_eq!(outcome.exit_status, 7);
+}

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::error::{Span, SparError};
@@ -25,6 +25,18 @@ pub fn display_type(ty: &SparType) -> String {
                 .map(display_type)
                 .collect::<Vec<_>>()
                 .join(", ")
+        ),
+        SparType::Function {
+            params,
+            return_type,
+        } => format!(
+            "fn({}) -> {}",
+            params
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", "),
+            display_type(return_type)
         ),
     }
 }
@@ -60,6 +72,78 @@ fn await_hint(expected: &SparType, actual: &SparType) -> Option<String> {
 
 pub(crate) type TypeSubstitution = HashMap<String, SparType>;
 
+const SEQUENCE_SHAPE_KEY: &str = "__spar_sequence_shape";
+const SEQUENCE_LIST_SHAPE: &str = "__spar_sequence_list";
+
+/// A type that can be a `Table` row: a struct/record shape, not a scalar.
+fn is_untyped_closure_expr(expression: &Expr) -> bool {
+    matches!(expression, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+}
+
+fn is_row_type(ty: &SparType) -> bool {
+    matches!(ty, SparType::Named(_) | SparType::Applied { .. })
+}
+
+/// A value fits a pipe parameter when the types are equal, or when a dynamic
+/// `Record` is piped where a list of records is expected (see
+/// `sequence_parts`); the runtime checks the value really is a list.
+fn pipe_type_accepts(expected: &SparType, actual: &SparType) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let record = SparType::Named("Record".into());
+    matches!(expected, SparType::List(inner) if inner.as_ref() == &record) && actual == &record
+}
+
+fn sequence_parts(actual: &SparType) -> Option<(SparType, SparType)> {
+    match actual {
+        SparType::List(inner) => Some((
+            SparType::Named(SEQUENCE_LIST_SHAPE.into()),
+            inner.as_ref().clone(),
+        )),
+        SparType::Applied { name, arguments }
+            if matches!(name.as_str(), "Table" | "Stream") && arguments.len() == 1 =>
+        {
+            Some((SparType::Named(name.clone()), arguments[0].clone()))
+        }
+        // A dynamic `Record` (JSON field, `_` of unknown shape) may hold a list.
+        // Accept it as a list of records; the runtime rejects it with a clear
+        // error when the value turns out not to be a list.
+        SparType::Named(name) if name == "Record" => Some((
+            SparType::Named(SEQUENCE_LIST_SHAPE.into()),
+            SparType::Named("Record".into()),
+        )),
+        _ => None,
+    }
+}
+
+/// `Lookup<K, V>` is a stdlib-only pattern: any indexable container whose
+/// key/value types match satisfies it once generics have been substituted.
+fn lookup_accepts(expected: &SparType, actual: Option<&SparType>) -> bool {
+    let (SparType::Applied { name, arguments }, Some(actual)) = (expected, actual) else {
+        return false;
+    };
+    if name != "Lookup" || arguments.len() != 2 {
+        return false;
+    }
+    lookup_parts(actual).is_some_and(|(key, value)| key == arguments[0] && value == arguments[1])
+}
+
+fn lookup_parts(actual: &SparType) -> Option<(SparType, SparType)> {
+    match actual {
+        SparType::List(inner) => Some((SparType::Int, inner.as_ref().clone())),
+        SparType::Applied { name, arguments }
+            if matches!(name.as_str(), "Table" | "Stream") && arguments.len() == 1 =>
+        {
+            Some((SparType::Int, arguments[0].clone()))
+        }
+        SparType::Applied { name, arguments } if name == "Map" && arguments.len() == 2 => {
+            Some((arguments[0].clone(), arguments[1].clone()))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) -> SparType {
     match ty {
         SparType::TypeParameter(name) => substitution
@@ -67,12 +151,44 @@ pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) ->
             .cloned()
             .unwrap_or_else(|| ty.clone()),
         SparType::List(inner) => SparType::List(Box::new(substitute_type(inner, substitution))),
+        SparType::Applied { name, arguments } if name == "Sequence" && arguments.len() == 1 => {
+            let inner = substitute_type(&arguments[0], substitution);
+            match substitution.get(SEQUENCE_SHAPE_KEY) {
+                Some(SparType::Named(shape)) if shape == SEQUENCE_LIST_SHAPE => {
+                    SparType::List(Box::new(inner))
+                }
+                // Table rows are Records; mapping to scalars yields a plain list.
+                Some(SparType::Named(shape)) if shape == "Table" && !is_row_type(&inner) => {
+                    SparType::List(Box::new(inner))
+                }
+                Some(SparType::Named(shape)) if matches!(shape.as_str(), "Table" | "Stream") => {
+                    SparType::Applied {
+                        name: shape.clone(),
+                        arguments: vec![inner],
+                    }
+                }
+                _ => SparType::Applied {
+                    name: name.clone(),
+                    arguments: vec![inner],
+                },
+            }
+        }
         SparType::Applied { name, arguments } => SparType::Applied {
             name: name.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| substitute_type(argument, substitution))
                 .collect(),
+        },
+        SparType::Function {
+            params,
+            return_type,
+        } => SparType::Function {
+            params: params
+                .iter()
+                .map(|param| substitute_type(param, substitution))
+                .collect(),
+            return_type: Box::new(substitute_type(return_type, substitution)),
         },
         _ => ty.clone(),
     }
@@ -83,6 +199,10 @@ fn mentions_type_parameter(ty: &SparType) -> bool {
         SparType::TypeParameter(_) => true,
         SparType::List(inner) => mentions_type_parameter(inner),
         SparType::Applied { arguments, .. } => arguments.iter().any(mentions_type_parameter),
+        SparType::Function {
+            params,
+            return_type,
+        } => params.iter().any(mentions_type_parameter) || mentions_type_parameter(return_type),
         _ => false,
     }
 }
@@ -119,6 +239,50 @@ pub(crate) fn unify_generic(
         SparType::Applied {
             name: pattern_name,
             arguments: pattern_arguments,
+        } if pattern_name == "Sequence" && pattern_arguments.len() == 1 => {
+            if let SparType::Applied { name, arguments } = actual {
+                if name == "Sequence" && arguments.len() == 1 {
+                    return unify_generic(&pattern_arguments[0], &arguments[0], substitution, span);
+                }
+            }
+            let Some((shape, element)) = sequence_parts(actual) else {
+                return type_mismatch(pattern, actual, span);
+            };
+            match substitution.get(SEQUENCE_SHAPE_KEY) {
+                Some(existing) if existing != &shape => {
+                    return Err(SparError::TypeError {
+                        message: "structured sequence arguments must use the same container shape"
+                            .into(),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    substitution.insert(SEQUENCE_SHAPE_KEY.into(), shape);
+                }
+            }
+            unify_generic(&pattern_arguments[0], &element, substitution, span)
+        }
+        SparType::Applied {
+            name: pattern_name,
+            arguments: pattern_arguments,
+        } if pattern_name == "Lookup" && pattern_arguments.len() == 2 => {
+            if let SparType::Applied { name, arguments } = actual {
+                if name == "Lookup" && arguments.len() == 2 {
+                    unify_generic(&pattern_arguments[0], &arguments[0], substitution, span)?;
+                    return unify_generic(&pattern_arguments[1], &arguments[1], substitution, span);
+                }
+            }
+            let Some((key, value)) = lookup_parts(actual) else {
+                return type_mismatch(pattern, actual, span);
+            };
+            unify_generic(&pattern_arguments[0], &key, substitution, span)?;
+            unify_generic(&pattern_arguments[1], &value, substitution, span)
+        }
+        SparType::Applied {
+            name: pattern_name,
+            arguments: pattern_arguments,
         } => match actual {
             SparType::Applied {
                 name: actual_name,
@@ -130,6 +294,21 @@ pub(crate) fn unify_generic(
                     unify_generic(pattern, actual, substitution, span)?;
                 }
                 Ok(())
+            }
+            _ => type_mismatch(pattern, actual, span),
+        },
+        SparType::Function {
+            params: pattern_params,
+            return_type: pattern_return,
+        } => match actual {
+            SparType::Function {
+                params: actual_params,
+                return_type: actual_return,
+            } if pattern_params.len() == actual_params.len() => {
+                for (pattern, actual) in pattern_params.iter().zip(actual_params) {
+                    unify_generic(pattern, actual, substitution, span)?;
+                }
+                unify_generic(pattern_return, actual_return, substitution, span)
             }
             _ => type_mismatch(pattern, actual, span),
         },
@@ -197,16 +376,53 @@ pub(crate) fn substitute_type_field(
     }
 }
 
-pub(crate) fn infer_expression_with_locals(
-    expr: &Expr,
+/// Instantiated parameter types of the function stage in `input |> stage`
+/// (piped value first), for lowering closures whose parameters are inferred.
+pub(crate) fn pipe_stage_parameters_with_locals(
+    input: &Expr,
+    stage: &Expr,
     symbols: &SymbolTable,
     locals: &HashMap<String, SparType>,
-) -> Option<SparType> {
+) -> Option<Vec<(String, SparType)>> {
+    let current_impl = match locals.get("self") {
+        Some(SparType::Named(owner)) => Some(owner.clone()),
+        _ => None,
+    };
+    let span = input.span().cloned().unwrap_or_else(Span::dummy);
     TypeChecker {
         symbols,
         errors: Vec::new(),
         schema_bindings: HashMap::new(),
         current_section: None,
+        current_impl,
+        mutable_bindings: HashSet::new(),
+        current_method_receiver_mutable: false,
+        expectations: Default::default(),
+    }
+    .pipe_stage_parameter_types(input, stage, locals, &span)
+    .ok()
+}
+
+pub(crate) fn infer_expression_with_locals(
+    expr: &Expr,
+    symbols: &SymbolTable,
+    locals: &HashMap<String, SparType>,
+) -> Option<SparType> {
+    // Inside a method the receiver `self` is a local of the owning struct's
+    // type, which is what grants access to that struct's private methods.
+    let current_impl = match locals.get("self") {
+        Some(SparType::Named(owner)) => Some(owner.clone()),
+        _ => None,
+    };
+    TypeChecker {
+        symbols,
+        errors: Vec::new(),
+        schema_bindings: HashMap::new(),
+        current_section: None,
+        current_impl,
+        mutable_bindings: HashSet::new(),
+        current_method_receiver_mutable: false,
+        expectations: Default::default(),
     }
     .infer_type_with_locals(expr, locals)
 }
@@ -248,6 +464,13 @@ pub struct TypeChecker<'a> {
     schema_bindings: HashMap<String, Vec<SchemaField>>,
     /// The section currently being checked, for `self.field` type lookups.
     current_section: Option<Vec<String>>,
+    current_impl: Option<String>,
+    mutable_bindings: HashSet<String>,
+    current_method_receiver_mutable: bool,
+    /// Declared types that a generic call's own type parameters may be inferred
+    /// from (`return err(...)` in a `-> Result<int, str>` function), keyed by the
+    /// call's name span.
+    expectations: std::cell::RefCell<HashMap<(usize, usize), SparType>>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -290,6 +513,10 @@ impl<'a> TypeChecker<'a> {
             errors: Vec::new(),
             schema_bindings: HashMap::new(),
             current_section: None,
+            current_impl: None,
+            mutable_bindings: HashSet::new(),
+            current_method_receiver_mutable: false,
+            expectations: Default::default(),
         }
         .infer_type(expr)
     }
@@ -300,6 +527,10 @@ impl<'a> TypeChecker<'a> {
             errors: Vec::new(),
             schema_bindings: HashMap::new(),
             current_section: None,
+            current_impl: None,
+            mutable_bindings: HashSet::new(),
+            current_method_receiver_mutable: false,
+            expectations: Default::default(),
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -332,6 +563,10 @@ impl<'a> TypeChecker<'a> {
             errors: Vec::new(),
             schema_bindings,
             current_section: None,
+            current_impl: None,
+            mutable_bindings: HashSet::new(),
+            current_method_receiver_mutable: false,
+            expectations: Default::default(),
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -357,6 +592,24 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Var(decl) => self.check_var(decl),
                 TopLevelItem::Dynamic(decl) => self.check_dynamic(decl),
                 TopLevelItem::Section(decl) => self.check_section(decl),
+                TopLevelItem::Impl(decl) => {
+                    let owner = match &decl.target {
+                        SparType::Named(name) => name.clone(),
+                        SparType::Applied { name, .. } => name.clone(),
+                        _ => continue,
+                    };
+                    let previous = self.current_impl.replace(owner);
+                    for method in &decl.methods {
+                        let previous_mut = self.current_method_receiver_mutable;
+                        self.current_method_receiver_mutable = method
+                            .receiver
+                            .as_ref()
+                            .is_some_and(|receiver| receiver.mutable);
+                        self.check_function_decl(&method.function);
+                        self.current_method_receiver_mutable = previous_mut;
+                    }
+                    self.current_impl = previous;
+                }
                 TopLevelItem::Function(f) => self.check_function_decl(f),
                 TopLevelItem::SchemaSection(_) => {}
                 TopLevelItem::Type(decl) => self.check_type_decl(decl),
@@ -368,11 +621,13 @@ impl<'a> TypeChecker<'a> {
                 }
                 TopLevelItem::SchemaFrom(_) => {} // never reaches the typechecker — schema files aren't typechecked (loader.rs handles them out-of-band)
                 TopLevelItem::Task(decl) => self.check_task(decl),
+                // Interactive input is checked as if inside an async function so
+                // a final `await expr` line is allowed.
                 TopLevelItem::Statement(statement) => self.check_func_stmts(
                     std::slice::from_ref(statement),
                     &SparType::Int,
                     &mut module_locals,
-                    false,
+                    self.symbols.top_level_await,
                 ),
             }
         }
@@ -786,35 +1041,34 @@ impl<'a> TypeChecker<'a> {
                 }
                 None => {} // optional, fine to omit
                 Some(cf) => match &tf.shape {
-                    TypeFieldShape::Primitive(expected_ty) => {
-                        match (&cf.ty, &cf.value) {
-                            (Some(actual), _) if actual != expected_ty => {
-                                self.push_type_error(
-                                    format!(
-                                        "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
-                                        path_str,
-                                        tf.name,
-                                        display_type(actual),
-                                        type_name,
-                                        display_type(expected_ty),
-                                    ),
-                                    None,
-                                    cf.span.clone(),
-                                );
-                            }
-                            (Some(_), _) => {}
-                            (None, Some(FieldValue::Expr(expr))) => {
-                                let scalar_mismatch = match self.infer_type(expr) {
+                    TypeFieldShape::Primitive(expected_ty) => match (&cf.ty, &cf.value) {
+                        (Some(actual), _) if actual != expected_ty => {
+                            self.push_type_error(
+                                format!(
+                                    "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
+                                    path_str,
+                                    tf.name,
+                                    display_type(actual),
+                                    type_name,
+                                    display_type(expected_ty),
+                                ),
+                                None,
+                                cf.span.clone(),
+                            );
+                        }
+                        (Some(_), _) => {}
+                        (None, Some(FieldValue::Expr(expr))) => {
+                            let scalar_mismatch = match self.infer_type(expr) {
+                                Some(actual)
+                                    if !matches!(expected_ty, SparType::List(_))
+                                        && &actual != expected_ty =>
+                                {
                                     Some(actual)
-                                        if !matches!(expected_ty, SparType::List(_))
-                                            && &actual != expected_ty =>
-                                    {
-                                        Some(actual)
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(actual) = scalar_mismatch {
-                                    self.push_type_error(
+                                }
+                                _ => None,
+                            };
+                            if let Some(actual) = scalar_mismatch {
+                                self.push_type_error(
                                         format!(
                                             "field `{}::{}` declared as `{}` but type `{}` expects `{}`",
                                             path_str,
@@ -826,13 +1080,13 @@ impl<'a> TypeChecker<'a> {
                                         None,
                                         cf.span.clone(),
                                     );
-                                } else {
-                                    let label = format!("{}::{}", path_str, tf.name);
-                                    self.check_expr_type(expr, expected_ty, &label, &cf.span);
-                                }
+                            } else {
+                                let label = format!("{}::{}", path_str, tf.name);
+                                self.check_expr_type(expr, expected_ty, &label, &cf.span);
                             }
-                            (None, _) => {
-                                self.push_type_error(
+                        }
+                        (None, _) => {
+                            self.push_type_error(
                                     format!(
                                         "field `{}::{}`'s value type could not be determined; type `{}` expects `{}`",
                                         path_str,
@@ -843,9 +1097,8 @@ impl<'a> TypeChecker<'a> {
                                     None,
                                     cf.span.clone(),
                                 );
-                            }
                         }
-                    }
+                    },
                     TypeFieldShape::Section(nested_type_fields) => {
                         self.validate_nested_type_field(
                             cf,
@@ -1533,6 +1786,431 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// The instantiated parameter list of a function stage in `input |> stage`,
+    /// with the piped value as the first parameter.
+    fn pipe_stage_parameter_types(
+        &self,
+        input: &Expr,
+        stage: &Expr,
+        locals: &HashMap<String, SparType>,
+        span: &Span,
+    ) -> Result<Vec<(String, SparType)>, SparError> {
+        let (name, name_span, mut arguments): (&String, &Span, Vec<CallArg>) = match stage {
+            Expr::FnCall(call) => {
+                let entry = self
+                    .call_entry(&call.name)
+                    .ok_or_else(|| SparError::TypeError {
+                        message: format!(
+                            "structured pipe cannot determine signature for '{}'",
+                            call.name
+                        ),
+                        hint: missing_data_import_hint(&call.name),
+                        span: call.span.clone(),
+                    })?;
+                let arguments = entry
+                    .params
+                    .iter()
+                    .skip(1)
+                    .zip(call.args.iter())
+                    .map(|((param, _), value)| CallArg {
+                        param_name: param.clone(),
+                        param_name_span: call.span.clone(),
+                        value: value.clone(),
+                        span: call.span.clone(),
+                    })
+                    .collect();
+                (&call.name, &call.span, arguments)
+            }
+            Expr::Call {
+                name,
+                name_span,
+                args,
+                ..
+            } => (name, name_span, args.clone()),
+            _ => return Ok(Vec::new()),
+        };
+        let entry = self.call_entry(name).ok_or_else(|| SparError::TypeError {
+            message: format!("structured pipe cannot determine signature for '{name}'"),
+            hint: missing_data_import_hint(name),
+            span: name_span.clone(),
+        })?;
+        let first = entry.params.first().ok_or_else(|| SparError::TypeError {
+            message: format!("structured pipe stage '{name}' takes no parameters"),
+            hint: None,
+            span: span.clone(),
+        })?;
+        arguments.insert(
+            0,
+            CallArg {
+                param_name: first.0.clone(),
+                param_name_span: span.clone(),
+                value: input.clone(),
+                span: span.clone(),
+            },
+        );
+        let (_, parameters) =
+            self.instantiate_call(name, &[], &arguments, Some(locals), name_span)?;
+        Ok(parameters)
+    }
+
+    fn structured_pipe_type(
+        &self,
+        input: &Expr,
+        stage: &Expr,
+        locals: Option<&HashMap<String, SparType>>,
+        span: &Span,
+    ) -> Result<SparType, SparError> {
+        let infer = |expr: &Expr| match locals {
+            Some(locals) => self.infer_type_with_locals(expr, locals),
+            None => self.infer_type(expr),
+        };
+        let input_ty = infer(input).ok_or_else(|| SparError::TypeError {
+            message: "cannot determine structured pipe input type".into(),
+            hint: None,
+            span: span.clone(),
+        })?;
+
+        let check_callable = |callable: SparType,
+                              extra_args: &[Expr]|
+         -> Result<SparType, SparError> {
+            let SparType::Function {
+                params,
+                return_type,
+            } = callable
+            else {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "structured pipe stage is not callable; got {}",
+                        display_type(&callable)
+                    ),
+                    hint: Some(
+                        "the right side of `|>` must be a function, closure, or function call"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                });
+            };
+            if params.len() != extra_args.len() + 1 {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "structured pipe stage expects {} argument(s) after the piped value, got {}",
+                        params.len().saturating_sub(1),
+                        extra_args.len()
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+            if params.first() != Some(&input_ty) {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "structured pipe cannot pass {} into a first parameter of type {}",
+                        display_type(&input_ty),
+                        params
+                            .first()
+                            .map(display_type)
+                            .unwrap_or_else(|| "unknown".into())
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+            for (argument, expected) in extra_args.iter().zip(params.iter().skip(1)) {
+                if matches!(argument, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+                {
+                    continue;
+                }
+                let actual = infer(argument).ok_or_else(|| SparError::TypeError {
+                    message: "cannot determine structured pipe argument type".into(),
+                    hint: None,
+                    span: argument.span().cloned().unwrap_or_else(|| span.clone()),
+                })?;
+                if !pipe_type_accepts(expected, &actual) {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "structured pipe argument expects {} but got {}",
+                            display_type(expected),
+                            display_type(&actual)
+                        ),
+                        hint: None,
+                        span: argument.span().cloned().unwrap_or_else(|| span.clone()),
+                    });
+                }
+            }
+            Ok(*return_type)
+        };
+
+        match stage {
+            Expr::FnCall(call) => {
+                if let Some(entry) = self.call_entry(&call.name) {
+                    if entry.params.len() != call.args.len() + 1 {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "structured pipe stage '{}' expects {} argument(s) after the piped value, got {}",
+                                call.name,
+                                entry.params.len().saturating_sub(1),
+                                call.args.len()
+                            ),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    }
+                    let mut arguments = Vec::with_capacity(entry.params.len());
+                    let first = &entry.params[0];
+                    arguments.push(CallArg {
+                        param_name: first.0.clone(),
+                        param_name_span: span.clone(),
+                        value: (*input).clone(),
+                        span: span.clone(),
+                    });
+                    for ((name, _), value) in entry.params.iter().skip(1).zip(call.args.iter()) {
+                        arguments.push(CallArg {
+                            param_name: name.clone(),
+                            param_name_span: call.span.clone(),
+                            value: (*value).clone(),
+                            span: call.span.clone(),
+                        });
+                    }
+                    let (ret, parameters) = self
+                        .instantiate_call(&call.name, &[], &arguments, locals, &call.span)
+                        .map_err(|error| match error {
+                            SparError::TypeError {
+                                message,
+                                hint,
+                                span: error_span,
+                            } => SparError::TypeError {
+                                message: format!(
+                                    "structured pipe stage '{}': {message}",
+                                    call.name
+                                ),
+                                hint,
+                                span: error_span,
+                            },
+                            other => other,
+                        })?;
+                    for argument in &arguments {
+                        if matches!(&argument.value, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+                        {
+                            // Untyped closures are checked against the stage signature.
+                            continue;
+                        }
+                        if let Some((_, expected)) = parameters
+                            .iter()
+                            .find(|(name, _)| name == &argument.param_name)
+                        {
+                            let actual =
+                                infer(&argument.value).ok_or_else(|| SparError::TypeError {
+                                    message: "cannot determine structured pipe argument type"
+                                        .into(),
+                                    hint: None,
+                                    span: argument.span.clone(),
+                                })?;
+                            if !pipe_type_accepts(expected, &actual) {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "structured pipe cannot pass {} into parameter '{}' of type {}",
+                                        display_type(&actual),
+                                        argument.param_name,
+                                        display_type(expected)
+                                    ),
+                                    hint: None,
+                                    span: argument.span.clone(),
+                                });
+                            }
+                        }
+                    }
+                    return Ok(ret);
+                }
+                let callable = locals
+                    .and_then(|locals| locals.get(&call.name).cloned())
+                    .or_else(|| {
+                        self.infer_namespace_type(&NamespaceRef {
+                            segments: vec![call.name.clone()],
+                            span: call.span.clone(),
+                        })
+                    })
+                    .ok_or_else(|| SparError::TypeError {
+                        message: format!("structured pipe stage '{}' is not callable", call.name),
+                        hint: None,
+                        span: call.span.clone(),
+                    })?;
+                check_callable(callable, &call.args)
+            }
+            Expr::Call {
+                name,
+                name_span,
+                type_arguments,
+                args,
+                ..
+            } => {
+                let Some(entry) = self.call_entry(name) else {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "structured pipe cannot determine signature for function '{name}'"
+                        ),
+                        hint: None,
+                        span: name_span.clone(),
+                    });
+                };
+                let Some((first_name, _)) = entry.params.first() else {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "structured pipe stage '{name}' does not accept an input value"
+                        ),
+                        hint: None,
+                        span: name_span.clone(),
+                    });
+                };
+                let mut arguments = Vec::with_capacity(args.len() + 1);
+                arguments.push(CallArg {
+                    param_name: first_name.clone(),
+                    param_name_span: span.clone(),
+                    value: (*input).clone(),
+                    span: span.clone(),
+                });
+                arguments.extend(args.iter().cloned());
+                let (ret, parameters) = self
+                    .instantiate_call(name, type_arguments, &arguments, locals, name_span)
+                    .map_err(|error| match error {
+                        SparError::TypeError {
+                            message,
+                            hint,
+                            span: error_span,
+                        } => SparError::TypeError {
+                            message: format!("structured pipe stage '{name}': {message}"),
+                            hint,
+                            span: error_span,
+                        },
+                        other => other,
+                    })?;
+                for argument in &arguments {
+                    if matches!(&argument.value, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+                    {
+                        // Untyped closures are checked against the stage signature.
+                        continue;
+                    }
+                    if let Some((_, expected)) = parameters
+                        .iter()
+                        .find(|(param, _)| param == &argument.param_name)
+                    {
+                        let actual =
+                            infer(&argument.value).ok_or_else(|| SparError::TypeError {
+                                message: "cannot determine structured pipe argument type".into(),
+                                hint: None,
+                                span: argument.span.clone(),
+                            })?;
+                        if !pipe_type_accepts(expected, &actual) {
+                            return Err(SparError::TypeError {
+                                message: format!(
+                                    "structured pipe cannot pass {} into parameter '{}' of type {}",
+                                    display_type(&actual),
+                                    argument.param_name,
+                                    display_type(expected)
+                                ),
+                                hint: None,
+                                span: argument.span.clone(),
+                            });
+                        }
+                    }
+                }
+                Ok(ret)
+            }
+            Expr::NamespaceRef(reference) if reference.segments.len() == 1 => {
+                let callable = locals
+                    .and_then(|locals| locals.get(&reference.segments[0]).cloned())
+                    .or_else(|| self.infer_namespace_type(reference))
+                    .ok_or_else(|| SparError::TypeError {
+                        message: format!(
+                            "structured pipe stage '{}' is not callable",
+                            reference.segments[0]
+                        ),
+                        hint: None,
+                        span: reference.span.clone(),
+                    })?;
+                check_callable(callable, &[])
+            }
+            Expr::Closure { .. } => {
+                let callable = infer(stage).ok_or_else(|| SparError::TypeError {
+                    message: "structured pipe closure needs enough type information to determine its callable signature".into(),
+                    hint: Some("annotate the closure parameter and return type".into()),
+                    span: span.clone(),
+                })?;
+                check_callable(callable, &[])
+            }
+            other => {
+                let callable = infer(other).ok_or_else(|| SparError::TypeError {
+                    message: "structured pipe stage is not callable".into(),
+                    hint: Some(
+                        "the right side of `|>` must be a function, closure, or function call"
+                            .into(),
+                    ),
+                    span: span.clone(),
+                })?;
+                check_callable(callable, &[])
+            }
+        }
+    }
+
+    fn instantiate_positional_named_call(
+        &self,
+        call: &FnCall,
+        locals: Option<&HashMap<String, SparType>>,
+    ) -> Result<Option<SparType>, SparError> {
+        if self.constructor_parameters(&call.name).is_some() {
+            if call.args.is_empty() {
+                return Ok(Some(SparType::Named(call.name.clone())));
+            }
+            return Err(SparError::TypeError {
+                message: format!(
+                    "struct constructor '{}' accepts only named field overrides",
+                    call.name
+                ),
+                hint: Some(format!(
+                    "use `{}(field: value, ...)` or `{}()`",
+                    call.name, call.name
+                )),
+                span: call.span.clone(),
+            });
+        }
+
+        let Some(entry) = self.call_entry(&call.name) else {
+            return Ok(None);
+        };
+
+        let required = entry
+            .params
+            .iter()
+            .filter(|(name, _)| !entry.default_params.contains(name))
+            .count();
+        if call.args.len() < required || call.args.len() > entry.params.len() {
+            return Err(SparError::TypeError {
+                message: format!(
+                    "function '{}' expects {}..={} positional argument(s), got {}",
+                    call.name,
+                    required,
+                    entry.params.len(),
+                    call.args.len()
+                ),
+                hint: None,
+                span: call.span.clone(),
+            });
+        }
+
+        let arguments = entry
+            .params
+            .iter()
+            .zip(call.args.iter())
+            .map(|((parameter_name, _), value)| CallArg {
+                param_name: parameter_name.clone(),
+                param_name_span: call.span.clone(),
+                value: value.clone(),
+                span: value.span().cloned().unwrap_or_else(|| call.span.clone()),
+            })
+            .collect::<Vec<_>>();
+        let (ret, _) = self.instantiate_call(&call.name, &[], &arguments, locals, &call.span)?;
+        Ok(Some(ret))
+    }
+
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {
         match expr {
             Expr::Object(_, _) => None, // shape only checkable against an expected type — see check_expr_type (Task 4)
@@ -1546,12 +2224,33 @@ impl<'a> TypeChecker<'a> {
                 .map(|t| SparType::List(Box::new(t))),
             Expr::NamespaceRef(nr) => self.infer_namespace_type(nr),
             Expr::FieldAccess { base, field, .. } => self.infer_field_access(base, field),
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => self.infer_method_call(receiver, method, args, None).ok(),
+            Expr::StructuredPipe { input, stage, span } => {
+                self.structured_pipe_type(input, stage, None, span).ok()
+            }
             Expr::FnCall(fc) => match fc.name.as_str() {
                 "env" | "str" => Some(SparType::Str),
                 "int" => Some(SparType::Int),
                 "float" => Some(SparType::Float),
                 "bool" => Some(SparType::Bool),
-                _ => None,
+                _ => {
+                    if let Ok(Some(ret)) = self.instantiate_positional_named_call(fc, None) {
+                        return Some(ret);
+                    }
+                    let reference = NamespaceRef {
+                        segments: vec![fc.name.clone()],
+                        span: fc.span.clone(),
+                    };
+                    match self.infer_namespace_type(&reference)? {
+                        SparType::Function { return_type, .. } => Some(*return_type),
+                        _ => None,
+                    }
+                }
             },
             Expr::BinaryOp(op) => {
                 let lhs = self.infer_type(&op.lhs)?;
@@ -1569,6 +2268,21 @@ impl<'a> TypeChecker<'a> {
                 .instantiate_call(name, type_arguments, args, None, name_span)
                 .ok()
                 .map(|(ret, _)| ret),
+            Expr::Closure {
+                params,
+                return_type,
+                ..
+            } => {
+                let return_type = return_type.as_ref()?.clone();
+                let params = params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect::<Option<Vec<_>>>()?;
+                Some(SparType::Function {
+                    params,
+                    return_type: Box::new(return_type),
+                })
+            }
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
                     let t = self.infer_type(operand)?;
@@ -1612,9 +2326,23 @@ impl<'a> TypeChecker<'a> {
 
     fn infer_namespace_type(&self, nr: &NamespaceRef) -> Option<SparType> {
         match nr.segments.as_slice() {
+            [name] if name == "_" => self.lookup_global_type(name),
             [name] if name == "status" => Some(SparType::Named("ProcessStatus".into())),
             [name] if name == "lastJob" => Some(SparType::Named("Job".into())),
-            [name] => self.lookup_global_type(name),
+            [name] => self.lookup_global_type(name).or_else(|| {
+                let entry = self
+                    .symbols
+                    .functions
+                    .get(name)
+                    .or_else(|| self.symbols.imported_functions.get(name))?;
+                if !entry.type_parameters.is_empty() {
+                    return None;
+                }
+                Some(SparType::Function {
+                    params: entry.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    return_type: Box::new(callable_return_type(entry)),
+                })
+            }),
             [ns, _name] if self.symbols.enums.contains_key(ns.as_str()) => {
                 Some(SparType::Named(ns.clone()))
             }
@@ -1659,15 +2387,136 @@ impl<'a> TypeChecker<'a> {
         self.infer_field_access_from_type(&base_ty, field)
     }
 
+    fn method_owner_for_receiver(
+        &self,
+        receiver: &Expr,
+        locals: Option<&HashMap<String, SparType>>,
+    ) -> Option<String> {
+        if let Expr::NamespaceRef(reference) = receiver {
+            if reference.segments.len() == 1 {
+                let name = &reference.segments[0];
+                if locals.and_then(|locals| locals.get(name)).is_none()
+                    && self
+                        .symbols
+                        .lookup_section(&reference.segments)
+                        .is_some_and(|section| section.canonical)
+                {
+                    return Some(name.clone());
+                }
+            }
+        }
+        let ty = match locals {
+            Some(locals) => self.infer_type_with_locals(receiver, locals),
+            None => self.infer_type(receiver),
+        }?;
+        match ty {
+            SparType::Named(name) => Some(name),
+            SparType::Applied { name, .. } => Some(name),
+            SparType::Str => Some("str".into()),
+            SparType::List(_) => Some("List".into()),
+            _ => None,
+        }
+    }
+
+    fn infer_method_call(
+        &self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+        locals: Option<&HashMap<String, SparType>>,
+    ) -> Result<SparType, SparError> {
+        let owner = self
+            .method_owner_for_receiver(receiver, locals)
+            .ok_or_else(|| SparError::TypeError {
+                message: format!("cannot resolve method '{method}' for receiver"),
+                hint: None,
+                span: receiver.span().cloned().unwrap_or_else(Span::dummy),
+            })?;
+        let entry =
+            self.symbols
+                .lookup_method(&owner, method)
+                .ok_or_else(|| SparError::TypeError {
+                    message: format!("struct '{owner}' has no method '{method}'"),
+                    hint: None,
+                    span: receiver.span().cloned().unwrap_or_else(Span::dummy),
+                })?;
+        if entry.function.is_private && self.current_impl.as_deref() != Some(owner.as_str()) {
+            return Err(SparError::TypeError {
+                message: format!("method '{method}' is private to struct '{owner}'"),
+                hint: None,
+                span: receiver.span().cloned().unwrap_or_else(Span::dummy),
+            });
+        }
+        let mut substitution = TypeSubstitution::new();
+        if entry.has_receiver {
+            let actual_receiver = match locals {
+                Some(locals) => self.infer_type_with_locals(receiver, locals),
+                None => self.infer_type(receiver),
+            };
+            if let (Some(actual_receiver), Some((_, expected_receiver))) =
+                (actual_receiver, entry.function.params.first())
+            {
+                let receiver_span = receiver.span().cloned().unwrap_or_else(Span::dummy);
+                unify_generic(
+                    expected_receiver,
+                    &actual_receiver,
+                    &mut substitution,
+                    &receiver_span,
+                )?;
+            }
+        }
+        let params = if entry.has_receiver {
+            &entry.function.params[1..]
+        } else {
+            &entry.function.params[..]
+        };
+        for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
+            let actual = match locals {
+                Some(locals) => self.infer_type_with_locals(argument, locals),
+                None => self.infer_type(argument),
+            }
+            .or_else(|| {
+                self.infer_closure_signature_for_pattern(argument, pattern, &substitution, locals)
+            });
+            if let Some(actual) = actual {
+                let argument_span = argument.span().cloned().unwrap_or_else(Span::dummy);
+                unify_generic(pattern, &actual, &mut substitution, &argument_span)?;
+            }
+        }
+        Ok(substitute_type(&entry.function.ret, &substitution))
+    }
+
     fn infer_field_access_from_type(&self, base_ty: &SparType, field: &str) -> Option<SparType> {
         match base_ty {
             SparType::Error if matches!(field, "message" | "kind") => Some(SparType::Str),
-            SparType::Named(type_name) => self
-                .symbols
-                .types
-                .get(type_name)
-                .and_then(|te| te.fields.iter().find(|f| f.name == field))
-                .map(|f| self.field_shape_to_type(&f.shape)),
+            // A field of a dynamic Record is itself dynamic; `asStr()`,
+            // `asInt()`, ... bridge it to a static type.
+            SparType::Named(type_name) if type_name == "Record" => Some(base_ty.clone()),
+            SparType::Named(type_name) => {
+                let path = vec![type_name.clone()];
+                if let Some(section) = self.symbols.lookup_section(&path) {
+                    if section.canonical {
+                        if let Some(entry) = section.fields.get(field) {
+                            if let Some(ty) = &entry.ty {
+                                return Some(ty.clone());
+                            }
+                            if let Some(binding) = &section.type_binding {
+                                return self
+                                    .type_fields_for(binding)
+                                    .and_then(|(_, fields)| {
+                                        fields.into_iter().find(|candidate| candidate.name == field)
+                                    })
+                                    .map(|field| self.field_shape_to_type(&field.shape));
+                            }
+                        }
+                    }
+                }
+                self.symbols
+                    .types
+                    .get(type_name)
+                    .and_then(|te| te.fields.iter().find(|f| f.name == field))
+                    .map(|f| self.field_shape_to_type(&f.shape))
+            }
             applied @ SparType::Applied { .. } => self
                 .type_fields_for(applied)
                 .and_then(|(_, fields)| {
@@ -1780,10 +2629,21 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr_type(&mut self, expr: &Expr, declared_ty: &SparType, label: &str, span: &Span) {
+        self.expect_call_type(expr, declared_ty);
+        if matches!(declared_ty, SparType::Function { .. }) && matches!(expr, Expr::Closure { .. })
+        {
+            if let Err(error) =
+                self.check_closure_against_expected(expr, declared_ty, &HashMap::new(), false)
+            {
+                self.errors.push(error);
+            }
+            return;
+        }
         self.check_expr_internal(expr);
 
         if let Expr::Object(items, _) = expr {
             match declared_ty {
+                SparType::Named(name) if name == "Record" => {}
                 SparType::Named(name) => {
                     self.check_object_against_named(items, name, label);
                 }
@@ -1815,6 +2675,7 @@ impl<'a> TypeChecker<'a> {
                 for item in items {
                     if let Expr::Object(obj_items, _) = item {
                         match elem_ty.as_ref() {
+                            SparType::Named(name) if name == "Record" => {}
                             SparType::Named(name) => {
                                 self.check_object_against_named(obj_items, name, label);
                             }
@@ -1969,6 +2830,9 @@ impl<'a> TypeChecker<'a> {
                 for arg in &fc.args {
                     self.check_expr_internal(arg);
                 }
+                if let Err(error) = self.instantiate_positional_named_call(fc, None) {
+                    self.errors.push(error);
+                }
             }
             Expr::String(s) => {
                 for part in &s.parts {
@@ -1990,6 +2854,11 @@ impl<'a> TypeChecker<'a> {
                 let result = self.check_call(expr);
                 if let Err(e) = result {
                     self.errors.push(e);
+                }
+            }
+            Expr::Closure { body, .. } => {
+                if let ClosureBody::Expr(value) = body {
+                    self.check_expr_internal(value);
                 }
             }
             Expr::Unary {
@@ -2032,11 +2901,24 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Await { value, span } => {
                 self.check_expr_internal(value);
-                self.push_type_error(
-                    "`await` is only valid inside an async function",
-                    Some("move `await` into an `async function`".into()),
-                    span.clone(),
-                );
+                if self.symbols.top_level_await {
+                    // Declarations are re-evaluated whenever the session
+                    // replays, so an awaited value must not be stored in one.
+                    self.push_type_error(
+                        "`await` in a declaration is not supported at the prompt",
+                        Some(
+                            "await the value as its own line (`await get(url: ...)`), then use `_`"
+                                .into(),
+                        ),
+                        span.clone(),
+                    );
+                } else {
+                    self.push_type_error(
+                        "`await` is only valid inside an async function",
+                        Some("move `await` into an `async function`".into()),
+                        span.clone(),
+                    );
+                }
             }
             Expr::Index {
                 source,
@@ -2092,12 +2974,75 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Literal(_) => {}
             Expr::NamespaceRef(_) => {}
+            Expr::MethodCall { receiver, args, .. } => {
+                self.check_expr_internal(receiver);
+                for argument in args {
+                    self.check_expr_internal(argument);
+                }
+            }
+            Expr::StructuredPipe { input, stage, span } => {
+                self.check_expr_internal(input);
+                match stage.as_ref() {
+                    Expr::FnCall(call) => {
+                        for argument in &call.args {
+                            self.check_expr_internal(argument);
+                        }
+                    }
+                    Expr::Call { args, .. } => {
+                        for argument in args {
+                            self.check_expr_internal(&argument.value);
+                        }
+                    }
+                    other => self.check_expr_internal(other),
+                }
+                if let Err(error) = self.structured_pipe_type(input, stage, None, span) {
+                    self.errors.push(error);
+                }
+            }
             Expr::FieldAccess { base, .. } => self.check_expr_internal(base),
-            Expr::Shell(_) | Expr::ExecShell(_) | Expr::CommandSubstitution(_) => {}
+            Expr::Shell(shell) | Expr::CommandSubstitution(shell) => {
+                if let Err(error) =
+                    self.check_mixed_shell_with_locals(shell, &HashMap::new(), false)
+                {
+                    self.errors.push(error);
+                }
+            }
+            Expr::ExecShell(shell) => {
+                if shell_contains_mixed_pipeline(shell) {
+                    self.push_type_error(
+                        "`exec shell` does not support structured mixed pipelines; return/execute a normal `shell { ... }` value instead",
+                        None,
+                        shell.span.clone(),
+                    );
+                }
+            }
         }
     }
 
     // ── Call argument type checking ───────────────────────────────────────────
+
+    fn constructor_parameters(&self, name: &str) -> Option<Vec<(String, SparType)>> {
+        let path = vec![name.to_string()];
+        let section = self.symbols.lookup_section(&path)?;
+        if !section.canonical {
+            return None;
+        }
+        let mut parameters = Vec::new();
+        for (field_name, field) in &section.fields {
+            let ty = field.ty.clone().or_else(|| {
+                section.type_binding.as_ref().and_then(|binding| {
+                    self.type_fields_for(binding).and_then(|(_, fields)| {
+                        fields
+                            .into_iter()
+                            .find(|candidate| candidate.name == *field_name)
+                            .map(|candidate| self.field_shape_to_type(&candidate.shape))
+                    })
+                })
+            })?;
+            parameters.push((field_name.clone(), ty));
+        }
+        Some(parameters)
+    }
 
     fn call_entry(&self, name: &str) -> Option<&FunctionEntry> {
         let segments: Vec<&str> = name.split("::").collect();
@@ -2113,6 +3058,69 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn infer_closure_signature_for_pattern(
+        &self,
+        expression: &Expr,
+        pattern: &SparType,
+        substitution: &TypeSubstitution,
+        outer_locals: Option<&HashMap<String, SparType>>,
+    ) -> Option<SparType> {
+        let Expr::Closure {
+            params,
+            return_type,
+            body,
+            ..
+        } = expression
+        else {
+            return None;
+        };
+        let substituted = substitute_type(pattern, substitution);
+        let SparType::Function {
+            params: expected_params,
+            ..
+        } = substituted
+        else {
+            return None;
+        };
+        if params.len() != expected_params.len() {
+            return None;
+        }
+
+        let mut locals = outer_locals.cloned().unwrap_or_default();
+        let mut actual_params = Vec::with_capacity(params.len());
+        for (param, expected) in params.iter().zip(expected_params.iter()) {
+            let actual = param
+                .ty
+                .clone()
+                .or_else(|| (!mentions_type_parameter(expected)).then(|| expected.clone()))?;
+            locals.insert(param.name.clone(), actual.clone());
+            actual_params.push(actual);
+        }
+
+        let actual_return = match return_type {
+            Some(explicit) => explicit.clone(),
+            None => match body {
+                ClosureBody::Expr(value) => self.infer_type_with_locals(value, &locals)?,
+                ClosureBody::Block(_) => return None,
+            },
+        };
+        Some(SparType::Function {
+            params: actual_params,
+            return_type: Box::new(actual_return),
+        })
+    }
+
+    /// Records that `expr`, if it is a call, is expected to produce `expected`.
+    fn expect_call_type(&self, expr: &Expr, expected: &SparType) {
+        let key = match expr {
+            Expr::Call { name_span, .. } => (name_span.start, name_span.end),
+            Expr::FnCall(call) => (call.span.start, call.span.end),
+            Expr::Grouped(inner, _) => return self.expect_call_type(inner, expected),
+            _ => return,
+        };
+        self.expectations.borrow_mut().insert(key, expected.clone());
+    }
+
     fn instantiate_call(
         &self,
         name: &str,
@@ -2123,6 +3131,20 @@ impl<'a> TypeChecker<'a> {
     ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
         if name == "panic" {
             return Ok((SparType::Void, vec![("message".to_string(), SparType::Str)]));
+        }
+        if !name.contains("::") {
+            if let Some(parameters) = self.constructor_parameters(name) {
+                if !type_arguments.is_empty() {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "struct constructor '{name}' does not accept call-site type arguments"
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                return Ok((SparType::Named(name.to_string()), parameters));
+            }
         }
         let Some(entry) = self.call_entry(name) else {
             let segments: Vec<&str> = name.split("::").collect();
@@ -2169,20 +3191,55 @@ impl<'a> TypeChecker<'a> {
             substitution.insert(parameter.name.clone(), argument.clone());
         }
 
-        for argument in arguments {
-            let Some((_, pattern)) = entry
-                .params
-                .iter()
-                .find(|(parameter_name, _)| parameter_name == &argument.param_name)
-            else {
-                continue;
-            };
-            let actual = match locals {
-                Some(locals) => self.infer_type_with_locals(&argument.value, locals),
-                None => self.infer_type(&argument.value),
-            };
-            if let Some(actual) = actual {
-                unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
+        // Closures with untyped parameters are inferred last, once the other
+        // arguments have bound the type parameters they depend on.
+        for closures_pass in [false, true] {
+            for argument in arguments {
+                if is_untyped_closure_expr(&argument.value) != closures_pass {
+                    continue;
+                }
+                let Some((_, pattern)) = entry
+                    .params
+                    .iter()
+                    .find(|(parameter_name, _)| parameter_name == &argument.param_name)
+                else {
+                    continue;
+                };
+                let actual = match locals {
+                    Some(locals) => self.infer_type_with_locals(&argument.value, locals),
+                    None => self.infer_type(&argument.value),
+                }
+                .or_else(|| {
+                    self.infer_closure_signature_for_pattern(
+                        &argument.value,
+                        pattern,
+                        &substitution,
+                        locals,
+                    )
+                });
+                if let Some(actual) = actual {
+                    unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
+                }
+            }
+        }
+
+        // Type parameters the arguments could not pin down may still follow from
+        // the type this call is expected to produce.
+        if entry
+            .type_parameters
+            .iter()
+            .any(|parameter| !substitution.contains_key(&parameter.name))
+        {
+            let expected = self
+                .expectations
+                .borrow()
+                .get(&(span.start, span.end))
+                .cloned();
+            if let Some(expected) = expected {
+                let mut trial = substitution.clone();
+                if unify_generic(&entry.ret, &expected, &mut trial, span).is_ok() {
+                    substitution = trial;
+                }
             }
         }
 
@@ -2229,28 +3286,41 @@ impl<'a> TypeChecker<'a> {
         params: &[(String, SparType)],
         arguments: &[CallArg],
         locals: Option<&HashMap<String, SparType>>,
-        span: &Span,
+        _span: &Span,
     ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
         let mut substitution = TypeSubstitution::new();
-        for argument in arguments {
-            let Some((_, pattern)) = params
-                .iter()
-                .find(|(parameter_name, _)| parameter_name == &argument.param_name)
-            else {
-                continue;
-            };
-            let actual = match locals {
-                Some(locals) => self.infer_type_with_locals(&argument.value, locals),
-                None => self.infer_type(&argument.value),
-            };
-            // A fully concrete parameter has nothing to infer; leave any
-            // mismatch to the per-argument check, which words it as
-            // "argument 'x' expects T but got U".
-            if !mentions_type_parameter(pattern) {
-                continue;
-            }
-            if let Some(actual) = actual {
-                unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
+        for closures_pass in [false, true] {
+            for argument in arguments {
+                if is_untyped_closure_expr(&argument.value) != closures_pass {
+                    continue;
+                }
+                let Some((_, pattern)) = params
+                    .iter()
+                    .find(|(parameter_name, _)| parameter_name == &argument.param_name)
+                else {
+                    continue;
+                };
+                let actual = match locals {
+                    Some(locals) => self.infer_type_with_locals(&argument.value, locals),
+                    None => self.infer_type(&argument.value),
+                }
+                .or_else(|| {
+                    self.infer_closure_signature_for_pattern(
+                        &argument.value,
+                        pattern,
+                        &substitution,
+                        locals,
+                    )
+                });
+                // A fully concrete parameter has nothing to infer; leave any
+                // mismatch to the per-argument check, which words it as
+                // "argument 'x' expects T but got U".
+                if !mentions_type_parameter(pattern) {
+                    continue;
+                }
+                if let Some(actual) = actual {
+                    unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
+                }
             }
         }
 
@@ -2578,6 +3648,7 @@ impl<'a> TypeChecker<'a> {
             if let Expr::Object(items, _) = &argument.value {
                 let ok = match locals {
                     Some(locals) => match expected {
+                        SparType::Named(name) if name == "Record" => true,
                         SparType::Named(name) => {
                             self.object_matches_named_type_with_locals(items, name, locals)
                         }
@@ -2589,6 +3660,7 @@ impl<'a> TypeChecker<'a> {
                         _ => false,
                     },
                     None => match expected {
+                        SparType::Named(name) if name == "Record" => true,
                         SparType::Named(name) => self.object_matches_named_type(items, name),
                         SparType::Applied { .. } => self.object_matches_type(items, expected),
                         _ => false,
@@ -2611,7 +3683,7 @@ impl<'a> TypeChecker<'a> {
                 Some(locals) => self.infer_type_with_locals(&argument.value, locals),
                 None => self.infer_type(&argument.value),
             };
-            if actual.as_ref() != Some(expected) {
+            if actual.as_ref() != Some(expected) && !lookup_accepts(expected, actual.as_ref()) {
                 return Err(SparError::TypeError {
                     message: format!(
                         "argument '{}' expects {} but got {}",
@@ -2631,7 +3703,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr_with_locals(
-        &self,
+        &mut self,
         expr: &Expr,
         locals: &HashMap<String, SparType>,
     ) -> Result<(), SparError> {
@@ -2639,7 +3711,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr_with_locals_in_context(
-        &self,
+        &mut self,
         expr: &Expr,
         locals: &HashMap<String, SparType>,
         is_async: bool,
@@ -2676,9 +3748,36 @@ impl<'a> TypeChecker<'a> {
                 }
                 Ok(())
             }
+            Expr::Closure { params, body, .. } => {
+                if let Some(param) = params.iter().find(|param| param.ty.is_none()) {
+                    return Err(SparError::TypeError {
+                        message: format!("cannot infer closure parameter '{}'", param.name),
+                        hint: Some(format!(
+                            "add a type annotation: `fn({}: Type) => ...` or provide an expected `fn(...) -> ...` type",
+                            param.name
+                        )),
+                        span: param.span.clone(),
+                    });
+                }
+                let mut closure_locals = locals.clone();
+                for param in params {
+                    if let Some(ty) = &param.ty {
+                        closure_locals.insert(param.name.clone(), ty.clone());
+                    }
+                }
+                if let ClosureBody::Expr(value) = body {
+                    self.check_expr_with_locals_in_context(value, &closure_locals, is_async)?;
+                }
+                Ok(())
+            }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.check_expr_with_locals_in_context(arg, locals, is_async)?;
+                }
+                if self.call_entry(&fc.name).is_some()
+                    || self.constructor_parameters(&fc.name).is_some()
+                {
+                    self.instantiate_positional_named_call(fc, Some(locals))?;
                 }
                 Ok(())
             }
@@ -2748,8 +3847,7 @@ impl<'a> TypeChecker<'a> {
                 // The loop variable is in scope for the body; give it the
                 // source's element type so e.g. `await item` type-checks.
                 let mut body_locals = locals.clone();
-                if let Some(SparType::List(elem_ty)) = self.infer_type_with_locals(source, locals)
-                {
+                if let Some(SparType::List(elem_ty)) = self.infer_type_with_locals(source, locals) {
                     body_locals.insert(var_name.clone(), *elem_ty);
                 }
                 self.check_expr_with_locals_in_context(body, &body_locals, is_async)?;
@@ -2757,11 +3855,372 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Literal(_) => Ok(()),
             Expr::NamespaceRef(_) => Ok(()),
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                span,
+                ..
+            } => {
+                self.check_expr_with_locals_in_context(receiver, locals, is_async)?;
+                let owner = self
+                    .method_owner_for_receiver(receiver, Some(locals))
+                    .ok_or_else(|| SparError::TypeError {
+                        message: format!("cannot resolve method '{method}' for receiver"),
+                        hint: None,
+                        span: span.clone(),
+                    })?;
+                let entry = self.symbols.lookup_method(&owner, method).ok_or_else(|| {
+                    SparError::TypeError {
+                        message: format!("struct '{owner}' has no method '{method}'"),
+                        hint: None,
+                        span: span.clone(),
+                    }
+                })?;
+                let receiver_is_static = matches!(receiver.as_ref(), Expr::NamespaceRef(reference)
+                    if reference.segments.len() == 1
+                    && !locals.contains_key(&reference.segments[0])
+                    && self.symbols.lookup_section(&reference.segments).is_some_and(|section| section.canonical));
+                if receiver_is_static == entry.has_receiver {
+                    return Err(SparError::TypeError {
+                        message: if receiver_is_static {
+                            format!("instance method '{method}' requires a struct value receiver")
+                        } else {
+                            format!("static method '{method}' must be called on struct '{owner}'")
+                        },
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                if entry.function.is_private && self.current_impl.as_deref() != Some(owner.as_str())
+                {
+                    return Err(SparError::TypeError {
+                        message: format!("method '{method}' is private to struct '{owner}'"),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+                if entry.receiver_mutable {
+                    if !matches!(receiver.as_ref(), Expr::NamespaceRef(reference) if reference.segments.len() == 1)
+                    {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "mutable method '{method}' requires a mutable binding receiver"
+                            ),
+                            hint: Some(
+                                "store the value in a `var mut` binding before calling the method"
+                                    .into(),
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                    if let Expr::NamespaceRef(reference) = receiver.as_ref() {
+                        if reference.segments.len() == 1 {
+                            let binding = &reference.segments[0];
+                            if locals.contains_key(binding)
+                                && !self.mutable_bindings.contains(binding)
+                            {
+                                return Err(SparError::TypeError {
+                                    message: format!("mutable method '{method}' requires mutable binding '{binding}'"),
+                                    hint: Some(format!("declare it as `var mut {binding} = ...`")),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                let params = if entry.has_receiver {
+                    &entry.function.params[1..]
+                } else {
+                    &entry.function.params[..]
+                };
+                if args.len() != params.len() {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "method '{method}' expects {} argument(s), got {}",
+                            params.len(),
+                            args.len()
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+
+                let mut substitution = TypeSubstitution::new();
+                if entry.has_receiver {
+                    if let (Some(actual_receiver), Some((_, expected_receiver))) = (
+                        self.infer_type_with_locals(receiver, locals),
+                        entry.function.params.first(),
+                    ) {
+                        unify_generic(
+                            expected_receiver,
+                            &actual_receiver,
+                            &mut substitution,
+                            span,
+                        )?;
+                    }
+                }
+                for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
+                    let actual = self.infer_type_with_locals(argument, locals).or_else(|| {
+                        self.infer_closure_signature_for_pattern(
+                            argument,
+                            pattern,
+                            &substitution,
+                            Some(locals),
+                        )
+                    });
+                    if let Some(actual) = actual {
+                        let argument_span =
+                            argument.span().cloned().unwrap_or_else(|| span.clone());
+                        unify_generic(pattern, &actual, &mut substitution, &argument_span)?;
+                    }
+                }
+
+                for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
+                    let expected = substitute_type(pattern, &substitution);
+                    if matches!(argument, Expr::Closure { .. })
+                        && matches!(expected, SparType::Function { .. })
+                    {
+                        self.check_closure_against_expected(argument, &expected, locals, is_async)?;
+                    } else {
+                        self.check_expr_with_locals_in_context(argument, locals, is_async)?;
+                        if let Some(actual) = self.infer_type_with_locals(argument, locals) {
+                            if actual != expected {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "method '{method}' argument expects '{}' but received '{}'",
+                                        display_type(&expected),
+                                        display_type(&actual)
+                                    ),
+                                    hint: await_hint(&expected, &actual),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Expr::StructuredPipe { input, stage, span } => {
+                self.check_expr_with_locals_in_context(input, locals, is_async)?;
+                // A closure with untyped parameters takes them from the piped
+                // input (`rows |> where(fn(r) => r.ok)`), so it cannot be
+                // checked on its own; it is checked below against the
+                // parameter type the stage signature gives it.
+                let is_deferred = |expr: &Expr| {
+                    matches!(expr, Expr::Closure { params, .. }
+                        if params.iter().any(|param| param.ty.is_none()))
+                };
+                let mut deferred: Vec<(&Expr, Option<usize>, Option<&str>)> = Vec::new();
+                match stage.as_ref() {
+                    Expr::FnCall(call) => {
+                        for (index, argument) in call.args.iter().enumerate() {
+                            if is_deferred(argument) {
+                                deferred.push((argument, Some(index), None));
+                            } else {
+                                self.check_expr_with_locals_in_context(argument, locals, is_async)?;
+                            }
+                        }
+                    }
+                    Expr::Call { args, .. } => {
+                        for argument in args {
+                            if is_deferred(&argument.value) {
+                                deferred.push((&argument.value, None, Some(&argument.param_name)));
+                            } else {
+                                self.check_expr_with_locals_in_context(
+                                    &argument.value,
+                                    locals,
+                                    is_async,
+                                )?;
+                            }
+                        }
+                    }
+                    other => self.check_expr_with_locals_in_context(other, locals, is_async)?,
+                }
+                if !deferred.is_empty() {
+                    let parameters = self.pipe_stage_parameter_types(input, stage, locals, span)?;
+                    for (closure, position, name) in deferred {
+                        let expected = match (position, name) {
+                            // The piped value is the first parameter.
+                            (Some(index), _) => parameters.get(index + 1).map(|(_, ty)| ty),
+                            (None, Some(name)) => parameters
+                                .iter()
+                                .find(|(parameter, _)| parameter == name)
+                                .map(|(_, ty)| ty),
+                            _ => None,
+                        };
+                        match expected {
+                            Some(expected @ SparType::Function { .. }) => {
+                                let expected = expected.clone();
+                                self.check_closure_against_expected(
+                                    closure, &expected, locals, is_async,
+                                )?;
+                            }
+                            _ => {
+                                self.check_expr_with_locals_in_context(closure, locals, is_async)?
+                            }
+                        }
+                    }
+                }
+                self.structured_pipe_type(input, stage, Some(locals), span)
+                    .map(|_| ())
+            }
             Expr::FieldAccess { base, .. } => {
                 self.check_expr_with_locals_in_context(base, locals, is_async)
             }
-            Expr::Shell(_) | Expr::ExecShell(_) | Expr::CommandSubstitution(_) => Ok(()),
+            Expr::Shell(shell) => self.check_mixed_shell_with_locals(shell, locals, is_async),
+            Expr::CommandSubstitution(shell) => {
+                if shell_contains_mixed_pipeline(shell) {
+                    Err(SparError::TypeError {
+                        message: "command substitution does not support structured mixed pipelines in v1; execute a normal `shell { ... }` value instead".into(),
+                        hint: None,
+                        span: shell.span.clone(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            Expr::ExecShell(shell) => {
+                if shell_contains_mixed_pipeline(shell) {
+                    Err(SparError::TypeError {
+                        message: "`exec shell` does not support structured mixed pipelines; return/execute a normal `shell { ... }` value instead".into(),
+                        hint: None,
+                        span: shell.span.clone(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
         }
+    }
+
+    fn check_mixed_shell_with_locals(
+        &mut self,
+        shell: &ShellExpr,
+        locals: &HashMap<String, SparType>,
+        is_async: bool,
+    ) -> Result<(), SparError> {
+        for (_, step) in &shell.steps {
+            let ShellStep::MixedPipeline(pipeline) = step else {
+                continue;
+            };
+            let registry = crate::structured_input::StructuredInputRegistry::builtin();
+            let resolved = registry.resolve(
+                pipeline.decoder.decoder.namespace,
+                &pipeline.decoder.decoder.name,
+                &pipeline.decoder.decoder.span,
+            )?;
+            for arg in &pipeline.decoder.args {
+                self.check_expr_with_locals_in_context(&arg.value, locals, is_async)?;
+                let expected = if arg.name == "streaming" {
+                    if resolved.descriptor.kind != crate::structured_input::DecoderKind::Scoc {
+                        return Err(SparError::TypeError {
+                            message: "`streaming` is a SCOC decoder control and is not valid for native codecs".into(),
+                            hint: None,
+                            span: arg.span.clone(),
+                        });
+                    }
+                    SparType::Bool
+                } else {
+                    let spec = resolved
+                        .descriptor
+                        .options
+                        .iter()
+                        .find(|spec| spec.name == arg.name)
+                        .ok_or_else(|| SparError::TypeError {
+                            message: format!(
+                                "unknown option `{}` for decoder `{}`",
+                                arg.name, pipeline.decoder.decoder.name
+                            ),
+                            hint: None,
+                            span: arg.span.clone(),
+                        })?;
+                    match spec.kind {
+                        crate::structured_input::DecoderOptionKind::Bool => SparType::Bool,
+                        crate::structured_input::DecoderOptionKind::Integer => SparType::Int,
+                        crate::structured_input::DecoderOptionKind::Float => SparType::Float,
+                        crate::structured_input::DecoderOptionKind::String
+                        | crate::structured_input::DecoderOptionKind::Enum => SparType::Str,
+                    }
+                };
+                if let Some(actual) = self.infer_type_with_locals(&arg.value, locals) {
+                    let compatible = actual == expected
+                        || (expected == SparType::Float && actual == SparType::Int);
+                    if !compatible {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "decoder option `{}` expects {}, got {}",
+                                arg.name,
+                                display_type(&expected),
+                                display_type(&actual)
+                            ),
+                            hint: None,
+                            span: arg.span.clone(),
+                        });
+                    }
+                }
+                if arg.name == "streaming"
+                    && matches!(&arg.value, Expr::Literal(Literal::Bool(true)))
+                    && !resolved.descriptor.capabilities.streaming
+                {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "decoder `{}` does not support streaming",
+                            pipeline.decoder.decoder.name
+                        ),
+                        hint: Some(
+                            "remove `streaming: true` or choose a streaming-capable SCOC parser"
+                                .into(),
+                        ),
+                        span: arg.span.clone(),
+                    });
+                }
+                if arg.name == "streaming"
+                    && resolved.forced_streaming
+                        == Some(crate::structured_input::StreamingMode::Enabled)
+                    && matches!(&arg.value, Expr::Literal(Literal::Bool(false)))
+                {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "decoder `{}` is a streaming compatibility alias and cannot set `streaming: false`",
+                            pipeline.decoder.decoder.name
+                        ),
+                        hint: Some(format!("use `from {}` for automatic/buffered selection", resolved.canonical_name)),
+                        span: arg.span.clone(),
+                    });
+                }
+            }
+            let mut current = mixed_decoder_stream_type(&pipeline.decoder);
+            for (index, stage) in pipeline.stages.iter().enumerate() {
+                let temp_name = format!("__sparMixedInput{index}");
+                let mut stage_locals = locals.clone();
+                stage_locals.insert(temp_name.clone(), current.clone());
+                let input = Expr::NamespaceRef(NamespaceRef {
+                    segments: vec![temp_name],
+                    span: pipeline.decoder.span.clone(),
+                });
+                let pipe = Expr::StructuredPipe {
+                    input: Box::new(input),
+                    stage: Box::new(stage.clone()),
+                    span: stage
+                        .span()
+                        .cloned()
+                        .unwrap_or_else(|| pipeline.span.clone()),
+                };
+                self.check_expr_with_locals_in_context(&pipe, &stage_locals, is_async)?;
+                current = self
+                    .infer_type_with_locals(&pipe, &stage_locals)
+                    .ok_or_else(|| SparError::TypeError {
+                        message: "cannot determine mixed structured pipeline stage type".into(),
+                        hint: None,
+                        span: stage
+                            .span()
+                            .cloned()
+                            .unwrap_or_else(|| pipeline.span.clone()),
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     // ── Function declaration type checking ────────────────────────────────────
@@ -2895,7 +4354,43 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// A `shell { ... }` or `command ...` used as a statement builds a plan and
+    /// throws it away, so nothing runs. Reject it instead of failing silently.
+    fn reject_discarded_shell_plans(&mut self, statements: &[FuncStmt]) {
+        for statement in statements {
+            match statement {
+                FuncStmt::Expression(Expr::Shell(shell), span) => {
+                    self.push_type_error(
+                        "this shell value is created but never run, so it does nothing",
+                        Some(
+                            "use `exec shell { ... }` to run it and capture its output, \
+                             `return` it from a function that returns `shell`, or \
+                             assign it with `var plan: shell = ...;`"
+                                .into(),
+                        ),
+                        if shell.span.start == 0 && shell.span.end == 0 {
+                            span.clone()
+                        } else {
+                            shell.span.clone()
+                        },
+                    );
+                }
+                FuncStmt::If(if_stmt) => {
+                    self.reject_discarded_shell_plans(&if_stmt.then_stmts);
+                    self.reject_discarded_shell_plans(&if_stmt.else_stmts);
+                }
+                FuncStmt::For(for_stmt) => self.reject_discarded_shell_plans(&for_stmt.body),
+                FuncStmt::Try(try_stmt) => {
+                    self.reject_discarded_shell_plans(&try_stmt.body);
+                    self.reject_discarded_shell_plans(&try_stmt.handler);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn check_function_decl(&mut self, f: &FunctionDecl) {
+        self.reject_discarded_shell_plans(&f.body.stmts);
         for param in &f.params {
             let Some(default) = &param.default else {
                 continue;
@@ -2927,7 +4422,130 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|p| (p.name.clone(), p.ty.clone()))
             .collect();
+        self.mutable_bindings.clear();
+        if self.current_method_receiver_mutable {
+            self.mutable_bindings.insert("self".to_string());
+        }
         self.check_func_stmts(&f.body.stmts, &f.ret, &mut local_types, f.is_async);
+    }
+
+    fn check_closure_against_expected(
+        &mut self,
+        closure: &Expr,
+        expected: &SparType,
+        outer_locals: &HashMap<String, SparType>,
+        is_async: bool,
+    ) -> Result<SparType, SparError> {
+        let Expr::Closure {
+            params,
+            return_type,
+            body,
+            span,
+        } = closure
+        else {
+            return Err(SparError::TypeError {
+                message: "internal type error: expected closure expression".into(),
+                hint: None,
+                span: Span::dummy(),
+            });
+        };
+        let SparType::Function {
+            params: expected_params,
+            return_type: expected_return,
+        } = expected
+        else {
+            return Err(SparError::TypeError {
+                message: format!(
+                    "closure requires a callable expected type, found '{}'",
+                    display_type(expected)
+                ),
+                hint: None,
+                span: span.clone(),
+            });
+        };
+        if params.len() != expected_params.len() {
+            return Err(SparError::TypeError {
+                message: format!(
+                    "closure expects {} parameter{}, but target callable requires {}",
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" },
+                    expected_params.len()
+                ),
+                hint: None,
+                span: span.clone(),
+            });
+        }
+
+        let mut locals = outer_locals.clone();
+        for (param, expected_ty) in params.iter().zip(expected_params) {
+            if let Some(explicit) = &param.ty {
+                if explicit != expected_ty {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "closure parameter '{}' has type '{}' but expected '{}'",
+                            param.name,
+                            display_type(explicit),
+                            display_type(expected_ty)
+                        ),
+                        hint: None,
+                        span: param.span.clone(),
+                    });
+                }
+            }
+            locals.insert(param.name.clone(), expected_ty.clone());
+        }
+
+        if let Some(explicit_return) = return_type {
+            if explicit_return != expected_return.as_ref() {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "closure return type '{}' does not match expected '{}'",
+                        display_type(explicit_return),
+                        display_type(expected_return)
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+        }
+
+        match body {
+            ClosureBody::Expr(value) => {
+                self.check_expr_with_locals_in_context(value, &locals, is_async)?;
+                let actual = self.infer_type_with_locals(value, &locals).ok_or_else(|| {
+                    SparError::TypeError {
+                        message: "cannot infer closure return type".into(),
+                        hint: Some(format!(
+                            "annotate the closure return type as `-> {}`",
+                            display_type(expected_return)
+                        )),
+                        span: span.clone(),
+                    }
+                })?;
+                if &actual != expected_return.as_ref() {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "closure returns '{}' but expected '{}'",
+                            display_type(&actual),
+                            display_type(expected_return)
+                        ),
+                        hint: await_hint(expected_return, &actual),
+                        span: span.clone(),
+                    });
+                }
+            }
+            ClosureBody::Block(body) => {
+                let mut block_locals = locals;
+                self.check_func_stmts(
+                    body.stmts.as_slice(),
+                    expected_return,
+                    &mut block_locals,
+                    is_async,
+                );
+            }
+        }
+
+        Ok(expected.clone())
     }
 
     fn check_func_stmts(
@@ -2940,6 +4558,31 @@ impl<'a> TypeChecker<'a> {
         for stmt in stmts {
             match stmt {
                 FuncStmt::LocalVar(lv) => {
+                    if lv.mutable {
+                        self.mutable_bindings.insert(lv.name.clone());
+                    } else {
+                        self.mutable_bindings.remove(&lv.name);
+                    }
+                    if let (Some(expected @ SparType::Function { .. }), Expr::Closure { .. }) =
+                        (lv.ty.as_ref(), &lv.value)
+                    {
+                        match self.check_closure_against_expected(
+                            &lv.value,
+                            expected,
+                            local_types,
+                            is_async,
+                        ) {
+                            Ok(ty) => {
+                                local_types.insert(lv.name.clone(), ty);
+                            }
+                            Err(error) => self.errors.push(error),
+                        }
+                        continue;
+                    }
+
+                    if let Some(declared) = lv.ty.as_ref() {
+                        self.expect_call_type(&lv.value, declared);
+                    }
                     if let Err(e) =
                         self.check_expr_with_locals_in_context(&lv.value, local_types, is_async)
                     {
@@ -3047,11 +4690,23 @@ impl<'a> TypeChecker<'a> {
                             {
                                 local_types.insert(lv.name.clone(), declared.clone());
                             }
-                            (_, None) => self.errors.push(SparError::TypeError {
-                                message: format!("cannot infer type of var '{}'", lv.name),
-                                hint: None,
-                                span: lv.span.clone(),
-                            }),
+                            (_, None) => {
+                                if let Expr::Closure { params, .. } = &lv.value {
+                                    if let Some(param) = params.iter().find(|param| param.ty.is_none()) {
+                                        self.errors.push(SparError::TypeError {
+                                            message: format!("cannot infer closure parameter '{}'", param.name),
+                                            hint: Some(format!("add a type annotation: `fn({}: Type) => ...` or declare the variable as `fn(...) -> ...`", param.name)),
+                                            span: param.span.clone(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                                self.errors.push(SparError::TypeError {
+                                    message: format!("cannot infer type of var '{}'", lv.name),
+                                    hint: None,
+                                    span: lv.span.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -3063,6 +4718,13 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
                 FuncStmt::Assignment { name, value, span } => {
+                    if let Some(target) = local_types
+                        .get(name)
+                        .cloned()
+                        .or_else(|| self.lookup_global_type(name))
+                    {
+                        self.expect_call_type(value, &target);
+                    }
                     if let Err(error) =
                         self.check_expr_with_locals_in_context(value, local_types, is_async)
                     {
@@ -3080,6 +4742,40 @@ impl<'a> TypeChecker<'a> {
                                     "binding '{name}' has type '{}' but is assigned a value of type '{}'",
                                     display_type(&expected),
                                     display_type(&actual)
+                                ),
+                                hint: await_hint(&expected, &actual),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                }
+                FuncStmt::FieldAssignment {
+                    base,
+                    fields,
+                    value,
+                    span,
+                } => {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(value, local_types, is_async)
+                    {
+                        self.errors.push(error);
+                    }
+                    let mut expected = local_types
+                        .get(base)
+                        .cloned()
+                        .or_else(|| self.lookup_global_type(base));
+                    for field in fields {
+                        expected =
+                            expected.and_then(|ty| self.infer_field_access_from_type(&ty, field));
+                    }
+                    let actual = self.infer_type_with_locals(value, local_types);
+                    if let (Some(expected), Some(actual)) = (expected, actual) {
+                        if expected != actual {
+                            self.errors.push(SparError::TypeError {
+                                message: format!(
+                                    "field assignment has type '{}' but field expects '{}'",
+                                    display_type(&actual),
+                                    display_type(&expected)
                                 ),
                                 hint: await_hint(&expected, &actual),
                                 span: span.clone(),
@@ -3159,6 +4855,19 @@ impl<'a> TypeChecker<'a> {
         span: &Span,
         is_async: bool,
     ) {
+        if matches!(ret_ty, SparType::Function { .. }) {
+            if let ReturnValue::Expr(expr @ Expr::Closure { .. }) = ret_value {
+                if let Err(error) =
+                    self.check_closure_against_expected(expr, ret_ty, local_types, is_async)
+                {
+                    self.errors.push(error);
+                }
+                return;
+            }
+        }
+        if let ReturnValue::Expr(expr) = ret_value {
+            self.expect_call_type(expr, ret_ty);
+        }
         match (ret_ty, ret_value) {
             (SparType::Void, ReturnValue::Void) => {}
             (SparType::Void, ReturnValue::Expr(_) | ReturnValue::SectionBlock(_)) => {
@@ -3216,6 +4925,24 @@ impl<'a> TypeChecker<'a> {
                                 span: field.span.clone(),
                             });
                         }
+                    }
+                }
+            }
+            (SparType::Named(name), ReturnValue::SectionBlock(fields)) if name == "Record" => {
+                for field in fields {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(&field.value, local_types, is_async)
+                    {
+                        self.errors.push(error);
+                    }
+                }
+            }
+            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _))) if matches!(elem_ty.as_ref(), SparType::Named(name) if name == "Record") => {
+                for item in items {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(item, local_types, is_async)
+                    {
+                        self.errors.push(error);
                     }
                 }
             }
@@ -3311,6 +5038,18 @@ impl<'a> TypeChecker<'a> {
                 if let Err(err) = self.check_expr_with_locals_in_context(e, local_types, is_async) {
                     self.errors.push(err);
                 }
+
+                // A generic function body is checked before any call-site
+                // substitution exists.  `T` is therefore intentionally
+                // unresolved here: validate the expression itself, but do
+                // not reject a concrete body expression merely because it
+                // cannot equal the type parameter until invocation-time
+                // inference/substitution has happened.  Generic operations
+                // are still validated by check_expr_with_locals_in_context.
+                if matches!(ty, SparType::TypeParameter(_)) {
+                    return;
+                }
+
                 let actual = self.infer_type_with_locals(e, local_types);
                 if actual.as_ref() != Some(ty) {
                     self.errors.push(SparError::TypeError {
@@ -3395,18 +5134,49 @@ impl<'a> TypeChecker<'a> {
                 }
                 self.infer_type(expr)
             }
+            Expr::FnCall(fc) => {
+                match fc.name.as_str() {
+                    "env" | "str" => return Some(SparType::Str),
+                    "int" => return Some(SparType::Int),
+                    "float" => return Some(SparType::Float),
+                    "bool" => return Some(SparType::Bool),
+                    _ => {}
+                }
+                if let Ok(Some(ret)) = self.instantiate_positional_named_call(fc, Some(locals)) {
+                    return Some(ret);
+                }
+                let callable = locals.get(&fc.name).cloned().or_else(|| {
+                    let reference = NamespaceRef {
+                        segments: vec![fc.name.clone()],
+                        span: fc.span.clone(),
+                    };
+                    self.infer_namespace_type(&reference)
+                })?;
+                match callable {
+                    SparType::Function {
+                        params,
+                        return_type,
+                    } if params.len() == fc.args.len() => {
+                        if fc.args.iter().zip(params.iter()).all(|(arg, expected)| {
+                            self.infer_type_with_locals(arg, locals).as_ref() == Some(expected)
+                        }) {
+                            Some(*return_type)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
             Expr::FieldAccess { base, field, .. } => {
                 if let Expr::NamespaceRef(nr) = base.as_ref() {
                     if nr.segments.len() == 1 {
                         if let Some(ty) = locals.get(&nr.segments[0]) {
                             return match ty {
                                 SparType::Error => Some(SparType::Str),
-                                SparType::Named(type_name) => self
-                                    .symbols
-                                    .types
-                                    .get(type_name)
-                                    .and_then(|te| te.fields.iter().find(|f| &f.name == field))
-                                    .map(|f| self.field_shape_to_type(&f.shape)),
+                                named @ SparType::Named(_) => {
+                                    self.infer_field_access_from_type(named, field)
+                                }
                                 applied @ SparType::Applied { .. } => self
                                     .type_fields_for(applied)
                                     .and_then(|(_, fields)| {
@@ -3425,6 +5195,32 @@ impl<'a> TypeChecker<'a> {
                 }
                 let base_ty = self.infer_type_with_locals(base, locals)?;
                 self.infer_field_access_from_type(&base_ty, field)
+            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => self
+                .infer_method_call(receiver, method, args, Some(locals))
+                .ok(),
+            Expr::StructuredPipe { input, stage, span } => self
+                .structured_pipe_type(input, stage, Some(locals), span)
+                .ok(),
+            Expr::Closure {
+                params,
+                return_type,
+                ..
+            } => {
+                let return_type = return_type.as_ref()?.clone();
+                let params = params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect::<Option<Vec<_>>>()?;
+                Some(SparType::Function {
+                    params,
+                    return_type: Box::new(return_type),
+                })
             }
             Expr::Call {
                 name,
@@ -3523,19 +5319,37 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             BinOp::Eq | BinOp::NotEq => {
-                if lty == rty
+                // A dynamic (Record) value may be compared for equality with a
+                // primitive; the runtime compares the underlying values.
+                let dynamic_pair = |dynamic: &SparType, other: &SparType| {
+                    matches!(dynamic, SparType::Named(name) if name == "Record")
+                        && matches!(
+                            other,
+                            SparType::Int | SparType::Float | SparType::Str | SparType::Bool
+                        )
+                };
+                let same_primitive = lty == rty
                     && matches!(
                         lty,
                         SparType::Int | SparType::Float | SparType::Str | SparType::Bool
-                    )
-                {
+                    );
+                if same_primitive || dynamic_pair(&lty, &rty) || dynamic_pair(&rty, &lty) {
                     Some(SparType::Bool)
                 } else {
                     None
                 }
             }
             BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-                if matches!(lty, SparType::Int | SparType::Float) && lty == rty {
+                // A dynamic (Record) value orders against a number or string;
+                // the runtime compares the underlying values.
+                let dynamic_order = |dynamic: &SparType, other: &SparType| {
+                    matches!(dynamic, SparType::Named(name) if name == "Record")
+                        && matches!(other, SparType::Int | SparType::Float | SparType::Str)
+                };
+                if dynamic_order(&lty, &rty)
+                    || dynamic_order(&rty, &lty)
+                    || (matches!(lty, SparType::Int | SparType::Float) && lty == rty)
+                {
                     Some(SparType::Bool)
                 } else {
                     None
@@ -3556,6 +5370,53 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
+    }
+}
+
+/// `where`, `take`, `map` ... live in `std/data` and must be imported; say so
+/// instead of leaving the bare "cannot determine signature" message.
+fn missing_data_import_hint(name: &str) -> Option<String> {
+    crate::stdlib::DATA_FUNCTIONS
+        .contains(&name)
+        .then(|| format!("import it first: import pkg {{ {name} }} from \"std/data\";"))
+}
+
+fn shell_contains_mixed_pipeline(shell: &ShellExpr) -> bool {
+    shell
+        .steps
+        .iter()
+        .any(|(_, step)| matches!(step, ShellStep::MixedPipeline(_)))
+}
+
+fn mixed_decoder_stream_type(decoder: &ShellDecodeStage) -> SparType {
+    let registry = crate::structured_input::StructuredInputRegistry::builtin();
+    let element = registry
+        .resolve(
+            decoder.decoder.namespace,
+            &decoder.decoder.name,
+            &decoder.decoder.span,
+        )
+        .ok()
+        .map(|resolved| {
+            use crate::structured_input::DecoderOutputShape;
+            match resolved
+                .descriptor
+                .stream_item
+                .unwrap_or(resolved.descriptor.normalized_output)
+            {
+                DecoderOutputShape::Scalar => SparType::Str,
+                DecoderOutputShape::List => {
+                    SparType::List(Box::new(SparType::Named("Record".into())))
+                }
+                DecoderOutputShape::Record | DecoderOutputShape::Table => {
+                    SparType::Named("Record".into())
+                }
+            }
+        })
+        .unwrap_or_else(|| SparType::Named("Record".into()));
+    SparType::Applied {
+        name: "Stream".into(),
+        arguments: vec![element],
     }
 }
 
@@ -3660,10 +5521,7 @@ mod tests {
                 r#"task Deploy { private: "yes"; run { echo deploy; }; };"#,
                 "private",
             ),
-            (
-                "task Deploy { group: 1; run { echo deploy; }; };",
-                "group",
-            ),
+            ("task Deploy { group: 1; run { echo deploy; }; };", "group"),
         ] {
             assert!(
                 has_type_error(src, field),
@@ -3822,12 +5680,14 @@ mod tests {
                         imports: Default::default(),
                         functions: Default::default(),
                         imported_functions: Default::default(),
+                        methods: Default::default(),
                         types: Default::default(),
                         enums: Default::default(),
                         function_groups: Default::default(),
                         tasks: Default::default(),
                         hosts: Default::default(),
                         natives: Default::default(),
+                        top_level_await: false,
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(result.is_err(), "var of type 'section' must be rejected");
@@ -3852,12 +5712,14 @@ mod tests {
                         imports: Default::default(),
                         functions: Default::default(),
                         imported_functions: Default::default(),
+                        methods: Default::default(),
                         types: Default::default(),
                         enums: Default::default(),
                         function_groups: Default::default(),
                         tasks: Default::default(),
                         hosts: Default::default(),
                         natives: Default::default(),
+                        top_level_await: false,
                     });
                 let result = TypeChecker::check(&program, &symbols);
                 assert!(
@@ -3979,5 +5841,68 @@ mod tests {
             r#"function f() -> int { var x: int = "hello"; return x; };"#,
             "declared as",
         ));
+    }
+
+    #[test]
+    fn mixed_decoder_accepts_typed_scoc_options() {
+        check_ok(
+            r#"
+            function main() -> shell {
+                var useRaw: bool = true;
+                return shell { printf x | from df(raw: useRaw, streaming: false); };
+            };
+            "#,
+        );
+    }
+
+    #[test]
+    fn mixed_decoder_rejects_unknown_scoc_option() {
+        let errors = check_err(
+            r#"
+            function main() -> shell {
+                return shell { printf x | from df(doesNotExist: true); };
+            };
+            "#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown option `doesNotExist`")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_decoder_rejects_wrong_option_type() {
+        let errors = check_err(
+            r#"
+            function main() -> shell {
+                return shell { printf x | from df(raw: "yes"); };
+            };
+            "#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("decoder option `raw` expects bool")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_decoder_rejects_forced_streaming_for_batch_only_parser() {
+        let errors = check_err(
+            r#"
+            function main() -> shell {
+                return shell { printf x | from df(streaming: true); };
+            };
+            "#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("does not support streaming")),
+            "got: {errors:?}"
+        );
     }
 }

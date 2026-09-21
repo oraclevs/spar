@@ -2,6 +2,11 @@
 // empty Process objects are rejected by the native provider as invalid handles.
 export type [Process] {};
 
+// Command, ProcessChunk, and ProcessStream are compiler-known runtime types,
+// like ProcessResult and PipelineStatus. Their behavior still lives in
+// nativeProcess/spar-process; this module only exposes construction/execution
+// functions.
+
 function args() -> [str] {
     return nativeProcess::args();
 };
@@ -10,8 +15,16 @@ function which(program: str) -> str {
     return nativeProcess::which(program: program);
 };
 
+function command(program: str, args: [str]) -> Command {
+    return nativeProcess::command(program: program, args: args);
+};
+
 function run(program: str, args: [str]) -> ProcessResult {
     return nativeProcess::run(program: program, args: args);
+};
+
+function stream(program: str, args: [str]) -> ProcessStream {
+    return nativeProcess::stream(program: program, args: args);
 };
 
 function spawn(program: str, args: [str]) -> Process {

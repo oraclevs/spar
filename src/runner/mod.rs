@@ -10,6 +10,6 @@ pub use executor::{execute, execute_with_native, ExecutionOptions, ExecutionRepo
 pub use graph::{BoundTask, ExecutionPlan};
 pub use task::{
     no_expr_eval, no_native_eval, BoundValue, CommandTemplate, ExprEval, NativeCommand, NativeEval,
-    ScalarKind, Task, TaskCommand,
-    TaskInvocation, TaskParameter, TaskSet, TemplatePart, RESERVED_CLI_COMMANDS,
+    ScalarKind, Task, TaskCommand, TaskInvocation, TaskParameter, TaskSet, TemplatePart,
+    RESERVED_CLI_COMMANDS,
 };

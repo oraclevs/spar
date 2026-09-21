@@ -104,7 +104,10 @@ fn emit_keeps_public_configuration_and_hides_internal_values() {
         directory.path().join("config.spar"),
         r#"
             var internal: int = 1;
-            export var visible: int = 2;
+            #[emit]
+            var visible: int = 2;
+            export var exportedButUnmarked: int = 3;
+            #[emit]
             [Public] { name: str = "spar"; };
             private [Private] { token: str = "hidden"; };
         "#,
@@ -122,6 +125,7 @@ fn emit_keeps_public_configuration_and_hides_internal_values() {
     assert_eq!(json["visible"], 2);
     assert_eq!(json["Public"]["name"], "spar");
     assert!(json.get("internal").is_none());
+    assert!(json.get("exportedButUnmarked").is_none());
     assert!(json.get("Private").is_none());
 }
 

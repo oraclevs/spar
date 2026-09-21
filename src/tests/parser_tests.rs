@@ -1500,3 +1500,62 @@ fn command_exec_and_shell_construct_forms_remain_reserved_in_construct_position(
     );
     assert_eq!(program.items.len(), 3);
 }
+
+#[test]
+fn emit_attribute_attaches_to_struct_and_var() {
+    use crate::ast::TopLevelItem;
+    let program = parse_ok(
+        "#[emit]\nstruct Server { port: int = 1; };\n#[emit]\nvar version: str = \"1\";\nstruct Plain { a: int = 1; };\n",
+    );
+    let TopLevelItem::Section(server) = &program.items[0] else { panic!("section") };
+    assert!(server.is_emit());
+    let TopLevelItem::Var(version) = &program.items[1] else { panic!("var") };
+    assert!(version.is_emit());
+    let TopLevelItem::Section(plain) = &program.items[2] else { panic!("section") };
+    assert!(!plain.is_emit());
+}
+
+#[test]
+fn emit_attribute_works_with_export_and_private_and_stacking() {
+    use crate::ast::TopLevelItem;
+    let program = parse_ok("#[emit]\n#[emit]\nexport var a: int = 1;\n#[emit]\nprivate struct B { x: int = 1; };\n");
+    let TopLevelItem::Var(a) = &program.items[0] else { panic!("var") };
+    assert_eq!(a.attributes.len(), 2);
+    let TopLevelItem::Section(b) = &program.items[1] else { panic!("section") };
+    assert!(b.is_emit() && b.private);
+}
+
+#[test]
+fn unknown_attribute_is_rejected_with_valid_names() {
+    let err = parse_ok_result("#[serialize]\nstruct A { x: int = 1; };").unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("unknown attribute `#[serialize]`"), "{text}");
+    assert!(text.contains("valid attributes: emit"), "{text}");
+}
+
+#[test]
+fn attribute_on_function_is_rejected() {
+    let err = parse_ok_result("#[emit]\nfunction f() -> int { return 1; };").unwrap_err();
+    assert!(
+        err.to_string().contains("only valid on top-level structs and vars"),
+        "{err}"
+    );
+}
+
+#[test]
+fn dangling_attribute_at_end_of_file_is_rejected() {
+    let err = parse_ok_result("var a: int = 1;\n#[emit]\n").unwrap_err();
+    assert!(
+        err.to_string().contains("only valid on top-level structs and vars"),
+        "{err}"
+    );
+}
+
+#[test]
+fn attribute_on_field_is_rejected() {
+    let err = parse_ok_result("struct A {\n    #[emit]\n    x: int = 1;\n};").unwrap_err();
+    assert!(
+        err.to_string().contains("only valid on top-level structs and vars"),
+        "{err}"
+    );
+}

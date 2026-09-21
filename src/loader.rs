@@ -1377,7 +1377,8 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
 }
 
 /// Validate config `program` against any `import schema "..."` declarations it contains.
-/// Loads each schema file, verifies it has @SchemaFile, then checks all sections.
+/// Loads each schema file, verifies it declares schemas, then checks every
+/// struct whose name matches a schema; structs with no schema are ignored.
 ///
 /// On success, also returns every config section's schema-derived field
 /// list, keyed by section name. The typechecker uses this to exempt
@@ -1403,21 +1404,16 @@ pub fn validate_schema_imports(
         std::collections::HashMap::new();
     for cfg_item in &program.items {
         if let TopLevelItem::Section(s) = cfg_item {
-            if s.private {
-                continue;
-            } // private sections are never emitted; skip schema validation
             if let Some(name) = s.path.first() {
                 config_sections.insert(name.clone(), s);
             }
         }
     }
 
-    // Fix 1: collect ALL schema section names across ALL imports before running Rule 2.
-    // With multiple `import schema` lines, each schema only knows about its own sections;
-    // checking Rule 2 inside the per-import loop would flag sections from schema B as
-    // "undeclared" while processing schema A.
-    let mut combined_schema_section_names: HashSet<String> = HashSet::new();
-    let mut has_schema_imports = false;
+    // Which import first declared each schema name; schema names share one
+    // namespace across every `import schema` in the file.
+    let mut schema_origin: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     for item in &program.items {
         let TopLevelItem::Import(decl) = item else {
@@ -1426,7 +1422,6 @@ pub fn validate_schema_imports(
         if !matches!(decl.kind, crate::ast::ImportKind::Schema) {
             continue;
         }
-        has_schema_imports = true;
 
         // Resolve and load the schema file
         let full_path = local_module_path(base_dir, &decl.path);
@@ -1504,24 +1499,37 @@ pub fn validate_schema_imports(
 
         for schema_item in &schema_prog.items {
             if let TopLevelItem::SchemaSection(s) = schema_item {
+                if let Some(first) = schema_origin.get(&s.name) {
+                    errors.push(SparError::SchemaError {
+                        message: format!(
+                            "schema `{}` is declared in both '{}' and '{}'",
+                            s.name, first, decl.path
+                        ),
+                        span: decl.span.clone(),
+                    });
+                    continue;
+                }
+                schema_origin.insert(s.name.clone(), decl.path.clone());
                 schema_sections.insert(s.name.clone(), (s.marker.optional, &s.fields));
             }
         }
 
-        // Accumulate names into the combined set for Rule 2 (checked after the loop).
-        for name in schema_sections.keys() {
-            combined_schema_section_names.insert(name.clone());
-        }
-
-        // Rule 1: every required schema section must have a matching config section
+        // Every required schema must have a struct of the same name in this file;
+        // structs with no schema are ordinary structs and are ignored.
         for (name, (optional, schema_fields)) in &schema_sections {
             match config_sections.get(name) {
                 None if !optional => {
+                    let mut message = format!(
+                        "schema `{}` ({}) has no matching struct in this file",
+                        name, decl.path
+                    );
+                    if let Some(close) =
+                        closest_name(name, config_sections.keys().map(String::as_str))
+                    {
+                        message.push_str(&format!("; did you mean `{close}`?"));
+                    }
                     errors.push(SparError::SchemaError {
-                        message: format!(
-                            "schema '{}' requires section `[{}]` but it is missing from the config",
-                            decl.path, name
-                        ),
+                        message,
                         span: decl.span.clone(),
                     });
                 }
@@ -1560,28 +1568,43 @@ pub fn validate_schema_imports(
         }
     }
 
-    // Rule 2 (Fix 1): check config sections against the COMBINED set of all schema section
-    // names, so that sections declared in schema B are not falsely rejected while processing
-    // schema A.  Only runs when at least one `import schema` is present.
-    if has_schema_imports {
-        for (name, cfg_section) in &config_sections {
-            if !combined_schema_section_names.contains(name) {
-                errors.push(SparError::SchemaError {
-                    message: format!(
-                        "section `[{}]` is not declared in any imported schema",
-                        name
-                    ),
-                    span: cfg_section.span.clone(),
-                });
-            }
-        }
-    }
-
     if errors.is_empty() {
         Ok(bindings)
     } else {
         Err(errors)
     }
+}
+
+/// The candidate within edit distance 2 of `target` (closest first, ties
+/// broken alphabetically), used for "did you mean" hints.
+fn closest_name<'a>(target: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<(usize, &str)> = None;
+    for candidate in candidates {
+        let distance = edit_distance(target, candidate);
+        if distance > 2 {
+            continue;
+        }
+        match best {
+            Some((d, name)) if d < distance || (d == distance && name <= candidate) => {}
+            _ => best = Some((distance, candidate)),
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
 }
 
 fn validate_fields(
@@ -1867,7 +1890,7 @@ mod tests {
     }
 
     #[test]
-    fn private_section_not_validated_against_schema() {
+    fn private_struct_without_a_schema_is_ignored() {
         use std::fs;
         let dir = tempdir().unwrap();
 
@@ -1888,7 +1911,7 @@ mod tests {
         let result = validate_schema_imports(&program, dir.path());
         assert!(
             result.is_ok(),
-            "private section must not be validated against schema, got: {:?}",
+            "a private struct with no schema must be ignored, got: {:?}",
             result.err()
         );
     }
@@ -2687,5 +2710,117 @@ mod tests {
             }
         }
         assert!(saw_shared, "Shared should have been spliced in");
+    }
+
+    fn schema_result(
+        schema_src: &str,
+        config_src: &str,
+    ) -> Result<
+        std::collections::HashMap<String, Vec<crate::ast::SchemaField>>,
+        Vec<crate::error::SparError>,
+    > {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("s.spar"), schema_src).unwrap();
+        let program = parse_src(&format!("import schema \"s.spar\";\n{config_src}"));
+        validate_schema_imports(&program, dir.path())
+    }
+
+    fn messages(errors: Vec<crate::error::SparError>) -> Vec<String> {
+        errors.iter().map(|e| e.to_string()).collect()
+    }
+
+    #[test]
+    fn matched_struct_is_type_checked() {
+        let errors = schema_result(
+            "schema Server { host: str; port: int; };",
+            "struct Server { host: str = \"h\"; };",
+        )
+        .unwrap_err();
+        assert!(messages(errors).iter().any(|m| m.contains("port")));
+    }
+
+    #[test]
+    fn struct_without_schema_is_ignored() {
+        assert!(schema_result(
+            "schema Server { host: str; };",
+            "struct Server { host: str = \"h\"; };\nstruct Other { z: int = 1; };",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn missing_required_schema_struct_is_an_error() {
+        let errors = schema_result(
+            "schema Server { host: str; };",
+            "struct Other { z: int = 1; };",
+        )
+        .unwrap_err();
+        let joined = messages(errors).join("\n");
+        assert!(joined.contains("schema `Server`"), "{joined}");
+        assert!(joined.contains("has no matching struct in this file"), "{joined}");
+        assert!(!joined.contains("did you mean"), "{joined}");
+    }
+
+    #[test]
+    fn missing_struct_suggests_a_close_name() {
+        let errors = schema_result(
+            "schema Server { host: str; };",
+            "struct Servr { host: str = \"h\"; };",
+        )
+        .unwrap_err();
+        assert!(messages(errors).join("\n").contains("did you mean `Servr`?"));
+    }
+
+    #[test]
+    fn distant_names_get_no_suggestion() {
+        let errors = schema_result(
+            "schema Server { host: str; };",
+            "struct Database { host: str = \"h\"; };",
+        )
+        .unwrap_err();
+        assert!(!messages(errors).join("\n").contains("did you mean"));
+    }
+
+    #[test]
+    fn optional_schema_struct_may_be_omitted() {
+        assert!(schema_result(
+            "schema? Cache { ttl: int; };",
+            "struct Other { z: int = 1; };"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn private_struct_is_validated_against_its_schema() {
+        let errors = schema_result(
+            "schema Server { host: str; port: int; };",
+            "private struct Server { host: str = \"h\"; };",
+        )
+        .unwrap_err();
+        assert!(messages(errors).iter().any(|m| m.contains("port")));
+    }
+
+    #[test]
+    fn duplicate_schema_names_across_imports_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.spar"), "schema Server { host: str; };").unwrap();
+        std::fs::write(dir.path().join("b.spar"), "schema Server { port: int; };").unwrap();
+        let program = parse_src(
+            "import schema \"a.spar\";\nimport schema \"b.spar\";\nstruct Server { host: str = \"h\"; port: int = 1; };\n",
+        );
+        let errors = validate_schema_imports(&program, dir.path()).unwrap_err();
+        let joined = messages(errors).join("\n");
+        assert!(joined.contains("schema `Server` is declared in both"), "{joined}");
+        assert!(joined.contains("a.spar") && joined.contains("b.spar"), "{joined}");
+    }
+
+    #[test]
+    fn all_schema_errors_are_reported_together() {
+        let errors = schema_result(
+            "schema A { x: int; };\nschema B { y: int; };",
+            "struct Unrelated { z: int = 1; };",
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 2);
     }
 }

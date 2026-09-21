@@ -63,6 +63,7 @@ pub enum Token {
     StructuredPipe, // `|>` Spar structured-value pipe
     Bang,
     At, // `@`
+    HashBracket, // `#[` opens an attribute
 
     // Function keywords
     KwAsync,
@@ -206,6 +207,7 @@ impl Token {
             Token::OrOr => "'||'",
             Token::Bang => "'!'",
             Token::At => "'@'",
+            Token::HashBracket => "'#['",
             Token::KwAsync => "'async'",
             Token::KwAwait => "'await'",
             Token::KwFunction => "'function'",

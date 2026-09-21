@@ -411,6 +411,20 @@ pub struct SchemaFromDecl {
     pub span: Span,
 }
 
+/// A `#[name]` attribute attached to a top-level declaration.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: String,
+    pub span: Span,
+}
+
+/// The only attribute names the parser accepts.
+pub const KNOWN_ATTRIBUTES: &[&str] = &["emit"];
+
+fn has_attribute(attributes: &[Attribute], name: &str) -> bool {
+    attributes.iter().any(|attribute| attribute.name == name)
+}
+
 #[derive(Debug, Clone)]
 pub struct VarDecl {
     pub exported: bool,
@@ -420,6 +434,13 @@ pub struct VarDecl {
     pub ty: SparType,
     pub value: Option<Expr>,
     pub span: Span,
+    pub attributes: Vec<Attribute>,
+}
+
+impl VarDecl {
+    pub fn is_emit(&self) -> bool {
+        has_attribute(&self.attributes, "emit")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +464,13 @@ pub struct SectionDecl {
     /// Source line of the closing `}`, so the formatter can keep comments
     /// trailing the last field inside the body.
     pub end_line: u32,
+    pub attributes: Vec<Attribute>,
+}
+
+impl SectionDecl {
+    pub fn is_emit(&self) -> bool {
+        has_attribute(&self.attributes, "emit")
+    }
 }
 
 #[derive(Debug, Clone)]

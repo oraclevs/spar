@@ -244,6 +244,7 @@ impl CommentCursor {
 fn item_end_line(item: &TopLevelItem) -> u32 {
     match item {
         TopLevelItem::Section(d) => d.end_line,
+        TopLevelItem::Var(d) => d.span.line,
         TopLevelItem::Impl(d) => d.end_line,
         TopLevelItem::Function(d) => d.body.span.line,
         TopLevelItem::Task(d) => d.closing_span.line,
@@ -253,12 +254,20 @@ fn item_end_line(item: &TopLevelItem) -> u32 {
     }
 }
 
+fn format_attributes(attributes: &[crate::ast::Attribute], out: &mut String) {
+    for attribute in attributes {
+        out.push_str("#[");
+        out.push_str(&attribute.name);
+        out.push_str("]\n");
+    }
+}
+
 fn item_span_line(item: &TopLevelItem) -> u32 {
     match item {
         TopLevelItem::Import(d) => d.span.line,
-        TopLevelItem::Var(d) => d.span.line,
+        TopLevelItem::Var(d) => d.attributes.first().map_or(d.span.line, |a| a.span.line),
         TopLevelItem::Dynamic(d) => d.span.line,
-        TopLevelItem::Section(d) => d.span.line,
+        TopLevelItem::Section(d) => d.attributes.first().map_or(d.span.line, |a| a.span.line),
         TopLevelItem::Impl(d) => d.span.line,
         TopLevelItem::Function(d) => d.span.line,
         TopLevelItem::SchemaSection(d) => d.span.line,
@@ -293,6 +302,7 @@ fn format_top_level_item(
         TopLevelItem::Import(imp) => format_import_decl(imp, out),
 
         TopLevelItem::Var(vd) => {
+            format_attributes(&vd.attributes, out);
             if vd.exported {
                 out.push_str("export ");
             }
@@ -327,6 +337,7 @@ fn format_top_level_item(
         }
 
         TopLevelItem::Section(sd) => {
+            format_attributes(&sd.attributes, out);
             if sd.exported {
                 out.push_str("export ");
             }
@@ -2911,6 +2922,7 @@ function pick(flag: bool) -> int {
                 type_binding: None,
                 span: crate::error::Span::dummy(),
                 end_line: 0,
+                attributes: Vec::new(),
             })],
         };
         let out = format_program(&program, &FormatConfig::default());
@@ -3642,5 +3654,21 @@ struct Config"#
     fn an_if_nested_inside_else_stays_nested() {
         let source = "function f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else {\n        if a == 2 {\n            return 20;\n        }\n    }\n    return 0;\n};\n";
         assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn formatter_keeps_attributes_on_their_own_line_above_the_declaration() {
+        let src = "#[emit]   export var  a:int=1;\n#[emit]\nstruct S { x: int = 1; };\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.starts_with("#[emit]\nexport var a: int = 1;\n"), "{formatted}");
+        assert!(formatted.contains("\n#[emit]\nstruct S {"), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted, "idempotent");
+    }
+
+    #[test]
+    fn formatter_places_leading_comment_before_the_attribute() {
+        let src = "// the server\n#[emit]\nstruct S { x: int = 1; };\n";
+        let formatted = format_source(src).unwrap();
+        assert!(formatted.starts_with("// the server\n#[emit]\nstruct S"), "{formatted}");
     }
 }

@@ -1358,6 +1358,12 @@ impl<'a> Lexer<'a> {
 
             b'0'..=b'9' => self.read_number(start, line, col)?,
 
+            b'#' if self.peek_at(1) == Some(b'[') => {
+                self.advance();
+                self.advance();
+                Token::HashBracket
+            }
+
             b'@' => {
                 self.advance();
                 Token::At
@@ -3006,6 +3012,19 @@ mod tests {
     fn lex_at_sign() {
         let tokens = Lexer::new("@").tokenize().unwrap();
         assert_eq!(tokens[0].token, Token::At);
+    }
+
+    #[test]
+    fn lex_hash_bracket() {
+        let tokens = Lexer::new("#[emit]").tokenize().unwrap();
+        assert_eq!(tokens[0].token, Token::HashBracket);
+        assert_eq!(tokens[1].token, Token::Ident("emit".to_string()));
+        assert_eq!(tokens[2].token, Token::RBracket);
+    }
+
+    #[test]
+    fn bare_hash_is_still_a_lex_error() {
+        assert!(Lexer::new("#x").tokenize().is_err());
     }
 
     #[test]

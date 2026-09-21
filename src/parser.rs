@@ -345,6 +345,51 @@ impl Parser {
     }
 
     fn parse_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
+        if !self.at(&Token::HashBracket) {
+            return self.parse_unattributed_top_level_item();
+        }
+        let attributes = self.parse_attributes()?;
+        let placement_error = |attribute: &Attribute| SparError::ParseError {
+            message: format!(
+                "attribute `#[{}]` is only valid on top-level structs and vars",
+                attribute.name
+            ),
+            span: attribute.span.clone(),
+        };
+        if self.at(&Token::Eof) {
+            return Err(placement_error(&attributes[0]));
+        }
+        let mut item = self.parse_unattributed_top_level_item()?;
+        match &mut item {
+            TopLevelItem::Var(declaration) => declaration.attributes = attributes,
+            TopLevelItem::Section(declaration) => declaration.attributes = attributes,
+            _ => return Err(placement_error(&attributes[0])),
+        }
+        Ok(item)
+    }
+
+    fn parse_attributes(&mut self) -> Result<Vec<Attribute>, SparError> {
+        let mut attributes = Vec::new();
+        while self.at(&Token::HashBracket) {
+            let span = self.peek_span();
+            self.advance();
+            let (name, name_span) = self.expect_ident()?;
+            if !KNOWN_ATTRIBUTES.contains(&name.as_str()) {
+                return Err(SparError::ParseError {
+                    message: format!(
+                        "unknown attribute `#[{name}]`; valid attributes: {}",
+                        KNOWN_ATTRIBUTES.join(", ")
+                    ),
+                    span: name_span,
+                });
+            }
+            self.expect(&Token::RBracket)?;
+            attributes.push(Attribute { name, span });
+        }
+        Ok(attributes)
+    }
+
+    fn parse_unattributed_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
         match self.peek() {
             Token::Import     => Ok(TopLevelItem::Import(self.parse_import()?)),
             Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
@@ -637,6 +682,7 @@ impl Parser {
             ty,
             value,
             span,
+            attributes: Vec::new(),
         })
     }
 
@@ -674,6 +720,11 @@ impl Parser {
     }
 
     fn parse_section_item(&mut self) -> Result<SectionItem, SparError> {
+        if self.at(&Token::HashBracket) {
+            return Err(self.error(
+                "attribute `#[...]` is only valid on top-level structs and vars",
+            ));
+        }
         if self.at(&Token::DotDotDot) {
             Ok(SectionItem::Spread(self.parse_spread()?))
         } else if self.at_ident() {
@@ -1122,6 +1173,7 @@ impl Parser {
             type_binding,
             span,
             end_line,
+            attributes: Vec::new(),
         }))
     }
 
@@ -1303,6 +1355,7 @@ impl Parser {
             type_binding,
             span,
             end_line,
+            attributes: Vec::new(),
         }))
     }
 

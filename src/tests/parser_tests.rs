@@ -621,16 +621,47 @@ fn comprehension_expression_still_parses() {
 }
 
 #[test]
-fn parses_schema_file_pragma() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; };";
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
+fn schema_declaration_makes_a_schema_file() {
+    let prog = parse_ok("schema X { a: int; };");
     assert!(prog.is_schema_file, "is_schema_file must be true");
 }
 
 #[test]
+fn schema_file_may_only_contain_schema_items_and_type_imports() {
+    let err = parse_ok_result("schema X { a: int; };\nvar y: int = 1;").unwrap_err();
+    assert!(err.to_string().contains("schema files may only contain"), "{err}");
+}
+
+#[test]
+fn old_schema_file_pragma_is_removed_with_a_hint() {
+    let err = parse_ok_result("@SchemaFile\nschema X { a: int; };").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("@SchemaFile was removed; declare `schema Name { ... };`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn old_bracket_schema_syntax_is_removed_with_a_hint() {
+    let err = parse_ok_result("Schema [X]{ a: int; };").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Schema [Name]{...} was replaced by `schema Name { ... };`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_variable_named_schema_still_works() {
+    let prog = parse_ok("var schema: int = 1;");
+    assert_eq!(prog.items.len(), 1);
+    assert!(!prog.is_schema_file);
+}
+
+#[test]
 fn parses_required_schema_section() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; };";
+    let src = "schema X { a: int; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 1);
@@ -650,7 +681,7 @@ fn parses_required_schema_section() {
 
 #[test]
 fn parses_optional_schema_section() {
-    let src = "@SchemaFile\nSchema? [Y]{ b: str; };";
+    let src = "schema? Y { b: str; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -663,7 +694,7 @@ fn parses_optional_schema_section() {
 
 #[test]
 fn parses_optional_schema_field() {
-    let src = "@SchemaFile\nSchema [X]{ a: int; b?: str; };";
+    let src = "schema X { a: int; b?: str; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
@@ -677,8 +708,7 @@ fn parses_optional_schema_field() {
 
 #[test]
 fn parses_nested_section_schema_field() {
-    let src = r#"@SchemaFile
-Schema [X]{
+    let src = r#"schema X {
     x: section = { host: str; port?: int; };
 };"#;
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -751,17 +781,6 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
     assert!(crate::parser::Parser::new(tokens).parse().is_ok());
 }
 
-#[test]
-fn schema_section_without_pragma_is_parse_error() {
-    // A Schema declaration outside a @SchemaFile is an error.
-    let src = "Schema [X]{ a: int; };";
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let result = crate::parser::Parser::new(tokens).parse();
-    assert!(
-        result.is_err(),
-        "schema section in non-schema file must be a parse error"
-    );
-}
 
 #[test]
 fn parse_type_decl_with_named_and_nested_fields() {
@@ -828,23 +847,10 @@ fn parse_section_with_type_binding() {
 }
 
 #[test]
-fn parse_schema_decl_still_requires_schema_file() {
-    // Unchanged behavior: a Schema declaration outside @SchemaFile is
-    // still rejected, by the SAME check that already exists — this just
-    // confirms the keyword-prefix migration didn't disturb it.
-    let src = r#"Schema [X]{ a: int; };"#;
-    let err = parse_err(src);
-    assert!(
-        err.contains("not a schema file") || err.contains("@SchemaFile"),
-        "expected the existing schema-file-required error, got: {err}"
-    );
-}
-
-#[test]
 fn parse_angle_bracket_schema_no_longer_parses() {
     // Angle brackets are fully deprecated — the old <Schema> suffix form
     // must no longer parse, even inside a @SchemaFile.
-    let src = "@SchemaFile\n[X]<Schema>{ a: int; }\n";
+    let src = "[X]<Schema>{ a: int; }\n";
     let _ = parse_err(src);
 }
 
@@ -944,9 +950,8 @@ fn parse_schema_from_decl() {
     // `SchemaFrom` declarations (parsing them doesn't require the
     // referenced type to actually exist; that's a Task 6 semantic check).
     let src = concat!(
-        "@SchemaFile\n",
-        "SchemaFrom [Postgres, PostgresType];\n",
-        "SchemaFrom? [Cache, CacheType];\n",
+        "schema Postgres from PostgresType;\n",
+        "schema? Cache from CacheType;\n",
     );
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 2);
@@ -967,27 +972,19 @@ fn parse_schema_from_decl() {
 }
 
 #[test]
-fn parse_schema_from_rejected_outside_schema_file() {
-    let src = r#"SchemaFrom [Postgres, PostgresType];"#;
-    let err = parse_err(src);
-    assert!(err.contains("schema file"), "got: {err}");
-}
-
-#[test]
 fn parse_schema_file_still_rejects_non_type_imports() {
     // Task 5 flips `import type` to legal inside @SchemaFile; every OTHER
     // import form must stay rejected there — asserted now so a regression
     // in Task 5 is caught by an already-passing Task 1 test.
-    let src = concat!("@SchemaFile\n", "import \"x.spar\" as x;\n",);
+    let src = concat!("schema Y { a: int; };\n", "import \"x.spar\" as x;\n",);
     let _ = parse_err(src);
 }
 
 #[test]
 fn parse_schema_file_allows_import_type() {
     let src = concat!(
-        "@SchemaFile\n",
         "import type { PostgresType } from \"types.spar\";\n",
-        "Schema [Postgres]{ image: str; };\n",
+        "schema Postgres { image: str; };\n",
     );
     let prog = parse_ok(src);
     assert_eq!(prog.items.len(), 2);
@@ -996,7 +993,7 @@ fn parse_schema_file_allows_import_type() {
 #[test]
 fn parse_schema_file_still_rejects_selective_import() {
     let src = concat!(
-        "@SchemaFile\n",
+        "schema Y { a: int; };\n",
         "import { PostgresType } from \"types.spar\";\n",
     );
     let _ = parse_err(src);
@@ -1004,7 +1001,7 @@ fn parse_schema_file_still_rejects_selective_import() {
 
 #[test]
 fn parse_schema_file_rejects_removed_as_part_of_syntax() {
-    let src = concat!("@SchemaFile\n", "import asPartOf \"types.spar\";\n",);
+    let src = concat!("schema Y { a: int; };\n", "import asPartOf \"types.spar\";\n",);
     let _ = parse_err(src);
 }
 

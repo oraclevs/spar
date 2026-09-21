@@ -1,6 +1,4 @@
-@SchemaFile
-
-Schema [Server]{
+schema Server {
     host: str;
     port?: int;
 };

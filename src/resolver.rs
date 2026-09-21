@@ -906,7 +906,7 @@ impl Resolver {
         if decl.name == "Schema" {
             self.push_error(
                 "'Schema' is reserved and cannot be used as a type name — \
-                 it already means a `Schema [Name]{...}` file-level contract",
+                 it already means a `schema Name {...}` file-level contract",
                 decl.name_span.clone(),
             );
             return;

@@ -177,11 +177,18 @@ impl Parser {
     }
 
     pub fn parse(mut self) -> Result<Program, SparError> {
-        let (is_schema_file, load_env) = if self.at(&Token::At) {
+        let load_env = if self.at(&Token::At) {
             self.advance(); // consume '@'
             let (name, name_span) = self.expect_ident()?;
             match name.as_str() {
-                "SchemaFile" => (true, None),
+                "SchemaFile" => {
+                    return Err(SparError::ParseError {
+                        message: "@SchemaFile was removed; declare `schema Name { ... };` \
+                                  (any file containing `schema` declarations is a schema file)"
+                            .to_string(),
+                        span: name_span,
+                    });
+                }
                 "LoadEnv" => {
                     let path = if self.at(&Token::LParen) {
                         self.advance();
@@ -191,20 +198,19 @@ impl Parser {
                     } else {
                         ".env".to_string()
                     };
-                    (false, Some(path))
+                    Some(path)
                 }
                 _ => {
                     return Err(SparError::ParseError {
                         message: format!(
-                            "unknown file pragma `@{}`; only `@SchemaFile` or `@LoadEnv` is supported",
-                            name
+                            "unknown file pragma `@{name}`; only `@LoadEnv` is supported"
                         ),
                         span: name_span,
                     });
                 }
             }
         } else {
-            (false, None)
+            None
         };
 
         let mut items = Vec::new();
@@ -214,6 +220,13 @@ impl Parser {
             }
             items.push(self.parse_top_level_item_or_expression()?);
         }
+
+        let is_schema_file = items.iter().any(|item| {
+            matches!(
+                item,
+                TopLevelItem::SchemaSection(_) | TopLevelItem::SchemaFrom(_)
+            )
+        });
 
         // Validate schema-file exclusivity rules
         if is_schema_file {
@@ -238,31 +251,9 @@ impl Parser {
                         TopLevelItem::SchemaSection(_) => unreachable!(),
                     };
                     return Err(SparError::ParseError {
-                        message: "schema files may only contain `Schema [Name]{...}` declarations, \
-                                   `import type {...} from \"...\";`, and `SchemaFrom [Name, Type];`".to_string(),
+                        message: "schema files may only contain `schema Name {...};` declarations, \
+                                   `schema Name from Type;`, and `import type {...} from \"...\";`".to_string(),
                         span: item_span,
-                    });
-                }
-            }
-        } else {
-            // Non-schema files must not have schema sections or SchemaFrom
-            for item in &items {
-                if let TopLevelItem::SchemaSection(s) = item {
-                    return Err(SparError::ParseError {
-                        message: format!(
-                            "`Schema [{}]{{...}};` declares a schema, but this file is not a schema file — \
-                             add `@SchemaFile` at the top of this file if it is intended to declare schema shapes",
-                            s.name
-                        ),
-                        span: s.span.clone(),
-                    });
-                }
-                if let TopLevelItem::SchemaFrom(sf) = item {
-                    return Err(SparError::ParseError {
-                        message: "`SchemaFrom [...]` is only legal inside a schema file — \
-                                   add `@SchemaFile` at the top of this file"
-                            .to_string(),
-                        span: sf.span.clone(),
                     });
                 }
             }
@@ -406,8 +397,15 @@ impl Parser {
             Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
             Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
             Token::Ident(s) if s == "functionGroup" => Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(false)?)),
-            Token::Ident(s) if s == "Schema" => Ok(TopLevelItem::SchemaSection(self.parse_schema_decl()?)),
-            Token::Ident(s) if s == "SchemaFrom" => Ok(TopLevelItem::SchemaFrom(self.parse_schema_from_decl()?)),
+            Token::Ident(s) if s == "Schema" && self.next_is(&Token::LBracket) => Err(self.error(
+                "Schema [Name]{...} was replaced by `schema Name { ... };`",
+            )),
+            Token::Ident(s) if s == "SchemaFrom" && self.next_is(&Token::LBracket) => Err(self.error(
+                "SchemaFrom [Name, Type]; was replaced by `schema Name from Type;`",
+            )),
+            Token::Ident(s) if s == "schema" && self.schema_declaration_follows() => {
+                self.parse_schema_item()
+            }
             Token::Ident(s) if s == "task" => Ok(TopLevelItem::Task(Box::new(self.parse_task_decl()?))),
             Token::KwIf | Token::KwFor | Token::KwBreak | Token::KwContinue => {
                 Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
@@ -468,11 +466,11 @@ impl Parser {
                 }
             }
             Token::At => Err(self.error(
-                "'@SchemaFile' or '@LoadEnv' pragma must be the first item in the file; \
+                "'@LoadEnv' pragma must be the first item in the file; \
                  pragmas cannot appear mid-file"
             )),
             _ => Err(self.error(format!(
-                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'Schema', 'task', or '[' to start a declaration",
+                "unexpected {}: expected 'import', 'var', 'export', 'dynamic', 'private', 'function', 'functionGroup', 'type', 'schema', 'task', or '[' to start a declaration",
                 self.peek().human_name()
             ))),
         }
@@ -914,21 +912,38 @@ impl Parser {
         Ok(SpreadStmt { expr, span })
     }
 
-    /// Parse `Schema [Name]{ ... }` or `Schema? [Name]{ ... }`. The `Schema`
-    /// ident itself is only `peek()`ed by the caller's dispatch — consume it
-    /// here.
-    fn parse_schema_decl(&mut self) -> Result<SchemaSectionDecl, SparError> {
+    /// `schema Name ...` / `schema? Name ...` — a declaration, not a
+    /// variable or call that happens to be named `schema`.
+    fn schema_declaration_follows(&self) -> bool {
+        matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.token),
+            Some(Token::Question) | Some(Token::Ident(_))
+        )
+    }
+
+    /// `schema [?] Name { fields };` or `schema [?] Name from Type;`.
+    fn parse_schema_item(&mut self) -> Result<TopLevelItem, SparError> {
         let span = self.peek_span();
-        self.advance(); // consume the 'Schema' ident
+        self.advance(); // consume 'schema'
         let optional = if self.at(&Token::Question) {
             self.advance();
             true
         } else {
             false
         };
-        self.expect(&Token::LBracket)?;
         let (name, _) = self.expect_ident()?;
-        self.expect(&Token::RBracket)?;
+        if matches!(self.peek(), Token::Ident(word) if word == "from") {
+            self.advance(); // consume 'from'
+            let (source_type, source_type_span) = self.expect_ident()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(TopLevelItem::SchemaFrom(SchemaFromDecl {
+                name,
+                source_type,
+                source_type_span,
+                marker: SchemaMarker { optional },
+                span,
+            }));
+        }
         self.expect(&Token::LBrace)?;
         let mut fields = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -936,39 +951,12 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         self.expect(&Token::Semicolon)?;
-        Ok(SchemaSectionDecl {
+        Ok(TopLevelItem::SchemaSection(SchemaSectionDecl {
             name,
             marker: SchemaMarker { optional },
             fields,
             span,
-        })
-    }
-
-    fn parse_schema_from_decl(&mut self) -> Result<SchemaFromDecl, SparError> {
-        let span = self.peek_span();
-        self.advance(); // consume 'SchemaFrom' ident
-
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        self.expect(&Token::LBracket)?;
-        let (name, _) = self.expect_ident()?;
-        self.expect(&Token::Comma)?;
-        let (source_type, source_type_span) = self.expect_ident()?;
-        self.expect(&Token::RBracket)?;
-        self.expect(&Token::Semicolon)?;
-
-        Ok(SchemaFromDecl {
-            name,
-            source_type,
-            source_type_span,
-            marker: SchemaMarker { optional },
-            span,
-        })
+        }))
     }
 
     /// Parse a single schema field: `name: Type;` or `name?: Type;`
@@ -3527,9 +3515,9 @@ mod tests {
 
     #[test]
     fn top_level_schema_requires_trailing_semicolon() {
-        let missing = "@SchemaFile\nSchema [Server]{ port: int; }";
+        let missing = "schema Server { port: int; }";
         assert!(parse_err(missing).contains("expected ';'"));
-        parse_str("@SchemaFile\nSchema [Server]{ port: int; };");
+        parse_str("schema Server { port: int; };");
     }
 
     #[test]
@@ -4057,7 +4045,7 @@ function f(flag: bool) -> int {
         let message = parse_err("@Unknown\ntask Build { run { echo build; }; };");
         assert!(
             message.contains(
-                "unknown file pragma `@Unknown`; only `@SchemaFile` or `@LoadEnv` is supported"
+                "unknown file pragma `@Unknown`; only `@LoadEnv` is supported"
             ),
             "got: {message}"
         );

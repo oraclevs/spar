@@ -2,7 +2,7 @@
 //! playground.
 //!
 //! `build_emit_json` is the single source of truth for the shape of emitted
-//! config (exported globals + public top-level sections, keys sorted) — as a
+//! config (top-level vars and sections marked `#[emit]`, keys sorted) — as a
 //! `serde_json::Value`, which every supported output format serializes from.
 //! Both the CLI (`spar emit`, with imports) and `emit_to_json`/`emit_to_yaml`/
 //! `emit_to_toml` (single-file, no imports) funnel through it so their output
@@ -67,44 +67,48 @@ pub fn emit_to_toml(src: &str) -> Result<String, Vec<String>> {
     toml::to_string_pretty(&value).map_err(|e| vec![e.to_string()])
 }
 
-/// Build the emitted JSON value: exported globals, then public top-level
-/// sections (private sections excluded), all keys sorted.
+/// Build the emitted JSON value: top-level vars and sections marked
+/// `#[emit]`, all keys sorted.
 pub fn build_emit_json(
     result: &EvalResult,
     symbols: &SymbolTable,
 ) -> Result<serde_json::Value, String> {
     let mut root = serde_json::Map::new();
 
-    // Exported globals only
+    const NOTHING_TO_EMIT: &str = "nothing to emit: mark top-level structs or vars with #[emit]";
+    let mut marked = 0usize;
+
+    // Top-level vars marked #[emit]
     for (name, value) in &result.globals {
-        let exported = symbols
-            .globals
-            .get(name)
-            .map(|entry| match entry {
-                GlobalEntry::Var { exported, .. } => *exported,
-                GlobalEntry::Dynamic { .. } => false,
-            })
-            .unwrap_or(false);
-        if exported {
+        let emitted = matches!(
+            symbols.globals.get(name),
+            Some(GlobalEntry::Var { emit: true, .. })
+        );
+        if emitted {
+            marked += 1;
             root.insert(name.clone(), config_value_to_json(value)?);
         }
     }
 
-    // Public top-level sections only (path length == 1)
+    // Top-level sections marked #[emit] (path length == 1)
     let mut section_keys: Vec<&Vec<String>> =
         result.sections.keys().filter(|p| p.len() == 1).collect();
     section_keys.sort();
 
     for path in section_keys {
-        let private = symbols
+        let emitted = symbols
             .sections
             .get(path)
-            .map(|e| e.private)
+            .map(|entry| entry.emit)
             .unwrap_or(false);
-        if !private {
-            let name = &path[0];
-            root.insert(name.clone(), build_section_value(path, result)?);
+        if emitted {
+            marked += 1;
+            root.insert(path[0].clone(), build_section_value(path, result)?);
         }
+    }
+
+    if marked == 0 {
+        return Err(NOTHING_TO_EMIT.to_string());
     }
 
     Ok(sort_keys(serde_json::Value::Object(root)))
@@ -260,7 +264,7 @@ mod tests {
     #[test]
     fn promise_values_cannot_be_emitted() {
         let errors = emit_to_json(
-            "async function value() -> int { return 1; }; export var pending: Promise<int> = value();",
+            "async function value() -> int { return 1; };\n#[emit]\nvar pending: Promise<int> = value();",
         )
         .unwrap_err();
         assert!(errors
@@ -269,9 +273,11 @@ mod tests {
     }
 
     const SRC: &str = r#"
-export var name: str = "spar";
+#[emit]
+var name: str = "spar";
 
-[Server]{
+#[emit]
+struct Server {
     port: int = 8080;
 };
 "#;
@@ -298,5 +304,39 @@ export var name: str = "spar";
     fn emit_to_toml_reports_pipeline_errors() {
         let errors = emit_to_toml("var x: int = \"not an int\";").unwrap_err();
         assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn only_emit_marked_items_are_emitted() {
+        let json = emit_to_json(
+            "#[emit]\nstruct A { x: int = 1; };\nstruct B { y: int = 2; };\n#[emit]\nvar c: int = 3;\nvar d: int = 4;\nexport var e: int = 5;\n",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, serde_json::json!({"A": {"x": 1}, "c": 3}));
+    }
+
+    #[test]
+    fn export_var_without_emit_does_not_leak_env_values() {
+        let json = emit_to_json(
+            "#[emit]\nstruct Ok { a: int = 1; };\nexport var secret: str = env(\"HOME\") ?? \"x\";\n",
+        )
+        .unwrap();
+        assert!(!json.contains("secret"), "{json}");
+    }
+
+    #[test]
+    fn private_does_not_block_emit_when_marked() {
+        let json = emit_to_json("#[emit]\nprivate struct P { x: int = 1; };\n").unwrap();
+        assert!(json.contains("\"P\""), "{json}");
+    }
+
+    #[test]
+    fn nothing_marked_is_an_error() {
+        let errors = emit_to_json("struct A { x: int = 1; };\nexport var b: int = 2;\n").unwrap_err();
+        assert_eq!(
+            errors,
+            vec!["nothing to emit: mark top-level structs or vars with #[emit]".to_string()]
+        );
     }
 }

@@ -136,6 +136,7 @@ pub enum GlobalEntry {
         optional: bool,
         exported: bool,
         mutable: bool,
+        emit: bool,
         span: Span,
     },
     Dynamic {
@@ -150,6 +151,8 @@ pub struct SectionEntry {
     pub canonical: bool,
     pub exported: bool,
     pub private: bool,
+    /// True when the declaration carries `#[emit]`.
+    pub emit: bool,
     /// The section's `-> TypeName` binding, if any. Only ever set for a
     /// top-level section (nested sections can't declare their own binding —
     /// their shape comes from the enclosing binding's `TypeFieldShape`).
@@ -1325,6 +1328,7 @@ impl Resolver {
                 optional: decl.optional,
                 exported: decl.exported,
                 mutable: decl.mutable,
+                emit: decl.is_emit(),
                 span: decl.span.clone(),
             },
         );
@@ -1428,6 +1432,7 @@ impl Resolver {
                 type_binding: decl.type_binding.as_ref().map(|b| b.ty.clone()),
                 exported: decl.exported,
                 private: decl.private,
+                emit: decl.is_emit(),
                 span: decl.span.clone(),
             },
         );
@@ -1542,6 +1547,7 @@ impl Resolver {
                 type_binding: None, // a nested section can't declare its own `-> Type` binding
                 exported: false,
                 private: false, // nested sections inherit parent privacy at emit time only
+                emit: false,
                 span,
             },
         );

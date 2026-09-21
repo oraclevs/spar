@@ -407,3 +407,53 @@ fn selective_struct_import_carries_public_impl_methods_but_hides_private_helpers
         private_call.errors
     );
 }
+
+fn error_text(compilation: &spar::Compilation) -> String {
+    compilation
+        .errors
+        .iter()
+        .map(|error| format!("{error:?}"))
+        .collect()
+}
+
+#[test]
+fn engine_with_locator_resolves_package_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_lockfile, _store, locator) = http_dependency_fixture(temp.path());
+    let engine = spar::Engine::default()
+        .with_base_dir(temp.path())
+        .with_locator(locator);
+    let compilation =
+        engine.emit_source("import pkg { get } from \"http\";\nvar x: str = get(path: \"a\");\n");
+    assert!(
+        !error_text(&compilation).contains("cannot resolve package import"),
+        "{:?}",
+        compilation.errors
+    );
+}
+
+#[test]
+fn unknown_package_alias_hint_names_the_configured_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_lockfile, _store, locator) = http_dependency_fixture(temp.path());
+    let engine = spar::Engine::default()
+        .with_base_dir(temp.path())
+        .with_locator(locator)
+        .with_package_command("pkg");
+    let compilation = engine.emit_source("import pkg { x } from \"nope\";\n");
+    let text = error_text(&compilation);
+    assert!(text.contains("pkg add nope"), "{text}");
+    assert!(!text.contains("spar install"), "{text}");
+}
+
+#[test]
+fn default_package_command_is_spar() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_lockfile, _store, locator) = http_dependency_fixture(temp.path());
+    let engine = spar::Engine::default()
+        .with_base_dir(temp.path())
+        .with_locator(locator);
+    let compilation = engine.emit_source("import pkg { x } from \"nope\";\n");
+    let text = error_text(&compilation);
+    assert!(text.contains("spar add nope"), "{text}");
+}

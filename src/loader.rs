@@ -35,6 +35,8 @@ pub struct ImportLoader {
     /// Import the `std/data` functions the program neither declares nor
     /// imports itself (see `CompileOptions::data_prelude`).
     data_prelude: bool,
+    /// The command hints tell users to run for package management.
+    package_command: String,
 }
 
 impl ImportLoader {
@@ -44,7 +46,13 @@ impl ImportLoader {
             locator: None,
             bundled_packages: crate::compiler::BundledPackageRoots::default(),
             data_prelude: false,
+            package_command: "spar".to_string(),
         }
+    }
+
+    pub fn with_package_command(mut self, name: String) -> Self {
+        self.package_command = name;
+        self
     }
 
     pub fn with_data_prelude(mut self, enabled: bool) -> Self {
@@ -128,10 +136,10 @@ impl ImportLoader {
                         "cannot resolve package import '{}' — no package lock/store is configured",
                         decl.path
                     ),
-                    hint: Some(
-                        "run `spar install` in a project with spar.package.spar, then try again"
-                            .into(),
-                    ),
+                    hint: Some(format!(
+                        "run `{} install` in a project with spar.package.spar, then try again",
+                        self.package_command
+                    )),
                     span: decl.span.clone(),
                 })?;
             return locator
@@ -145,10 +153,11 @@ impl ImportLoader {
                         "cannot resolve package import '{}' — dependency or module was not found",
                         decl.path
                     ),
-                    hint: Some(
-                        "check [Dependencies], run `spar install`, and verify the package module path"
-                            .into(),
-                    ),
+                    hint: Some(format!(
+                        "run `{cmd} add {alias} <source>` to add this dependency, or `{cmd} install` if the lockfile changed",
+                        cmd = self.package_command,
+                        alias = decl.path.split('/').next().unwrap_or(&decl.path),
+                    )),
                     span: decl.span.clone(),
                 });
         }
@@ -561,8 +570,9 @@ fn splice_selective(
     // dependency closure below can pull in on demand. A failure here is left
     // for the ordinary resolver to report against the unresolved call.
     let module_dir = full_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut module_loader =
-        ImportLoader::new(module_dir).with_bundled_packages(loader.bundled_packages.clone());
+    let mut module_loader = ImportLoader::new(module_dir)
+        .with_bundled_packages(loader.bundled_packages.clone())
+        .with_package_command(loader.package_command.clone());
     if let Some(locator) = &resolved.locator {
         module_loader = module_loader.with_locator(locator.clone());
     }
@@ -1159,7 +1169,10 @@ pub fn collect_imports(
                     decl.path
                 ),
                 hint: Some(if decl.package {
-                    "check the package alias/module path and run `spar install` if dependencies changed".into()
+                    format!(
+                        "check the package alias/module path and run `{} install` if dependencies changed",
+                        loader.package_command
+                    )
                 } else {
                     "check the module path; `.spar` is optional and paths are relative to the current file".into()
                 }),

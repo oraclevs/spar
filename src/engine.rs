@@ -64,6 +64,19 @@ impl Engine {
         Ok(self)
     }
 
+    /// Routes explicit `import pkg` requests through `locator`'s lockfile and
+    /// store, exactly as the `spar` CLI does for a project directory.
+    pub fn with_locator(mut self, locator: crate::package::ModuleLocator) -> Self {
+        self.options.locator = Some(locator);
+        self
+    }
+
+    /// Sets the command name used in package-import hints (default `spar`).
+    pub fn with_package_command(mut self, name: impl Into<String>) -> Self {
+        self.options.package_command = name.into();
+        self
+    }
+
     /// A persistent, incrementally-evaluated session over this engine's
     /// hosts and options — see `session::Session`.
     pub fn session(&self) -> crate::session::Session {

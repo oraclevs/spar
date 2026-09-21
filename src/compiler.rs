@@ -92,6 +92,9 @@ pub struct CompileOptions {
     /// Resolves explicit `import pkg` requests through a project's package
     /// lock/store. Ordinary `import` statements remain local modules only.
     pub locator: Option<crate::package::ModuleLocator>,
+    /// The command package-import hints tell users to run (`spar` for the
+    /// CLI; embedders such as Sparsh set their own, e.g. `pkg`).
+    pub package_command: String,
     /// Source-backed first-party packages registered by an embedder.
     /// `std` remains reserved and is resolved separately before these roots.
     pub bundled_packages: BundledPackageRoots,
@@ -115,6 +118,7 @@ impl Default for CompileOptions {
             hosts: crate::host::HostRegistry::default(),
             natives: crate::stdlib::native_registry(),
             locator: None,
+            package_command: "spar".to_string(),
             bundled_packages: BundledPackageRoots::default(),
             effect_ledger: None,
             data_prelude: false,
@@ -211,7 +215,8 @@ impl Compiler {
     fn import_loader(&self) -> ImportLoader {
         let loader = ImportLoader::new(&self.options.base_dir)
             .with_bundled_packages(self.options.bundled_packages.clone())
-            .with_data_prelude(self.options.data_prelude);
+            .with_data_prelude(self.options.data_prelude)
+            .with_package_command(self.options.package_command.clone());
         match &self.options.locator {
             Some(locator) => loader.with_locator(locator.clone()),
             None => loader,

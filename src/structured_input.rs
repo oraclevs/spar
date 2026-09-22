@@ -186,6 +186,25 @@ impl StructuredInputRegistry {
         let normalized = name.trim().to_ascii_lowercase();
         if let Some(descriptor) = scoc::parser(&normalized) {
             ensure_scoc_platform(descriptor, span)?;
+            // SCOC may register a streaming suffix (`ping-s`) as a plain
+            // registry alias for its batch parser (`ping`), so a direct hit
+            // here doesn't mean the caller asked for the batch form — check
+            // `upstream.streaming_name` the same way the fallback loop below
+            // does, and still force streaming on.
+            let is_streaming_alias = descriptor
+                .upstream
+                .and_then(|upstream| upstream.streaming_name)
+                .is_some_and(|streaming_name| streaming_name.eq_ignore_ascii_case(&normalized));
+            if is_streaming_alias {
+                let mut alias = scoc_descriptor(descriptor);
+                alias.name = normalized.clone();
+                alias.compatibility_alias_for = Some(descriptor.name.to_string());
+                return Ok(ResolvedDecoder {
+                    canonical_name: descriptor.name.to_string(),
+                    descriptor: alias,
+                    forced_streaming: Some(StreamingMode::Enabled),
+                });
+            }
             return Ok(ResolvedDecoder {
                 canonical_name: descriptor.name.to_string(),
                 descriptor: scoc_descriptor(descriptor),

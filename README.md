@@ -2,6 +2,8 @@
 
 **A statically typed scripting language, with native configuration, task automation, and package management built in.**
 
+Most config formats can't tell you `port` should be an integer until something breaks at runtime. Spar catches that at `spar check`, because a `.spar` file is typed source, not a text blob — the same file that holds your config can also compute values, import other files, validate against a schema, and, if you want more than config, run as an actual program.
+
 Spar started as a typed configuration language and still is one — the same `.spar` files, `spar emit`, and Rust deserialization below are unchanged. It's grown a scripting core alongside that: mutable variables, control flow, `void` and async functions, a `main` entry point, and `spar exec`/`spar repl` to actually run a `.spar` file as a program rather than only evaluate it as config.
 
 Write your configuration in `.spar` files — with types, computed values, cross-file imports, and schema validation — then either run `spar emit` to produce clean JSON, or load the config straight into your Rust application with one call:

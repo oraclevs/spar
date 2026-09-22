@@ -22,6 +22,13 @@ function endsWith(value: str, needle: str) -> bool {
     return nativeText::endsWith(value: value, needle: needle);
 };
 
+// Parses a human-readable byte size ("10GB", "1.5 GiB", "512K", a bare
+// number of bytes) into an int, for comparing against a table's numeric
+// `size` column: `f.size > parseSize("10GB")`.
+function parseSize(value: str) -> int {
+    return nativeText::parseSize(value: value);
+};
+
 function replace(value: str, from: str, to: str) -> str {
     return nativeText::replace(value: value, from: from, to: to);
 };

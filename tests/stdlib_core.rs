@@ -182,3 +182,57 @@ fn core_builtin_length_methods_share_normal_method_syntax() {
         .expect("str.length and List<T>.length should be registered built-in methods");
     assert_eq!(outcome.exit_status, 7);
 }
+
+#[test]
+fn range_end_only_form_is_available_without_import() {
+    let engine = Engine::new(CompileOptions::default());
+    let program = engine
+        .compile_source(
+            r#"
+            function main() -> int {
+                var mut total: int = 0;
+                for i in range(5) {
+                    total = total + i;
+                }
+                return total;
+            };
+            "#,
+        )
+        .expect("range prelude source should compile");
+    let outcome = engine
+        .execute_compiled_with_context(&program, RuntimeContext::for_base_dir(program.base_dir()))
+        .expect("range prelude should execute");
+    assert_eq!(outcome.exit_status, 10);
+}
+
+#[test]
+fn range_from_starts_at_the_given_value() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            function main() -> int {
+                var mut total: int = 0;
+                for i in rangeFrom(2, 5) {
+                    total = total + i;
+                }
+                return total;
+            };
+            "#,
+        )
+        .expect("rangeFrom(start, end) should execute");
+    assert_eq!(outcome.exit_status, 9);
+}
+
+#[test]
+fn range_end_bound_is_exclusive_and_empty_when_start_reaches_end() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            function main() -> int {
+                return rangeFrom(5, 5).length();
+            };
+            "#,
+        )
+        .expect("empty range should execute");
+    assert_eq!(outcome.exit_status, 0);
+}

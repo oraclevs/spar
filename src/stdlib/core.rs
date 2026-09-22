@@ -1,7 +1,7 @@
 use crate::ast::SparType;
 use crate::runtime::{NativeFunction, NativeMethod, NativeRegistry, Value};
 
-use super::support::error;
+use super::support::{error, int_arg};
 
 fn type_parameter(name: &str) -> SparType {
     SparType::TypeParameter(name.into())
@@ -25,6 +25,21 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             |_context, args| length_value(args),
         ))
         .expect("nativeCore::len registration must be unique");
+
+    registry
+        .register(NativeFunction::sync(
+            "nativeCore",
+            "range",
+            vec![("start", SparType::Int), ("end", SparType::Int)],
+            SparType::List(Box::new(SparType::Int)),
+            true,
+            |_context, args| {
+                let start = int_arg(args, 0, "start")?;
+                let end = int_arg(args, 1, "end")?;
+                Ok(Value::List((start..end).map(Value::Int).collect()))
+            },
+        ))
+        .expect("nativeCore::range registration must be unique");
 
     register_sum_type_constructors(registry);
     register_collection_methods(registry);

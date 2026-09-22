@@ -47,7 +47,15 @@ pub fn resolve_bundled_import(request: &str) -> Option<PathBuf> {
     }
 }
 
-const PRELUDE_NAMES: &[&str] = &["print", "println", "len", "assert", "panic"];
+const PRELUDE_NAMES: &[&str] = &[
+    "print",
+    "println",
+    "len",
+    "range",
+    "rangeFrom",
+    "assert",
+    "panic",
+];
 
 /// Inject Spar-written prelude functions into an ordinary source module.
 /// Explicit imports of the same canonical std symbols suppress implicit

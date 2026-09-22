@@ -13,6 +13,14 @@ function len<T>(value: T) -> int {
     return nativeCore::len(value: value);
 };
 
+function range(end: int) -> [int] {
+    return nativeCore::range(start: 0, end: end);
+};
+
+function rangeFrom(start: int, end: int) -> [int] {
+    return nativeCore::range(start: start, end: end);
+};
+
 function assert(condition: bool, message: str) -> void {
     if !condition {
         panic(message: message);

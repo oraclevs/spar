@@ -621,7 +621,7 @@ impl Session {
     pub fn eval_shell_plan(&self, source: &str) -> Result<spar_command::ShellPlan, Vec<SparError>> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let environment = std::env::vars_os().collect::<Vec<_>>();
-        self.eval_shell_plan_with_context(source, &cwd, &environment)
+        self.eval_shell_plan_with_context(source, &cwd, &environment, None)
     }
 
     pub fn eval_shell_plan_with_context(
@@ -629,6 +629,7 @@ impl Session {
         source: &str,
         cwd: &Path,
         environment: &[(OsString, OsString)],
+        last_exit_code: Option<i32>,
     ) -> Result<spar_command::ShellPlan, Vec<SparError>> {
         let trimmed = source.trim();
         let terminated = if trimmed.ends_with(';') {
@@ -668,8 +669,12 @@ impl Session {
         let inserted = terminated
             .len()
             .saturating_sub(trimmed.len() + usize::from(!trimmed.ends_with(';')));
+        let mut shell_context = runtime_context(cwd, environment);
+        if let Some(code) = last_exit_code {
+            shell_context.set_last_exit_code(code);
+        }
         let mut evaluated = self
-            .evaluate_candidate(&fragment, Some(runtime_context(cwd, environment)))
+            .evaluate_candidate(&fragment, Some(shell_context))
             .map_err(|errors| {
                 relocate_errors(
                     errors,
@@ -1375,6 +1380,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
                 "echo $SPARSH_TEST_NAME $(pwd)",
                 temp.path(),
                 &environment,
+                None,
             )
             .unwrap();
 
@@ -1740,7 +1746,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         let cwd = std::env::current_dir().unwrap();
         let line = "echo ${nowhere}";
         let errors = session
-            .eval_shell_plan_with_context(line, &cwd, &[])
+            .eval_shell_plan_with_context(line, &cwd, &[], None)
             .unwrap_err();
         assert_eq!(covered(&errors[0], line), "nowhere", "{errors:?}");
         assert_eq!(errors[0].span().line, 1);
@@ -1849,7 +1855,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         let session = session_with_history();
         let cwd = std::env::current_dir().unwrap();
         let errors = session
-            .eval_shell_plan_with_context("echo ${nowhere}", &cwd, &[])
+            .eval_shell_plan_with_context("echo ${nowhere}", &cwd, &[], None)
             .unwrap_err();
         let message = errors[0].to_string();
         assert!(
@@ -2021,5 +2027,33 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         assert!(names.contains(&"project"));
         assert!(names.contains(&"build"));
         assert!(session.has_function("build"));
+    }
+
+    #[test]
+    fn eval_shell_plan_with_context_resolves_last_exit_code_into_dollar_question() {
+        let session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let plan = session
+            .eval_shell_plan_with_context("echo $?", &cwd, &[], Some(3))
+            .expect("plan should build");
+        let (_, step) = &plan.steps[0];
+        let spar_command::Step::Command(command) = step else {
+            panic!("expected a single command step, got {step:?}");
+        };
+        assert_eq!(command.args, vec!["3".to_string()]);
+    }
+
+    #[test]
+    fn eval_shell_plan_with_context_defaults_dollar_question_to_zero_when_no_prior_status() {
+        let session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let plan = session
+            .eval_shell_plan_with_context("echo $?", &cwd, &[], None)
+            .expect("plan should build");
+        let (_, step) = &plan.steps[0];
+        let spar_command::Step::Command(command) = step else {
+            panic!("expected a single command step, got {step:?}");
+        };
+        assert_eq!(command.args, vec!["0".to_string()]);
     }
 }

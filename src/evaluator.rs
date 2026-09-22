@@ -1929,12 +1929,16 @@ impl Evaluator {
                     )?);
                 }
                 ShellWordPart::Environment(name) => {
-                    if name == "?" || name == "!" {
+                    if name == "?" {
+                        let code = self.runtime_context.last_exit_code().unwrap_or(0);
+                        output.push_str(&code.to_string());
+                    } else if name == "!" {
                         return Err(EvalErr::Host {
                             message: format!("${name} requires an active shell execution context"),
                         });
+                    } else {
+                        output.push_str(self.runtime_context.env_get(name).unwrap_or_default());
                     }
-                    output.push_str(self.runtime_context.env_get(name).unwrap_or_default());
                 }
                 ShellWordPart::CommandSubstitution(shell) => {
                     output.push_str(&self.eval_deferred_command_substitution(shell, local_scope)?);

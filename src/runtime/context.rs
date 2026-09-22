@@ -121,6 +121,7 @@ pub struct RuntimeContext {
     cancelled: bool,
     requested_exit: Option<i32>,
     inherit_exec_output: bool,
+    last_exit_code: Option<i32>,
 }
 
 impl RuntimeContext {
@@ -140,6 +141,7 @@ impl RuntimeContext {
             cancelled: false,
             requested_exit: None,
             inherit_exec_output: false,
+            last_exit_code: None,
         }
     }
 
@@ -194,6 +196,18 @@ impl RuntimeContext {
 
     pub fn set_args(&mut self, args: Vec<String>) {
         self.args = args;
+    }
+
+    /// The exit code `$?` should report, when this context represents a
+    /// continuation of a caller-tracked shell session (e.g. an interactive
+    /// prompt's previous command) rather than a fresh compiled `Runtime`
+    /// that tracks its own `shell_outcome` as it executes.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
+    }
+
+    pub fn set_last_exit_code(&mut self, code: i32) {
+        self.last_exit_code = Some(code);
     }
 
     pub fn env_get(&self, key: &str) -> Option<&str> {

@@ -394,7 +394,7 @@ pub struct CompiledProgram {
 }
 
 impl CompiledProgram {
-    pub(crate) fn from_compilation(
+    pub fn from_compilation(
         compilation: Compilation,
         options: CompileOptions,
     ) -> Result<Self, Vec<SparError>> {
@@ -437,6 +437,18 @@ impl CompiledProgram {
 
     pub fn source_path(&self) -> Option<&Path> {
         self.options.source_path.as_deref()
+    }
+
+    /// The compiled function backing `task_name`'s native `run{}` block, if
+    /// `task_lowering::inject_task_functions` synthesized one for it (i.e.,
+    /// the task's selected run block is Spar-language, not `run bash {}` /
+    /// a shebang script).
+    pub fn task_entry(&self, task_name: &str) -> Option<FunctionId> {
+        self.modules.first()?.functions.iter().find_map(|function| {
+            (function.key.group.as_deref() == Some(crate::task_lowering::TASK_FUNCTION_GROUP)
+                && function.name == task_name)
+                .then_some(function.id)
+        })
     }
 
     /// Number of functions declared by the program's own modules; the

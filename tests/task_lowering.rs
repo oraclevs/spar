@@ -450,3 +450,66 @@ task T {{
         compilation.errors
     );
 }
+
+#[test]
+fn injected_task_function_runs_the_native_run_block_live_with_bound_params() {
+    use spar::runner::{BoundValue, ScalarKind};
+    use spar::{CompiledProgram, Engine};
+    use std::collections::BTreeMap;
+
+    let temp = tempdir().unwrap();
+    let out = temp.path().join("out.txt");
+    let src = format!(
+        r#"
+        task Greet(name: str) {{
+            run {{
+                echo "${{name}}" > "{}";
+            }};
+        }};
+        "#,
+        out.display()
+    );
+    let mut compilation = compile(&src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let program = compilation.program.take().expect("compiled program");
+    let symbols = compilation.symbols.clone().expect("symbols");
+    let imports = compilation.imports.clone();
+
+    let mut program_for_compiled = program.clone();
+    spar::task_lowering::inject_task_functions(&mut program_for_compiled);
+
+    let compiled_input = spar::Compilation {
+        program: Some(program_for_compiled),
+        symbols: Some(symbols),
+        imports,
+        result: None,
+        tasks: None,
+        task_exprs: Vec::new(),
+        errors: Vec::new(),
+    };
+    let compiled = CompiledProgram::from_compilation(compiled_input, CompileOptions::default())
+        .expect("injected task function should lower");
+    let function = compiled
+        .task_entry("Greet")
+        .expect("Greet's native run block should have a compiled entry");
+
+    let context = spar::RuntimeContext::for_base_dir(compiled.base_dir());
+    let outcome = Engine::default()
+        .call_function_with_context(
+            &compiled,
+            function,
+            vec![spar::Value::String("world".into())],
+            context,
+        )
+        .expect("Greet should execute");
+    assert_eq!(outcome.exit_status, 0);
+    assert_eq!(std::fs::read_to_string(out).unwrap().trim(), "world");
+
+    // Silence unused-import warnings for BoundValue/ScalarKind/BTreeMap —
+    // removed once a later task's tests exercise them in this file.
+    let _ = (
+        BoundValue::Scalar(String::new()),
+        ScalarKind::Str,
+        BTreeMap::<String, String>::new(),
+    );
+}

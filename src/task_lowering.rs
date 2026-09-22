@@ -24,7 +24,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    Expr, Program, RunBody, ShellTemplatePart, SparType, StringPart, TaskDecl, TopLevelItem,
+    Expr, FunctionBody, FunctionDecl, FunctionGroupDecl, Param, Program, ReturnValue, RunBlock,
+    RunBody, ShellTemplatePart, SparType, Statement, StringPart, TaskDecl, TopLevelItem,
 };
 use crate::error::{Span, SparError};
 use crate::evaluator::{ConfigValue, EvalResult, Evaluator};
@@ -33,6 +34,14 @@ use crate::runner::{
     CommandTemplate, NativeCommand, ScalarKind, Task, TaskCommand, TaskParameter, TaskSet,
     TemplatePart,
 };
+
+/// Reserved function-group name for the synthetic `-> shell` functions
+/// `inject_task_functions` builds from native `run{}` blocks. Contains
+/// `$`, a character the lexer never produces inside an identifier, so it
+/// can never collide with a real `functionGroup` declared in source —
+/// these functions are compiler-internal and never resolvable by name
+/// from user code.
+pub(crate) const TASK_FUNCTION_GROUP: &str = "$task";
 
 /// A `${...}` interpolation lowered to `TemplatePart::Expr` because it
 /// mentions a task parameter without being a bare reference to one.
@@ -114,6 +123,87 @@ pub fn lower_tasks(
             span: Span::dummy(),
         }]),
     }
+}
+
+/// Picks the run block for the current OS: an exact `run <os> {}` match,
+/// or the OS-agnostic `run {}` fallback if there's no exact match.
+fn select_run_block(decl: &TaskDecl) -> Option<&RunBlock> {
+    let current_os = std::env::consts::OS;
+    decl.run_blocks
+        .iter()
+        .find(|block| block.os.as_deref() == Some(current_os))
+        .or_else(|| decl.run_blocks.iter().find(|block| block.os.is_none()))
+}
+
+/// Synthesizes one `-> shell` function per task whose selected `run{}`
+/// block is native (Spar-language, not `run bash {}`), and appends them
+/// to `program.items` as a single `$task` function group. Must run
+/// after `Compiler::compile()` (so `RunBody::Native` bodies are already
+/// resolved and typechecked) and before `CompiledProgram::from_compilation`
+/// (so `ModuleGraphBuilder::lower_functions` picks the synthetic
+/// functions up through its normal `program.items` scan).
+///
+/// Each synthetic function's body is `return shell { <original ShellExpr> };`
+/// — the exact node the resolver/typechecker already validated, reused
+/// as-is (same spans). `lower_function` (`lowerer.rs`) is self-contained
+/// — it does its own name-based local resolution via `LocalAllocator`,
+/// independent of resolver-time bookkeeping tied to a specific
+/// pre-existing function's identity — so this needs no changes to
+/// `resolver.rs`/`typechecker.rs`.
+pub fn inject_task_functions(program: &mut Program) {
+    let mut functions = Vec::new();
+    for item in &program.items {
+        let TopLevelItem::Task(decl) = item else {
+            continue;
+        };
+        let Some(block) = select_run_block(decl) else {
+            continue;
+        };
+        let RunBody::Native(shell) = &block.body else {
+            continue;
+        };
+        let params: Vec<Param> = decl
+            .params
+            .iter()
+            .map(|p| Param {
+                name: p.name.clone(),
+                ty: p.ty.clone(),
+                default: p.default.clone(),
+                span: p.span.clone(),
+            })
+            .collect();
+        functions.push(FunctionDecl {
+            name: decl.name.clone(),
+            name_span: decl.name_span.clone(),
+            type_parameters: Vec::new(),
+            params,
+            ret: SparType::Shell,
+            ret_span: shell.span.clone(),
+            body: FunctionBody {
+                stmts: vec![Statement::Return(
+                    ReturnValue::Expr(Expr::Shell(shell.clone())),
+                    shell.span.clone(),
+                )],
+                span: shell.span.clone(),
+            },
+            is_async: false,
+            is_private: true,
+            trusted_native: false,
+            span: shell.span.clone(),
+        });
+    }
+    if functions.is_empty() {
+        return;
+    }
+    program
+        .items
+        .push(TopLevelItem::FunctionGroup(FunctionGroupDecl {
+            is_private: true,
+            name: TASK_FUNCTION_GROUP.to_string(),
+            name_span: Span::dummy(),
+            functions,
+            span: Span::dummy(),
+        }));
 }
 
 fn lower_one_task(
@@ -199,12 +289,7 @@ fn lower_one_task(
         })
         .collect();
 
-    let current_os = std::env::consts::OS;
-    let selected_block = decl
-        .run_blocks
-        .iter()
-        .find(|block| block.os.as_deref() == Some(current_os))
-        .or_else(|| decl.run_blocks.iter().find(|block| block.os.is_none()));
+    let selected_block = select_run_block(decl);
 
     let mut commands: Vec<TaskCommand> = Vec::new();
     match selected_block {
@@ -265,8 +350,9 @@ fn lower_one_task(
                 .collect();
             errors.push(SparError::EvalError {
                 message: format!(
-                    "task '{}' has no run block for `{current_os}` (defined: {}) and no default 'run {{}}' block",
+                    "task '{}' has no run block for `{}` (defined: {}) and no default 'run {{}}' block",
                     decl.name,
+                    std::env::consts::OS,
                     labels.join(", ")
                 ),
                 span: decl.span.clone(),

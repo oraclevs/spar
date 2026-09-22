@@ -170,3 +170,39 @@ fn read_bool_rejects_non_bool_input() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("'yes' is not a valid bool"), "{stderr}");
 }
+
+#[test]
+fn cd_inside_exec_shell_expression_still_fails_naturally() {
+    // execute_shell (exec shell{}'s own executor) has no builtin
+    // interception at all -- cd already failed here before this feature
+    // and still does. Locks in that read's fix didn't touch this.
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> int {
+            exec shell { cd /tmp; };
+            return 0;
+        };
+        "#,
+        "",
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn read_inside_exec_shell_expression_persists_to_a_later_separate_exec_shell() {
+    let directory = tempfile::tempdir().unwrap();
+    let out_file = directory.path().join("out.txt");
+    let source = format!(
+        r#"
+        function main() -> int {{
+            exec shell {{ read int n; }};
+            exec shell {{ echo "n=$n" > "{}"; }};
+            return 0;
+        }};
+        "#,
+        out_file.display()
+    );
+    let output = spar_exec_with_input(&source, "42\n");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), "n=42\n");
+}

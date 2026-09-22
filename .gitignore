@@ -1,2 +1,8 @@
 /target
 /.worktrees
+/docs/
+/PATCH_MANIFEST.md
+/VERIFY.md
+/compile.logs
+/note.txt
+/testresult.txt

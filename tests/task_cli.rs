@@ -786,6 +786,46 @@ fn native_block_failure_reports_exit_code() {
 }
 
 #[test]
+fn native_block_cd_is_a_real_builtin_not_an_exec_attempt() {
+    // cd is never a real program on PATH -- every shell implements it
+    // in-process. A native run block resolves it directly instead of
+    // handing it to execvp and failing with "No such file or directory".
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("child")).unwrap();
+    fs::write(directory.path().join("child/marker.txt"), "found").unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "cd.spar",
+        "task Cd { run { cd \"child\"; cat marker.txt; }; };\n",
+    );
+    let output = spar_in(&["run", "cd", "-f", file.to_str().unwrap()], directory.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "found");
+}
+
+#[test]
+fn native_block_shell_only_builtin_reports_a_clear_error_not_an_os_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        directory.path(),
+        "jobs.spar",
+        "task ShowJobs { run { jobs; }; };\n",
+    );
+    let output = spar(&["run", "showjobs", "-f", file.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Spar shell builtin") && stderr.contains("Install sparsh"),
+        "{stderr}"
+    );
+    assert!(!stderr.to_lowercase().contains("bash"), "{stderr}");
+}
+
+#[test]
 fn native_block_spreads_variadic_parameters_with_ellipsis() {
     let directory = tempfile::tempdir().unwrap();
     let file = write_fixture(

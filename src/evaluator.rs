@@ -2871,6 +2871,37 @@ pub fn execute_shell_plan(plan: &spar_command::ShellPlan) -> std::io::Result<She
     execute_shell_plan_with_options(plan, &options)
 }
 
+/// Names that are always a shell builtin and never a real program on PATH,
+/// on any common system -- unlike `echo`, `printf`, `kill`, `read`, `which`,
+/// which usually have a genuine standalone binary and so are left to fail
+/// with `spar-process`'s ordinary "not found" error instead of this one.
+/// Deliberately conservative: a name left off this list just falls through
+/// to the normal not-found error rather than risking a wrong claim.
+fn is_shell_only_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "alias"
+            | "unalias"
+            | "pushd"
+            | "popd"
+            | "dirs"
+            | "hash"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "disown"
+            | "source"
+            | "."
+            | "deactivate"
+            | "reload"
+            | "logout"
+            | "help"
+            | "repl"
+            | "umask"
+            | "ulimit"
+    )
+}
+
 pub fn execute_shell_plan_with_options(
     plan: &spar_command::ShellPlan,
     options: &spar_process::ExecutionOptions,
@@ -2909,9 +2940,29 @@ pub fn execute_shell_plan_with_options(
                     code: Some(code),
                 });
             }
-            let output = spar_process::run_command(command, self.options)?;
-            self.last_status = output.pipeline_status;
-            Ok(output.status)
+            if command.program == "cd" {
+                return self.run_cd(command);
+            }
+            match spar_process::run_command(command, self.options) {
+                Ok(output) => {
+                    self.last_status = output.pipeline_status;
+                    Ok(output.status)
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && is_shell_only_builtin(&command.program) =>
+                {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "`{}` is a Spar shell builtin, not a program on PATH -- it only \
+                             runs inside the Spar shell. Install sparsh to run this task.",
+                            command.program
+                        ),
+                    ))
+                }
+                Err(error) => Err(error),
+            }
         }
 
         fn run_pipeline(
@@ -2925,6 +2976,40 @@ pub fn execute_shell_plan_with_options(
 
         fn should_stop(&self) -> bool {
             self.stop
+        }
+    }
+
+    impl NativeExecutor<'_> {
+        /// `cd` is never a real program -- every shell implements it
+        /// in-process. `spar-process` has no such concept, so a native run
+        /// block resolves it here instead of handing it to `execvp` and
+        /// getting a confusing `No such file or directory`.
+        fn run_cd(
+            &mut self,
+            command: &spar_command::CommandPlan,
+        ) -> std::io::Result<spar_process::ExitStatus> {
+            let target = match command.args.first() {
+                Some(arg) => arg.clone(),
+                None => std::env::var("HOME")
+                    .map_err(|_| std::io::Error::other("cd: HOME is not set"))?,
+            };
+            match std::env::set_current_dir(&target) {
+                Ok(()) => {
+                    self.last_status = Some(spar_process::PipelineStatus {
+                        code: 0,
+                        success: true,
+                        processes: vec![],
+                    });
+                    Ok(spar_process::ExitStatus {
+                        success: true,
+                        code: Some(0),
+                    })
+                }
+                Err(error) => Err(std::io::Error::new(
+                    error.kind(),
+                    format!("cd: {target}: {error}"),
+                )),
+            }
         }
     }
 

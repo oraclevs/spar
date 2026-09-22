@@ -1,0 +1,139 @@
+warning: unused import: `ConfigValue`
+  --> src/engine.rs:19:24
+   |
+19 | use crate::evaluator::{ConfigValue, Evaluator};
+   |                        ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `ResourceTable`
+  --> src/runtime.rs:18:32
+   |
+18 | pub use resource::{ResourceId, ResourceTable};
+   |                                ^^^^^^^^^^^^^
+
+warning: unused import: `schema_type_of`
+  --> src/runtime.rs:19:18
+   |
+19 | pub use schema::{schema_type_of, Schema, SchemaField, SchemaInferenceError, SchemaType};
+   |                  ^^^^^^^^^^^^^^
+
+warning: unused imports: `STDLIB_CACHE_FORMAT_VERSION`, `StdlibBundleIdentity`, and `configured_precompiled_bundle`
+  --> src/stdlib/mod.rs:23:5
+   |
+23 |     configured_precompiled_bundle, StdlibBundleIdentity, STDLIB_CACHE_FORMAT_VERSION,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `span`
+    --> src/typechecker.rs:3056:9
+     |
+3056 |         span: &Span,
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_span`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+  --> src/compiled.rs:72:34
+   |
+72 |     Constant(crate::ConfigValue, Span),
+   |     --------                     ^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+72 -     Constant(crate::ConfigValue, Span),
+72 +     Constant(crate::ConfigValue, ()),
+   |
+
+warning: field `span` is never read
+  --> src/compiled.rs:78:9
+   |
+75 |     DirectCall {
+   |     ---------- field in this variant
+...
+78 |         span: Span,
+   |         ^^^^
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `span` is never read
+  --> src/compiled.rs:91:9
+   |
+89 |     FunctionRef {
+   |     ----------- field in this variant
+90 |         function: FunctionId,
+91 |         span: Span,
+   |         ^^^^
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `1` is never read
+   --> src/compiled.rs:132:35
+    |
+132 |     List(Vec<CompiledExpression>, Span),
+    |     ---- field in this variant    ^^^^
+    |
+    = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+132 -     List(Vec<CompiledExpression>, Span),
+132 +     List(Vec<CompiledExpression>, ()),
+    |
+
+warning: field `decoder_span` is never read
+   --> src/compiled.rs:190:9
+    |
+187 | pub(crate) struct CompiledShellMixedPipeline {
+    |                   -------------------------- field in this struct
+...
+190 |     pub decoder_span: Span,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `CompiledShellMixedPipeline` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `normalize_shell_body` is never used
+  --> src/lexer.rs:44:4
+   |
+44 | fn normalize_shell_body(body: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `execute_program` is never used
+   --> src/runtime.rs:325:15
+    |
+325 | pub(crate) fn execute_program(program: &CompiledProgram) -> Result<Value, Vec<SparError>> {
+    |               ^^^^^^^^^^^^^^^
+
+warning: constant `STDLIB_CACHE_FORMAT_VERSION` is never used
+ --> src/stdlib/bundle.rs:5:11
+  |
+5 | pub const STDLIB_CACHE_FORMAT_VERSION: u32 = 1;
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StdlibBundleIdentity` is never constructed
+  --> src/stdlib/bundle.rs:10:12
+   |
+10 | pub struct StdlibBundleIdentity {
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `current` and `cache_key` are never used
+  --> src/stdlib/bundle.rs:17:12
+   |
+16 | impl StdlibBundleIdentity {
+   | ------------------------- associated items in this implementation
+17 |     pub fn current() -> Self {
+   |            ^^^^^^^
+...
+25 |     pub fn cache_key(&self) -> String {
+   |            ^^^^^^^^^
+
+warning: function `configured_precompiled_bundle` is never used
+  --> src/stdlib/bundle.rs:38:8
+   |
+38 | pub fn configured_precompiled_bundle() -> Option<PathBuf> {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `spar` (lib) generated 16 warnings (run `cargo fix --lib -p spar` to apply 5 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s

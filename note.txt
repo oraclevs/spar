@@ -1,0 +1,386 @@
+    Checking spar v0.5.0 (/home/occ/Projects/Rust/occ_lang/spar)
+error: unused import: `ConfigValue`
+  --> src/engine.rs:19:24
+   |
+19 | use crate::evaluator::{ConfigValue, Evaluator};
+   |                        ^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `ResourceTable`
+  --> src/runtime.rs:16:32
+   |
+16 | pub use resource::{ResourceId, ResourceTable};
+   |                                ^^^^^^^^^^^^^
+
+error: unused import: `schema_type_of`
+  --> src/runtime.rs:17:18
+   |
+17 | pub use schema::{schema_type_of, Schema, SchemaField, SchemaInferenceError, SchemaType};
+   |                  ^^^^^^^^^^^^^^
+
+error: unused imports: `STDLIB_CACHE_FORMAT_VERSION`, `StdlibBundleIdentity`, and `configured_precompiled_bundle`
+  --> src/stdlib/mod.rs:23:5
+   |
+23 |     configured_precompiled_bundle, StdlibBundleIdentity, STDLIB_CACHE_FORMAT_VERSION,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `schema_type_of`
+  --> src/runtime.rs:17:18
+   |
+17 | pub use schema::{schema_type_of, Schema, SchemaField, SchemaInferenceError, SchemaType};
+   |                  ^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused variable: `span`
+    --> src/typechecker.rs:3040:9
+     |
+3040 |         span: &Span,
+     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_span`
+     |
+     = note: `-D unused-variables` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: field `1` is never read
+  --> src/compiled.rs:72:34
+   |
+72 |     Constant(crate::ConfigValue, Span),
+   |     --------                     ^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+72 -     Constant(crate::ConfigValue, Span),
+72 +     Constant(crate::ConfigValue, ()),
+   |
+
+error: field `span` is never read
+  --> src/compiled.rs:78:9
+   |
+75 |     DirectCall {
+   |     ---------- field in this variant
+...
+78 |         span: Span,
+   |         ^^^^
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+error: field `span` is never read
+  --> src/compiled.rs:91:9
+   |
+89 |     FunctionRef {
+   |     ----------- field in this variant
+90 |         function: FunctionId,
+91 |         span: Span,
+   |         ^^^^
+   |
+   = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+error: field `1` is never read
+   --> src/compiled.rs:132:35
+    |
+132 |     List(Vec<CompiledExpression>, Span),
+    |     ---- field in this variant    ^^^^
+    |
+    = note: `CompiledExpression` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+132 -     List(Vec<CompiledExpression>, Span),
+132 +     List(Vec<CompiledExpression>, ()),
+    |
+
+error: function `normalize_shell_body` is never used
+  --> src/lexer.rs:44:4
+   |
+44 | fn normalize_shell_body(body: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+error: function `execute_program` is never used
+   --> src/runtime.rs:192:15
+    |
+192 | pub(crate) fn execute_program(program: &CompiledProgram) -> Result<Value, Vec<SparError>> {
+    |               ^^^^^^^^^^^^^^^
+
+error: constant `STDLIB_CACHE_FORMAT_VERSION` is never used
+ --> src/stdlib/bundle.rs:5:11
+  |
+5 | pub const STDLIB_CACHE_FORMAT_VERSION: u32 = 1;
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: struct `StdlibBundleIdentity` is never constructed
+  --> src/stdlib/bundle.rs:10:12
+   |
+10 | pub struct StdlibBundleIdentity {
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+error: associated items `current` and `cache_key` are never used
+  --> src/stdlib/bundle.rs:17:12
+   |
+16 | impl StdlibBundleIdentity {
+   | ------------------------- associated items in this implementation
+17 |     pub fn current() -> Self {
+   |            ^^^^^^^
+...
+25 |     pub fn cache_key(&self) -> String {
+   |            ^^^^^^^^^
+
+error: function `configured_precompiled_bundle` is never used
+  --> src/stdlib/bundle.rs:38:8
+   |
+38 | pub fn configured_precompiled_bundle() -> Option<PathBuf> {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this function has too many arguments (8/7)
+   --> src/evaluator.rs:569:5
+    |
+569 | /     pub(crate) fn evaluate_with_imports_base_effects_natives_and_context(
+570 | |         program: &Program,
+571 | |         symbols: &SymbolTable,
+572 | |         loaded: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+...   |
+577 | |         runtime_context: crate::runtime::RuntimeContext,
+578 | |     ) -> Result<EvalResult, Vec<SparError>> {
+    | |___________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: this `map_or` can be simplified
+   --> src/lexer.rs:636:16
+    |
+636 |             && previous.map_or(true, |p| p.is_whitespace() || p == ';')
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unnecessary_map_or
+    = note: `-D clippy::unnecessary-map-or` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_map_or)]`
+help: use `is_none_or` instead
+    |
+636 -             && previous.map_or(true, |p| p.is_whitespace() || p == ';')
+636 +             && previous.is_none_or(|p| p.is_whitespace() || p == ';')
+    |
+
+error: this `map_or` can be simplified
+   --> src/lexer.rs:813:12
+    |
+813 |           && source[keyword.len()..]
+    |  ____________^
+814 | |             .chars()
+815 | |             .next()
+816 | |             .map_or(true, |ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+    | |__________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unnecessary_map_or
+help: use `is_none_or` instead
+    |
+816 -             .map_or(true, |ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+816 +             .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+    |
+
+error: this `.find_map(..)` can be written more simply using `.find(..)`
+   --> src/loader.rs:650:64
+    |
+650 |                       let helper = imported_program.items.iter().find_map(|item| match item {
+    |  ________________________________________________________________^
+651 | |                         TopLevelItem::Function(f) if f.name == name => Some(item),
+652 | |                         _ => None,
+653 | |                     });
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unnecessary_find_map
+    = note: `-D clippy::unnecessary-find-map` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_find_map)]`
+
+error: unnecessary use of `clone` to create a slice from a reference
+   --> src/lowerer.rs:594:41
+    |
+594 |                         .lookup_section(&[call.name.clone()])
+    |                                         ^^^^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&call.name)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#cloned_ref_to_slice_refs
+    = note: `-D clippy::cloned-ref-to-slice-refs` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cloned_ref_to_slice_refs)]`
+
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> src/parser.rs:2782:10
+     |
+2782 |     ) -> Result<(RunShell, Option<Span>, Option<String>, Option<Span>), SparError> {
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: usage of `bool::then` in `filter_map`
+    --> src/resolver.rs:1996:53
+     |
+1996 |                           .chain(self.sections.iter().filter_map(|(path, section)| {
+     |  _____________________________________________________^
+1997 | |                             (section.canonical && path.len() == 1).then(|| &path[0])
+1998 | |                         }))
+     | |__________________________^ help: use `filter` then `map` instead: `filter(|&(path, section)| (section.canonical && path.len() == 1)).map(|(path, section)| &path[0])`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#filter_map_bool_then
+     = note: `-D clippy::filter-map-bool-then` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::filter_map_bool_then)]`
+
+error: this can be `std::io::Error::other(_)`
+  --> src/runtime/context.rs:34:21
+   |
+34 |                     io::Error::new(io::ErrorKind::Other, "runtime output buffer lock poisoned")
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#io_other_error
+   = note: `-D clippy::io-other-error` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::io_other_error)]`
+help: use `std::io::Error::other`
+   |
+34 -                     io::Error::new(io::ErrorKind::Other, "runtime output buffer lock poisoned")
+34 +                     io::Error::other("runtime output buffer lock poisoned")
+   |
+
+error: this `impl` can be derived
+  --> src/runtime/context.rs:57:1
+   |
+57 | / impl Default for RuntimeInput {
+58 | |     fn default() -> Self {
+59 | |         Self::Stdin
+60 | |     }
+61 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#derivable_impls
+   = note: `-D clippy::derivable-impls` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::derivable_impls)]`
+help: replace the manual implementation with a derive attribute and mark the default variant
+   |
+52 + #[derive(Default)]
+53 | pub enum RuntimeInput {
+54 ~     #[default]
+55 ~     Stdin,
+   |
+
+error: this can be `std::io::Error::other(_)`
+  --> src/runtime/context.rs:77:21
+   |
+77 |                     io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned")
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#io_other_error
+help: use `std::io::Error::other`
+   |
+77 -                     io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned")
+77 +                     io::Error::other("runtime input buffer lock poisoned")
+   |
+
+error: this can be `std::io::Error::other(_)`
+  --> src/runtime/context.rs:93:21
+   |
+93 |                     io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned")
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#io_other_error
+help: use `std::io::Error::other`
+   |
+93 -                     io::Error::new(io::ErrorKind::Other, "runtime input buffer lock poisoned")
+93 +                     io::Error::other("runtime input buffer lock poisoned")
+   |
+
+error: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+   --> src/runtime/stream.rs:222:5
+    |
+222 | /     pub fn next(&mut self) -> Result<Option<Value>, SparError> {
+223 | |         let mut reject = |_callable: &Value, _args: Vec<Value>| {
+224 | |             Err(SparError::EvalError {
+225 | |                 message: "structured stream transform requires runtime callable execution".into(),
+...   |
+229 | |         self.next_with(&mut reject)
+230 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#should_implement_trait
+    = note: `-D clippy::should-implement-trait` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::should_implement_trait)]`
+
+error: this loop could be written as a `while let` loop
+   --> src/shell_lang.rs:487:9
+    |
+487 | /         loop {
+488 | |             let Some(next) = self.tokens.get(self.pos).cloned() else {
+489 | |                 break;
+490 | |             };
+...   |
+507 | |             self.pos += 1;
+508 | |         }
+    | |_________^ help: try: `while let Some(next) = self.tokens.get(self.pos).cloned() { .. }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#while_let_loop
+    = note: `-D clippy::while-let-loop` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::while_let_loop)]`
+
+error: this loop could be written as a `for` loop
+   --> src/shell_lang.rs:633:5
+    |
+633 |     while let Some((relative, ch)) = iter.next() {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `for (relative, ch) in iter`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#while_let_on_iterator
+    = note: `-D clippy::while-let-on-iterator` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::while_let_on_iterator)]`
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src/stdlib/fs.rs:105:21
+    |
+105 |     let predicates: [(&str, fn(&fs::Metadata) -> bool); 3] = [
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#type_complexity
+
+error: could not compile `spar` (lib) due to 30 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: using `contains()` instead of `iter().any()` is more efficient
+    --> src/lexer.rs:2756:17
+     |
+2756 |         assert!(tokens.iter().any(|token| *token == Token::KwFn));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `tokens.contains(&Token::KwFn)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#manual_contains
+     = note: `-D clippy::manual-contains` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_contains)]`
+
+error: using `contains()` instead of `iter().any()` is more efficient
+    --> src/lexer.rs:2757:17
+     |
+2757 |         assert!(tokens.iter().any(|token| *token == Token::FatArrow));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `tokens.contains(&Token::FatArrow)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#manual_contains
+
+error: using `contains()` instead of `iter().any()` is more efficient
+    --> src/lexer.rs:2758:17
+     |
+2758 |         assert!(tokens.iter().any(|token| *token == Token::Arrow));
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `tokens.contains(&Token::Arrow)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#manual_contains
+
+error: the borrowed expression implements the required traits
+    --> src/loader.rs:2563:13
+     |
+2563 |             &root.join("config.spar"),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `root.join("config.spar")`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#needless_borrows_for_generic_args
+     = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: could not compile `spar` (lib test) due to 29 previous errors

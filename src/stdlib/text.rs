@@ -15,6 +15,28 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry
         .register(NativeFunction::sync(
             "nativeText",
+            "parseSize",
+            vec![("value", SparType::Str)],
+            SparType::Int,
+            true,
+            parse_size_impl,
+        ))
+        .expect("nativeText::parseSize registration must be unique");
+    registry
+        .register_method(NativeMethod::sync(
+            "str",
+            "parseSize",
+            SparType::Str,
+            vec![],
+            SparType::Int,
+            false,
+            parse_size_impl,
+        ))
+        .expect("str.parseSize registration must be unique");
+
+    registry
+        .register(NativeFunction::sync(
+            "nativeText",
             "replace",
             vec![
                 ("value", SparType::Str),
@@ -193,6 +215,62 @@ fn ends_with_impl(
     ))
 }
 
+fn parse_size_impl(
+    _context: &mut crate::runtime::RuntimeContext,
+    args: &[Value],
+) -> Result<Value, crate::SparError> {
+    let text = string_arg(args, 0, "value")?;
+    parse_size(text)
+        .map(Value::Int)
+        .ok_or_else(|| super::support::error(format!("could not parse size '{text}'")))
+}
+
+/// Parses a human-readable byte size: a bare number (bytes), or a number
+/// followed by a unit -- "10GB", "1.5 GiB", "512K", "2 terabytes". Case and
+/// internal spacing/commas are ignored, and a trailing "s" is dropped so
+/// "gigabytes" and "GB" mean the same thing.
+///
+/// An `i` before the final `b` (`KiB`, `MiB`, ...) is binary, base 1024;
+/// otherwise the unit is decimal, base 1000 -- matching what a directory
+/// listing's own `size` column displays (`ls`'s "10.5 GB" means
+/// `parseSize("10.5GB")`, not `parseSize("10.5GiB")`).
+fn parse_size(text: &str) -> Option<i64> {
+    let cleaned = text.trim().replace(',', "");
+    let digits_end = cleaned
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .last()?
+        .0
+        + 1;
+    let number: f64 = cleaned[..digits_end].parse().ok()?;
+    let mut unit = cleaned[digits_end..].trim().to_ascii_lowercase();
+    if unit.ends_with('s') {
+        unit.pop();
+    }
+    if unit.is_empty() || unit == "b" || unit == "byte" {
+        return Some(number as i64);
+    }
+
+    const UNITS: [(char, &str, &str); 6] = [
+        ('k', "kilobyte", "kibibyte"),
+        ('m', "megabyte", "mebibyte"),
+        ('g', "gigabyte", "gibibyte"),
+        ('t', "terabyte", "tebibyte"),
+        ('p', "petabyte", "pebibyte"),
+        ('e', "exabyte", "exbibyte"),
+    ];
+    for (index, (prefix, decimal_name, binary_name)) in UNITS.iter().enumerate() {
+        let exponent = i32::try_from(index).ok()? + 1;
+        if unit == format!("{prefix}ib") || unit == *binary_name {
+            return Some((number * 1024f64.powi(exponent)) as i64);
+        }
+        if unit == format!("{prefix}b") || unit == *decimal_name || unit == prefix.to_string() {
+            return Some((number * 1000f64.powi(exponent)) as i64);
+        }
+    }
+    None
+}
+
 fn replace_impl(
     _context: &mut crate::runtime::RuntimeContext,
     args: &[Value],
@@ -224,4 +302,51 @@ fn join_impl(
     Ok(Value::String(
         string_list_arg(args, 0, "values")?.join(string_arg(args, 1, "separator")?),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_numbers_and_bytes_pass_through() {
+        assert_eq!(parse_size("1024"), Some(1024));
+        assert_eq!(parse_size("512 B"), Some(512));
+        assert_eq!(parse_size("3 bytes"), Some(3));
+    }
+
+    #[test]
+    fn decimal_units_use_powers_of_1000() {
+        assert_eq!(parse_size("1KB"), Some(1_000));
+        assert_eq!(parse_size("10GB"), Some(10_000_000_000));
+        assert_eq!(parse_size("1.5 gigabytes"), Some(1_500_000_000));
+        assert_eq!(parse_size("2M"), Some(2_000_000));
+    }
+
+    #[test]
+    fn an_i_before_the_final_b_means_binary_powers_of_1024() {
+        assert_eq!(parse_size("1KiB"), Some(1_024));
+        assert_eq!(parse_size("1.5GiB"), Some((1.5 * 1024f64.powi(3)) as i64));
+        assert_eq!(parse_size("2 kibibytes"), Some(2_048));
+    }
+
+    #[test]
+    fn matches_what_a_listings_size_column_displays() {
+        // The `ls` table's own "10.5 GB" is decimal, so it round-trips
+        // through the same string this function parses.
+        assert_eq!(parse_size("30.3GB"), Some(30_300_000_000));
+    }
+
+    #[test]
+    fn case_spacing_commas_and_plurals_do_not_matter() {
+        assert_eq!(parse_size("  10 Gb  "), Some(10_000_000_000));
+        assert_eq!(parse_size("1,024KB"), Some(1_024_000));
+    }
+
+    #[test]
+    fn unparseable_or_empty_input_is_none() {
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("GB"), None);
+        assert_eq!(parse_size("10 furlongs"), None);
+    }
 }

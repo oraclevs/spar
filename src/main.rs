@@ -1632,7 +1632,10 @@ mod tests {
                 assert_eq!(name, "myapp");
                 assert_eq!(kind, spar::package::PackageKind::Application);
             }
-            other => panic!("expected Cmd::New, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Cmd::New, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1649,15 +1652,22 @@ mod tests {
                 assert_eq!(name, "mylib");
                 assert_eq!(kind, spar::package::PackageKind::Library);
             }
-            other => panic!("expected Cmd::New, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Cmd::New, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
     #[test]
     fn new_project_creates_dir_manifest_and_entry_stub() {
         let base = tempfile::tempdir().unwrap();
-        let manifest =
-            new_project(base.path(), "myapp", spar::package::PackageKind::Application).unwrap();
+        let manifest = new_project(
+            base.path(),
+            "myapp",
+            spar::package::PackageKind::Application,
+        )
+        .unwrap();
         assert_eq!(manifest.name, "myapp");
         let project_dir = base.path().join("myapp");
         assert!(project_dir.join("spar.package.spar").is_file());
@@ -1668,7 +1678,11 @@ mod tests {
     fn new_project_fails_when_dir_already_exists() {
         let base = tempfile::tempdir().unwrap();
         std::fs::create_dir(base.path().join("myapp")).unwrap();
-        let result = new_project(base.path(), "myapp", spar::package::PackageKind::Application);
+        let result = new_project(
+            base.path(),
+            "myapp",
+            spar::package::PackageKind::Application,
+        );
         assert!(result.is_err());
     }
 

@@ -2566,19 +2566,21 @@ impl Runtime<'_> {
         let name = &args[1];
         if !matches!(type_token, "int" | "float" | "bool" | "str") {
             return Err(runtime_error(
-                &format!(
-                    "'read': unknown type '{type_token}' (expected int, float, bool, or str)"
-                ),
+                &format!("'read': unknown type '{type_token}' (expected int, float, bool, or str)"),
                 span,
             )
             .into());
         }
 
-        let bytes = self.context.read_stdin_line().map_err(|error| {
-            runtime_error(&format!("'read': stdin read failed: {error}"), span)
-        })?;
+        let bytes = self
+            .context
+            .read_stdin_line()
+            .map_err(|error| runtime_error(&format!("'read': stdin read failed: {error}"), span))?;
         let text = String::from_utf8(bytes).map_err(|_| {
-            runtime_error("'read': stdin contains bytes that are not valid UTF-8", span)
+            runtime_error(
+                "'read': stdin contains bytes that are not valid UTF-8",
+                span,
+            )
         })?;
         let value = text.trim_end_matches(['\r', '\n']).to_string();
 
@@ -2596,9 +2598,7 @@ impl Runtime<'_> {
             "bool" => {
                 if value != "true" && value != "false" {
                     return Err(runtime_error(
-                        &format!(
-                            "'read': '{value}' is not a valid bool (expected true or false)"
-                        ),
+                        &format!("'read': '{value}' is not a valid bool (expected true or false)"),
                         span,
                     )
                     .into());

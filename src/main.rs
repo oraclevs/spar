@@ -190,6 +190,7 @@ fn main() {
         Cmd::Exec { path, program_args } => cmd_exec(&path, program_args),
         Cmd::Repl => cmd_repl(),
         Cmd::PackageInit { name, kind } => cmd_package_init(name, kind),
+        Cmd::New { name, kind } => cmd_new(name, kind),
         Cmd::PackageAdd { alias, request } => cmd_package_add(&alias, &request),
         Cmd::PackageRemove { alias } => cmd_package_remove(&alias),
         Cmd::PackageInstall { offline } => cmd_package_install(offline),
@@ -249,6 +250,10 @@ enum Cmd {
         name: Option<String>,
         kind: spar::package::PackageKind,
     },
+    New {
+        name: String,
+        kind: spar::package::PackageKind,
+    },
     PackageAdd {
         alias: String,
         request: String,
@@ -292,6 +297,7 @@ fn parse_args(args: &[String]) -> Cmd {
         Some("dump") => parse_dump_args(&args[2..]),
         Some("exec") => parse_exec_args(&args[2..]),
         Some("repl") => Cmd::Repl,
+        Some("new") => parse_new_args(&args[2..]),
         Some("init") => parse_package_init_args(&args[2..]),
         Some("add") => parse_package_add_args(&args[2..]),
         Some("remove") => parse_package_remove_args(&args[2..]),
@@ -338,6 +344,37 @@ fn parse_exec_args(args: &[String]) -> Cmd {
     Cmd::Exec {
         path: path.clone(),
         program_args,
+    }
+}
+
+fn parse_new_args(args: &[String]) -> Cmd {
+    let mut name = None;
+    let mut kind = spar::package::PackageKind::Application;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--lib" | "--library" => {
+                kind = spar::package::PackageKind::Library;
+                index += 1;
+            }
+            "--config" => {
+                kind = spar::package::PackageKind::Config;
+                index += 1;
+            }
+            "--app" | "--application" => {
+                kind = spar::package::PackageKind::Application;
+                index += 1;
+            }
+            other if name.is_none() && !other.starts_with('-') => {
+                name = Some(other.to_string());
+                index += 1;
+            }
+            other => return Cmd::BadArgs(format!("unexpected argument for `new`: {other}")),
+        }
+    }
+    match name {
+        Some(name) => Cmd::New { name, kind },
+        None => Cmd::BadArgs("`new` requires a project name: `spar new <name>`".into()),
     }
 }
 
@@ -642,6 +679,8 @@ COMMANDS:
     exec          <file.spar> [-- args...]
                                         Run file.spar's `main` and exit with its status
     repl                                Start an interactive scripting session
+    new           <name> [--app|--lib|--config]
+                                        Create a new spar project directory (defaults to --app)
     init          [name] [--app|--lib|--config]
                                         Create spar.package.spar in the current directory
     add           <alias> <request>     Add/update a dependency, resolve, and lock it
@@ -1266,6 +1305,34 @@ fn package_exit_on_error<T>(result: Result<T, spar::package::PackageError>) -> T
     }
 }
 
+fn new_project(
+    base: &Path,
+    name: &str,
+    kind: spar::package::PackageKind,
+) -> Result<spar::package::PackageManifest, spar::package::PackageError> {
+    let dir = base.join(name);
+    if dir.exists() {
+        return Err(spar::package::PackageError::Conflict {
+            message: format!("{} already exists", dir.display()),
+        });
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| spar::package::PackageError::Io {
+        message: format!("failed to create {}: {e}", dir.display()),
+    })?;
+    spar::package::commands::init(&dir, name, kind)
+}
+
+fn cmd_new(name: String, kind: spar::package::PackageKind) {
+    let base = package_project_dir();
+    let manifest = package_exit_on_error(new_project(&base, &name, kind));
+    println!(
+        "created '{}/' ({}) — cd {} && spar run",
+        manifest.name,
+        kind.as_str(),
+        manifest.name
+    );
+}
+
 fn cmd_package_init(name: Option<String>, kind: spar::package::PackageKind) {
     let dir = package_project_dir();
     let name = name.unwrap_or_else(|| {
@@ -1549,6 +1616,60 @@ mod tests {
     fn parse_args_fmt_missing_path_is_bad_args() {
         let args = vec!["spar".to_string(), "fmt".to_string()];
         assert!(matches!(parse_args(&args), Cmd::BadArgs(_)));
+    }
+
+    #[test]
+    fn parse_args_new_requires_name() {
+        let args = vec!["spar".to_string(), "new".to_string()];
+        assert!(matches!(parse_args(&args), Cmd::BadArgs(_)));
+    }
+
+    #[test]
+    fn parse_args_new_defaults_to_application() {
+        let args = vec!["spar".to_string(), "new".to_string(), "myapp".to_string()];
+        match parse_args(&args) {
+            Cmd::New { name, kind } => {
+                assert_eq!(name, "myapp");
+                assert_eq!(kind, spar::package::PackageKind::Application);
+            }
+            other => panic!("expected Cmd::New, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_args_new_with_lib_flag() {
+        let args = vec![
+            "spar".to_string(),
+            "new".to_string(),
+            "mylib".to_string(),
+            "--lib".to_string(),
+        ];
+        match parse_args(&args) {
+            Cmd::New { name, kind } => {
+                assert_eq!(name, "mylib");
+                assert_eq!(kind, spar::package::PackageKind::Library);
+            }
+            other => panic!("expected Cmd::New, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn new_project_creates_dir_manifest_and_entry_stub() {
+        let base = tempfile::tempdir().unwrap();
+        let manifest =
+            new_project(base.path(), "myapp", spar::package::PackageKind::Application).unwrap();
+        assert_eq!(manifest.name, "myapp");
+        let project_dir = base.path().join("myapp");
+        assert!(project_dir.join("spar.package.spar").is_file());
+        assert!(project_dir.join(&manifest.entry).is_file());
+    }
+
+    #[test]
+    fn new_project_fails_when_dir_already_exists() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir(base.path().join("myapp")).unwrap();
+        let result = new_project(base.path(), "myapp", spar::package::PackageKind::Application);
+        assert!(result.is_err());
     }
 
     #[test]

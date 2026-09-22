@@ -73,6 +73,7 @@ pub fn lower_tasks(
     eval_result: &EvalResult,
     base_dir: &Path,
     expr_table: &mut Vec<TaskExprEntry>,
+    native_task_names: &mut Vec<String>,
 ) -> Result<Option<TaskSet>, Vec<SparError>> {
     let decls: Vec<&TaskDecl> = program
         .items
@@ -91,7 +92,15 @@ pub fn lower_tasks(
     let mut tasks: Vec<Task> = Vec::new();
 
     for decl in &decls {
-        match lower_one_task(decl, program, symbols, eval_result, base_dir, expr_table) {
+        match lower_one_task(
+            decl,
+            program,
+            symbols,
+            eval_result,
+            base_dir,
+            expr_table,
+            native_task_names,
+        ) {
             Ok(task) => tasks.push(task),
             Err(mut errs) => errors.append(&mut errs),
         }
@@ -213,6 +222,7 @@ fn lower_one_task(
     eval_result: &EvalResult,
     base_dir: &Path,
     expr_table: &mut Vec<TaskExprEntry>,
+    native_task_names: &mut Vec<String>,
 ) -> Result<Task, Vec<SparError>> {
     let mut errors: Vec<SparError> = Vec::new();
 
@@ -332,13 +342,9 @@ fn lower_one_task(
                 }
             }
             RunBody::Native(shell) => {
-                let native_expr = Expr::Shell(shell.clone());
-                let id = expr_table.len();
-                let source = native_block_source(&native_expr);
-                expr_table.push(TaskExprEntry {
-                    expr: native_expr,
-                    param_kinds: param_kinds.clone(),
-                });
+                let id = native_task_names.len();
+                native_task_names.push(decl.name.clone());
+                let source = native_block_source(&Expr::Shell(shell.clone()));
                 commands.push(TaskCommand::Native(NativeCommand { id, source }));
             }
         },

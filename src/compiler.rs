@@ -159,6 +159,12 @@ pub struct Compilation {
     /// `program`/`symbols`/`result` and the task's bound parameter
     /// values, to render that command at run time.
     pub task_exprs: Vec<TaskExprEntry>,
+    /// Task name for each native `run{}` block, indexed by
+    /// `NativeCommand.id` — populated by `task_lowering::lower_tasks`.
+    /// Separate from `task_exprs` (which now only holds `run bash{}`
+    /// template interpolations that mention a task parameter without
+    /// being a bare reference to one).
+    pub native_task_names: Vec<String>,
     pub errors: Vec<SparError>,
 }
 
@@ -231,6 +237,7 @@ impl Compiler {
             result: None,
             tasks: None,
             task_exprs: Vec::new(),
+            native_task_names: Vec::new(),
             errors: Vec::new(),
         };
 
@@ -371,6 +378,7 @@ impl Compiler {
                         &result,
                         &self.options.base_dir,
                         &mut compilation.task_exprs,
+                        &mut compilation.native_task_names,
                     ) {
                         Ok(tasks) => compilation.tasks = tasks,
                         Err(errors) => compilation.errors.extend(errors),

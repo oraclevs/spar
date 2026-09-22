@@ -2877,7 +2877,7 @@ pub fn execute_shell_plan(plan: &spar_command::ShellPlan) -> std::io::Result<She
 /// with `spar-process`'s ordinary "not found" error instead of this one.
 /// Deliberately conservative: a name left off this list just falls through
 /// to the normal not-found error rather than risking a wrong claim.
-fn is_shell_only_builtin(name: &str) -> bool {
+pub(crate) fn is_shell_only_builtin(name: &str) -> bool {
     matches!(
         name,
         "alias"

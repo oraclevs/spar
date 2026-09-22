@@ -158,12 +158,14 @@ impl Engine {
             program.options.effect_ledger.clone(),
         )?;
         let mut task_exprs = Vec::new();
+        let mut native_task_names = Vec::new();
         let tasks = crate::task_lowering::lower_tasks(
             &entry.checked.program,
             &entry.checked.symbols,
             &result,
             &program.options.base_dir,
             &mut task_exprs,
+            &mut native_task_names,
         )?;
         Ok(Compilation {
             program: Some(entry.checked.program.clone()),
@@ -172,6 +174,7 @@ impl Engine {
             result: Some(result),
             tasks,
             task_exprs,
+            native_task_names,
             errors: Vec::new(),
         })
     }

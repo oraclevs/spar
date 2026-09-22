@@ -3,7 +3,7 @@ use spar::runner::{
 };
 use spar::{
     renderer::ErrorRenderer, Compilation, CompileOptions, Compiler, ConfigValue, EmitFormat,
-    Engine, Evaluator,
+    Engine, Evaluator, Value,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
@@ -38,70 +38,107 @@ fn task_expr_evaluator(
 }
 
 /// Builds the `NativeEval` callback `runner::execute_with_native` uses to
-/// run a native `run { }` block: binds the task's parameters as locals,
-/// evaluates the block's `Expr::Shell` to a `ShellPlan`, and executes it
-/// through `spar-process`. `task_exprs` holds the block's expression (the
-/// same table parameter-dependent `${...}` interpolations use).
+/// run a native `run { }` block: binds the task's parameters as compiled
+/// function arguments and calls it through `Engine::call_function_with_context`,
+/// which executes any returned shell value live (so `$!`/`$?`/`lastJob`
+/// work, including across calls to other `-> shell` functions from inside
+/// the block). `id` indexes `compilation.native_task_names` to find the
+/// task's name, then `compiled.task_entry(name)` finds its compiled
+/// function.
 #[allow(clippy::type_complexity)]
-fn native_block_runner(
-    compilation: &Compilation,
+fn native_block_runner<'a>(
+    compilation: &'a Compilation,
+    compiled: &'a spar::CompiledProgram,
 ) -> impl Fn(
     usize,
     &BTreeMap<String, BoundValue>,
     &BTreeMap<String, String>,
     Option<&Path>,
 ) -> Result<i32, String>
-       + '_ {
-    let program = compilation.program.as_ref().expect("compiled program");
-    let symbols = compilation.symbols.as_ref().expect("compiled symbols");
-    let eval_result = compilation.result.as_ref().expect("compiled eval result");
-    let entries = &compilation.task_exprs;
+       + 'a {
     move |id, values, environment, cwd| {
-        let entry = entries
+        let task_name = compilation
+            .native_task_names
             .get(id)
-            .ok_or_else(|| format!("internal error: unknown native block #{id}"))?;
-        let mut local_scope = HashMap::new();
-        for (name, kind) in &entry.param_kinds {
-            if let Some(value) = values.get(name) {
-                local_scope.insert(name.clone(), bound_to_config(value, *kind));
-            }
+            .ok_or_else(|| format!("internal error: unknown native task #{id}"))?;
+        let function = compiled
+            .task_entry(task_name)
+            .ok_or_else(|| format!("internal error: task '{task_name}' has no compiled entry"))?;
+        let tasks = compilation
+            .tasks
+            .as_ref()
+            .ok_or_else(|| "internal error: no tasks were lowered".to_owned())?;
+        let task = tasks
+            .get(task_name)
+            .map_err(|e| format!("internal error: {e}"))?;
+
+        let mut arguments = Vec::with_capacity(task.parameters.len());
+        for param in &task.parameters {
+            let value = match values.get(&param.name) {
+                Some(BoundValue::Scalar(s)) => bound_scalar_to_value(s, param.kind),
+                // A variadic task parameter binds as a list of strings at
+                // runtime — the `...${tags}` spread syntax in a native run
+                // block's shell words expects `Value::List`, matching the
+                // old `Evaluator`-backed path's `ConfigValue::List` binding.
+                Some(BoundValue::Variadic(items)) => {
+                    Value::List(items.iter().cloned().map(Value::String).collect())
+                }
+                None => {
+                    return Err(format!(
+                        "internal error: task parameter '{}' was never bound",
+                        param.name
+                    ))
+                }
+            };
+            arguments.push(value);
         }
-        let (value, requested_exit) = Evaluator::eval_task_block(
-            program,
-            symbols,
-            eval_result,
-            &entry.expr,
-            &local_scope,
-            environment,
-        )
-        .map_err(|e| e.to_string())?;
-        let ConfigValue::Shell(plan) = value else {
-            return Err("native run block did not evaluate to a shell plan".to_owned());
-        };
-        let mut options = spar_process::ExecutionOptions::default();
-        let mut merged: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-            std::env::vars_os().collect();
-        merged.extend(
-            environment
-                .iter()
-                .map(|(key, value)| (key.into(), value.into())),
-        );
-        options.environment = Some(merged);
-        // `spar-process` has no working-directory option, so switch the
-        // process directory around the call. The runner is sequential.
-        let previous = std::env::current_dir().ok();
+
+        // `for_base_dir` resolves a relative (including empty) base dir
+        // against the process cwd — `RuntimeContext::new` does not, and an
+        // empty `compiled.base_dir()` (a bare filename with no directory
+        // prefix, e.g. `-f tasks.spar`) would otherwise leave the runtime
+        // with an empty working directory.
+        let mut context = spar::RuntimeContext::for_base_dir(compiled.base_dir());
         if let Some(cwd) = cwd {
-            std::env::set_current_dir(cwd).map_err(|e| e.to_string())?;
+            context.set_cwd(cwd.to_path_buf());
         }
-        let outcome = spar::evaluator::execute_shell_plan_with_options(&plan, &options);
-        if let Some(previous) = previous {
-            let _ = std::env::set_current_dir(previous);
+        for (key, value) in environment {
+            context.env_set(key.clone(), value.clone());
         }
-        // `exit(code: N)` decides the block's status once its queued commands
-        // have run.
-        outcome
-            .map(|o| requested_exit.unwrap_or(o.exit_code))
-            .map_err(|e| e.to_string())
+        // Tasks predate the compiled runtime's `exec { }` (which captures
+        // output as data by design) — a task's `exec` statements write
+        // straight to the terminal, matching the pre-migration behavior.
+        context.set_inherit_exec_output(true);
+
+        let engine = spar::Engine::default();
+        engine
+            .call_function_with_context(compiled, function, arguments, context)
+            .map(|outcome| outcome.exit_status)
+            .map_err(|errors| {
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+    }
+}
+
+fn bound_scalar_to_value(s: &str, kind: ScalarKind) -> Value {
+    match kind {
+        ScalarKind::Str => Value::String(s.to_string()),
+        ScalarKind::Int => s
+            .parse()
+            .map(Value::Int)
+            .unwrap_or_else(|_| Value::String(s.to_string())),
+        ScalarKind::Float => s
+            .parse()
+            .map(Value::Float)
+            .unwrap_or_else(|_| Value::String(s.to_string())),
+        ScalarKind::Bool => s
+            .parse()
+            .map(Value::Bool)
+            .unwrap_or_else(|_| Value::String(s.to_string())),
     }
 }
 
@@ -904,6 +941,7 @@ fn cmd_run(
     let renderer = make_renderer(&src, &path_text);
     let options = compile_options_for_path_or_exit(&path);
     let base_dir = options.base_dir.clone();
+    let compiled_options = options.clone();
     let compilation = Compiler::new(options).compile(&src);
     if !compilation.errors.is_empty() {
         eprintln!("{}", renderer.render_all(&compilation.errors));
@@ -917,6 +955,31 @@ fn cmd_run(
     for warning in tasks.reserved_name_warnings() {
         eprintln!("warning: {warning}");
     }
+
+    let compiled = {
+        let mut program_for_compiled = compilation
+            .program
+            .clone()
+            .expect("successful compilation has a program");
+        spar::task_lowering::inject_task_functions(&mut program_for_compiled);
+        let compiled_input = Compilation {
+            program: Some(program_for_compiled),
+            symbols: compilation.symbols.clone(),
+            imports: compilation.imports.clone(),
+            result: None,
+            tasks: None,
+            task_exprs: Vec::new(),
+            native_task_names: Vec::new(),
+            errors: Vec::new(),
+        };
+        match spar::CompiledProgram::from_compilation(compiled_input, compiled_options) {
+            Ok(program) => program,
+            Err(errors) => {
+                eprintln!("{}", renderer.render_all(&errors));
+                std::process::exit(1);
+            }
+        }
+    };
 
     let task = if choose {
         match choose_task(tasks) {
@@ -964,7 +1027,7 @@ fn cmd_run(
 
     let exec_options = ExecutionOptions { dry_run, base_dir };
     let exprs = task_expr_evaluator(&compilation);
-    let native = native_block_runner(&compilation);
+    let native = native_block_runner(&compilation, &compiled);
     if let Err(e) = spar::runner::execute_with_native(&plan, &exec_options, &exprs, &native) {
         match e {
             RunnerError::QuietCommandFailed {

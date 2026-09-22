@@ -485,6 +485,7 @@ fn injected_task_function_runs_the_native_run_block_live_with_bound_params() {
         result: None,
         tasks: None,
         task_exprs: Vec::new(),
+        native_task_names: Vec::new(),
         errors: Vec::new(),
     };
     let compiled = CompiledProgram::from_compilation(compiled_input, CompileOptions::default())
@@ -512,4 +513,36 @@ fn injected_task_function_runs_the_native_run_block_live_with_bound_params() {
         ScalarKind::Str,
         BTreeMap::<String, String>::new(),
     );
+}
+
+#[test]
+fn native_run_blocks_get_their_own_id_table_separate_from_bash_template_exprs() {
+    use spar::runner::TaskCommand;
+
+    let src = r#"
+    task Native {
+        run {
+            echo hi;
+        };
+    };
+    task Templated(env: str) {
+        run bash {
+            deploy ${env + env};
+        };
+    };
+    "#;
+    let compilation = compile(src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let tasks = compilation.tasks.as_ref().expect("tasks");
+
+    let native_task = tasks.get("Native").unwrap();
+    let TaskCommand::Native(native_command) = &native_task.commands[0] else {
+        panic!("expected a native command");
+    };
+    assert_eq!(compilation.native_task_names[native_command.id], "Native");
+
+    // The bash template's non-bare-param expression (`${1 + 1}`) still
+    // goes through task_exprs, untouched by this change — and its id
+    // space no longer shares a counter with native_task_names.
+    assert!(!compilation.task_exprs.is_empty());
 }

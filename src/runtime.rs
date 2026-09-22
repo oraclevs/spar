@@ -2655,9 +2655,25 @@ impl Runtime<'_> {
                     };
                     continue;
                 }
-                spar_command::Step::Command(command) => {
-                    spar_process::run_command(command, &options)
-                }
+                spar_command::Step::Command(command) => spar_process::run_command(
+                    command, &options,
+                )
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && crate::evaluator::is_shell_only_builtin(&command.program)
+                    {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!(
+                                "`{}` is a Spar shell builtin, not a program on PATH -- it only \
+                                     runs inside the Spar shell. Install sparsh to run this task.",
+                                command.program
+                            ),
+                        )
+                    } else {
+                        error
+                    }
+                }),
                 spar_command::Step::Pipeline(pipeline) => {
                     spar_process::run_pipeline(pipeline, &options)
                 }
@@ -3631,9 +3647,10 @@ impl Runtime<'_> {
             .as_ref()
             .ok_or_else(|| module_state_error(span))?;
         let run = || {
+            let capture = !self.context.inherit_exec_output();
             let options = spar_process::ExecutionOptions {
-                capture_stdout: true,
-                capture_stderr: true,
+                capture_stdout: capture,
+                capture_stderr: capture,
                 environment: Some(self.context.environment_pairs()),
             };
             let mut success = true;

@@ -476,6 +476,7 @@ impl CompiledProgram {
             result: None,
             tasks: None,
             task_exprs: Vec::new(),
+            native_task_names: Vec::new(),
             errors,
         }
     }

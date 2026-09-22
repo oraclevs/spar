@@ -120,6 +120,7 @@ pub struct RuntimeContext {
     mixed_capture: Option<MixedCapture>,
     cancelled: bool,
     requested_exit: Option<i32>,
+    inherit_exec_output: bool,
 }
 
 impl RuntimeContext {
@@ -138,7 +139,25 @@ impl RuntimeContext {
             mixed_capture: None,
             cancelled: false,
             requested_exit: None,
+            inherit_exec_output: false,
         }
+    }
+
+    /// Whether an `exec { }` statement's child stdout/stderr should be
+    /// inherited (visible live) instead of captured into its returned
+    /// `{ stdout, stderr }` fields. Off by default — `exec { }`'s designed
+    /// behavior in the compiled runtime is to capture output as data. A
+    /// task's native `run{}` block turns this on (see
+    /// `set_inherit_exec_output`) to match the pre-Runtime-migration
+    /// behavior task authors relied on: `exec` statements in a task write
+    /// straight to the terminal, in declaration order against the rest of
+    /// the block's commands.
+    pub fn inherit_exec_output(&self) -> bool {
+        self.inherit_exec_output
+    }
+
+    pub fn set_inherit_exec_output(&mut self, value: bool) {
+        self.inherit_exec_output = value;
     }
 
     pub fn for_base_dir(base_dir: &Path) -> Self {

@@ -798,7 +798,10 @@ fn native_block_cd_is_a_real_builtin_not_an_exec_attempt() {
         "cd.spar",
         "task Cd { run { cd \"child\"; cat marker.txt; }; };\n",
     );
-    let output = spar_in(&["run", "cd", "-f", file.to_str().unwrap()], directory.path());
+    let output = spar_in(
+        &["run", "cd", "-f", file.to_str().unwrap()],
+        directory.path(),
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -1270,4 +1273,36 @@ task Serve {
     assert_eq!(environment["SPAR_DUMP_SECRET"], "<redacted>", "{text}");
     assert_eq!(environment["PORT"], "<redacted>", "{text}");
     assert_eq!(environment["TOKEN"], "<redacted>", "{text}");
+}
+
+#[test]
+fn native_task_run_block_calls_a_shell_returning_helper_function() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join("out.txt");
+    let fixture = write_fixture(
+        temp.path(),
+        "task.spar",
+        &format!(
+            r#"
+            function writeMarker() -> shell {{
+                return shell {{
+                    echo "from-helper" > "{}";
+                }};
+            }};
+            task Run {{
+                run {{
+                    writeMarker();
+                }};
+            }};
+            "#,
+            out.display()
+        ),
+    );
+    let output = spar(&["run", "Run", "-f", fixture.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(out).unwrap().trim(), "from-helper");
 }

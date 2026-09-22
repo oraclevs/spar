@@ -24,9 +24,9 @@ toml = "1"
 tempfile = "3"
 semver = "1"
 sha2 = "0.10"
-spar-command = { path = "../spar-command" }
-spar-process = { path = "../spar-process" }
-scoc = { path = "../scoc" }
+spar-command = { path = "../spar-command", version = "0.1.0" }
+spar-process = { path = "../spar-process", version = "0.1.0" }
+scoc = { path = "../scoc", version = "0.1.0" }
 
 indexmap = "2"
 regex = "1"

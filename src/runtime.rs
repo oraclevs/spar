@@ -2590,11 +2590,13 @@ impl Runtime<'_> {
                         pid: 0,
                         pipeline: vec![],
                     };
+                    self.shell_outcome = Some(outcome.clone());
                     self.shell_exit = true;
                     break;
                 }
                 spar_command::Step::Command(command) if command.program == "cd" => {
                     outcome = self.execute_cd_builtin(command, span)?;
+                    self.shell_outcome = Some(outcome.clone());
                     continue;
                 }
                 spar_command::Step::Command(command) if command.background => {
@@ -2621,6 +2623,7 @@ impl Runtime<'_> {
                         pid,
                         pipeline: vec![],
                     };
+                    self.shell_outcome = Some(outcome.clone());
                     continue;
                 }
                 spar_command::Step::Pipeline(pipeline)
@@ -2653,27 +2656,27 @@ impl Runtime<'_> {
                         pid,
                         pipeline: vec![],
                     };
+                    self.shell_outcome = Some(outcome.clone());
                     continue;
                 }
-                spar_command::Step::Command(command) => spar_process::run_command(
-                    command, &options,
-                )
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        && crate::evaluator::is_shell_only_builtin(&command.program)
-                    {
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!(
+                spar_command::Step::Command(command) => {
+                    spar_process::run_command(command, &options).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && crate::evaluator::is_shell_only_builtin(&command.program)
+                        {
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                format!(
                                 "`{}` is a Spar shell builtin, not a program on PATH -- it only \
                                      runs inside the Spar shell. Install sparsh to run this task.",
                                 command.program
                             ),
-                        )
-                    } else {
-                        error
-                    }
-                }),
+                            )
+                        } else {
+                            error
+                        }
+                    })
+                }
                 spar_command::Step::Pipeline(pipeline) => {
                     spar_process::run_pipeline(pipeline, &options)
                 }
@@ -2696,6 +2699,7 @@ impl Runtime<'_> {
                 pid: last.map_or(0, |process| process.pid),
                 pipeline: status.processes,
             };
+            self.shell_outcome = Some(outcome.clone());
         }
         Ok(outcome)
     }

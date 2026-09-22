@@ -1306,3 +1306,124 @@ fn native_task_run_block_calls_a_shell_returning_helper_function() {
     );
     assert_eq!(fs::read_to_string(out).unwrap().trim(), "from-helper");
 }
+
+#[test]
+fn native_task_captures_pid_of_a_background_job_started_in_a_helper_function() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("finished");
+    let pid_file = temp.path().join("pid");
+    let fixture = write_fixture(
+        temp.path(),
+        "task.spar",
+        &format!(
+            r#"
+            function startBackground() -> shell {{
+                return shell {{
+                    sh -c "sleep 0.02; printf done > '{}'" &;
+                }};
+            }};
+            task Scp {{
+                run {{
+                    startBackground();
+                    echo "$!" > "{}";
+                }};
+            }};
+            "#,
+            marker.display(),
+            pid_file.display()
+        ),
+    );
+    let output = spar(&["run", "Scp", "-f", fixture.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "done");
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    assert!(pid.trim().parse::<u32>().is_ok(), "got: {pid:?}");
+}
+
+#[test]
+fn native_task_reads_exit_code_of_previous_step_via_dollar_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join("out.txt");
+    let fixture = write_fixture(
+        temp.path(),
+        "task.spar",
+        &format!(
+            r#"
+            task Check {{
+                run {{
+                    sh -c "exit 3";
+                    echo "$?" > "{}";
+                }};
+            }};
+            "#,
+            out.display()
+        ),
+    );
+    let output = spar(&["run", "Check", "-f", fixture.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(out).unwrap().trim(), "3");
+}
+
+#[test]
+fn native_task_env_and_cwd_do_not_leak_across_tasks() {
+    let temp = tempfile::tempdir().unwrap();
+    let subdir = temp.path().join("work");
+    fs::create_dir(&subdir).unwrap();
+    let out_a = temp.path().join("a.txt");
+    let out_b = temp.path().join("b.txt");
+    let fixture = write_fixture(
+        temp.path(),
+        "task.spar",
+        &format!(
+            r#"
+            task A {{
+                cwd: "{}";
+                env: {{
+                    GREETING: "hi";
+                }};
+                run {{
+                    sh -c "pwd > '{}'; printf '%s' \"$GREETING\" >> '{}'";
+                }};
+            }};
+            task B {{
+                run {{
+                    sh -c "pwd > '{}'; printf '%s' \"$GREETING\" >> '{}'";
+                }};
+            }};
+            "#,
+            subdir.display(),
+            out_a.display(),
+            out_a.display(),
+            out_b.display(),
+            out_b.display(),
+        ),
+    );
+    let output_a = spar(&["run", "A", "-f", fixture.to_str().unwrap()]);
+    assert!(
+        output_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+    let output_b = spar(&["run", "B", "-f", fixture.to_str().unwrap()]);
+    assert!(
+        output_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+
+    let a_contents = fs::read_to_string(&out_a).unwrap();
+    assert!(a_contents.starts_with(&subdir.display().to_string()));
+    assert!(a_contents.trim_end().ends_with("hi"));
+
+    let b_contents = fs::read_to_string(&out_b).unwrap();
+    assert!(!b_contents.starts_with(&subdir.display().to_string()));
+    assert!(!b_contents.contains("hi"));
+}

@@ -1951,12 +1951,17 @@ impl Parser {
         let end = self.expect(&Token::ShellBlockEnd)?.span;
         let all_commands = statements.iter().all(|statement| {
             matches!(statement, Statement::Expression(Expr::Shell(shell), _)
-                if shell.statements.is_empty()
-                    && !shell.steps.iter().any(|(_, step)| match step {
-                        ShellStep::Command(command) => command.background,
-                        ShellStep::Pipeline(commands) => commands.last().is_some_and(|command| command.background),
-                        ShellStep::MixedPipeline(_) => false,
-                    }))
+            if shell.statements.is_empty()
+                && !shell.steps.iter().any(|(_, step)| match step {
+                    ShellStep::Command(command) => {
+                        command.background || command_references_last_status(command)
+                    }
+                    ShellStep::Pipeline(commands) => {
+                        commands.last().is_some_and(|command| command.background)
+                            || commands.iter().any(command_references_last_status)
+                    }
+                    ShellStep::MixedPipeline(_) => false,
+                }))
         });
         let steps = if all_commands {
             let mut flattened = Vec::new();
@@ -3056,6 +3061,44 @@ impl Parser {
         }
         Ok(commands)
     }
+}
+
+/// True if `word` contains a bare `$?` or `$!` reference. Used to keep a
+/// block containing one out of the `.steps` flattening
+/// `parse_mixed_shell_block` otherwise applies to a run of plain commands
+/// (see the `all_commands` check there) — flattening word-expands every
+/// step upfront, before any of them run, so `$?`/`$!` would only ever see
+/// whatever value preceded the whole block instead of the immediately
+/// preceding step's outcome. Keeping the block as separate statements
+/// instead makes each one execute (and update `$?`/`$!`'s backing state)
+/// before the next one's words are built.
+fn word_references_last_status(word: &ShellWord) -> bool {
+    word.parts
+        .iter()
+        .any(|part| matches!(part, ShellWordPart::Environment(name) if name == "?" || name == "!"))
+}
+
+/// Same check as `word_references_last_status`, applied to every word a
+/// command touches: its program name, arguments, environment assignment
+/// values, and redirect targets.
+fn command_references_last_status(command: &ShellCommandExpr) -> bool {
+    word_references_last_status(&command.program)
+        || command.args.iter().any(word_references_last_status)
+        || command
+            .environment
+            .iter()
+            .any(|entry| word_references_last_status(&entry.value))
+        || [&command.stdin, &command.stdout, &command.stderr]
+            .into_iter()
+            .flatten()
+            .any(|redirect| word_references_last_status(&redirect.target))
+        || command
+            .redirections
+            .iter()
+            .any(|redirect| match &redirect.target {
+                ShellFdRedirectTarget::File(file) => word_references_last_status(&file.target),
+                ShellFdRedirectTarget::Duplicate(_) => false,
+            })
 }
 
 /// Trims leading/trailing whitespace-only literal parts and, if anything

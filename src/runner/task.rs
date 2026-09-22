@@ -77,8 +77,9 @@ pub type ExprEval<'a> = dyn Fn(usize, &BTreeMap<String, BoundValue>) -> Result<S
 /// Runs a native run block: given its table `id`, the task's bound
 /// parameter values, its environment, and its resolved working directory,
 /// executes the block and returns its exit code. Supplied by the caller
-/// (the `spar` binary wires this to `Evaluator` + `spar-process`) since
-/// `runner` has no `Evaluator`/`ast` dependency of its own.
+/// (the `spar` binary wires this to the compiled `Runtime` via
+/// `Engine::call_function_with_context`) since `runner` has no
+/// `Runtime`/`Evaluator`/`ast` dependency of its own.
 pub type NativeEval<'a> = dyn Fn(
         usize,
         &BTreeMap<String, BoundValue>,

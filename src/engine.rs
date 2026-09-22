@@ -7,8 +7,10 @@
 //! caller doesn't have to know `Compiler`'s internals to pick the right
 //! mode.
 //!
-//! Task remains a separate surface entirely (`task_lowering.rs` /
-//! `runner/`), unaffected by any of this.
+//! Task metadata resolution and the task DAG remain a separate surface
+//! (`task_lowering.rs` / `runner/`), but a task's native `run{}` block
+//! executes through this module's `call_function_with_context` — see
+//! `task_lowering::inject_task_functions` and `CompiledProgram::task_entry`.
 
 use std::path::Path;
 

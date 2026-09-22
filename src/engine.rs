@@ -218,6 +218,23 @@ impl Engine {
         Ok(ExecutionOutcome { exit_status })
     }
 
+    /// Calls a compiled function directly by id — not through `main` — and,
+    /// if it returns a shell-typed value, executes that value live. This is
+    /// the entry point task `run{}` blocks use (see
+    /// `task_lowering::inject_task_functions` and `CompiledProgram::task_entry`):
+    /// it reuses the exact per-step execution `-> shell main()` already gets,
+    /// so `$!`/`$?`/`lastJob` work identically for a function reached this way.
+    pub fn call_function_with_context(
+        &self,
+        program: &CompiledProgram,
+        function: crate::compiled::FunctionId,
+        arguments: Vec<Value>,
+        context: crate::runtime::RuntimeContext,
+    ) -> Result<ExecutionOutcome, Vec<SparError>> {
+        crate::runtime::call_function_with_context(program, function, arguments, context)
+            .map(|exit_status| ExecutionOutcome { exit_status })
+    }
+
     pub fn execute_path(&self, path: &Path) -> Result<ExecutionOutcome, Vec<SparError>> {
         self.with_path(path).execute_source(&read_source(path)?)
     }
@@ -701,6 +718,46 @@ mod tests {
             pid_file.display()
         );
         let outcome = Engine::default().execute_source(&source).unwrap();
+        assert_eq!(outcome.exit_status, 0);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "done");
+        let pids = std::fs::read_to_string(pid_file).unwrap();
+        let (short, native) = pids.split_once(':').unwrap();
+        assert_eq!(short, native);
+        assert!(native.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn call_function_with_context_executes_a_non_main_shell_function_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("finished");
+        let pid_file = temp.path().join("pid");
+        let source = format!(
+            r#"
+            function helper() -> shell {{
+                return shell {{
+                    sh -c "sleep 0.02; printf done > '{}'" &;
+                    printf "%s:%s" "$!" "${{lastJob.pid}}" > "{}";
+                }};
+            }};
+            function main() -> int {{
+                return 0;
+            }};
+            "#,
+            marker.display(),
+            pid_file.display()
+        );
+        let program = Engine::default()
+            .compile_source(&source)
+            .expect("helper + main should compile");
+        let context = crate::runtime::RuntimeContext::for_base_dir(program.base_dir());
+        let outcome = Engine::default()
+            .call_function_with_context(
+                &program,
+                crate::compiled::FunctionId(0),
+                Vec::new(),
+                context,
+            )
+            .expect("calling helper() directly should run its shell body live");
         assert_eq!(outcome.exit_status, 0);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "done");
         let pids = std::fs::read_to_string(pid_file).unwrap();

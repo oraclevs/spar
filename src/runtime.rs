@@ -479,6 +479,69 @@ pub(crate) fn execute_program_with_context(
     }
 }
 
+/// Calls `function` (from `program`) with `arguments`, in `context`. If it
+/// returns a shell-typed value (`Value::Shell`/`MixedShell`/`ShellProgram`),
+/// executes it live — the same per-step engine `execute_program_with_context`
+/// uses for `-> shell main()` — so `$!`, `$?`, and `lastJob` observe real
+/// job state, and calls to other `-> shell` functions from inside that body
+/// share it (same `Runtime` instance, `last_job` is instance-scoped, not
+/// call-frame-scoped). Returns the resulting exit status; an explicit
+/// `exit(code: N)` inside the block wins over the executed plan's own exit
+/// code, matching `-> shell main()`'s behavior.
+pub(crate) fn call_function_with_context(
+    program: &CompiledProgram,
+    function: FunctionId,
+    arguments: Vec<Value>,
+    context: RuntimeContext,
+) -> Result<i32, Vec<SparError>> {
+    let mut runtime = Runtime {
+        program,
+        call_depth: 0,
+        state: Some(ModuleState::new(program)),
+        tasks: TaskTable::default(),
+        shell_depth: 0,
+        shell_outcome: None,
+        jobs: Vec::new(),
+        last_job: None,
+        shell_exit: false,
+        shell_cwd: None,
+        context,
+    };
+    let called: Result<Value, RuntimeFault> = (|| {
+        runtime.ensure_module(program.entry)?;
+        if runtime.function_is_async(function)? {
+            let handle = runtime.tasks.spawn(function, arguments);
+            runtime.drive_promise(handle, &Span::dummy())
+        } else {
+            runtime.call_function(function, arguments)
+        }
+    })();
+    runtime.tasks.cancel_pending();
+    let value = called.map_err(|fault| vec![fault.into_error()])?;
+    let exit_code = match value {
+        Value::MixedShell(shell) => runtime
+            .execute_mixed_shell(&shell)
+            .map(|outcome| outcome.exit_code)
+            .map_err(|fault| vec![fault.into_error()]),
+        Value::ShellProgram(shell_program) => runtime
+            .execute_shell_program(&shell_program)
+            .map(|outcome| outcome.exit_code)
+            .map_err(|fault| vec![fault.into_error()]),
+        Value::Shell(plan) => {
+            let span = runtime
+                .entry_function_span(function)
+                .unwrap_or_else(Span::dummy);
+            runtime
+                .execute_native_shell_plan(&plan, &span)
+                .map(|outcome| outcome.exit_code)
+                .map_err(|fault| vec![fault.into_error()])
+        }
+        Value::Int(code) => Ok(code as i32),
+        _ => Ok(0),
+    }?;
+    Ok(runtime.context.requested_exit().unwrap_or(exit_code))
+}
+
 pub(crate) enum InteractiveRuntimeExecution {
     Value(crate::session::InteractiveRuntimeValue),
     Process(crate::evaluator::ShellPlanOutcome),

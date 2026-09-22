@@ -92,3 +92,81 @@ fn read_bool_binds_value_visible_to_a_later_statement() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"ok=true\n");
 }
+
+#[test]
+fn read_wrong_arity_is_a_runtime_error() {
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> shell {
+            return shell { read name; };
+        };
+        "#,
+        "",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires a type and a variable name"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn read_unknown_type_token_is_a_runtime_error() {
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> shell {
+            return shell { read frobnicate name; };
+        };
+        "#,
+        "",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown type 'frobnicate'"), "{stderr}");
+}
+
+#[test]
+fn read_int_rejects_non_numeric_input() {
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> shell {
+            return shell { read int n; };
+        };
+        "#,
+        "abc\n",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("'abc' is not a valid int"), "{stderr}");
+}
+
+#[test]
+fn read_float_rejects_non_numeric_input() {
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> shell {
+            return shell { read float n; };
+        };
+        "#,
+        "abc\n",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("'abc' is not a valid float"), "{stderr}");
+}
+
+#[test]
+fn read_bool_rejects_non_bool_input() {
+    let output = spar_exec_with_input(
+        r#"
+        function main() -> shell {
+            return shell { read bool n; };
+        };
+        "#,
+        "yes\n",
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("'yes' is not a valid bool"), "{stderr}");
+}

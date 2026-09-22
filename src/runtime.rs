@@ -2532,6 +2532,95 @@ impl Runtime<'_> {
         })
     }
 
+    /// Reads a line of stdin into a shell-local variable, at *build* time
+    /// (called from `eval_shell_command`, not `execute_native_shell_plan`).
+    /// `eval_shell_plan` resolves every step's words for the whole block in
+    /// one upfront pass before any step executes, so a later step's `$name`
+    /// word is only able to see this variable if the read (and its
+    /// `context.env_set`) happens during that same build pass — waiting for
+    /// this step's own execution turn would be too late. One consequence:
+    /// `read` runs unconditionally as its build is reached, regardless of a
+    /// preceding `&&`/`||` join condition (join gating is checked only at
+    /// execution time).
+    ///
+    /// Returns a no-op `CommandPlan` (`true`, no args) standing in for this
+    /// step, so `execute_native_shell_plan` still spawns something (cheaply
+    /// succeeding) at this position in the plan.
+    fn eval_read_builtin(
+        &mut self,
+        args: &[String],
+        background: bool,
+        span: &Span,
+    ) -> Result<spar_command::CommandPlan, RuntimeFault> {
+        if background {
+            return Err(runtime_error("'read' cannot run in the background", span).into());
+        }
+        if args.len() != 2 {
+            return Err(runtime_error(
+                "'read' requires a type and a variable name: read <int|float|bool|str> <name>",
+                span,
+            )
+            .into());
+        }
+        let type_token = args[0].as_str();
+        let name = &args[1];
+        if !matches!(type_token, "int" | "float" | "bool" | "str") {
+            return Err(runtime_error(
+                &format!(
+                    "'read': unknown type '{type_token}' (expected int, float, bool, or str)"
+                ),
+                span,
+            )
+            .into());
+        }
+
+        let bytes = self.context.read_stdin_line().map_err(|error| {
+            runtime_error(&format!("'read': stdin read failed: {error}"), span)
+        })?;
+        let text = String::from_utf8(bytes).map_err(|_| {
+            runtime_error("'read': stdin contains bytes that are not valid UTF-8", span)
+        })?;
+        let value = text.trim_end_matches(['\r', '\n']).to_string();
+
+        match type_token {
+            "int" => {
+                value.parse::<i64>().map_err(|_| {
+                    runtime_error(&format!("'read': '{value}' is not a valid int"), span)
+                })?;
+            }
+            "float" => {
+                value.parse::<f64>().map_err(|_| {
+                    runtime_error(&format!("'read': '{value}' is not a valid float"), span)
+                })?;
+            }
+            "bool" => {
+                if value != "true" && value != "false" {
+                    return Err(runtime_error(
+                        &format!(
+                            "'read': '{value}' is not a valid bool (expected true or false)"
+                        ),
+                        span,
+                    )
+                    .into());
+                }
+            }
+            _ => {}
+        }
+
+        self.context.env_set(name.clone(), value);
+        Ok(spar_command::CommandPlan {
+            program: "true".to_string(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            redirections: vec![],
+            background: false,
+        })
+    }
+
     fn execute_native_shell_plan(
         &mut self,
         plan: &spar_command::ShellPlan,
@@ -3336,6 +3425,10 @@ impl Runtime<'_> {
                 args.push(self.eval_shell_word(argument, frame, module)?);
             }
         }
+        let program = self.eval_shell_word(&command.program, frame, module)?;
+        if program == "read" {
+            return self.eval_read_builtin(&args, command.background, &command.program.span);
+        }
         let mut env = Vec::with_capacity(command.environment.len());
         for (key, value) in &command.environment {
             env.push(spar_command::EnvironmentOverride {
@@ -3344,7 +3437,7 @@ impl Runtime<'_> {
             });
         }
         Ok(spar_command::CommandPlan {
-            program: self.eval_shell_word(&command.program, frame, module)?,
+            program,
             args,
             env,
             cwd: None,

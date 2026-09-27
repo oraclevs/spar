@@ -376,8 +376,16 @@ impl<'a> Runtime<'a> {
         // The `run` closure needs a handle to the very `Scheduler` it's
         // being installed into (to build each worker's `Runtime.scheduler`
         // field) — filled immediately after `Scheduler::new` returns, well
-        // before any task can possibly run.
-        let scheduler_cell: Arc<std::sync::OnceLock<Arc<scheduler::Scheduler>>> =
+        // before any task can possibly run. This must be a `Weak`, not an
+        // `Arc`: the closure is stored *inside* the `Scheduler` itself (as
+        // its `run` field), so an `Arc` here would be a reference cycle —
+        // Scheduler -> run closure -> Arc<Scheduler> -> back to Scheduler —
+        // that never frees, leaking the whole task table, the compiled
+        // program, and the module cache on every execution, including
+        // purely synchronous ones. A `Weak` breaks the cycle; it's always
+        // upgradable here because nothing can be running a task without
+        // the Scheduler itself still being alive somewhere up the stack.
+        let scheduler_cell: Arc<std::sync::OnceLock<std::sync::Weak<scheduler::Scheduler>>> =
             Arc::new(std::sync::OnceLock::new());
         let run_scheduler_cell = Arc::clone(&scheduler_cell);
         let run: Arc<dyn Fn(TaskInvocation) -> Result<Value, RuntimeFault> + Send + Sync> =
@@ -385,10 +393,11 @@ impl<'a> Runtime<'a> {
                 let scheduler = run_scheduler_cell
                     .get()
                     .expect("scheduler cell filled before any task can run")
-                    .clone();
+                    .upgrade()
+                    .expect("scheduler outlives every task it is currently running");
                 let mut worker_runtime = Runtime {
                     program: Arc::clone(&run_program),
-                    call_depth: 0,
+                    call_depth: invocation.call_depth,
                     state: Some(run_module_state.share()),
                     scheduler,
                     is_entry: false,
@@ -401,11 +410,29 @@ impl<'a> Runtime<'a> {
                     context: invocation.context,
                     _marker: std::marker::PhantomData,
                 };
-                worker_runtime.call_function(invocation.function, invocation.arguments)
+                let result =
+                    worker_runtime.call_function(invocation.function, invocation.arguments);
+                // `exit(code:)` inside this task's own call chain set
+                // `requested_exit` on this task's *isolated* context
+                // (`spawn_child` gives every task its own copy) — nothing
+                // about that is visible to whichever `Runtime` awaits this
+                // task's promise unless it's carried back explicitly.
+                // `RuntimeFault::Exit` is that side channel: it overrides
+                // whatever `call_function` itself returned (matching the
+                // original single-threaded semantics, where a real exit
+                // request always wins over a computed return value — see
+                // `call_function_with_context`'s own
+                // `requested_exit().unwrap_or(exit_code)`), and
+                // `Runtime::apply_exit_and_unwrap` on the awaiting side
+                // reapplies it to that side's own context.
+                match worker_runtime.context.requested_exit() {
+                    Some(code) => Err(RuntimeFault::Exit(code)),
+                    None => result,
+                }
             });
         let pool_scheduler =
             scheduler::Scheduler::new(scheduler::Scheduler::default_pool_size(), run);
-        let _ = scheduler_cell.set(Arc::clone(&pool_scheduler));
+        let _ = scheduler_cell.set(Arc::downgrade(&pool_scheduler));
         Runtime {
             program,
             call_depth: 0,
@@ -730,7 +757,10 @@ pub(crate) fn call_function_with_context(
         runtime.ensure_module(entry_module)?;
         let result = if runtime.function_is_async(function)? {
             let spawn_context = runtime.context.spawn_child();
-            let handle = runtime.scheduler.spawn(function, arguments, spawn_context);
+            let spawn_depth = runtime.call_depth + 1;
+            let handle = runtime
+                .scheduler
+                .spawn(function, arguments, spawn_context, spawn_depth);
             runtime.drive_promise(handle, &Span::dummy())
         } else {
             runtime.call_function(function, arguments)
@@ -877,7 +907,10 @@ impl Runtime<'_> {
     fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
             let spawn_context = self.context.spawn_child();
-            let handle = self.scheduler.spawn(entry, Vec::new(), spawn_context);
+            let spawn_depth = self.call_depth + 1;
+            let handle = self
+                .scheduler
+                .spawn(entry, Vec::new(), spawn_context, spawn_depth);
             self.drive_promise(handle, &Span::dummy())
         } else {
             self.call_function(entry, Vec::new())
@@ -923,7 +956,29 @@ impl Runtime<'_> {
         handle: crate::PromiseHandle,
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
-        self.scheduler.await_handle(handle, span)
+        let result = self.scheduler.await_handle(handle, span);
+        self.apply_exit_and_unwrap(result)
+    }
+
+    /// Translates a completed task's `RuntimeFault::Exit(code)` (see
+    /// `new_entry_runtime`'s `run` closure) into this `Runtime`'s own
+    /// `requested_exit`, and the value the rest of the language already
+    /// expects to see: exactly what an ordinary `exit(code:)` call produces
+    /// when it's *this* context that made it. Every place that consumes a
+    /// task's raw `Ready` result (`drive_promise`, `race`, `timeout`) must
+    /// route through this — otherwise `exit()` inside an awaited task is
+    /// silently lost the moment it crosses a task boundary.
+    fn apply_exit_and_unwrap(
+        &mut self,
+        result: Result<Value, RuntimeFault>,
+    ) -> Result<Value, RuntimeFault> {
+        match result {
+            Err(RuntimeFault::Exit(code)) => {
+                self.context.request_exit(code);
+                Ok(Value::Int(i64::from(code)))
+            }
+            other => other,
+        }
     }
 
     fn call_closure(
@@ -1210,7 +1265,14 @@ impl Runtime<'_> {
                         }
                         self.execute_statements(handler, frame, module)?
                     }
-                    Err(fatal @ RuntimeFault::Fatal(_)) => return Err(fatal),
+                    // A `Fatal` runtime error always propagates unconditionally
+                    // past `try`/`catch` — never caught by a user handler.
+                    // `Exit` gets the same treatment: an `exit(code:)` inside a
+                    // `try` block must not be swallowed by its `catch`, exactly
+                    // as it isn't gated by any other control-flow construct.
+                    Err(fault @ (RuntimeFault::Fatal(_) | RuntimeFault::Exit(_))) => {
+                        return Err(fault)
+                    }
                 },
             };
             if let Some(code) = self.context.requested_exit() {
@@ -1281,6 +1343,7 @@ impl Runtime<'_> {
                                 function,
                                 values,
                                 self.context.spawn_child(),
+                                self.call_depth + 1,
                             )))
                         } else {
                             self.call_function(function, values)
@@ -1487,6 +1550,7 @@ impl Runtime<'_> {
                                 *function,
                                 values,
                                 self.context.spawn_child(),
+                                self.call_depth + 1,
                             )));
                         }
                         let (result, method_frame, parameter_slots) =
@@ -1562,6 +1626,7 @@ impl Runtime<'_> {
                         *function,
                         values,
                         self.context.spawn_child(),
+                        self.call_depth + 1,
                     )))
                 } else {
                     self.call_function_typed(*function, values, requested_type)
@@ -1850,22 +1915,60 @@ impl Runtime<'_> {
                     .ok_or_else(|| {
                         runtime_error("typed JSON target module is unavailable", span)
                     })?;
-                let imports = self.program.modules.iter()
-                    .find(|module| module.id == target.module).unwrap().import_modules.clone();
-                let functions = self.program.modules.iter().flat_map(|module|
-                    module.functions.iter().map(|function| (function.key.clone(), function.id))
-                ).collect();
-                let parameters = self.program.modules.iter().flat_map(|module|
-                    crate::compiled::function_declarations(&module.checked.program).into_iter()
-                        .zip(&module.functions).map(|(declaration, function)| (function.id,
-                            declaration.params.iter().map(|parameter| (parameter.name.clone(), parameter.ty.clone())).collect()))
-                ).collect();
+                let imports = self
+                    .program
+                    .modules
+                    .iter()
+                    .find(|module| module.id == target.module)
+                    .unwrap()
+                    .import_modules
+                    .clone();
+                let functions = self
+                    .program
+                    .modules
+                    .iter()
+                    .flat_map(|module| {
+                        module
+                            .functions
+                            .iter()
+                            .map(|function| (function.key.clone(), function.id))
+                    })
+                    .collect();
+                let parameters = self
+                    .program
+                    .modules
+                    .iter()
+                    .flat_map(|module| {
+                        crate::compiled::function_declarations(&module.checked.program)
+                            .into_iter()
+                            .zip(&module.functions)
+                            .map(|(declaration, function)| {
+                                (
+                                    function.id,
+                                    declaration
+                                        .params
+                                        .iter()
+                                        .map(|parameter| {
+                                            (parameter.name.clone(), parameter.ty.clone())
+                                        })
+                                        .collect(),
+                                )
+                            })
+                    })
+                    .collect();
                 let mut default_fault = None;
                 let mut evaluate_default = |expression: &crate::ast::Expr, ty: &SparType| {
-                    let (expression, slots) = crate::lowerer::lower_default(expression, ty, &target_symbols,
+                    let (expression, slots) = crate::lowerer::lower_default(
+                        expression,
+                        ty,
+                        &target_symbols,
                         crate::lowerer::LoweringContext {
-                            module: target.module, imports: &imports, functions: &functions, parameters: &parameters,
-                        })?;
+                            module: target.module,
+                            imports: &imports,
+                            functions: &functions,
+                            parameters: &parameters,
+                        },
+                    )?;
                     self.eval_expression(&expression, &mut Frame::new(slots), target.module)
                         .map_err(|fault| {
                             default_fault = Some(fault.clone());
@@ -1876,7 +1979,8 @@ impl Runtime<'_> {
                     symbols: &target_symbols,
                     evaluate_default: &mut evaluate_default,
                 };
-                let decoded = crate::stdlib::support::decode_json_typed(parsed, &target.ty, &mut environment);
+                let decoded =
+                    crate::stdlib::support::decode_json_typed(parsed, &target.ty, &mut environment);
                 match default_fault {
                     Some(fault) => Err(fault),
                     None => decoded.map_err(Into::into),
@@ -1918,7 +2022,7 @@ impl Runtime<'_> {
                     let mut pending = false;
                     for handle in &promises {
                         match self.scheduler.status_snapshot(*handle) {
-                            TaskStatus::Ready(result) => return result,
+                            TaskStatus::Ready(result) => return self.apply_exit_and_unwrap(result),
                             TaskStatus::Pending => pending = true,
                             TaskStatus::Running => pending = true,
                             TaskStatus::Cancelled => {
@@ -1998,7 +2102,7 @@ impl Runtime<'_> {
                                 )
                                 .into());
                             }
-                            return result;
+                            return self.apply_exit_and_unwrap(result);
                         }
                         // `Running` now legitimately means "a worker thread
                         // is actively executing it right now" (real
@@ -4398,6 +4502,7 @@ impl Runtime<'_> {
                     .map(Value::from_config)
                     .collect(),
                 self.context.spawn_child(),
+                self.call_depth + 1,
             );
             replacements.insert(pending.handle, handle);
         }
@@ -5157,6 +5262,25 @@ fn runtime_error(message: &str, span: &Span) -> SparError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_runtime_drop_frees_its_scheduler() {
+        let program = Arc::new(
+            crate::Engine::default()
+                .compile_source("function main() -> int { return 0; };")
+                .unwrap(),
+        );
+        let context = RuntimeContext::for_base_dir(&program.options.base_dir);
+        let runtime = Runtime::new_entry_runtime(Arc::clone(&program), context);
+        let weak_scheduler = Arc::downgrade(&runtime.scheduler);
+        drop(runtime);
+        assert!(
+            weak_scheduler.upgrade().is_none(),
+            "Scheduler should be freed once the entry Runtime that owns it drops \
+             (a reference cycle between the Scheduler and its own `run` closure \
+             would keep it alive forever)"
+        );
+    }
 
     #[test]
     fn frame_reads_and_writes_valid_slots() {

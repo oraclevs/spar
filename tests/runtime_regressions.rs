@@ -133,29 +133,40 @@ fn map_value_preserves_insertion_order_and_replace_in_place() {
 #[test]
 fn map_value_supports_non_string_keys_including_bool_and_float() {
     let mut by_int = Value::Map(vec![].into());
-    let Value::Map(map) = &mut by_int else { unreachable!() };
+    let Value::Map(map) = &mut by_int else {
+        unreachable!()
+    };
     assert_eq!(map.insert(Value::Int(1), Value::String("one".into())), None);
     assert_eq!(map.insert(Value::Int(2), Value::String("two".into())), None);
     assert_eq!(map.get(&Value::Int(1)), Some(&Value::String("one".into())));
     assert_eq!(map.get(&Value::Int(3)), None);
 
     let mut by_bool = Value::Map(vec![].into());
-    let Value::Map(map) = &mut by_bool else { unreachable!() };
+    let Value::Map(map) = &mut by_bool else {
+        unreachable!()
+    };
     map.insert(Value::Bool(true), Value::Int(1));
     map.insert(Value::Bool(false), Value::Int(0));
     assert_eq!(map.get(&Value::Bool(true)), Some(&Value::Int(1)));
     assert_eq!(map.get(&Value::Bool(false)), Some(&Value::Int(0)));
 
     let mut by_float = Value::Map(vec![].into());
-    let Value::Map(map) = &mut by_float else { unreachable!() };
+    let Value::Map(map) = &mut by_float else {
+        unreachable!()
+    };
     map.insert(Value::Float(1.5), Value::String("a".into()));
     map.insert(Value::Float(2.5), Value::String("b".into()));
-    assert_eq!(map.get(&Value::Float(1.5)), Some(&Value::String("a".into())));
+    assert_eq!(
+        map.get(&Value::Float(1.5)),
+        Some(&Value::String("a".into()))
+    );
 
     // A key type with no fast-path index (Other) must still round-trip
     // correctly, just without the O(1) lookup.
     let mut by_list = Value::Map(vec![].into());
-    let Value::Map(map) = &mut by_list else { unreachable!() };
+    let Value::Map(map) = &mut by_list else {
+        unreachable!()
+    };
     let list_key = Value::List(vec![Value::Int(1), Value::Int(2)]);
     map.insert(list_key.clone(), Value::String("listy".into()));
     assert_eq!(map.get(&list_key), Some(&Value::String("listy".into())));
@@ -383,8 +394,7 @@ fn await_on_an_async_impl_method_call_works_like_an_async_function() {
 // parts list from the split-off value when it's actually non-empty.
 #[test]
 fn env_prefix_value_starting_with_interpolation_formats_stably() {
-    let source =
-        "task Show {\n    run {\n        SPAR_A=${secret} printenv SPAR_A;\n    };\n};\n";
+    let source = "task Show {\n    run {\n        SPAR_A=${secret} printenv SPAR_A;\n    };\n};\n";
     let once = spar::formatter::format_source(source).expect("format");
     let twice = spar::formatter::format_source(&once).expect("format again");
     assert_eq!(once, twice, "formatting must be idempotent");
@@ -540,4 +550,109 @@ fn blocking_process_wait_does_not_stall_concurrent_async_work() {
         )
         .expect("process wait and concurrent delay should both complete");
     assert_eq!(outcome.exit_status, 0);
+}
+
+// Regression (found in final review, not the original plan): nested `await`
+// — an async fn awaiting another async fn it called, the shape the stdlib
+// itself uses everywhere (`std/http::get` awaits `request`, `std/async::all`
+// awaits each promise in its list) — used to be able to deadlock the whole
+// worker pool at realistic fan-out, well under the pool's own size limit,
+// because a worker blocked in `await_handle` held its thread doing nothing
+// while waiting for a `Pending` task that no *other* free worker existed to
+// pick up. `Scheduler::await_handle` now claims and runs a `Pending` task
+// inline on the waiting thread instead of only blocking, which makes this
+// deadlock structurally impossible regardless of fan-out width.
+#[test]
+fn nested_await_fan_out_does_not_deadlock_the_pool() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { all } from "std/async";
+            import pkg { sleepMillis } from "std/time";
+            async fn inner() -> int {
+                sleepMillis(millis: 20);
+                return 1;
+            };
+            async fn outer(tag: int) -> int {
+                return await inner();
+            };
+            async fn main() -> int {
+                var mut ps: [Promise<int>] = [];
+                for i in range(end: 40) { ps.append(value: outer(tag: i)); }
+                var rs = await all<int>(promises: ps);
+                return rs.length();
+            };
+            "#,
+        )
+        .expect("nested fan-out should not deadlock the worker pool");
+    assert_eq!(outcome.exit_status, 40);
+}
+
+// Regression (found in final review): `exit(code:)` called inside a task
+// that's spawned and then `await`ed used to be silently lost — the task's
+// own `RuntimeContext` is an isolated `spawn_child()` copy (by design, see
+// Task 1), so setting `requested_exit` on it never reached the awaiting
+// side's context, and execution just continued past the `await` as if
+// nothing had happened. Mirrors the existing synchronous baseline
+// (`stdlib_process.rs::process_exit_requests_runtime_exit_without_terminating_embedder`)
+// but across an `await` boundary.
+#[test]
+fn exit_inside_an_awaited_task_propagates_to_the_awaiting_context() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { exit } from "std/process";
+            async fn quit() -> int {
+                exit(code: 7);
+                return 0;
+            };
+            async fn main() -> int {
+                var r = await quit();
+                return 1;
+            };
+            "#,
+        )
+        .expect("exit inside an awaited task should run");
+    assert_eq!(outcome.exit_status, 7);
+}
+
+// Regression (found in final review): if the entry point errors while a
+// detached (fire-and-forget) task is still in flight, the entry `Runtime`
+// drops, and `Scheduler::shutdown` cancels not-yet-started work, stops the
+// pool, and joins every worker thread. Under the old blocking-only
+// `await_handle`, a still-running detached task that then spawned and
+// awaited its own subtask would wait forever for a free pool worker that
+// would never come (every worker had already exited or was about to) —
+// `shutdown`'s `join()` call, and so the whole process, hung permanently.
+// The same inline-execution fix that resolves nested-await pool exhaustion
+// resolves this too: the still-running task's own thread claims and runs
+// its subtask itself, so it always finishes (here, within ~100ms), instead
+// of waiting on a pool that's shutting down around it.
+#[test]
+fn spawning_a_subtask_after_shutdown_has_started_does_not_hang() {
+    let start = Instant::now();
+    let result = Engine::new(CompileOptions::default()).execute_source(
+        r#"
+            import pkg { sleepMillis } from "std/time";
+            async fn helper() -> int { return 5; };
+            async fn background() -> int {
+                sleepMillis(millis: 100);
+                return await helper();
+            };
+            async fn main() -> int {
+                background();
+                return 1 / 0;
+            };
+            "#,
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        result.is_err(),
+        "main's own division-by-zero error should still propagate"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "a subtask spawned by a task that outlives the entry point's own error \
+         must not hang the process forever, took {elapsed:?}"
+    );
 }

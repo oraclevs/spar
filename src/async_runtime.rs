@@ -7,12 +7,33 @@ use crate::{PromiseHandle, SparError, Value};
 pub(crate) enum RuntimeFault {
     Raised(SparError),
     Fatal(SparError),
+    /// A spawned task's own execution called `exit(code:)`. This is not a
+    /// user-facing error — it's a side channel from a worker-side `Runtime`
+    /// (whose `RuntimeContext` is an isolated `spawn_child()` copy, so
+    /// setting `requested_exit` on it is invisible to the awaiting side)
+    /// back to whichever `Runtime` `await`s this task's promise, so it can
+    /// apply the same exit request to its own context and keep the
+    /// existing per-statement unwind-on-`requested_exit` mechanism working
+    /// across an `await` boundary the same way it always did within one
+    /// thread. See `Runtime::apply_exit_and_unwrap`.
+    Exit(i32),
 }
 
 impl RuntimeFault {
     pub(crate) fn into_error(self) -> SparError {
         match self {
             Self::Raised(error) | Self::Fatal(error) => error,
+            // Should never actually surface: every place that consumes a
+            // task's result (`drive_promise`, `race`, `timeout`) translates
+            // `Exit` before it can reach a caller that renders it as a
+            // diagnostic. This is a defensive fallback, not a normal path.
+            Self::Exit(code) => SparError::EvalError {
+                message: format!(
+                    "internal runtime error: exit request (code {code}) was not applied \
+                     before its promise result was rendered as an error"
+                ),
+                span: crate::error::Span::dummy(),
+            },
         }
     }
 }
@@ -21,6 +42,7 @@ impl std::fmt::Display for RuntimeFault {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Raised(error) | Self::Fatal(error) => error.fmt(formatter),
+            Self::Exit(code) => write!(formatter, "exit request (code {code})"),
         }
     }
 }
@@ -36,6 +58,14 @@ pub(crate) struct TaskInvocation {
     pub(crate) function: FunctionId,
     pub(crate) arguments: Vec<Value>,
     pub(crate) context: crate::runtime::context::RuntimeContext,
+    /// The spawning `Runtime`'s own `call_depth` at spawn time, plus one.
+    /// Each worker-side `Runtime` built to run this task starts its
+    /// `call_depth` from here instead of 0 — otherwise `MAX_CALL_DEPTH`
+    /// never trips for recursion that goes through `async fn`/`await`
+    /// (every nested async call would reset the counter), turning a
+    /// language-level "recursion too deep" diagnostic into an unbounded
+    /// resource consumer instead.
+    pub(crate) call_depth: usize,
 }
 
 enum TaskState {
@@ -59,6 +89,7 @@ impl TaskTable {
         function: FunctionId,
         arguments: Vec<Value>,
         context: crate::runtime::context::RuntimeContext,
+        call_depth: usize,
     ) -> PromiseHandle {
         let handle = PromiseHandle::new(self.next_id);
         self.next_id += 1;
@@ -68,6 +99,7 @@ impl TaskTable {
                 function,
                 arguments,
                 context,
+                call_depth,
             }),
         );
         self.created.insert(handle, std::time::Instant::now());
@@ -176,7 +208,7 @@ mod tests {
     fn spawned_task_captures_a_context_snapshot() {
         let mut tasks = TaskTable::default();
         let ctx = crate::runtime::context::RuntimeContext::new(std::path::PathBuf::from("/tmp"));
-        let handle = tasks.spawn(FunctionId(1), Vec::new(), ctx.spawn_child());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), ctx.spawn_child(), 0);
         let invocation = tasks.start(handle).unwrap();
         assert_eq!(invocation.context.cwd(), std::path::Path::new("/tmp"));
     }
@@ -184,7 +216,7 @@ mod tests {
     #[test]
     fn completed_task_is_started_only_once() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(7), vec![Value::Int(3)], test_context());
+        let handle = tasks.spawn(FunctionId(7), vec![Value::Int(3)], test_context(), 0);
         let invocation = tasks.start(handle).unwrap();
         assert_eq!(invocation.function, FunctionId(7));
         tasks.complete(handle, Ok(Value::Int(4)));
@@ -198,7 +230,7 @@ mod tests {
     #[test]
     fn pending_tasks_are_cancelled_at_shutdown() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context(), 0);
         tasks.cancel_pending();
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Cancelled)));
     }
@@ -206,7 +238,7 @@ mod tests {
     #[test]
     fn running_tasks_are_cancelled_at_shutdown() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context(), 0);
         tasks.start(handle).unwrap();
         tasks.cancel_pending();
         assert!(matches!(tasks.status(handle), TaskStatus::Cancelled));
@@ -215,7 +247,7 @@ mod tests {
     #[test]
     fn starting_a_running_task_reports_a_cycle_candidate() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context(), 0);
         assert!(tasks.start(handle).is_ok());
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Running)));
     }
@@ -223,7 +255,7 @@ mod tests {
     #[test]
     fn queued_task_reports_pending_until_the_scheduler_starts_it() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context(), 0);
         assert!(matches!(tasks.status(handle), TaskStatus::Pending));
         assert!(tasks.next_pending().is_some());
         assert!(matches!(tasks.status(handle), TaskStatus::Running));

@@ -50,8 +50,17 @@ fn bytes_and_list_methods_live_on_values_without_removing_free_functions() {
                     .take(count: 2);
 
                 if count(source: legacy) != modern.count() { return 3; }
-                if get(source: legacy, key: 0) != modern.get(index: 0) { return 4; }
-                if modern.first() != 6 || modern.last() != 8 { return 5; }
+                // get() free function is strict (errors on a missing index);
+                // .get() the method is safe (returns Option<T>) -- by
+                // design, not a bug (see stdlib_data.rs's
+                // group_by_returns_map_of_tables_and_get_is_strict_lookup).
+                if get(source: legacy, key: 0) != modern.get(index: 0).unwrap() { return 4; }
+                // .first()/.last() the method are the safe canonical List
+                // surface (Option<T>) -- src/stdlib/data.rs deliberately
+                // doesn't shadow them with its bare-T free-function-style
+                // versions (see the "must not shadow the core safe/
+                // canonical List surface" comment in its registration).
+                if modern.first().unwrap() != 6 || modern.last().unwrap() != 8 { return 5; }
                 if modern.length() != 2 || modern.isEmpty() { return 6; }
                 return 0;
             };
@@ -78,11 +87,11 @@ fn map_methods_cover_length_keys_values_and_canonical_get() {
                     User(name: "Ngozi", team: "red")
                 ] |> collectTable();
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(key: |user: User| user.team);
+                    |> groupBy(key: |value: User| value.team);
 
                 if groups.length() != 2 || groups.isEmpty() { return 1; }
                 if groups.keys().length() != 2 || groups.values().length() != 2 { return 2; }
-                if groups.get(key: "red").count() != get(source: groups, key: "red").count() { return 3; }
+                if groups.get(key: "red").unwrap().count() != get(source: groups, key: "red").count() { return 3; }
                 if !groups.containsKey(key: "blue") { return 4; }
                 return 0;
             };
@@ -199,7 +208,7 @@ fn generic_list_methods_infer_untyped_closure_parameters_and_results() {
                 var values: [int] = [1, 2, 3];
                 var doubled: [int] = values.map(transform: |value: int| value * 2);
                 var selected: [int] = doubled.filter(predicate: |value: int| value >= 4);
-                return selected.first() + selected.last();
+                return selected.first().unwrap() + selected.last().unwrap();
             };
             "#,
         )

@@ -62,7 +62,7 @@ fn collect_table_filter_select_schema_and_methods_share_semantics() {
                 ] |> collectTable();
 
                 var active: Table<User> = table
-                    |> filter(predicate: |user: User| user.active);
+                    |> filter(predicate: |value: User| value.active);
                 var names: Table<Record> = active |> select(fields: ["name"]);
                 var tableSchema: Schema = schema(source: names);
 
@@ -95,7 +95,7 @@ fn group_by_returns_map_of_tables_and_get_is_strict_lookup() {
                     User(name: "Ngozi", team: "red")
                 ] |> collectTable();
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(key: |user: User| user.team);
+                    |> groupBy(key: |value: User| value.team);
                 var red: Table<User> = get(source: groups, key: "red");
                 var blue: Table<User> = get(source: groups, key: "blue");
                 return red.count() * 10 + blue.count();
@@ -123,8 +123,8 @@ fn where_unique_by_and_inspect_preserve_table_shape() {
                     User(name: "Ada", age: 31)
                 ] |> collectTable();
                 var result: Table<User> = users
-                    |> where(predicate: |user: User| user.age >= 24)
-                    |> uniqueBy(key: |user: User| user.name)
+                    |> where(predicate: |value: User| value.age >= 24)
+                    |> uniqueBy(key: |value: User| value.name)
                     |> inspect();
                 return result.count();
             };

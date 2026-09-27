@@ -2438,7 +2438,14 @@ impl Resolver {
             }
             return Ok(());
         };
-        let implicit_param = entry.params.first().map(|(name, _)| name.clone());
+        // Same "first param not already explicitly supplied" rule as
+        // pipe_stage_with_input — not simply the first declared param.
+        let supplied: HashSet<&str> = args.iter().map(|a| a.param_name.as_str()).collect();
+        let implicit_param = entry
+            .params
+            .iter()
+            .find(|(name, _)| !supplied.contains(name.as_str()))
+            .map(|(name, _)| name.clone());
         let param_names: HashSet<String> = entry.params.iter().map(|(n, _)| n.clone()).collect();
         let mut seen: HashSet<String> = HashSet::new();
         for arg in args {
@@ -2489,7 +2496,12 @@ impl Resolver {
             _ => return None,
         };
         let segments: Vec<&str> = name.split("::").collect();
-        let first_param = match segments.as_slice() {
+        let supplied: HashSet<&str> = args.iter().map(|a| a.param_name.as_str()).collect();
+        // The implicit slot is the first param NOT already explicitly
+        // supplied — not simply the first param declared — so an explicit
+        // argument for an earlier param (e.g. `decorate(prefix: "...")`
+        // piping into its later `value` param) doesn't collide with it.
+        let implicit_param = match segments.as_slice() {
             [function] => self
                 .functions
                 .get(*function)
@@ -2502,12 +2514,13 @@ impl Resolver {
             _ => None,
         }?
         .params
-        .first()?
+        .iter()
+        .find(|(name, _)| !supplied.contains(name.as_str()))?
         .0
         .clone();
         let mut injected = Vec::with_capacity(args.len() + 1);
         injected.push(CallArg {
-            param_name: first_param,
+            param_name: implicit_param,
             param_name_span: span.clone(),
             value: input.clone(),
             span: span.clone(),

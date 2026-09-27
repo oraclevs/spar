@@ -669,7 +669,7 @@ pub(crate) fn call_function_with_context(
     let called: Result<Value, RuntimeFault> = (|| {
         runtime.ensure_module(program.entry)?;
         if runtime.function_is_async(function)? {
-            let handle = runtime.tasks.spawn(function, arguments);
+            let handle = runtime.tasks.spawn(function, arguments, runtime.context.spawn_child());
             runtime.drive_promise(handle, &Span::dummy())
         } else {
             runtime.call_function(function, arguments)
@@ -819,7 +819,7 @@ enum RuntimeFlow {
 impl Runtime<'_> {
     fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
-            let handle = self.tasks.spawn(entry, Vec::new());
+            let handle = self.tasks.spawn(entry, Vec::new(), self.context.spawn_child());
             self.drive_promise(handle, &Span::dummy())
         } else {
             self.call_function(entry, Vec::new())
@@ -1261,7 +1261,11 @@ impl Runtime<'_> {
                     Value::Closure(closure) => self.call_closure(closure, values, span),
                     Value::Function(function) => {
                         if self.function_is_async(function)? {
-                            Ok(Value::Promise(self.tasks.spawn(function, values)))
+                            Ok(Value::Promise(self.tasks.spawn(
+                                function,
+                                values,
+                                self.context.spawn_child(),
+                            )))
                         } else {
                             self.call_function(function, values)
                         }
@@ -1463,7 +1467,11 @@ impl Runtime<'_> {
                         // here (the call is deferred, not run inline), but
                         // no stdlib method combines the two today.
                         if self.function_is_async(*function)? {
-                            return Ok(Value::Promise(self.tasks.spawn(*function, values)));
+                            return Ok(Value::Promise(self.tasks.spawn(
+                                *function,
+                                values,
+                                self.context.spawn_child(),
+                            )));
                         }
                         let (result, method_frame, parameter_slots) =
                             self.call_function_with_frame(*function, values)?;
@@ -1534,7 +1542,11 @@ impl Runtime<'_> {
                     // Async generic reification is not currently consumed by a
                     // native reflection API. Ordinary promise execution remains
                     // type-erased; sync generic wrappers preserve their target.
-                    Ok(Value::Promise(self.tasks.spawn(*function, values)))
+                    Ok(Value::Promise(self.tasks.spawn(
+                        *function,
+                        values,
+                        self.context.spawn_child(),
+                    )))
                 } else {
                     self.call_function_typed(*function, values, requested_type)
                 }
@@ -4373,6 +4385,7 @@ impl Runtime<'_> {
                     .into_iter()
                     .map(Value::from_config)
                     .collect(),
+                self.context.spawn_child(),
             );
             replacements.insert(pending.handle, handle);
         }

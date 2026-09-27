@@ -31,10 +31,11 @@ impl From<SparError> for RuntimeFault {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TaskInvocation {
     pub(crate) function: FunctionId,
     pub(crate) arguments: Vec<Value>,
+    pub(crate) context: crate::runtime::context::RuntimeContext,
 }
 
 enum TaskState {
@@ -53,7 +54,12 @@ pub(crate) struct TaskTable {
 }
 
 impl TaskTable {
-    pub(crate) fn spawn(&mut self, function: FunctionId, arguments: Vec<Value>) -> PromiseHandle {
+    pub(crate) fn spawn(
+        &mut self,
+        function: FunctionId,
+        arguments: Vec<Value>,
+        context: crate::runtime::context::RuntimeContext,
+    ) -> PromiseHandle {
         let handle = PromiseHandle::new(self.next_id);
         self.next_id += 1;
         self.states.insert(
@@ -61,6 +67,7 @@ impl TaskTable {
             TaskState::Pending(TaskInvocation {
                 function,
                 arguments,
+                context,
             }),
         );
         self.created.insert(handle, std::time::Instant::now());
@@ -79,9 +86,14 @@ impl TaskTable {
             return Err(TaskStatus::Unknown);
         };
         match state {
-            TaskState::Pending(invocation) => {
-                let invocation = invocation.clone();
-                *state = TaskState::Running;
+            TaskState::Pending(_) => {
+                // `RuntimeContext` (inside `TaskInvocation`) intentionally
+                // isn't `Clone` — it owns per-task resource handles — so the
+                // invocation is moved out of `Pending` rather than cloned.
+                let TaskState::Pending(invocation) = std::mem::replace(state, TaskState::Running)
+                else {
+                    unreachable!("state was just matched as Pending")
+                };
                 Ok(invocation)
             }
             TaskState::Running => Err(TaskStatus::Running),
@@ -136,10 +148,23 @@ pub(crate) enum TaskStatus {
 mod tests {
     use super::*;
 
+    fn test_context() -> crate::runtime::context::RuntimeContext {
+        crate::runtime::context::RuntimeContext::new(std::path::PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn spawned_task_captures_a_context_snapshot() {
+        let mut tasks = TaskTable::default();
+        let ctx = crate::runtime::context::RuntimeContext::new(std::path::PathBuf::from("/tmp"));
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), ctx.spawn_child());
+        let invocation = tasks.start(handle).unwrap();
+        assert_eq!(invocation.context.cwd(), std::path::Path::new("/tmp"));
+    }
+
     #[test]
     fn completed_task_is_started_only_once() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(7), vec![Value::Int(3)]);
+        let handle = tasks.spawn(FunctionId(7), vec![Value::Int(3)], test_context());
         let invocation = tasks.start(handle).unwrap();
         assert_eq!(invocation.function, FunctionId(7));
         tasks.complete(handle, Ok(Value::Int(4)));
@@ -153,7 +178,7 @@ mod tests {
     #[test]
     fn pending_tasks_are_cancelled_at_shutdown() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
         tasks.cancel_pending();
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Cancelled)));
     }
@@ -161,7 +186,7 @@ mod tests {
     #[test]
     fn running_tasks_are_cancelled_at_shutdown() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
         tasks.start(handle).unwrap();
         tasks.cancel_pending();
         assert!(matches!(tasks.status(handle), TaskStatus::Cancelled));
@@ -170,7 +195,7 @@ mod tests {
     #[test]
     fn starting_a_running_task_reports_a_cycle_candidate() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
         assert!(tasks.start(handle).is_ok());
         assert!(matches!(tasks.start(handle), Err(TaskStatus::Running)));
     }
@@ -178,7 +203,7 @@ mod tests {
     #[test]
     fn queued_task_reports_pending_until_the_scheduler_starts_it() {
         let mut tasks = TaskTable::default();
-        let handle = tasks.spawn(FunctionId(1), Vec::new());
+        let handle = tasks.spawn(FunctionId(1), Vec::new(), test_context());
         assert!(matches!(tasks.status(handle), TaskStatus::Pending));
         assert!(tasks.next_pending().is_some());
         assert!(matches!(tasks.status(handle), TaskStatus::Running));

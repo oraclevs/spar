@@ -124,6 +124,16 @@ pub struct RuntimeContext {
     last_exit_code: Option<i32>,
 }
 
+impl std::fmt::Debug for RuntimeContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeContext")
+            .field("cwd", &self.cwd)
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
 impl RuntimeContext {
     pub fn new(cwd: PathBuf) -> Self {
         Self {

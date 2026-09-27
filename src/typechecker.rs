@@ -2955,6 +2955,11 @@ impl<'a> TypeChecker<'a> {
         };
         match expected {
             SparType::Named(name) if name == "Record" => Ok(()),
+            // `Any` accepts everything by definition, including a dynamic
+            // object literal — this was falling through to the generic
+            // "object literals are only valid for Record or Map" rejection
+            // below instead.
+            SparType::Any => Ok(()),
             SparType::Applied { name, arguments } if name == "Map" && arguments.len() == 2 => {
                 let key_type = &arguments[0];
                 let value_type = &arguments[1];

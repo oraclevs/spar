@@ -152,7 +152,12 @@ fn http_response_exposes_headers_optional_content_type_and_non_success_bodies() 
             if !response.isClientError() {{ return 2; }}
             if response.body != "missing" {{ return 3; }}
             if response.contentType.unwrap() != "application/json" {{ return 4; }}
-            if response.headers.get(key: "X-Request-Id").unwrap() != "abc123" {{ return 5; }}
+            // response.headers keys are always lowercased (ureq's own
+            // headers_names() lowercases them and doesn't expose the
+            // original casing — the same convention Node's
+            // http.IncomingMessage.headers uses), regardless of how the
+            // server capitalized them on the wire.
+            if response.headers.get(key: "x-request-id").unwrap() != "abc123" {{ return 5; }}
             return 0;
         }};
         "#

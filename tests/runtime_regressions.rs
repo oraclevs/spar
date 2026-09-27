@@ -432,3 +432,39 @@ fn imported_module_state_persists_across_two_calls_into_it() {
     // this would read 1 + 1 = 2 instead of the correct 1 + 2 = 3.
     assert_eq!(outcome.exit_status, 3);
 }
+
+// Regression: the flagship proof for Phase 2 (real multi-threaded async
+// concurrency) — spawning several async tasks and awaiting them together
+// must actually overlap on real OS threads, not run one at a time on a
+// single-threaded cooperative scheduler (the old TaskTable behavior).
+#[test]
+fn concurrent_async_delays_overlap_not_serialize() {
+    let start = Instant::now();
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { all } from "std/async";
+            import pkg { sleepMillis } from "std/time";
+            async fn slow() -> int {
+                sleepMillis(millis: 200);
+                return 1;
+            };
+            async fn main() -> int {
+                var mut ps: [Promise<int>] = [];
+                for i in range(end: 5) { ps.append(value: slow()); }
+                var rs = await all<int>(promises: ps);
+                return rs.length();
+            };
+            "#,
+        )
+        .expect("concurrent delays should execute");
+    let elapsed = start.elapsed();
+    assert_eq!(outcome.exit_status, 5);
+    // Serial would take ~1000ms (5 x 200ms); concurrent should land near
+    // 200ms. 600ms leaves generous headroom for scheduling/test-machine
+    // jitter while still failing hard on a regression back to serial.
+    assert!(
+        elapsed < std::time::Duration::from_millis(600),
+        "expected concurrent execution (~200ms), took {elapsed:?} — looks serial"
+    );
+}

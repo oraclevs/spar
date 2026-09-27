@@ -133,6 +133,26 @@ impl TaskTable {
         }
         self.queue.clear();
     }
+
+    /// Whether any task is still `Pending` or `Running` — used to wait for
+    /// every spawned task (including ones nothing ever `await`s) to reach a
+    /// final state before an entry point declares success.
+    pub(crate) fn any_unsettled(&self) -> bool {
+        self.states
+            .values()
+            .any(|state| matches!(state, TaskState::Pending(_) | TaskState::Running))
+    }
+
+    /// The first `Fatal` fault among completed tasks, if any — a panic
+    /// inside a spawned-but-never-`await`ed task must still abort the
+    /// program, the same way it did under the old single-threaded
+    /// cooperative scheduler (where every statement ticked the queue).
+    pub(crate) fn first_fatal(&self) -> Option<RuntimeFault> {
+        self.states.values().find_map(|state| match state {
+            TaskState::Ready(Err(fault @ RuntimeFault::Fatal(_))) => Some(fault.clone()),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug)]

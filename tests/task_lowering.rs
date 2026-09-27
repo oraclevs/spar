@@ -488,8 +488,10 @@ fn injected_task_function_runs_the_native_run_block_live_with_bound_params() {
         native_task_names: Vec::new(),
         errors: Vec::new(),
     };
-    let compiled = CompiledProgram::from_compilation(compiled_input, CompileOptions::default())
-        .expect("injected task function should lower");
+    let compiled = std::sync::Arc::new(
+        CompiledProgram::from_compilation(compiled_input, CompileOptions::default())
+            .expect("injected task function should lower"),
+    );
     let function = compiled
         .task_entry("Greet")
         .expect("Greet's native run block should have a compiled entry");

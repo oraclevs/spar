@@ -48,7 +48,7 @@ fn task_expr_evaluator(
 #[allow(clippy::type_complexity)]
 fn native_block_runner<'a>(
     compilation: &'a Compilation,
-    compiled: &'a spar::CompiledProgram,
+    compiled: &'a std::sync::Arc<spar::CompiledProgram>,
 ) -> impl Fn(
     usize,
     &BTreeMap<String, BoundValue>,
@@ -1012,7 +1012,7 @@ fn cmd_run(
             errors: Vec::new(),
         };
         match spar::CompiledProgram::from_compilation(compiled_input, compiled_options) {
-            Ok(program) => program,
+            Ok(program) => std::sync::Arc::new(program),
             Err(errors) => {
                 eprintln!("{}", renderer.render_all(&errors));
                 std::process::exit(1);

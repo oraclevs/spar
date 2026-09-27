@@ -23,7 +23,7 @@ pub use table::TableValue;
 pub use value::Value;
 
 use crate::ast::SparType;
-use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus, TaskTable};
+use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus};
 use crate::compiled::{
     CompiledExpression, CompiledMethodTarget, CompiledObjectItem, CompiledProgram,
     CompiledShellCommand, CompiledShellExpr, CompiledShellMixedPipeline, CompiledShellRedirect,
@@ -302,7 +302,7 @@ const MAX_CALL_DEPTH: usize = 20;
 
 #[cfg(test)]
 pub(crate) fn execute_self_contained_entry(
-    program: &CompiledProgram,
+    program: &Arc<CompiledProgram>,
 ) -> Result<Value, Vec<SparError>> {
     let entry = program.entry_main.ok_or_else(|| {
         vec![SparError::ResolveError {
@@ -311,21 +311,17 @@ pub(crate) fn execute_self_contained_entry(
             span: Span::dummy(),
         }]
     })?;
-    Runtime {
-        program,
-        call_depth: 0,
-        state: None,
-        tasks: TaskTable::default(),
-        shell_depth: 0,
-        shell_outcome: None,
-        jobs: Vec::new(),
-        last_job: None,
-        shell_exit: false,
-        shell_cwd: None,
-        context: RuntimeContext::for_base_dir(&program.options.base_dir),
-    }
-    .run_entry(entry)
-    .map_err(|fault| vec![fault.into_error()])
+    let mut runtime = Runtime::new_entry_runtime(
+        Arc::clone(program),
+        RuntimeContext::for_base_dir(&program.options.base_dir),
+    );
+    // Unlike the other 3 entry points, this test-only helper never calls
+    // `ensure_module` — it drives `run_entry` directly against whatever
+    // self-contained program the caller compiled, with no module state.
+    runtime.state = None;
+    runtime
+        .run_entry(entry)
+        .map_err(|fault| vec![fault.into_error()])
 }
 
 #[derive(Clone)]
@@ -336,10 +332,11 @@ enum DataSequenceShape {
 }
 
 pub(crate) struct Runtime<'a> {
-    program: &'a CompiledProgram,
+    program: Arc<CompiledProgram>,
     call_depth: usize,
     state: Option<ModuleState>,
-    tasks: TaskTable,
+    scheduler: Arc<scheduler::Scheduler>,
+    is_entry: bool,
     shell_depth: usize,
     shell_outcome: Option<crate::evaluator::ShellPlanOutcome>,
     jobs: Vec<spar_process::Job>,
@@ -347,12 +344,83 @@ pub(crate) struct Runtime<'a> {
     shell_exit: bool,
     shell_cwd: Option<std::path::PathBuf>,
     context: RuntimeContext,
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl Drop for Runtime<'_> {
     fn drop(&mut self) {
-        self.tasks.cancel_pending();
+        // Worker-side `Runtime`s (built fresh per task by the scheduler's
+        // `run` callback) must NOT shut the scheduler down when they finish
+        // one task — only the entry `Runtime` (the one the top-level
+        // `execute_*` free function owns) does, and only once every other
+        // pending/in-flight task has had a chance to run to completion.
+        if self.is_entry {
+            self.scheduler.shutdown();
+        }
         self.context.shutdown();
+    }
+}
+
+impl<'a> Runtime<'a> {
+    /// Builds the top-level `Runtime` for one `execute_*` call, plus the
+    /// `Scheduler` backing every async task it (transitively) spawns. Each
+    /// spawned task runs on a worker thread through a fresh, short-lived
+    /// `Runtime` built by the closure below, sharing this one's `program`
+    /// (`Arc`-cloned, cheap) and `ModuleState` (also `Arc`-shared — see
+    /// `ModuleState::share`) but owning its own call stack and a
+    /// `RuntimeContext` snapshot captured at spawn time.
+    fn new_entry_runtime(program: Arc<CompiledProgram>, context: RuntimeContext) -> Self {
+        let module_state = ModuleState::new(&program);
+        let run_program = Arc::clone(&program);
+        let run_module_state = module_state.share();
+        // The `run` closure needs a handle to the very `Scheduler` it's
+        // being installed into (to build each worker's `Runtime.scheduler`
+        // field) — filled immediately after `Scheduler::new` returns, well
+        // before any task can possibly run.
+        let scheduler_cell: Arc<std::sync::OnceLock<Arc<scheduler::Scheduler>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let run_scheduler_cell = Arc::clone(&scheduler_cell);
+        let run: Arc<dyn Fn(TaskInvocation) -> Result<Value, RuntimeFault> + Send + Sync> =
+            Arc::new(move |invocation| {
+                let scheduler = run_scheduler_cell
+                    .get()
+                    .expect("scheduler cell filled before any task can run")
+                    .clone();
+                let mut worker_runtime = Runtime {
+                    program: Arc::clone(&run_program),
+                    call_depth: 0,
+                    state: Some(run_module_state.share()),
+                    scheduler,
+                    is_entry: false,
+                    shell_depth: 0,
+                    shell_outcome: None,
+                    jobs: Vec::new(),
+                    last_job: None,
+                    shell_exit: false,
+                    shell_cwd: None,
+                    context: invocation.context,
+                    _marker: std::marker::PhantomData,
+                };
+                worker_runtime.call_function(invocation.function, invocation.arguments)
+            });
+        let pool_scheduler =
+            scheduler::Scheduler::new(scheduler::Scheduler::default_pool_size(), run);
+        let _ = scheduler_cell.set(Arc::clone(&pool_scheduler));
+        Runtime {
+            program,
+            call_depth: 0,
+            state: Some(module_state),
+            scheduler: pool_scheduler,
+            is_entry: true,
+            shell_depth: 0,
+            shell_outcome: None,
+            jobs: Vec::new(),
+            last_job: None,
+            shell_exit: false,
+            shell_cwd: None,
+            context,
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
@@ -378,7 +446,6 @@ impl ModuleState {
     /// Used by Task 5 so every per-task `Runtime` sharing one top-level
     /// execution reads/writes the same results cache instead of each
     /// getting its own empty one.
-    #[allow(dead_code)]
     fn share(&self) -> Self {
         Self {
             results: self.results.clone(),
@@ -597,7 +664,7 @@ fn runtime_value_to_scoc_option(value: Value, span: &Span) -> Result<scoc::Optio
 }
 
 #[allow(dead_code)] // context-free entry point for embedders
-pub(crate) fn execute_program(program: &CompiledProgram) -> Result<Value, Vec<SparError>> {
+pub(crate) fn execute_program(program: &Arc<CompiledProgram>) -> Result<Value, Vec<SparError>> {
     execute_program_with_context(
         program,
         RuntimeContext::for_base_dir(&program.options.base_dir),
@@ -605,7 +672,7 @@ pub(crate) fn execute_program(program: &CompiledProgram) -> Result<Value, Vec<Sp
 }
 
 pub(crate) fn execute_program_with_context(
-    program: &CompiledProgram,
+    program: &Arc<CompiledProgram>,
     context: RuntimeContext,
 ) -> Result<Value, Vec<SparError>> {
     let entry = program.entry_main.ok_or_else(|| {
@@ -615,19 +682,7 @@ pub(crate) fn execute_program_with_context(
             span: Span::dummy(),
         }]
     })?;
-    let mut runtime = Runtime {
-        program,
-        call_depth: 0,
-        state: Some(ModuleState::new(program)),
-        tasks: TaskTable::default(),
-        shell_depth: 0,
-        shell_outcome: None,
-        jobs: Vec::new(),
-        last_job: None,
-        shell_exit: false,
-        shell_cwd: None,
-        context,
-    };
+    let mut runtime = Runtime::new_entry_runtime(Arc::clone(program), context);
     let value = runtime
         .ensure_module(program.entry)
         .and_then(|()| runtime.run_entry(entry))
@@ -664,34 +719,29 @@ pub(crate) fn execute_program_with_context(
 /// `exit(code: N)` inside the block wins over the executed plan's own exit
 /// code, matching `-> shell main()`'s behavior.
 pub(crate) fn call_function_with_context(
-    program: &CompiledProgram,
+    program: &Arc<CompiledProgram>,
     function: FunctionId,
     arguments: Vec<Value>,
     context: RuntimeContext,
 ) -> Result<i32, Vec<SparError>> {
-    let mut runtime = Runtime {
-        program,
-        call_depth: 0,
-        state: Some(ModuleState::new(program)),
-        tasks: TaskTable::default(),
-        shell_depth: 0,
-        shell_outcome: None,
-        jobs: Vec::new(),
-        last_job: None,
-        shell_exit: false,
-        shell_cwd: None,
-        context,
-    };
+    let entry_module = program.entry;
+    let mut runtime = Runtime::new_entry_runtime(Arc::clone(program), context);
     let called: Result<Value, RuntimeFault> = (|| {
-        runtime.ensure_module(program.entry)?;
-        if runtime.function_is_async(function)? {
-            let handle = runtime.tasks.spawn(function, arguments, runtime.context.spawn_child());
+        runtime.ensure_module(entry_module)?;
+        let result = if runtime.function_is_async(function)? {
+            let spawn_context = runtime.context.spawn_child();
+            let handle = runtime.scheduler.spawn(function, arguments, spawn_context);
             runtime.drive_promise(handle, &Span::dummy())
         } else {
             runtime.call_function(function, arguments)
+        };
+        if result.is_ok() {
+            if let Some(fatal) = runtime.scheduler.settle_and_take_fatal() {
+                return Err(fatal);
+            }
         }
+        result
     })();
-    runtime.tasks.cancel_pending();
     let value = called.map_err(|fault| vec![fault.into_error()])?;
     let exit_code = match value {
         Value::MixedShell(shell) => runtime
@@ -723,25 +773,13 @@ pub(crate) enum InteractiveRuntimeExecution {
 }
 
 pub(crate) fn execute_interactive_preview_with_context(
-    program: &CompiledProgram,
+    program: &Arc<CompiledProgram>,
     function_name: &str,
     context: RuntimeContext,
     preview_limit: usize,
     await_result: bool,
 ) -> Result<(InteractiveRuntimeExecution, crate::evaluator::EvalResult), Vec<SparError>> {
-    let mut runtime = Runtime {
-        program,
-        call_depth: 0,
-        state: Some(ModuleState::new(program)),
-        tasks: TaskTable::default(),
-        shell_depth: 0,
-        shell_outcome: None,
-        jobs: Vec::new(),
-        last_job: None,
-        shell_exit: false,
-        shell_cwd: None,
-        context,
-    };
+    let mut runtime = Runtime::new_entry_runtime(Arc::clone(program), context);
     runtime
         .ensure_module(program.entry)
         .map_err(|fault| vec![fault.into_error()])?;
@@ -771,6 +809,9 @@ pub(crate) fn execute_interactive_preview_with_context(
                 .drive_promise(handle, &Span::dummy())
                 .map_err(|fault| vec![fault.into_error()])?;
         }
+    }
+    if let Some(fatal) = runtime.scheduler.settle_and_take_fatal() {
+        return Err(vec![fatal.into_error()]);
     }
     let execution = match value {
         Value::MixedShell(shell) => {
@@ -835,12 +876,21 @@ enum RuntimeFlow {
 impl Runtime<'_> {
     fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
-            let handle = self.tasks.spawn(entry, Vec::new(), self.context.spawn_child());
+            let spawn_context = self.context.spawn_child();
+            let handle = self.scheduler.spawn(entry, Vec::new(), spawn_context);
             self.drive_promise(handle, &Span::dummy())
         } else {
             self.call_function(entry, Vec::new())
         };
-        self.tasks.cancel_pending();
+        // A spawned-but-never-awaited task's panic must still abort the
+        // program (see Scheduler::settle_and_take_fatal) — only check once
+        // the entry call itself succeeded; an already-failing entry call
+        // doesn't need a second error layered on top.
+        if result.is_ok() {
+            if let Some(fatal) = self.scheduler.settle_and_take_fatal() {
+                return Err(fatal);
+            }
+        }
         result
     }
 
@@ -868,61 +918,12 @@ impl Runtime<'_> {
             .map(|function| function.span.clone())
     }
 
-    fn run_task(
-        &mut self,
-        handle: crate::PromiseHandle,
-        invocation: TaskInvocation,
-    ) -> Result<(), RuntimeFault> {
-        let result = self.call_function(invocation.function, invocation.arguments);
-        let fatal = match &result {
-            Err(RuntimeFault::Fatal(error)) => Some(RuntimeFault::Fatal(error.clone())),
-            _ => None,
-        };
-        self.tasks.complete(handle, result);
-        match fatal {
-            Some(fatal) => Err(fatal),
-            None => Ok(()),
-        }
-    }
-
-    fn tick_one(&mut self) -> Result<(), RuntimeFault> {
-        if let Some((handle, invocation)) = self.tasks.next_pending() {
-            self.run_task(handle, invocation)?;
-        }
-        Ok(())
-    }
-
     fn drive_promise(
         &mut self,
         handle: crate::PromiseHandle,
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
-        loop {
-            match self.tasks.status(handle) {
-                TaskStatus::Pending => {
-                    let Some((next_handle, invocation)) = self.tasks.next_pending() else {
-                        return Err(RuntimeFault::Fatal(runtime_error(
-                            "promise scheduler made no progress",
-                            span,
-                        )));
-                    };
-                    self.run_task(next_handle, invocation)?;
-                }
-                TaskStatus::Ready(result) => return result,
-                TaskStatus::Running => {
-                    return Err(runtime_error("promise await cycle detected", span).into());
-                }
-                TaskStatus::Cancelled => {
-                    return Err(runtime_error("promise was cancelled", span).into());
-                }
-                TaskStatus::Unknown => {
-                    return Err(RuntimeFault::Fatal(runtime_error(
-                        "unknown promise handle",
-                        span,
-                    )));
-                }
-            }
-        }
+        self.scheduler.await_handle(handle, span)
     }
 
     fn call_closure(
@@ -1221,7 +1222,6 @@ impl Runtime<'_> {
             if !matches!(flow, RuntimeFlow::Normal) {
                 return Ok(flow);
             }
-            self.tick_one()?;
         }
         Ok(RuntimeFlow::Normal)
     }
@@ -1277,7 +1277,7 @@ impl Runtime<'_> {
                     Value::Closure(closure) => self.call_closure(closure, values, span),
                     Value::Function(function) => {
                         if self.function_is_async(function)? {
-                            Ok(Value::Promise(self.tasks.spawn(
+                            Ok(Value::Promise(self.scheduler.spawn(
                                 function,
                                 values,
                                 self.context.spawn_child(),
@@ -1483,7 +1483,7 @@ impl Runtime<'_> {
                         // here (the call is deferred, not run inline), but
                         // no stdlib method combines the two today.
                         if self.function_is_async(*function)? {
-                            return Ok(Value::Promise(self.tasks.spawn(
+                            return Ok(Value::Promise(self.scheduler.spawn(
                                 *function,
                                 values,
                                 self.context.spawn_child(),
@@ -1558,7 +1558,7 @@ impl Runtime<'_> {
                     // Async generic reification is not currently consumed by a
                     // native reflection API. Ordinary promise execution remains
                     // type-erased; sync generic wrappers preserve their target.
-                    Ok(Value::Promise(self.tasks.spawn(
+                    Ok(Value::Promise(self.scheduler.spawn(
                         *function,
                         values,
                         self.context.spawn_child(),
@@ -1917,7 +1917,7 @@ impl Runtime<'_> {
                 loop {
                     let mut pending = false;
                     for handle in &promises {
-                        match self.tasks.status(*handle) {
+                        match self.scheduler.status_snapshot(*handle) {
                             TaskStatus::Ready(result) => return result,
                             TaskStatus::Pending => pending = true,
                             TaskStatus::Running => pending = true,
@@ -1942,7 +1942,8 @@ impl Runtime<'_> {
                             span,
                         )));
                     }
-                    self.tick_one()?;
+                    self.scheduler
+                        .wait_for_any_change(std::time::Duration::from_millis(50));
                 }
             }
             NativeIntrinsic::PromiseTimeout => {
@@ -1983,12 +1984,12 @@ impl Runtime<'_> {
                     }
                 };
                 let started = self
-                    .tasks
+                    .scheduler
                     .created_at(handle)
                     .unwrap_or_else(std::time::Instant::now);
                 let limit = std::time::Duration::from_millis(millis);
                 loop {
-                    match self.tasks.status(handle) {
+                    match self.scheduler.status_snapshot(handle) {
                         TaskStatus::Ready(result) => {
                             if started.elapsed() > limit {
                                 return Err(runtime_error(
@@ -1999,19 +2000,12 @@ impl Runtime<'_> {
                             }
                             return result;
                         }
-                        TaskStatus::Pending => {}
-                        TaskStatus::Running => {
-                            // The promise is suspended further down this
-                            // stack, so it cannot finish while we wait.
-                            if started.elapsed() >= limit {
-                                return Err(runtime_error(
-                                    &format!("promise timed out after {millis} ms"),
-                                    span,
-                                )
-                                .into());
-                            }
-                            return Err(runtime_error("promise await cycle detected", span).into());
-                        }
+                        // `Running` now legitimately means "a worker thread
+                        // is actively executing it right now" (real
+                        // concurrency), not a same-stack cycle the way it
+                        // did under the old single-threaded pump — so it
+                        // waits exactly like `Pending`.
+                        TaskStatus::Pending | TaskStatus::Running => {}
                         TaskStatus::Cancelled => {
                             return Err(runtime_error("promise was cancelled", span).into())
                         }
@@ -2029,13 +2023,8 @@ impl Runtime<'_> {
                         )
                         .into());
                     }
-                    let Some((next_handle, invocation)) = self.tasks.next_pending() else {
-                        return Err(RuntimeFault::Fatal(runtime_error(
-                            "promise scheduler made no progress",
-                            span,
-                        )));
-                    };
-                    self.run_task(next_handle, invocation)?;
+                    self.scheduler
+                        .wait_for_any_change(std::time::Duration::from_millis(50));
                 }
             }
             intrinsic @ (NativeIntrinsic::DataMap
@@ -4401,7 +4390,7 @@ impl Runtime<'_> {
             for argument in &mut pending.arguments {
                 remap_promises(argument, &replacements);
             }
-            let handle = self.tasks.spawn(
+            let handle = self.scheduler.spawn(
                 function.id,
                 pending
                     .arguments
@@ -4573,7 +4562,10 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<(), RuntimeFault> {
         self.ensure_module(module)?;
-        let state = self.state.as_ref().ok_or_else(|| module_state_error(span))?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| module_state_error(span))?;
         let mut guard = state.results.lock().unwrap();
         let result = guard
             .get_mut(&module)
@@ -4590,11 +4582,12 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
         self.ensure_module(module)?;
-        let state = self.state.as_ref().ok_or_else(|| module_state_error(span))?;
-        let guard = state.results.lock().unwrap();
-        let result = guard
-            .get(&module)
+        let state = self
+            .state
+            .as_ref()
             .ok_or_else(|| module_state_error(span))?;
+        let guard = state.results.lock().unwrap();
+        let result = guard.get(&module).ok_or_else(|| module_state_error(span))?;
         let symbols = &self
             .program
             .modules
@@ -5205,8 +5198,10 @@ mod tests {
             .compile("function sparshPreview() -> Stream<int> { return _; };")
             .into_result()
             .expect("interactive preview helper should compile");
-        let program = crate::CompiledProgram::from_compilation(compilation, options)
-            .expect("interactive preview helper should lower");
+        let program = Arc::new(
+            crate::CompiledProgram::from_compilation(compilation, options)
+                .expect("interactive preview helper should lower"),
+        );
         let mut context = RuntimeContext::for_base_dir(program.base_dir());
         let pulls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pulls_for_stream = std::sync::Arc::clone(&pulls);
@@ -5237,24 +5232,17 @@ mod tests {
 
     #[test]
     fn internal_unknown_function_and_operation_mismatch_are_diagnostics() {
-        let program = crate::Engine::default()
-            .compile_source("function main() -> int { return 0; };")
-            .unwrap();
-        let unknown = Runtime {
-            program: &program,
-            call_depth: 0,
-            state: None,
-            tasks: TaskTable::default(),
-            shell_depth: 0,
-            shell_outcome: None,
-            jobs: Vec::new(),
-            last_job: None,
-            shell_exit: false,
-            shell_cwd: None,
-            context: RuntimeContext::for_base_dir(&program.options.base_dir),
-        }
-        .call_function(FunctionId(999), Vec::new())
-        .unwrap_err();
+        let program = Arc::new(
+            crate::Engine::default()
+                .compile_source("function main() -> int { return 0; };")
+                .unwrap(),
+        );
+        let context = RuntimeContext::for_base_dir(&program.options.base_dir);
+        let mut runtime = Runtime::new_entry_runtime(Arc::clone(&program), context);
+        runtime.state = None;
+        let unknown = runtime
+            .call_function(FunctionId(999), Vec::new())
+            .unwrap_err();
         assert!(unknown.to_string().contains("internal runtime error:"));
         assert!(unknown.to_string().contains("unknown function ID"));
 

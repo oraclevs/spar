@@ -336,8 +336,10 @@ impl Session {
             .compile(&runtime_source)
             .into_result()
             .map_err(&relocate_body)?;
-        let program = crate::compiled::CompiledProgram::from_compilation(compilation, options)
-            .map_err(&relocate_body)?;
+        let program = std::sync::Arc::new(
+            crate::compiled::CompiledProgram::from_compilation(compilation, options)
+                .map_err(&relocate_body)?,
+        );
 
         let mut context = runtime_context(cwd, environment);
         context.set_previous_value(previous_value);
@@ -537,8 +539,10 @@ impl Session {
             );
         }
         let functions = function_params.keys().cloned().collect();
-        let program = crate::compiled::CompiledProgram::from_compilation(compilation, options)
-            .map_err(to_fragment)?;
+        let program = std::sync::Arc::new(
+            crate::compiled::CompiledProgram::from_compilation(compilation, options)
+                .map_err(to_fragment)?,
+        );
         let mut context = runtime_context(cwd, environment);
         context.set_previous_value(previous_value);
         context.set_structured_terminal(self.structured_terminal);

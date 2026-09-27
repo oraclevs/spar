@@ -155,6 +155,24 @@ impl Scheduler {
         let _ = self.changed.wait_timeout(guard, timeout);
     }
 
+    /// Blocks until every spawned task (including ones nothing ever
+    /// `await`s) has reached a final state, then returns the first `Fatal`
+    /// fault among them, if any. An entry point calls this right before
+    /// returning success — the old single-threaded scheduler ticked its
+    /// queue after every statement, so a panic in a detached task always
+    /// got a chance to run and abort the program before `main` returned;
+    /// under the pool, tasks run on their own regardless of whether
+    /// anything awaits them, so this is the equivalent checkpoint. Bounded
+    /// the same way `shutdown` is: it waits for work already in flight, it
+    /// does not wait for work that was never going to start.
+    pub(crate) fn settle_and_take_fatal(&self) -> Option<RuntimeFault> {
+        let mut guard = self.inner.lock().unwrap();
+        while guard.any_unsettled() {
+            guard = self.changed.wait(guard).unwrap();
+        }
+        guard.first_fatal()
+    }
+
     pub(crate) fn shutdown(&self) {
         {
             let mut guard = self.inner.lock().unwrap();
@@ -182,7 +200,9 @@ mod tests {
         let c1 = concurrent.clone();
         let m1 = max_concurrent.clone();
         let run: std::sync::Arc<
-            dyn Fn(crate::async_runtime::TaskInvocation) -> Result<Value, crate::async_runtime::RuntimeFault>
+            dyn Fn(
+                    crate::async_runtime::TaskInvocation,
+                ) -> Result<Value, crate::async_runtime::RuntimeFault>
                 + Send
                 + Sync,
         > = std::sync::Arc::new(move |_invocation| {
@@ -194,8 +214,16 @@ mod tests {
         });
         let scheduler = Scheduler::new(4, run);
         let ctx = RuntimeContext::new(std::path::PathBuf::from("/tmp"));
-        let h1 = scheduler.spawn(crate::compiled::FunctionId(1), Vec::new(), ctx.spawn_child());
-        let h2 = scheduler.spawn(crate::compiled::FunctionId(1), Vec::new(), ctx.spawn_child());
+        let h1 = scheduler.spawn(
+            crate::compiled::FunctionId(1),
+            Vec::new(),
+            ctx.spawn_child(),
+        );
+        let h2 = scheduler.spawn(
+            crate::compiled::FunctionId(1),
+            Vec::new(),
+            ctx.spawn_child(),
+        );
         let span = crate::error::Span::dummy();
         scheduler.await_handle(h1, &span).unwrap();
         scheduler.await_handle(h2, &span).unwrap();

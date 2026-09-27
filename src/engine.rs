@@ -89,17 +89,28 @@ impl Engine {
         crate::session::Session::new(self.options.clone())
     }
 
-    /// Compile and type-check source without evaluating it.
-    pub fn compile_source(&self, source: &str) -> Result<CompiledProgram, Vec<SparError>> {
+    /// Compile and type-check source without evaluating it. Returns an
+    /// `Arc` because Execute mode's `Runtime` shares the compiled program
+    /// across every worker thread a spawned `async fn` task runs on (see
+    /// `runtime::scheduler::Scheduler`) — callers that only Check/Emit
+    /// never need to know that, `Arc<CompiledProgram>` derefs exactly like
+    /// `CompiledProgram` everywhere they already used it.
+    pub fn compile_source(
+        &self,
+        source: &str,
+    ) -> Result<std::sync::Arc<CompiledProgram>, Vec<SparError>> {
         let options = CompileOptions {
             evaluate: false,
             ..self.options.clone()
         };
         let compilation = Compiler::new(options.clone()).compile(source);
-        CompiledProgram::from_compilation(compilation, options)
+        CompiledProgram::from_compilation(compilation, options).map(std::sync::Arc::new)
     }
 
-    pub fn compile_path(&self, path: &Path) -> Result<CompiledProgram, Vec<SparError>> {
+    pub fn compile_path(
+        &self,
+        path: &Path,
+    ) -> Result<std::sync::Arc<CompiledProgram>, Vec<SparError>> {
         self.with_path(path).compile_source(&read_source(path)?)
     }
 
@@ -187,7 +198,7 @@ impl Engine {
 
     pub fn execute_compiled(
         &self,
-        program: &CompiledProgram,
+        program: &std::sync::Arc<CompiledProgram>,
     ) -> Result<ExecutionOutcome, Vec<SparError>> {
         self.execute_compiled_with_context(
             program,
@@ -200,7 +211,7 @@ impl Engine {
     /// and stdio without mutating process-global state.
     pub fn execute_compiled_with_context(
         &self,
-        program: &CompiledProgram,
+        program: &std::sync::Arc<CompiledProgram>,
         context: crate::runtime::RuntimeContext,
     ) -> Result<ExecutionOutcome, Vec<SparError>> {
         let entry = program
@@ -235,7 +246,7 @@ impl Engine {
     /// so `$!`/`$?`/`lastJob` work identically for a function reached this way.
     pub fn call_function_with_context(
         &self,
-        program: &CompiledProgram,
+        program: &std::sync::Arc<CompiledProgram>,
         function: crate::compiled::FunctionId,
         arguments: Vec<Value>,
         context: crate::runtime::RuntimeContext,

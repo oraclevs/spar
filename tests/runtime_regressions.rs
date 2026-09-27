@@ -468,3 +468,34 @@ fn concurrent_async_delays_overlap_not_serialize() {
         "expected concurrent execution (~200ms), took {elapsed:?} — looks serial"
     );
 }
+
+// Regression: each spawned task runs on a fresh, short-lived, worker-side
+// `Runtime` (built per task by `new_entry_runtime`'s `run` closure) that is
+// dropped as soon as that one task finishes. That drop must NOT shut down
+// the shared `Scheduler` — is_entry is false for every worker-side
+// `Runtime` — or a sibling task still in flight (or not yet started) would
+// never get to run once the first spawned task's own `Runtime` is dropped.
+#[test]
+fn dropping_a_nested_runtime_does_not_cancel_sibling_tasks() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { all } from "std/async";
+            import pkg { sleepMillis } from "std/time";
+            async fn slow(tag: int) -> int {
+                sleepMillis(millis: 150);
+                return tag;
+            };
+            async fn main() -> int {
+                var mut ps: [Promise<int>] = [];
+                for i in range(end: 3) { ps.append(value: slow(tag: i)); }
+                var rs = await all<int>(promises: ps);
+                var mut sum = 0;
+                for r in rs { sum = sum + r; }
+                return sum;
+            };
+            "#,
+        )
+        .expect("sibling tasks should all run to completion");
+    assert_eq!(outcome.exit_status, 0 + 1 + 2);
+}

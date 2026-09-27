@@ -1125,8 +1125,8 @@ mod tests {
                 r#"struct Config {
     name: str = "top";
     prompt: Record = {
-        depth: int = 1;
-        inner: Record = { flag: bool = true; };
+        depth: 1;
+        inner: { flag: true; };
     };
 };"#,
             )
@@ -1484,7 +1484,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
 
         let result = session
             .eval_interactive_shell_preview_with_context(
-                "printf 'name,age,team\\nObi,24,core\\nAda,31,ops\\n' | from csv |> where(predicate: |row| row.age > 20)",
+                "printf 'name,age,team\\nObi,24,core\\nAda,31,ops\\n' | from csv |> where(predicate: |value| value.age > 20)",
                 &cwd,
                 &environment,
                 None,
@@ -1587,7 +1587,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
         )
         .expect("mixed pipeline without `to` should run");
 
@@ -1644,7 +1644,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         plain.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut plain,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
         );
         // No terminal and no `to`: falls back to JSON Lines bytes.
         assert!(
@@ -1659,7 +1659,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20) | cat; }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20) | cat; }}"),
         );
         assert!(result.is_err(), "{result:?}");
     }
@@ -1671,7 +1671,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.enable_data_prelude();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
         )
         .expect("`where` should resolve through the prelude");
         assert!(
@@ -1738,7 +1738,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
     fn expression_errors_point_at_the_typed_expression() {
         let mut session = session_with_history();
         let cwd = std::env::current_dir().unwrap();
-        let fragment = "var ok: int = 1;\n  nowhere(1)";
+        let fragment = "var ok: int = 1;\n  nowhere(x: 1)";
         let errors = session
             .eval_interactive_preview_with_context(fragment, &cwd, &[], None, 20)
             .unwrap_err();
@@ -1750,7 +1750,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
     fn mixed_pipeline_errors_point_at_the_typed_stage() {
         let mut session = session_with_history();
         let cwd = std::env::current_dir().unwrap();
-        let body = "  printf x | from csv |> where(predicate: |r| r.age > 20)";
+        let body = "  printf x | from csv |> where(predicate: |value| value.age > 20)";
         let errors = session
             .eval_interactive_shell_preview_with_context(body, &cwd, &[], None, 20)
             .unwrap_err();
@@ -1929,7 +1929,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let mut session = Engine::default().session();
         let error = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
         )
         .unwrap_err();
         let SparError::TypeError { hint, .. } = &error[0] else {

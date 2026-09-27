@@ -2393,16 +2393,100 @@ impl Resolver {
     /// the stage as an ordinary named call with that argument filled in, so the
     /// usual argument checks see the complete call. `None` when the stage is not
     /// a named call to a function whose signature is known here.
+    /// A shell mixed-pipeline stage (`from csv |> where(predicate: ...)`
+    /// inside a `shell { ... }` block) gets its first argument filled in
+    /// implicitly by the piped-in bytes at lowering/eval time — see
+    /// runtime.rs's `input_slot` handling of `CompiledShellMixedPipeline`.
+    /// Unlike a plain-expression `x |> f(...)`, there's no `input` AST
+    /// node here to splice in (the value comes from the shell pipe at
+    /// runtime), so resolve just exempts that first param from "missing
+    /// argument" validation the same way it already exempts a defaulted
+    /// param, instead of building an injected call like
+    /// `pipe_stage_with_input` does.
+    fn resolve_pipeline_stage(
+        &self,
+        stage: &Expr,
+        locals: &HashSet<String>,
+    ) -> Result<(), SparError> {
+        let (name, args, name_span) = match stage {
+            Expr::Call { name, args, name_span, .. } => (name, args, name_span),
+            Expr::FnCall(fc) => (&fc.name, &fc.args, &fc.span),
+            _ => return self.resolve_expr_with_locals(stage, locals),
+        };
+        let segments: Vec<&str> = name.split("::").collect();
+        let entry = match segments.as_slice() {
+            [function] => self
+                .functions
+                .get(*function)
+                .or_else(|| self.imported_functions.get(*function)),
+            [group, function] => self
+                .function_groups
+                .get(*group)
+                .and_then(|entry| entry.functions.get(*function))
+                .or_else(|| self.imported_functions.get(name.as_str())),
+            _ => None,
+        };
+        let Some(entry) = entry else {
+            // Unlike an ordinary call, don't raise "undefined function"
+            // here — typecheck's pipe_stage_parameter_types already gives
+            // a better message for this exact spot (e.g. suggesting
+            // `import pkg { where } from "std/data";" for a std/data
+            // function used unimported), so defer to it. Still resolve
+            // each argument's own value so nested errors aren't missed.
+            for arg in args {
+                self.resolve_expr_with_locals(&arg.value, locals)?;
+            }
+            return Ok(());
+        };
+        let implicit_param = entry.params.first().map(|(name, _)| name.clone());
+        let param_names: HashSet<String> = entry.params.iter().map(|(n, _)| n.clone()).collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        for arg in args {
+            if !param_names.contains(&arg.param_name) {
+                return Err(SparError::ResolveError {
+                    message: format!("function '{name}' has no param '{}'", arg.param_name),
+                    hint: None,
+                    span: arg.param_name_span.clone(),
+                });
+            }
+            if !seen.insert(arg.param_name.clone()) {
+                return Err(SparError::ResolveError {
+                    message: format!("duplicate argument '{}'", arg.param_name),
+                    hint: None,
+                    span: arg.param_name_span.clone(),
+                });
+            }
+            self.resolve_expr_with_locals(&arg.value, locals)?;
+        }
+        let missing: Vec<_> = param_names
+            .iter()
+            .filter(|p| {
+                !seen.contains(p.as_str())
+                    && !entry.default_params.contains(p.as_str())
+                    && implicit_param.as_deref() != Some(p.as_str())
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(SparError::ResolveError {
+                message: format!("missing arguments for function '{name}': {:?}", missing),
+                hint: None,
+                span: name_span.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn pipe_stage_with_input(&self, input: &Expr, stage: &Expr) -> Option<Expr> {
-        let Expr::Call {
-            name,
-            name_span,
-            type_arguments,
-            args,
-            span,
-        } = stage
-        else {
-            return None;
+        // An ordinary call like `where(...)` parses as `Expr::FnCall`, not
+        // `Expr::Call` (that variant is for calls carrying explicit
+        // `<T>` type arguments, e.g. a generic struct constructor) — this
+        // used to only handle `Expr::Call`, so every `|> where(...)`-style
+        // stage silently skipped implicit-argument injection and then
+        // failed resolve with a bogus "missing arguments" error.
+        let (name, args, span) = match stage {
+            Expr::Call { name, args, span, .. } => (name, args, span),
+            Expr::FnCall(fc) => (&fc.name, &fc.args, &fc.span),
+            _ => return None,
         };
         let segments: Vec<&str> = name.split("::").collect();
         let first_param = match segments.as_slice() {
@@ -2429,12 +2513,19 @@ impl Resolver {
             span: span.clone(),
         });
         injected.extend(args.iter().cloned());
-        Some(Expr::Call {
-            name: name.clone(),
-            name_span: name_span.clone(),
-            type_arguments: type_arguments.clone(),
-            args: injected,
-            span: span.clone(),
+        Some(match stage {
+            Expr::Call { name_span, type_arguments, .. } => Expr::Call {
+                name: name.clone(),
+                name_span: name_span.clone(),
+                type_arguments: type_arguments.clone(),
+                args: injected,
+                span: span.clone(),
+            },
+            _ => Expr::FnCall(FnCall {
+                name: name.clone(),
+                args: injected,
+                span: span.clone(),
+            }),
         })
     }
 
@@ -3410,7 +3501,7 @@ impl Resolver {
                         self.resolve_expr_with_locals(&arg.value, outer_locals)?;
                     }
                     for stage in &pipeline.stages {
-                        self.resolve_expr_with_locals(stage, outer_locals)?;
+                        self.resolve_pipeline_stage(stage, outer_locals)?;
                     }
                 }
             }
@@ -4149,8 +4240,8 @@ mod tests {
 
     #[test]
     fn test_global_reserved_struct_name() {
-        assert!(has_error("[global]{ port: int = 3000; };", "global"));
-        assert!(has_error("[global]{ port: int = 3000; };", "reserved"));
+        assert!(has_error("struct global { port: int = 3000; };", "global"));
+        assert!(has_error("struct global { port: int = 3000; };", "reserved"));
     }
 
     #[test]
@@ -4210,7 +4301,7 @@ mod tests {
 
     #[test]
     fn struct_lowercase_start_is_naming_error() {
-        let src = "[metaData]{ port: int = 8080; };";
+        let src = "struct metaData { port: int = 8080; };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let errs = Resolver::new().resolve(&program, &[]).unwrap_err();
@@ -4298,7 +4389,7 @@ mod tests {
 
     #[test]
     fn dynamic_record_field_does_not_register_nested_struct() {
-        let src = r#"struct Outer { inner: Record = { key: str = "v"; }; };"#;
+        let src = r#"struct Outer { inner: Record = { key: "v"; }; };"#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
         let symbols = Resolver::new().resolve(&program, &[]).unwrap();

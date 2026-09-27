@@ -399,9 +399,16 @@ fn resolver_var_in_only_one_branch_not_in_outer_scope() {
 
 #[test]
 fn resolver_section_param_rejected() {
+    // The `section` type was removed entirely, so this is now caught at
+    // parse time (a clearer error than the old resolve-time rejection),
+    // not by resolve_err (which expects lex/parse to succeed).
     let src = r#"function f(x: section) -> str { return "hi"; };"#;
-    let err = resolve_err(src);
-    assert!(err.contains("section") || err.contains("param"));
+    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
+    let err = crate::parser::Parser::new(tokens)
+        .parse()
+        .expect_err("`section` as a param type must be rejected");
+    let err = format!("{err:?}");
+    assert!(err.contains("section") || err.contains("param"), "got: {err}");
 }
 
 #[test]

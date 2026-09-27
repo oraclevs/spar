@@ -3968,9 +3968,12 @@ function f(flag: bool) -> int {
 
     #[test]
     fn native_shell_words_are_contextual_identifiers_outside_construct_position() {
+        // `type` declarations were removed (use `struct`) and struct/type
+        // names must be PascalCase now, so a lowercase `command` type name
+        // is no longer expressible — this still covers "command"/"exec"/
+        // "shell" as ordinary field and function/param names.
         parse_str(
             r#"
-            type command { value: str; };
             struct Holder {
                 command: str = "field";
                 exec: str = "value";

@@ -64,7 +64,7 @@ fn parses_async_function_group_member() {
 
 #[test]
 fn rejects_async_without_function() {
-    assert!(parse_err("async var value: int = 1;").contains("'function'"));
+    assert!(parse_err("async var value: int = 1;").contains("'fn'"));
 }
 
 fn parse_err(src: &str) -> String {
@@ -547,7 +547,7 @@ fn record_object_return_parses_without_section_syntax() {
 
 #[test]
 fn bool_builtin_call_in_expression_position_still_works() {
-    let src = r#"function f(s: str) -> bool { return bool(s); };"#;
+    let src = r#"function f(s: str) -> bool { return bool(value: s); };"#;
     assert!(parse_ok_result(src).is_ok());
 }
 
@@ -558,7 +558,7 @@ fn int_float_str_bool_as_types_in_all_positions() {
         var b: float = 1.0;
         var c: str = "x";
         var d: bool = true;
-        function f(x: float, y: bool) -> str { return str(x); };
+        function f(x: float, y: bool) -> str { return str(value: x); };
         struct S { n: int = 0; flag: bool = false; };
     "#;
     assert!(parse_ok_result(src).is_ok());
@@ -1551,7 +1551,7 @@ fn pipe_closure_block_body_and_return_type_parse() {
 #[test]
 fn positional_ordinary_calls_are_rejected_with_named_argument_hint() {
     let error = parse_err("var value: int = parseInt(\"42\");");
-    assert!(error.contains("named") || error.contains("parameter"), "{error}");
+    assert!(error.contains("by name") || error.contains("parameter"), "{error}");
 }
 
 #[test]

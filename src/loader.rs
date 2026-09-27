@@ -2307,8 +2307,8 @@ mod tests {
         fs::write(
             dir.path().join("compose.spar"),
             concat!(
-                "private struct ProductionEnvironment { nodeEnv: \"production\"; };\n",
-                "export struct Postgres { environment: { ...ProductionEnvironment; }; };\n",
+                "private struct ProductionEnvironment { nodeEnv: str = \"production\"; };\n",
+                "export struct Postgres { environment: Record = { ...ProductionEnvironment(); }; };\n",
             ),
         )
         .unwrap();
@@ -2456,7 +2456,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
-            "schema Container { x: Option<str>; };\n",
+            "schema Container { x: str; };\n",
         )
         .unwrap();
         let src = concat!(

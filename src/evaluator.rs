@@ -3753,7 +3753,7 @@ var endpoint: str = Config().host;
 
     #[test]
     fn test_str_coercion_of_bool() {
-        let r = eval_ok("var x: str = str(true);");
+        let r = eval_ok("var x: str = str(value: true);");
         assert_eq!(global(&r, "x"), ConfigValue::Str("true".into()));
     }
 
@@ -3811,10 +3811,20 @@ var endpoint: str = Config().host;
 
     #[test]
     fn test_namespace_ref_nested_record_field_3seg() {
+        // Bare `Server.rateLimit.enabled` (no instance call) is gone along
+        // with struct-as-namespace access generally — `Server().rateLimit.enabled`
+        // is the replacement, but only types cleanly through named-struct
+        // fields end to end: a `Record`-typed intermediate field makes the
+        // final `.enabled` access dynamically-typed, needing a `.asBool()`
+        // bridge that this test's bare `eval_ok` (interpreted, not
+        // compiled) evaluator can't run — method calls require the
+        // compiled runtime. Use a named `RateLimit` struct instead so the
+        // whole chain stays statically typed.
         let r = eval_ok(
             r#"
-            struct Server { rateLimit: Record = { enabled: true; }; };
-            var isDone: bool = Server.rateLimit.enabled;
+            struct RateLimit { enabled: bool = true; };
+            struct Server { rateLimit: RateLimit = RateLimit(); };
+            var isDone: bool = Server().rateLimit.enabled;
         "#,
         );
         assert_eq!(global(&r, "isDone"), ConfigValue::Bool(true));

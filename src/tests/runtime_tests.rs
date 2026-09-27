@@ -145,7 +145,7 @@ fn compiled_functions_support_recursion_defaults_and_named_arguments() {
 
 #[test]
 fn compiled_expressions_build_lists_structs_interpolation_and_comprehensions() {
-    let value = execute("struct ResultShape { label: str; }; struct ResultValue: ResultShape { label = \"sum-4\"; }; function main() -> int { var values: [int] = for value in [1, 2, 3] { value }; var object: ResultValue = ResultValue(label: \"sum-${values[0] + values[2]}\"); if object.label == \"sum-4\" { return 0; } return 1; };").unwrap();
+    let value = execute("struct ResultValue { label: str; }; function main() -> int { var values: [int] = for value in [1, 2, 3] { value }; var object: ResultValue = ResultValue(label: \"sum-${values[0] + values[2]}\"); if object.label == \"sum-4\" { return 0; } return 1; };").unwrap();
     assert_eq!(value, Value::Int(0));
 }
 
@@ -205,10 +205,9 @@ fn compiled_generic_named_types_substitute_nested_fields() {
     let value = execute(
         r#"
         struct Box<T> { value: T; };
-        struct IntBox: Box<int> { value = 9; };
         function unbox<T>(box: Box<T>) -> T { return box.value; };
         function main() -> int {
-            var boxed: Box<int> = IntBox();
+            var boxed: Box<int> = Box<int>(value: 9);
             return unbox(box: boxed);
         };
         "#,

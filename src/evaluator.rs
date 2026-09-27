@@ -2960,17 +2960,40 @@ impl Evaluator {
             _ => None,
         }).ok_or_else(|| EvalErr::PathNotFound { path: name.to_string(), span: call_span.clone() })?;
         let supplied = self.eval_explicit_args(args, caller_scope)?;
+        // Guard against a struct whose own default field values (directly,
+        // or via another struct's defaults) construct it again — without
+        // this, two structs whose defaults reference each other via
+        // `Other()` constructor calls recurse until the stack overflows
+        // instead of reporting a cyclic reference. Mirrors the
+        // `evaluating_structs` guard `eval_struct_by_path` already uses for
+        // the bare-name (no-call) nested-field-access path.
+        let cycle_key = vec![name.to_string()];
+        if self.evaluating_structs.contains(&cycle_key) {
+            return Err(EvalErr::CyclicRef {
+                name: name.to_string(),
+                span: call_span.clone(),
+            });
+        }
+        self.evaluating_structs.insert(cycle_key.clone());
         let mut fields = indexmap::IndexMap::new();
         for field in declaration.type_decl().fields {
             let value = if let Some((_, value)) = supplied.iter().find(|(key, _)| key.as_str() == field.name.as_str()) {
                 value.clone()
             } else if let Some(default) = field.default {
-                self.eval_expr(&default, &HashMap::new())?
+                match self.eval_expr(&default, &HashMap::new()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.evaluating_structs.remove(&cycle_key);
+                        return Err(e);
+                    }
+                }
             } else {
+                self.evaluating_structs.remove(&cycle_key);
                 return Err(EvalErr::Fatal { message: format!("struct '{name}' is missing required field '{}'", field.name), span: call_span.clone() });
             };
             fields.insert(field.name, value);
         }
+        self.evaluating_structs.remove(&cycle_key);
         Ok(ConfigValue::Object(fields))
     }
 

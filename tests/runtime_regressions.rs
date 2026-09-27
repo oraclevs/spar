@@ -269,3 +269,43 @@ fn native_method_calls_survive_an_error_in_argument_evaluation() {
         .expect("receiver must survive an error raised while evaluating an argument");
     assert_eq!(outcome.exit_status, 0);
 }
+
+// Regression: two structs whose default field values construct each other
+// via `Other()` constructor calls (the only way to reach another struct's
+// fields now that bare `Other.field` access requires an instance) used to
+// recurse with no cycle guard and blow the stack instead of reporting a
+// cyclic reference — `eval_struct_constructor` had no equivalent of the
+// `evaluating_structs` guard `eval_struct_by_path` already used.
+#[test]
+fn struct_constructor_cycle_reports_cyclic_reference_not_stack_overflow() {
+    // check_source only runs lex/parse/resolve/typecheck; the cycle only
+    // manifests during evaluation, so this must go through emit_source
+    // (which runs the full pipeline, including eager evaluation of
+    // `#[emit]` structs) to actually exercise the constructor recursion.
+    let compilation = Engine::new(CompileOptions::default()).emit_source(
+        r#"
+            #[emit] struct X {
+                nested: Record = {
+                    v: Y().inner.val;
+                };
+            };
+            struct Y {
+                inner: Record = {
+                    val: X().nested.v;
+                };
+            };
+            "#,
+    );
+    assert!(
+        !compilation.is_ok(),
+        "a genuine circular constructor reference must error, not hang or crash"
+    );
+    assert!(
+        compilation
+            .errors
+            .iter()
+            .any(|e| format!("{e}").to_lowercase().contains("cyclic")),
+        "expected a cyclic-reference error, got {:?}",
+        compilation.errors
+    );
+}

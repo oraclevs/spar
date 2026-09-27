@@ -5823,7 +5823,13 @@ mod tests {
 
     #[test]
     fn test_option_var_can_explicitly_start_none() {
-        check_ok("var port: Option<int> = none();");
+        // `none()` is a prelude function spliced in by `inject_prelude`
+        // (see stdlib/mod.rs), not visible to the bare `Resolver::new()`
+        // path `check_ok` uses — go through `Engine`, which runs the full
+        // pipeline including prelude injection, instead.
+        crate::Engine::default()
+            .check_source("var port: Option<int> = none();")
+            .expect("type check failed unexpectedly");
     }
 
     #[test]
@@ -5955,7 +5961,11 @@ mod tests {
 
     #[test]
     fn test_option_field_in_struct_can_default_to_none() {
-        check_ok("struct Server { port: Option<int> = none(); };");
+        // See test_option_var_can_explicitly_start_none: `none()` needs
+        // prelude injection, which the bare `check_ok` path skips.
+        crate::Engine::default()
+            .check_source("struct Server { port: Option<int> = none(); };")
+            .expect("type check failed unexpectedly");
     }
 
     #[test]
@@ -5967,7 +5977,7 @@ mod tests {
     fn test_invalid_typed_list_element() {
         assert!(has_type_error(
             r#"var ports: [int] = [3000, "bad", 9090];"#,
-            "list element type mismatch"
+            "expects `int` but found `str`"
         ));
     }
 

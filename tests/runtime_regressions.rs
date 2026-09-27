@@ -336,3 +336,37 @@ fn shell_status_signal_is_a_real_option_not_a_bare_int_or_missing_field() {
         .expect("status.signal must behave like an ordinary Option<int>");
     assert_eq!(outcome.exit_status, 0);
 }
+
+// Regression: `await receiver.asyncMethod()` — an async `impl` method,
+// called through method syntax rather than as a free function — didn't
+// typecheck at all (infer_method_call never wrapped an async method's
+// return type in Promise<T>, the same wrapping instantiate_named_fn_call
+// already does for a plain async function call, so `await` saw the bare
+// return type and rejected it as "not a Promise"). Fixing the typechecker
+// exposed a second gap one layer down: CompiledExpression::MethodCall's
+// function-target branch always called the method synchronously with no
+// async check at all (DirectCall already had one), so an async method's
+// eagerly-computed result got hit with an `await` expecting a real
+// Promise and crashed with "expected Promise, received <T>" instead.
+#[test]
+fn await_on_an_async_impl_method_call_works_like_an_async_function() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            struct Doubler { factor: int = 2; };
+            impl Doubler {
+                async fn apply(self, value: int) -> int {
+                    return self.factor * value;
+                };
+            };
+            async fn main() -> int {
+                var d: Doubler = Doubler();
+                var result: int = await d.apply(value: 21);
+                if result != 42 { return 1; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("await on an async impl-method call should typecheck and run");
+    assert_eq!(outcome.exit_status, 0);
+}

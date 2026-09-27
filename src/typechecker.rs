@@ -2812,7 +2812,18 @@ impl<'a> TypeChecker<'a> {
                 span: receiver.span().cloned().unwrap_or_else(Span::dummy),
             });
         }
-        Ok(substitute_type(&entry.function.ret, &substitution))
+        let eventual_return = substitute_type(&entry.function.ret, &substitution);
+        // Mirror instantiate_named_fn_call's handling of a plain async
+        // function call: an async method's declared return type is its
+        // *resolved* type, not the Promise<T> a caller actually gets back —
+        // `await`ing it needs that wrapped here, the same as any other
+        // async call. Without this, `await receiver.asyncMethod()` failed
+        // to typecheck at all ("cannot await `T`; expected `Promise<T>`").
+        Ok(if entry.function.is_async {
+            promise_type(eventual_return)
+        } else {
+            eventual_return
+        })
     }
 
     fn infer_field_access_from_type(&self, base_ty: &SparType, field: &str) -> Option<SparType> {

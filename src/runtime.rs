@@ -1451,6 +1451,20 @@ impl Runtime<'_> {
                 }
                 let (result, updated_receiver) = match target {
                     CompiledMethodTarget::Function(function) => {
+                        // Mirror CompiledExpression::DirectCall: an async
+                        // `impl` method must hand back a real Promise for
+                        // `await` to consume, the same as an async free
+                        // function — this had no such check at all, so
+                        // `await receiver.asyncMethod()` typechecked (once
+                        // infer_method_call wrapped its type in Promise<T>
+                        // to match) but crashed at eval with "expected
+                        // Promise, received <T>". A self-mutating async
+                        // method can't also write back an updated receiver
+                        // here (the call is deferred, not run inline), but
+                        // no stdlib method combines the two today.
+                        if self.function_is_async(*function)? {
+                            return Ok(Value::Promise(self.tasks.spawn(*function, values)));
+                        }
                         let (result, method_frame, parameter_slots) =
                             self.call_function_with_frame(*function, values)?;
                         let updated = if *mutates_receiver {

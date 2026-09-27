@@ -50,7 +50,7 @@ impl HttpClient {
         query: Map<str, str> = {},
         headers: Map<str, str> = {},
     ) -> HttpResponse {
-        return self.request(method: "GET", path: path, query: query, headers: headers);
+        return await self.request(method: "GET", path: path, query: query, headers: headers);
     };
 
     async fn delete(
@@ -59,7 +59,7 @@ impl HttpClient {
         query: Map<str, str> = {},
         headers: Map<str, str> = {},
     ) -> HttpResponse {
-        return self.request(method: "DELETE", path: path, query: query, headers: headers);
+        return await self.request(method: "DELETE", path: path, query: query, headers: headers);
     };
 
     async fn post(
@@ -70,7 +70,7 @@ impl HttpClient {
         body: str = "",
         jsonBody: Any = none<Any>(),
     ) -> HttpResponse {
-        return self.request(method: "POST", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+        return await self.request(method: "POST", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
     };
 
     async fn put(
@@ -81,7 +81,7 @@ impl HttpClient {
         body: str = "",
         jsonBody: Any = none<Any>(),
     ) -> HttpResponse {
-        return self.request(method: "PUT", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+        return await self.request(method: "PUT", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
     };
 
     async fn patch(
@@ -92,7 +92,7 @@ impl HttpClient {
         body: str = "",
         jsonBody: Any = none<Any>(),
     ) -> HttpResponse {
-        return self.request(method: "PATCH", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+        return await self.request(method: "PATCH", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
     };
 };
 

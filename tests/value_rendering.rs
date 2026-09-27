@@ -142,7 +142,7 @@ fn universal_to_string_and_type_name_methods_use_runtime_value_semantics() {
                 if maybe.toString() != "Some(7)" { return 3; }
                 if maybe.typeName() != "Option" { return 4; }
 
-                var mut valuesByName: Map<str, int> = { "answer": 42; };
+                var mut valuesByName: Map<str, int> = { answer: 42; };
                 if valuesByName.typeName() != "Map" { return 5; }
                 if valuesByName.toString() != "{\"answer\": 42}" { return 6; }
                 return 0;

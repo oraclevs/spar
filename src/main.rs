@@ -2191,7 +2191,7 @@ struct Server { timeout: int = Defaults().timeout; };
 #[emit]
 struct MetaData {
     tool: str = "stackforge";
-    manual: Record = { author: str = "occ"; };
+    manual: Record = { author: "occ"; };
 };
 "#;
         let json = emit_src(src);
@@ -2221,12 +2221,12 @@ struct Man { aster: int = 6; };
 #[emit]
 struct MetaData {
     tool:    str = "stackforge";
-    version: int = Man.aster;
+    version: int = Man().aster;
     askter:  bool = false;
     manual: Record = {
-        main: str = "MainMan";
-        more: Record = { see: int = 5; };
-        options: [str] = options;
+        main: "MainMan";
+        more: { see: 5; };
+        options: options;
     };
 };
 "#;

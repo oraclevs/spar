@@ -1,0 +1,4 @@
+fn echo(value: str) -> str {
+    return value;
+};
+var result: str = echo("spar");

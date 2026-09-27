@@ -1,19 +1,20 @@
 use crate::ast::SparType;
 use crate::runtime::{NativeFunction, NativeRegistry, Value};
 
-use super::support::{error, owned_bytes_arg, string_arg};
+use super::support::{error, owned_bytes_arg};
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
     registry
         .register(NativeFunction::sync(
             "nativeIo",
             "print",
-            vec![("message", SparType::Str)],
+            vec![("value", SparType::Any)],
             SparType::Void,
             true,
             |context, args| {
+                let rendered = args.first().map(Value::render_display).unwrap_or_default();
                 context
-                    .write_stdout(string_arg(args, 0, "message")?.as_bytes())
+                    .write_stdout(rendered.as_bytes())
                     .map_err(|error_value| error(format!("stdout write failed: {error_value}")))?;
                 Ok(Value::Void)
             },
@@ -23,13 +24,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeIo",
             "println",
-            vec![("message", SparType::Str)],
+            vec![("value", SparType::Any)],
             SparType::Void,
             true,
             |context, args| {
-                let message = string_arg(args, 0, "message")?;
+                let rendered = args.first().map(Value::render_display).unwrap_or_default();
                 context
-                    .write_stdout(format!("{message}\n").as_bytes())
+                    .write_stdout(format!("{rendered}\n").as_bytes())
                     .map_err(|error_value| error(format!("stdout write failed: {error_value}")))?;
                 Ok(Value::Void)
             },
@@ -39,12 +40,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeIo",
             "eprint",
-            vec![("message", SparType::Str)],
+            vec![("value", SparType::Any)],
             SparType::Void,
             true,
             |context, args| {
+                let rendered = args.first().map(Value::render_display).unwrap_or_default();
                 context
-                    .write_stderr(string_arg(args, 0, "message")?.as_bytes())
+                    .write_stderr(rendered.as_bytes())
                     .map_err(|error_value| error(format!("stderr write failed: {error_value}")))?;
                 Ok(Value::Void)
             },
@@ -54,13 +56,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeIo",
             "eprintln",
-            vec![("message", SparType::Str)],
+            vec![("value", SparType::Any)],
             SparType::Void,
             true,
             |context, args| {
-                let message = string_arg(args, 0, "message")?;
+                let rendered = args.first().map(Value::render_display).unwrap_or_default();
                 context
-                    .write_stderr(format!("{message}\n").as_bytes())
+                    .write_stderr(format!("{rendered}\n").as_bytes())
                     .map_err(|error_value| error(format!("stderr write failed: {error_value}")))?;
                 Ok(Value::Void)
             },

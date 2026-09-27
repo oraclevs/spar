@@ -7,6 +7,28 @@ fn parse_ok(src: &str) -> crate::ast::Program {
     program
 }
 
+
+#[test]
+fn parses_any_and_preserves_callable_parameter_names() {
+    use crate::ast::{CallableParamType, SparType, TopLevelItem};
+
+    let program = parse_ok("var value: Any = 1; var callback: fn(value: int, label: str) -> bool;");
+    let TopLevelItem::Var(value) = &program.items[0] else { panic!("expected Any variable"); };
+    assert_eq!(value.ty, SparType::Any);
+
+    let TopLevelItem::Var(callback) = &program.items[1] else { panic!("expected callback variable"); };
+    assert_eq!(
+        callback.ty,
+        SparType::Function {
+            params: vec![
+                CallableParamType { name: "value".into(), ty: SparType::Int },
+                CallableParamType { name: "label".into(), ty: SparType::Str },
+            ],
+            return_type: Box::new(SparType::Bool),
+        }
+    );
+}
+
 #[test]
 fn parses_async_function_and_await_expression() {
     use crate::ast::{Expr, ReturnValue, Statement, TopLevelItem};
@@ -58,12 +80,12 @@ fn parses_generic_function_type_and_explicit_call() {
     use crate::ast::{Expr, SparType, TopLevelItem, TypeFieldShape};
 
     let program = parse_ok(
-        "type [Pair<T, U>] { left: T; right: U; }; \
+        "struct Pair<T, U> { left: T; right: U; }; \
          function identity<T>(value: T) -> T { return value; }; \
          var answer: int = identity<int>(value: 7);",
     );
 
-    let TopLevelItem::Type(pair) = &program.items[0] else {
+    let TopLevelItem::Struct(pair) = &program.items[0] else {
         panic!("expected generic type")
     };
     assert_eq!(
@@ -73,7 +95,7 @@ fn parses_generic_function_type_and_explicit_call() {
             .collect::<Vec<_>>(),
         ["T", "U"]
     );
-    assert!(matches!(pair.fields[0].shape, TypeFieldShape::TypeParameter(ref name) if name == "T"));
+    assert!(matches!(pair.type_decl().fields[0].shape, TypeFieldShape::Primitive(SparType::TypeParameter(ref name)) if name == "T"));
 
     let TopLevelItem::Function(identity) = &program.items[1] else {
         panic!("expected generic function")
@@ -303,39 +325,14 @@ fn rejects_required_function_parameter_after_defaulted_parameter() {
 }
 
 #[test]
-fn parse_function_decl_section_return() {
+fn rejects_section_return_types_with_named_type_migration_hint() {
     let src = r#"
         function makeServer(host: str, port: int) -> section {
-            return { host: str = host; port: int = port; };
+            return { host: host; port: port; };
         };
     "#;
-    let prog = parse_ok(src);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Function(f) => {
-            assert_eq!(f.params.len(), 2);
-            assert!(matches!(f.ret, crate::ast::SparType::Section));
-            // The return statement is now a FuncStmt::Return in body.stmts
-            let ret_stmt = f
-                .body
-                .stmts
-                .iter()
-                .find_map(|s| {
-                    if let crate::ast::FuncStmt::Return(rv, _) = s {
-                        Some(rv)
-                    } else {
-                        None
-                    }
-                })
-                .expect("should have a Return stmt");
-            match ret_stmt {
-                crate::ast::ReturnValue::SectionBlock(fields) => {
-                    assert_eq!(fields.len(), 2);
-                }
-                _ => panic!("expected SectionBlock"),
-            }
-        }
-        _ => panic!("expected Function"),
-    }
+    let error = parse_err(src);
+    assert!(error.contains("section") && (error.contains("named type") || error.contains("Record")), "{error}");
 }
 
 #[test]
@@ -536,19 +533,16 @@ fn parse_ok_result(src: &str) -> Result<crate::ast::Program, crate::error::SparE
 }
 
 #[test]
-fn bool_type_in_return_section_parses() {
+fn record_object_return_parses_without_section_syntax() {
     let src = r#"
-        function builderFunc(major: int) -> section {
+        function builderFunc(major: int) -> Record {
             if major <= 0 {
-                return { error: bool = true; message: str = "bad"; };
+                return { error: true; message: "bad"; };
             }
-            return { error: bool = false; };
+            return { error: false; };
         };
     "#;
-    assert!(
-        parse_ok_result(src).is_ok(),
-        "bool as type in return block must parse"
-    );
+    assert!(parse_ok_result(src).is_ok(), "record object return must parse");
 }
 
 #[test]
@@ -565,7 +559,7 @@ fn int_float_str_bool_as_types_in_all_positions() {
         var c: str = "x";
         var d: bool = true;
         function f(x: float, y: bool) -> str { return str(x); };
-        [S]{ n: int = 0; flag: bool = false; };
+        struct S { n: int = 0; flag: bool = false; };
     "#;
     assert!(parse_ok_result(src).is_ok());
 }
@@ -669,69 +663,51 @@ fn parses_required_schema_section() {
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     assert_eq!(prog.items.len(), 1);
     match &prog.items[0] {
-        crate::ast::TopLevelItem::SchemaSection(s) => {
+        crate::ast::TopLevelItem::Schema(s) => {
             assert_eq!(s.name, "X");
-            assert!(!s.marker.optional);
             assert_eq!(s.fields.len(), 1);
             assert_eq!(s.fields[0].name, "a");
         }
         other => panic!(
-            "expected SchemaSection, got {:?}",
+            "expected Schema, got {:?}",
             std::mem::discriminant(other)
         ),
     }
 }
 
 #[test]
-fn parses_optional_schema_section() {
-    let src = "schema? Y { b: str; };";
+fn rejects_optional_schema_marker() {
+    let error = parse_err("schema? Y { b: str; };");
+    assert!(error.contains("Option<T>") && error.contains("removed"), "{error}");
+}
+
+#[test]
+fn schema_optional_fields_use_option_type() {
+    let src = "schema X { a: int; b: Option<str>; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let prog = crate::parser::Parser::new(tokens).parse().unwrap();
     match &prog.items[0] {
-        crate::ast::TopLevelItem::SchemaSection(s) => {
-            assert!(s.marker.optional);
+        crate::ast::TopLevelItem::Schema(s) => {
+            assert!(matches!(
+                &s.fields[1].shape,
+                crate::ast::SchemaFieldShape::Type(crate::ast::SparType::Applied { name, arguments })
+                    if name == "Option" && arguments == &vec![crate::ast::SparType::Str]
+            ));
         }
-        _ => panic!("expected SchemaSection"),
+        _ => panic!("expected Schema"),
     }
 }
 
 #[test]
-fn parses_optional_schema_field() {
-    let src = "schema X { a: int; b?: str; };";
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::SchemaSection(s) => {
-            assert!(!s.fields[0].optional);
-            assert!(s.fields[1].optional);
-        }
-        _ => panic!("expected SchemaSection"),
-    }
+fn rejects_legacy_optional_schema_field_marker() {
+    let error = parse_err("schema X { a: int; b?: str; };");
+    assert!(error.contains("Option<T>") && error.contains("removed"), "{error}");
 }
 
 #[test]
-fn parses_nested_section_schema_field() {
-    let src = r#"schema X {
-    x: section = { host: str; port?: int; };
-};"#;
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let prog = crate::parser::Parser::new(tokens).parse().unwrap();
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::SchemaSection(s) => {
-            assert_eq!(s.fields.len(), 1);
-            assert_eq!(s.fields[0].name, "x");
-            match &s.fields[0].shape {
-                crate::ast::SchemaFieldShape::Section(nested) => {
-                    assert_eq!(nested.len(), 2);
-                    assert_eq!(nested[0].name, "host");
-                    assert_eq!(nested[1].name, "port");
-                    assert!(nested[1].optional);
-                }
-                _ => panic!("expected Section shape"),
-            }
-        }
-        _ => panic!("expected SchemaSection"),
-    }
+fn rejects_nested_section_schema_field() {
+    let error = parse_err(r#"schema X { x: section = { host: str; port?: int; }; };"#);
+    assert!(error.contains("section") && error.contains("removed"), "{error}");
 }
 
 #[test]
@@ -785,67 +761,44 @@ fn non_schema_file_with_lt_gt_comparison_still_parses() {
 }
 
 #[test]
-fn parse_type_decl_with_named_and_nested_fields() {
+fn parse_type_decl_with_named_fields_and_option() {
     let src = r#"
-        type [Border]{
-            width?: int;
+        struct Border {
+            width: Option<int> = none();
         };
-        export type [Decoration]{
-            color?: str;
-            border?: Border;
-            boxShadow: section = {
-                blurRadius: int;
-            };
+        struct Shadow {
+            blurRadius: int;
+        };
+        export struct Decoration {
+            color: Option<str> = none();
+            border: Option<Border> = none();
+            boxShadow: Shadow;
         };
     "#;
     let prog = parse_ok(src);
-    assert_eq!(prog.items.len(), 2);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Type(t) => {
-            assert_eq!(t.name, "Border");
-            assert!(!t.exported);
-            assert_eq!(t.fields.len(), 1);
-        }
-        other => panic!("expected TopLevelItem::Type, got {:?}", other),
-    }
-    match &prog.items[1] {
-        crate::ast::TopLevelItem::Type(t) => {
-            assert_eq!(t.name, "Decoration");
-            assert!(t.exported);
-            assert_eq!(t.fields.len(), 3);
-            assert!(
-                matches!(t.fields[1].shape, crate::ast::TypeFieldShape::Named(ref n) if n == "Border")
-            );
-            assert!(matches!(
-                t.fields[2].shape,
-                crate::ast::TypeFieldShape::Section(_)
-            ));
-        }
-        other => panic!("expected TopLevelItem::Type, got {:?}", other),
-    }
+    assert_eq!(prog.items.len(), 3);
+    let crate::ast::TopLevelItem::Struct(decoration) = &prog.items[2] else {
+        panic!("expected Decoration type");
+    };
+    assert_eq!(decoration.name, "Decoration");
+    assert!(decoration.exported);
+    assert_eq!(decoration.items.len(), 3);
+    assert!(matches!(
+        decoration.type_decl().fields[2].shape,
+        crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Named(ref n)) if n == "Shadow"
+    ));
 }
 
 #[test]
-fn parse_section_with_type_binding() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: str = "postgres:16";
-        };
-    "#;
-    let prog = parse_ok(src);
-    match &prog.items[1] {
-        crate::ast::TopLevelItem::Section(s) => {
-            let binding = s.type_binding.as_ref().expect("expected a type_binding");
-            assert_eq!(
-                binding.ty,
-                crate::ast::SparType::Named("PostgresType".into())
-            );
-        }
-        other => panic!("expected TopLevelItem::Section, got {:?}", other),
-    }
+fn rejects_inline_section_type_fields() {
+    let error = parse_err(r#"struct Decoration { boxShadow: section = { blurRadius: int; }; };"#);
+    assert!(error.contains("section") && error.contains("named"), "{error}");
+}
+
+#[test]
+fn rejects_removed_struct_type_binding() {
+    let error = parse_err("struct Postgres: Shape { image = \"postgres:16\"; };");
+    assert!(error.contains("struct type bindings were removed"), "{error}");
 }
 
 #[test]
@@ -878,19 +831,9 @@ fn parse_selective_import() {
 }
 
 #[test]
-fn parse_import_type_selective() {
-    let src = r#"import type { PostgresType, Border as B } from "shared.spar";"#;
-    let prog = parse_ok(src);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Import(d) => match &d.kind {
-            crate::ast::ImportKind::TypeSelective(items) => {
-                assert_eq!(items.len(), 2);
-                assert_eq!(items[0].name, "PostgresType");
-            }
-            other => panic!("expected TypeSelective, got {:?}", other),
-        },
-        other => panic!("expected TopLevelItem::Import, got {:?}", other),
-    }
+fn rejects_removed_import_type_selective() {
+    let error = parse_err(r#"import type { PostgresType, Border as B } from "shared.spar";"#);
+    assert!(error.contains("import type"), "{error}");
 }
 
 #[test]
@@ -951,26 +894,22 @@ fn parse_schema_from_decl() {
     // type {...}` isn't legal until Task 5, so this test sticks to plain
     // `SchemaFrom` declarations (parsing them doesn't require the
     // referenced type to actually exist; that's a Task 6 semantic check).
-    let src = concat!(
-        "schema Postgres from PostgresType;\n",
-        "schema? Cache from CacheType;\n",
-    );
+    let src = "schema Postgres from PostgresType;\n";
     let prog = parse_ok(src);
-    assert_eq!(prog.items.len(), 2);
+    assert_eq!(prog.items.len(), 1);
     match &prog.items[0] {
         crate::ast::TopLevelItem::SchemaFrom(sf) => {
             assert_eq!(sf.name, "Postgres");
             assert_eq!(sf.source_type, "PostgresType");
-            assert!(!sf.marker.optional);
         }
         other => panic!("expected SchemaFrom, got {:?}", other),
     }
-    match &prog.items[1] {
-        crate::ast::TopLevelItem::SchemaFrom(sf) => {
-            assert!(sf.marker.optional);
-        }
-        other => panic!("expected SchemaFrom, got {:?}", other),
-    }
+}
+
+#[test]
+fn rejects_optional_schema_from_marker() {
+    let error = parse_err("schema? Cache from CacheType;\n");
+    assert!(error.contains("Option<T>") && error.contains("removed"), "{error}");
 }
 
 #[test]
@@ -983,9 +922,9 @@ fn parse_schema_file_still_rejects_non_type_imports() {
 }
 
 #[test]
-fn parse_schema_file_allows_import_type() {
+fn parse_schema_file_allows_ordinary_import() {
     let src = concat!(
-        "import type { PostgresType } from \"types.spar\";\n",
+        "import { PostgresType } from \"types.spar\";\n",
         "schema Postgres { image: str; };\n",
     );
     let prog = parse_ok(src);
@@ -993,12 +932,12 @@ fn parse_schema_file_allows_import_type() {
 }
 
 #[test]
-fn parse_schema_file_still_rejects_selective_import() {
+fn parse_schema_file_allows_selective_import() {
     let src = concat!(
         "schema Y { a: int; };\n",
         "import { PostgresType } from \"types.spar\";\n",
     );
-    let _ = parse_err(src);
+    let _ = parse_ok(src);
 }
 
 #[test]
@@ -1011,73 +950,47 @@ fn parse_schema_file_rejects_removed_as_part_of_syntax() {
 }
 
 #[test]
-fn parse_spread_inside_nested_field_body() {
+fn parse_spread_inside_dynamic_record_field() {
     let src = r#"
-        [Postgres] -> PostgresType {
-            image: "postgres:16";
-            environment: { ...ProductionEnvironment; };
+        struct Postgres {
+            image: str = "postgres:16";
+            environment: Record = { ...ProductionEnvironment; };
         };
     "#;
     let prog = parse_ok(src);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Section(sd) => {
-            let env_field = sd
-                .items
-                .iter()
-                .find_map(|it| {
-                    if let crate::ast::SectionItem::Field(f) = it {
-                        if f.name == "environment" {
-                            return Some(f);
-                        }
-                    }
-                    None
-                })
-                .expect("expected an environment field");
-            match &env_field.value {
-                Some(crate::ast::FieldValue::Nested(items)) => {
-                    assert_eq!(items.len(), 1);
-                    assert!(matches!(items[0], crate::ast::SectionItem::Spread(_)));
-                }
-                other => panic!("expected FieldValue::Nested, got {:?}", other),
-            }
-        }
-        other => panic!("expected TopLevelItem::Section, got {:?}", other),
-    }
+    let crate::ast::TopLevelItem::Struct(sd) = &prog.items[0] else { panic!("expected struct") };
+    let env_field = sd.items.iter().find_map(|item| match item {
+        crate::ast::ObjectItem::Field(field) if field.name == "environment" => Some(field),
+        _ => None,
+    }).expect("environment field");
+    let Some(crate::ast::FieldValue::Expr(crate::ast::Expr::Object(items, _))) = &env_field.value else {
+        panic!("expected dynamic object expression, got {:?}", env_field.value);
+    };
+    assert_eq!(items.len(), 1);
+    assert!(matches!(items[0], crate::ast::ObjectItem::Spread(_)));
 }
 
 #[test]
-fn parse_spread_mixed_with_fields_inside_nested_body() {
+fn parse_spread_mixed_with_fields_inside_dynamic_record() {
     let src = r#"
-        [Postgres] -> PostgresType {
-            image: "postgres:16";
-            environment: {
+        struct Postgres {
+            image: str = "postgres:16";
+            environment: Record = {
                 ...ProductionEnvironment;
                 port: "3000";
             };
         };
     "#;
     let prog = parse_ok(src);
-    match &prog.items[0] {
-        crate::ast::TopLevelItem::Section(sd) => {
-            let env_field = sd
-                .items
-                .iter()
-                .find_map(|it| {
-                    if let crate::ast::SectionItem::Field(f) = it {
-                        if f.name == "environment" {
-                            return Some(f);
-                        }
-                    }
-                    None
-                })
-                .expect("expected an environment field");
-            match &env_field.value {
-                Some(crate::ast::FieldValue::Nested(items)) => assert_eq!(items.len(), 2),
-                other => panic!("expected FieldValue::Nested, got {:?}", other),
-            }
-        }
-        other => panic!("expected TopLevelItem::Section, got {:?}", other),
-    }
+    let crate::ast::TopLevelItem::Struct(sd) = &prog.items[0] else { panic!("expected struct") };
+    let env_field = sd.items.iter().find_map(|item| match item {
+        crate::ast::ObjectItem::Field(field) if field.name == "environment" => Some(field),
+        _ => None,
+    }).expect("environment field");
+    let Some(crate::ast::FieldValue::Expr(crate::ast::Expr::Object(items, _))) = &env_field.value else {
+        panic!("expected dynamic object expression, got {:?}", env_field.value);
+    };
+    assert_eq!(items.len(), 2);
 }
 
 // ── SparType::Named ──────────────────────────────────────────────────────────
@@ -1123,40 +1036,24 @@ fn parse_function_param_and_return_with_named_type() {
 }
 
 #[test]
-fn parse_section_field_with_explicit_named_type_and_eq_disambiguates_as_type() {
-    let src = "[Tree]{ root: Leaf = someExpr; };";
+fn parse_struct_field_with_explicit_named_type_and_eq_disambiguates_as_type() {
+    let src = "struct Tree { root: Leaf = someExpr; };";
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else {
-        panic!("expected section")
+    let crate::ast::TopLevelItem::Struct(s) = &program.items[0] else {
+        panic!("expected struct")
     };
-    let crate::ast::SectionItem::Field(f) = &s.items[0] else {
+    let crate::ast::ObjectItem::Field(f) = &s.items[0] else {
         panic!("expected field")
     };
     assert_eq!(f.ty, Some(crate::ast::SparType::Named("Leaf".to_string())));
 }
 
 #[test]
-fn parse_section_field_bare_ident_no_eq_is_still_untyped_value_regression() {
-    let src = "[Man] -> Human { name: someVar; };";
-    let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-    let program = crate::parser::Parser::new(tokens).parse().unwrap();
-    let crate::ast::TopLevelItem::Section(s) = &program.items[0] else {
-        panic!("expected section")
-    };
-    let crate::ast::SectionItem::Field(f) = &s.items[0] else {
-        panic!("expected field")
-    };
-    assert_eq!(f.ty, None);
-    assert!(matches!(
-        &f.value,
-        Some(crate::ast::FieldValue::Expr(
-            crate::ast::Expr::NamespaceRef(_)
-        ))
-    ));
+fn rejects_bound_struct_field_bare_ident() {
+    let error = parse_err("struct Man: Human { name: someVar; };");
+    assert!(error.contains("struct type bindings were removed"), "{error}");
 }
-
-// ── Expr::Object ──────────────────────────────────────────────────────────────
 
 #[test]
 fn parse_bare_object_literal_as_var_value() {
@@ -1199,8 +1096,8 @@ fn parse_object_literal_with_spread() {
     let Some(crate::ast::Expr::Object(items, _)) = &v.value else {
         panic!("expected object literal")
     };
-    assert!(matches!(&items[0], crate::ast::SectionItem::Spread(_)));
-    assert!(matches!(&items[1], crate::ast::SectionItem::Field(_)));
+    assert!(matches!(&items[0], crate::ast::ObjectItem::Spread(_)));
+    assert!(matches!(&items[1], crate::ast::ObjectItem::Field(_)));
 }
 
 // ── enum declarations ─────────────────────────────────────────────────────────
@@ -1391,31 +1288,12 @@ fn parses_try_catch_without_binding() {
 #[test]
 fn parses_canonical_struct_and_list_types() {
     use crate::ast::{SparType, TopLevelItem};
-
-    let program = parse_ok(
-        "type Pair<T, V> { left: T; right: V; }; \
-         struct Example: Pair<str, int> { left = \"hello\"; right = 42; }; \
-         var values: List<str> = [\"a\", \"b\"];",
-    );
-
-    let TopLevelItem::Type(pair) = &program.items[0] else {
-        panic!("expected type")
-    };
-    assert_eq!(pair.name, "Pair");
-    let TopLevelItem::Section(example) = &program.items[1] else {
-        panic!("expected unified struct section")
-    };
-    assert_eq!(example.path, ["Example"]);
-    assert_eq!(
-        example.type_binding.as_ref().map(|binding| &binding.ty),
-        Some(&SparType::Applied {
-            name: "Pair".into(),
-            arguments: vec![SparType::Str, SparType::Int],
-        })
-    );
-    let TopLevelItem::Var(values) = &program.items[2] else {
-        panic!("expected var")
-    };
+    let program = parse_ok(r#"struct Pair<T, V> { left: T; right: V; }; var example: Pair<str, int> = Pair<str, int>(left: "hello", right: 42); var values: List<str> = ["a", "b"];"#);
+    let TopLevelItem::Struct(pair) = &program.items[0] else { panic!("expected struct"); };
+    assert_eq!(pair.type_parameters.len(), 2);
+    let TopLevelItem::Var(example) = &program.items[1] else { panic!("expected variable"); };
+    assert_eq!(example.ty, SparType::Applied { name: "Pair".into(), arguments: vec![SparType::Str, SparType::Int] });
+    let TopLevelItem::Var(values) = &program.items[2] else { panic!("expected variable"); };
     assert_eq!(values.ty, SparType::List(Box::new(SparType::Str)));
 }
 
@@ -1428,11 +1306,11 @@ fn parses_private_export_struct_and_ignored_catch() {
          export struct Public { name: str = \"spar\"; }; \
          function main() -> void { try { return; } catch { return; } };",
     );
-    let TopLevelItem::Section(internal) = &program.items[0] else {
+    let TopLevelItem::Struct(internal) = &program.items[0] else {
         panic!()
     };
     assert!(internal.private);
-    let TopLevelItem::Section(public) = &program.items[1] else {
+    let TopLevelItem::Struct(public) = &program.items[1] else {
         panic!()
     };
     assert!(public.exported);
@@ -1446,34 +1324,28 @@ fn parses_private_export_struct_and_ignored_catch() {
 }
 
 #[test]
-fn parses_legacy_sections_and_list_types_to_compatibility_nodes() {
+fn canonical_struct_and_legacy_list_type_parse_together() {
     use crate::ast::{SparType, TopLevelItem};
 
-    let program = parse_ok("[Legacy] { ports: [int] = [1, 2]; };");
-    let TopLevelItem::Section(section) = &program.items[0] else {
-        panic!()
-    };
-    let crate::ast::SectionItem::Field(field) = &section.items[0] else {
-        panic!()
-    };
+    let program = parse_ok("struct Legacy { ports: [int] = [1, 2]; };");
+    let TopLevelItem::Struct(struct_decl) = &program.items[0] else { panic!() };
+    let crate::ast::ObjectItem::Field(field) = &struct_decl.items[0] else { panic!() };
     assert_eq!(field.ty, Some(SparType::List(Box::new(SparType::Int))));
 }
 
 #[test]
-fn rejects_generic_struct_declarations_with_actionable_message() {
-    let error = parse_err("struct BoxValue<T> { value: T; };");
-    assert!(
-        error.contains("structs are concrete values and cannot declare type parameters"),
-        "{error}"
-    );
-    assert!(error.contains("generic `type`"), "{error}");
+fn accepts_generic_struct_declarations() {
+    let program = parse_ok("struct BoxValue<T> { value: T; };");
+    let crate::ast::TopLevelItem::Struct(decl) = &program.items[0] else { panic!("expected struct"); };
+    assert_eq!(decl.type_parameters.len(), 1);
+    assert_eq!(decl.type_parameters[0].name, "T");
 }
 
 #[test]
 fn native_shell_words_are_contextual_names_outside_construct_position() {
     let program = parse_ok(
         r#"
-        type Tool {
+        struct Tool {
             command: str;
             exec: str;
             shell: str;
@@ -1497,7 +1369,7 @@ fn command_exec_and_shell_construct_forms_remain_reserved_in_construct_position(
         r#"
         var one: shell = command echo one;
         var two: shell = shell { echo two; };
-        function run() -> section { return exec { echo three; }; };
+        function run() -> shell { return exec { echo three; }; };
         "#,
     );
     assert_eq!(program.items.len(), 3);
@@ -1509,16 +1381,16 @@ fn emit_attribute_attaches_to_struct_and_var() {
     let program = parse_ok(
         "#[emit]\nstruct Server { port: int = 1; };\n#[emit]\nvar version: str = \"1\";\nstruct Plain { a: int = 1; };\n",
     );
-    let TopLevelItem::Section(server) = &program.items[0] else {
-        panic!("section")
+    let TopLevelItem::Struct(server) = &program.items[0] else {
+        panic!("struct")
     };
     assert!(server.is_emit());
     let TopLevelItem::Var(version) = &program.items[1] else {
         panic!("var")
     };
     assert!(version.is_emit());
-    let TopLevelItem::Section(plain) = &program.items[2] else {
-        panic!("section")
+    let TopLevelItem::Struct(plain) = &program.items[2] else {
+        panic!("struct")
     };
     assert!(!plain.is_emit());
 }
@@ -1533,8 +1405,8 @@ fn emit_attribute_works_with_export_and_private_and_stacking() {
         panic!("var")
     };
     assert_eq!(a.attributes.len(), 2);
-    let TopLevelItem::Section(b) = &program.items[1] else {
-        panic!("section")
+    let TopLevelItem::Struct(b) = &program.items[1] else {
+        panic!("struct")
     };
     assert!(b.is_emit() && b.private);
 }
@@ -1575,4 +1447,119 @@ fn attribute_on_field_is_rejected() {
             .contains("only valid on top-level structs and vars"),
         "{err}"
     );
+}
+
+
+#[test]
+fn rejects_legacy_nullable_question_mark_with_option_migration_hint() {
+    for source in [
+        "var name?: str;",
+        "struct UserType { sex?: str; };",
+        "struct User { sex?: str = \"male\"; };",
+    ] {
+        let error = parse_err(source);
+        assert!(error.contains("Option<T>"), "{source}: {error}");
+        assert!(error.contains("none()"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn fallback_operator_remains_independent_from_removed_nullable_syntax() {
+    use crate::ast::{BinOp, Expr, TopLevelItem};
+
+    let program = parse_ok("var value: int = maybe ?? 7;");
+    let TopLevelItem::Var(value) = &program.items[0] else { panic!("expected var"); };
+    let Some(Expr::BinaryOp(binary)) = &value.value else { panic!("expected fallback expression"); };
+    assert_eq!(binary.op, BinOp::Fallback);
+}
+
+#[test]
+fn legacy_sections_and_section_type_annotations_are_rejected() {
+    let legacy = parse_err("[Server] { port: int = 8080; };");
+    assert!(legacy.contains("struct"), "{legacy}");
+
+    let annotation = parse_err("var config: section = { port: 8080; };");
+    assert!(annotation.contains("section") && annotation.contains("Record"), "{annotation}");
+
+    let field_shape = parse_err("struct Root { server: section; };");
+    assert!(field_shape.contains("named") || field_shape.contains("type"), "{field_shape}");
+}
+
+#[test]
+fn dynamic_object_literals_remain_expressions_not_sections() {
+    use crate::ast::{Expr, TopLevelItem};
+
+    let program = parse_ok("var config: Record = { key: \"value\"; };");
+    let TopLevelItem::Var(config) = &program.items[0] else { panic!("expected variable"); };
+    assert!(matches!(config.value, Some(Expr::Object(_, _))));
+}
+
+#[test]
+fn named_type_constructor_is_the_typed_nesting_surface() {
+    use crate::ast::{Expr, TopLevelItem};
+
+    let program = parse_ok(
+        "struct Address { city: str = \"\"; }; var address: Address = Address(city: \"Awka\");",
+    );
+    let TopLevelItem::Var(address) = &program.items[1] else { panic!("expected address variable"); };
+    let Some(Expr::Call { name, args, .. }) = &address.value else { panic!("expected constructor call"); };
+    assert_eq!(name, "Address");
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].param_name, "city");
+}
+
+#[test]
+fn fn_is_the_canonical_function_declaration_keyword() {
+    let program = parse_ok("fn answer(value: int) -> int { return value; };");
+    assert!(matches!(program.items[0], crate::ast::TopLevelItem::Function(_)));
+}
+
+#[test]
+fn function_remains_a_compatibility_alias() {
+    let program = parse_ok("function answer(value: int) -> int { return value; };");
+    assert!(matches!(program.items[0], crate::ast::TopLevelItem::Function(_)));
+}
+
+#[test]
+fn pipe_closures_parse_for_zero_and_multiple_parameters() {
+    use crate::ast::{ClosureBody, Expr, TopLevelItem};
+
+    let program = parse_ok(
+        "var zero: fn() -> int = || 42;\n\
+         var add: fn(left: int, right: int) -> int = |left: int, right: int| left + right;",
+    );
+    let TopLevelItem::Var(zero) = &program.items[0] else { panic!("expected zero closure") };
+    assert!(matches!(zero.value, Some(Expr::Closure { ref params, body: ClosureBody::Expr(_), .. }) if params.is_empty()));
+    let TopLevelItem::Var(add) = &program.items[1] else { panic!("expected add closure") };
+    assert!(matches!(add.value, Some(Expr::Closure { ref params, body: ClosureBody::Expr(_), .. }) if params.len() == 2));
+}
+
+#[test]
+fn pipe_closure_block_body_and_return_type_parse() {
+    let program = parse_ok(
+        "var clamp: fn(value: int) -> int = |value: int| -> int { return value; };",
+    );
+    assert!(matches!(
+        &program.items[0],
+        crate::ast::TopLevelItem::Var(crate::ast::VarDecl {
+            value: Some(crate::ast::Expr::Closure { return_type: Some(crate::ast::SparType::Int), .. }),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn positional_ordinary_calls_are_rejected_with_named_argument_hint() {
+    let error = parse_err("var value: int = parseInt(\"42\");");
+    assert!(error.contains("named") || error.contains("parameter"), "{error}");
+}
+
+#[test]
+fn named_method_calls_preserve_argument_names() {
+    let program = parse_ok("var value: int = items.insert(index: 0, value: 7);");
+    let crate::ast::TopLevelItem::Var(var) = &program.items[0] else { panic!("expected var") };
+    let Some(crate::ast::Expr::MethodCall { args, .. }) = &var.value else { panic!("expected method call") };
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0].param_name, "index");
+    assert_eq!(args[1].param_name, "value");
 }

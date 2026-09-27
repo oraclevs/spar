@@ -1,10 +1,5 @@
-import type { Pair } from "types.spar";
-
-struct Imported: Pair<str, int> {
-    left = "imported";
-    right = 23;
-};
-
-function main() -> int {
-    return Imported.right;
+import { Pair } from "types.spar";
+fn main() -> int {
+    var imported: Pair<str, int> = Pair<str, int>(left: "imported", right: 23);
+    return imported.right;
 };

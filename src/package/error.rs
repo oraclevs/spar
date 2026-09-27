@@ -4,7 +4,7 @@
 pub enum PackageError {
     /// A `spar.package.spar` manifest is malformed, missing a required
     /// field, or uses a construct manifests don't allow (anything beyond
-    /// literal `[Package]`/`[Dependencies]`/`[Overrides]` string fields).
+    /// literal `struct Package`/`struct Dependencies`/`struct Overrides` string fields).
     Manifest { message: String },
     /// A generated `spar.package.lock.spar` file is malformed or contains
     /// an internally inconsistent dependency graph.

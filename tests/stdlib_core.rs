@@ -9,7 +9,7 @@ fn prelude_println_is_available_without_import() {
         .compile_source(
             r#"
             function main() -> int {
-                println(message: "hello from prelude");
+                println(value: "hello from prelude");
                 return len(value: "spar");
             };
             "#,
@@ -40,9 +40,10 @@ fn check_mode_resolves_implicit_prelude_native_capabilities() {
         };
 
         function main() -> int {
-            println(message: App.name);
-            print(message: "!");
-            return len(value: App.name);
+            var app: App = App();
+            println(value: app.name);
+            print(value: "!");
+            return len(value: app.name);
         };
         "#,
     );
@@ -72,7 +73,7 @@ fn explicit_std_root_import_can_replace_implicit_binding() {
 fn reserved_prelude_name_cannot_be_redeclared() {
     let engine = Engine::new(CompileOptions::default());
     let errors = engine
-        .check_source("function println(message: str) -> void { return; };")
+        .check_source("function println(value: str) -> void { return; };")
         .expect_err("reserved prelude declaration must be rejected");
     assert!(errors
         .iter()
@@ -191,7 +192,7 @@ fn range_end_only_form_is_available_without_import() {
             r#"
             function main() -> int {
                 var mut total: int = 0;
-                for i in range(5) {
+                for i in range(end: 5) {
                     total = total + i;
                 }
                 return total;
@@ -212,7 +213,7 @@ fn range_from_starts_at_the_given_value() {
             r#"
             function main() -> int {
                 var mut total: int = 0;
-                for i in rangeFrom(2, 5) {
+                for i in rangeFrom(start: 2, end: 5) {
                     total = total + i;
                 }
                 return total;
@@ -229,7 +230,7 @@ fn range_end_bound_is_exclusive_and_empty_when_start_reaches_end() {
         .execute_source(
             r#"
             function main() -> int {
-                return rangeFrom(5, 5).length();
+                return rangeFrom(start: 5, end: 5).length();
             };
             "#,
         )

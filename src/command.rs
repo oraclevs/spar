@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn byte_only_shell_plan_api_rejects_mixed_structured_pipeline() {
-        let error = super::parse_shell_plan("printf x | from lines |> take(1) |> to lines | cat")
+        let error = super::parse_shell_plan("printf x | from lines |> take(count: 1) |> to lines | cat")
             .expect_err("byte-only ShellPlan must not erase structured stages");
         assert!(
             error

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Expr, FieldValue, Program, SectionDecl, SectionItem, StringPart, TopLevelItem};
+use crate::ast::{Expr, FieldValue, Program, StructDecl, ObjectItem, StringPart, TopLevelItem};
 use crate::package::error::PackageError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,29 +71,29 @@ impl PackageManifest {
         let mut saw_overrides = false;
 
         for item in &program.items {
-            let TopLevelItem::Section(section) = item else {
+            let TopLevelItem::Struct(structure) = item else {
                 return Err(unsupported(path));
             };
-            match section.path.as_slice() {
-                [name] if name == "Package" => {
+            match structure.name.as_str() {
+                "Package" => {
                     if package_fields.is_some() {
-                        return Err(manifest_err(path, "duplicate [Package] section"));
+                        return Err(manifest_err(path, "duplicate `struct Package` declaration"));
                     }
-                    package_fields = Some(literal_fields(section, path)?);
+                    package_fields = Some(literal_fields(structure, path)?);
                 }
-                [name] if name == "Dependencies" => {
+                "Dependencies" => {
                     if saw_dependencies {
-                        return Err(manifest_err(path, "duplicate [Dependencies] section"));
+                        return Err(manifest_err(path, "duplicate `struct Dependencies` declaration"));
                     }
                     saw_dependencies = true;
-                    dependencies = literal_fields(section, path)?;
+                    dependencies = literal_fields(structure, path)?;
                 }
-                [name] if name == "Overrides" => {
+                "Overrides" => {
                     if saw_overrides {
-                        return Err(manifest_err(path, "duplicate [Overrides] section"));
+                        return Err(manifest_err(path, "duplicate `struct Overrides` declaration"));
                     }
                     saw_overrides = true;
-                    overrides = literal_fields(section, path)?;
+                    overrides = literal_fields(structure, path)?;
                 }
                 _ => return Err(unsupported(path)),
             }
@@ -107,19 +107,19 @@ impl PackageManifest {
         {
             return Err(manifest_err(
                 path,
-                &format!("[Package] contains unknown field '{field}'"),
+                &format!("`struct Package` contains unknown field '{field}'"),
             ));
         }
 
         let name = fields
             .get("name")
             .cloned()
-            .ok_or_else(|| manifest_err(path, "[Package] is missing required field 'name'"))?;
+            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'name'"))?;
         if !is_valid_package_name(&name) {
             return Err(manifest_err(
                 path,
                 &format!(
-                    "[Package] name '{name}' is invalid — use lowercase letters, digits, '-', \
+                    "`struct Package` name '{name}' is invalid — use lowercase letters, digits, '-', \
                      or '_', starting with a letter or digit"
                 ),
             ));
@@ -128,18 +128,18 @@ impl PackageManifest {
         let version_text = fields
             .get("version")
             .cloned()
-            .ok_or_else(|| manifest_err(path, "[Package] is missing required field 'version'"))?;
+            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'version'"))?;
         let version = semver::Version::parse(&version_text).map_err(|e| {
             manifest_err(
                 path,
-                &format!("[Package] version '{version_text}' is not valid SemVer: {e}"),
+                &format!("`struct Package` version '{version_text}' is not valid SemVer: {e}"),
             )
         })?;
 
         let kind_text = fields
             .get("kind")
             .cloned()
-            .ok_or_else(|| manifest_err(path, "[Package] is missing required field 'kind'"))?;
+            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'kind'"))?;
         let kind = match kind_text.as_str() {
             "application" => PackageKind::Application,
             "library" => PackageKind::Library,
@@ -148,7 +148,7 @@ impl PackageManifest {
                 return Err(manifest_err(
                     path,
                     &format!(
-                        "[Package] kind '{other}' is invalid — must be 'application', \
+                        "`struct Package` kind '{other}' is invalid — must be 'application', \
                          'library', or 'config'"
                     ),
                 ))
@@ -185,8 +185,8 @@ impl PackageManifest {
                 return Err(manifest_err(
                     path,
                     &format!(
-                        "[Overrides] names '{alias}', which has no matching entry in \
-                         [Dependencies] to override"
+                        "`struct Overrides` names '{alias}', which has no matching entry in \
+                         `struct Dependencies` to override"
                     ),
                 ));
             }
@@ -196,7 +196,7 @@ impl PackageManifest {
             ) {
                 return Err(manifest_err(
                     path,
-                    &format!("[Overrides] entry '{alias}' must use a local 'path:' source"),
+                    &format!("`struct Overrides` entry '{alias}' must use a local 'path:' source"),
                 ));
             }
         }
@@ -220,12 +220,12 @@ impl PackageManifest {
     /// `spar.package.lock.spar` is.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push_str("struct Package: SparPackage {\n");
-        out.push_str(&format!("    name = \"{}\";\n", escape(&self.name)));
-        out.push_str(&format!("    version = \"{}\";\n", self.version));
-        out.push_str(&format!("    kind = \"{}\";\n", self.kind.as_str()));
+        out.push_str("struct Package {\n");
+        out.push_str(&format!("    name: str = \"{}\";\n", escape(&self.name)));
+        out.push_str(&format!("    version: str = \"{}\";\n", self.version));
+        out.push_str(&format!("    kind: str = \"{}\";\n", self.kind.as_str()));
         out.push_str(&format!(
-            "    entry = \"{}\";\n",
+            "    entry: str = \"{}\";\n",
             escape(&self.entry.to_string_lossy())
         ));
         out.push_str("};\n");
@@ -285,14 +285,20 @@ fn manifest_err(path: &Path, message: &str) -> PackageError {
 }
 
 fn literal_fields(
-    section: &SectionDecl,
+    structure: &StructDecl,
     path: &Path,
 ) -> Result<BTreeMap<String, String>, PackageError> {
+    if !structure.type_parameters.is_empty() {
+        return Err(manifest_err(path, "manifest declarations cannot be generic"));
+    }
     let mut out = BTreeMap::new();
-    for item in &section.items {
-        let SectionItem::Field(field) = item else {
+    for item in &structure.items {
+        let ObjectItem::Field(field) = item else {
             return Err(unsupported(path));
         };
+        if field.ty != Some(crate::ast::SparType::Str) {
+            return Err(manifest_err(path, "manifest fields must be explicitly typed as str"));
+        }
         let Some(FieldValue::Expr(expr)) = &field.value else {
             return Err(unsupported(path));
         };

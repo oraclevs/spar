@@ -1,29 +1,175 @@
-export type [HttpResponse] {
-    status: int;
-    body: str;
-    contentType: str;
+export struct HttpResponse {
+    status: int = 0;
+    body: str = "";
+    headers: Map<str, str> = {};
+    contentType: Option<str> = none();
 };
 
-async function request(method: str, url: str, body: str = "") -> HttpResponse {
-    return nativeHttp::request(method: method, url: url, body: body);
+export struct Duration {
+    seconds: int = 30;
+    millis: int = 0;
 };
 
-async function get(url: str) -> HttpResponse {
-    return nativeHttp::request(method: "GET", url: url, body: "");
+impl Duration {
+    fn totalMillis(self) -> int {
+        return (self.seconds * 1000) + self.millis;
+    };
 };
 
-async function delete(url: str) -> HttpResponse {
-    return nativeHttp::request(method: "DELETE", url: url, body: "");
+export struct HttpClient {
+    baseUrl: str = "";
+    headers: Map<str, str> = {};
+    timeout: Duration = Duration();
 };
 
-async function post(url: str, body: str) -> HttpResponse {
-    return nativeHttp::request(method: "POST", url: url, body: body);
+impl HttpClient {
+    async fn request(
+        self,
+        method: str,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+        body: str = "",
+        jsonBody: Any = none<Any>(),
+    ) -> HttpResponse {
+        return nativeHttp::request(
+            method: method,
+            url: "${self.baseUrl}${path}",
+            defaultHeaders: self.headers,
+            headers: headers,
+            query: query,
+            body: body,
+            jsonBody: jsonBody,
+            timeoutMillis: self.timeout.totalMillis(),
+        );
+    };
+
+    async fn get(
+        self,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+    ) -> HttpResponse {
+        return self.request(method: "GET", path: path, query: query, headers: headers);
+    };
+
+    async fn delete(
+        self,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+    ) -> HttpResponse {
+        return self.request(method: "DELETE", path: path, query: query, headers: headers);
+    };
+
+    async fn post(
+        self,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+        body: str = "",
+        jsonBody: Any = none<Any>(),
+    ) -> HttpResponse {
+        return self.request(method: "POST", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+    };
+
+    async fn put(
+        self,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+        body: str = "",
+        jsonBody: Any = none<Any>(),
+    ) -> HttpResponse {
+        return self.request(method: "PUT", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+    };
+
+    async fn patch(
+        self,
+        path: str,
+        query: Map<str, str> = {},
+        headers: Map<str, str> = {},
+        body: str = "",
+        jsonBody: Any = none<Any>(),
+    ) -> HttpResponse {
+        return self.request(method: "PATCH", path: path, query: query, headers: headers, body: body, jsonBody: jsonBody);
+    };
 };
 
-async function put(url: str, body: str) -> HttpResponse {
-    return nativeHttp::request(method: "PUT", url: url, body: body);
+impl HttpResponse {
+    fn json<T>(self) -> T {
+        return nativeJson::parse<T>(text: self.body);
+    };
 };
 
-async function patch(url: str, body: str) -> HttpResponse {
-    return nativeHttp::request(method: "PATCH", url: url, body: body);
+async fn request(
+    method: str,
+    url: str,
+    body: str = "",
+    jsonBody: Any = none<Any>(),
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return nativeHttp::request(
+        method: method,
+        url: url,
+        defaultHeaders: {},
+        headers: headers,
+        query: query,
+        body: body,
+        jsonBody: jsonBody,
+        timeoutMillis: timeout.totalMillis(),
+    );
+};
+
+async fn get(
+    url: str,
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return await request(method: "GET", url: url, headers: headers, query: query, timeout: timeout);
+};
+
+async fn delete(
+    url: str,
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return await request(method: "DELETE", url: url, headers: headers, query: query, timeout: timeout);
+};
+
+async fn post(
+    url: str,
+    body: str = "",
+    jsonBody: Any = none<Any>(),
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return await request(method: "POST", url: url, body: body, jsonBody: jsonBody, headers: headers, query: query, timeout: timeout);
+};
+
+async fn put(
+    url: str,
+    body: str = "",
+    jsonBody: Any = none<Any>(),
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return await request(method: "PUT", url: url, body: body, jsonBody: jsonBody, headers: headers, query: query, timeout: timeout);
+};
+
+async fn patch(
+    url: str,
+    body: str = "",
+    jsonBody: Any = none<Any>(),
+    headers: Map<str, str> = {},
+    query: Map<str, str> = {},
+    timeout: Duration = Duration(),
+) -> HttpResponse {
+    return await request(method: "PATCH", url: url, body: body, jsonBody: jsonBody, headers: headers, query: query, timeout: timeout);
 };

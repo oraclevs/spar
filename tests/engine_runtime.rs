@@ -128,10 +128,10 @@ fn canonical_struct_uses_generic_defaults_and_field_access() {
     let outcome = Engine::default()
         .execute_source(
             r#"
-            type Config<T> { name: str = "default"; value: T; };
-            struct App: Config<int> { value = 7; };
-            function main() -> int {
-                if App.name == "default" { return App.value; }
+            struct Config<T> { name: str = "default"; value: T; };
+            fn main() -> int {
+                var app: Config<int> = Config<int>(value: 7);
+                if app.name == "default" { return app.value; }
                 return 0;
             };
             "#,
@@ -253,7 +253,7 @@ fn execute_path_preserves_generics_through_selective_imports() {
     fs::write(
         temp.path().join("generic.spar"),
         concat!(
-            "export type [Box<T>] { value: T; };\n",
+            "export struct Box<T> { value: T; };\n",
             "function identity<T>(value: T) -> T { return value; };\n",
         ),
     )
@@ -262,9 +262,9 @@ fn execute_path_preserves_generics_through_selective_imports() {
         temp.path().join("main.spar"),
         concat!(
             "import { identity } from \"generic.spar\";\n",
-            "import type { Box } from \"generic.spar\";\n",
+            "import { Box } from \"generic.spar\";\n",
             "function main() -> int {\n",
-            "    var boxed: Box<int> = { value: identity(value: 19); };\n",
+            "    var boxed: Box<int> = Box<int>(value: identity(value: 19));\n",
             "    return boxed.value;\n",
             "};\n",
         ),
@@ -282,12 +282,12 @@ fn closure_outlives_defining_function_and_invokes_positionally() {
     let outcome = Engine::default()
         .execute_source(
             r#"
-            function make(min: int) -> fn(int) -> bool {
-                return fn(value) => value >= min;
+            fn make(min: int) -> fn(value: int) -> bool {
+                return |value: int| value >= min;
             };
             function main() -> int {
-                var check: fn(int) -> bool = make(min: 10);
-                if check(11) { return 1; }
+                var check: fn(value: int) -> bool = make(min: 10);
+                if check(value: 11) { return 1; }
                 return 0;
             };
             "#,
@@ -303,9 +303,9 @@ fn closure_capture_is_by_value() {
             r#"
             function main() -> int {
                 var mut threshold: int = 10;
-                var check: fn(int) -> bool = fn(value) => value > threshold;
+                var check: fn(value: int) -> bool = |value: int| value > threshold;
                 threshold = 20;
-                if check(11) { return 1; }
+                if check(value: 11) { return 1; }
                 return 0;
             };
             "#,
@@ -321,8 +321,8 @@ fn named_function_can_be_stored_and_invoked_as_callable_value() {
             r#"
             function double(value: int) -> int { return value * 2; };
             function main() -> int {
-                var callback: fn(int) -> int = double;
-                return callback(7);
+                var callback: fn(value: int) -> int = double;
+                return callback(value: 7);
             };
             "#,
         )
@@ -377,7 +377,7 @@ fn impl_methods_static_factories_and_mut_self_execute() {
                 private function normalized(self) -> str { return self.name; };
             };
             function main() -> int {
-                var mut user = User.adult("Obi");
+                var mut user = User.adult(name: "Obi");
                 if !user.isAdult() { return 1; }
                 user.deactivate();
                 if user.active { return 2; }
@@ -416,10 +416,10 @@ fn structured_pipe_executes_calls_bare_callables_and_closures() {
             function add(value: int, amount: int) -> int { return value + amount; };
             function double(value: int) -> int { return value * 2; };
             function main() -> int {
-                var a: int = 5 |> add(3);
-                var transform: fn(int) -> int = double;
+                var a: int = 5 |> add(by: 3);
+                var transform: fn(value: int) -> int = double;
                 var b: int = a |> transform;
-                var c: int = b |> fn(value: int) -> int => value + 1;
+                var c: int = b |> |value: int| value + 1;
                 return c;
             };
             "#,

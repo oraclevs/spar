@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeclId {
     Global(String),
-    Section(String),
+    Struct(String),
 }
 
 pub type DepGraph = HashMap<DeclId, HashSet<DeclId>>;

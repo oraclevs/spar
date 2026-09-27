@@ -17,7 +17,7 @@ fn record_is_a_builtin_dynamic_object_type() {
 #[test]
 fn record_type_does_not_disable_declared_struct_shape_checks() {
     let source = r#"
-        type User { name: str; age: int; };
+        struct User { name: str; age: int; };
         var user: User = { name: "Obi"; };
         function main() -> int { return 0; };
     "#;
@@ -157,8 +157,9 @@ fn resolves_field_access_on_a_cross_file_plain_var() {
     fs::write(
         temp.path().join("network.spar"),
         concat!(
-            "export type [Network]{ name: str; driver: str; };\n",
-            "export var appNetwork: Network = { name: \"app-net\"; driver: \"bridge\"; };\n",
+            "export struct Network { name: str; driver: str; };\n",
+
+            "export var appNetwork: Network = Network(name: \"app-net\", driver: \"bridge\");\n",
         ),
     )
     .unwrap();
@@ -271,8 +272,8 @@ fn first_class_callable_types_accept_named_functions_and_infer_closure_parameter
     let source = r#"
         function inc(value: int) -> int { return value + 1; };
         function main() -> int {
-            var named: fn(int) -> int = inc;
-            var closure: fn(int) -> int = fn(value) => value + 1;
+            var named: fn(value: int) -> int = inc;
+            var closure: fn(value: int) -> int = |value: int| value + 1;
             return 0;
         };
     "#;
@@ -286,7 +287,7 @@ fn callable_assignment_rejects_incompatible_named_function_signature() {
     let source = r#"
         function inc(value: int) -> int { return value + 1; };
         function main() -> int {
-            var bad: fn(str) -> int = inc;
+            var bad: fn(value: str) -> int = inc;
             return 0;
         };
     "#;
@@ -294,7 +295,7 @@ fn callable_assignment_rejects_incompatible_named_function_signature() {
     assert!(
         errors
             .iter()
-            .any(|error| error.to_string().contains("fn(str) -> int")
+            .any(|error| error.to_string().contains("fn(value: str) -> int")
                 || error.to_string().contains("callable")),
         "{errors:?}"
     );
@@ -304,7 +305,7 @@ fn callable_assignment_rejects_incompatible_named_function_signature() {
 fn closure_without_expected_or_explicit_parameter_type_is_rejected() {
     let source = r#"
         function main() -> int {
-            var unknown = fn(value) => value;
+            var unknown = |value| value;
             return 0;
         };
     "#;
@@ -384,7 +385,7 @@ fn impl_blocks_reject_non_struct_targets_and_duplicate_methods() {
     let non_struct = Engine::default()
         .check_source(
             r#"
-            type UserId { value: str; };
+            enum UserId { First, Second };
             impl UserId {
                 function value(self) -> str { return self.value; };
             };
@@ -463,13 +464,28 @@ fn private_impl_method_is_not_available_to_external_callers() {
 }
 
 #[test]
+fn structured_pipe_binds_first_unsupplied_compatible_named_parameter() {
+    Engine::default()
+        .check_source(
+            r#"
+            fn decorate(prefix: str, value: int) -> int { return value; };
+            fn main() -> int {
+                var value: int = 5 |> decorate(prefix: "value=");
+                return value;
+            };
+            "#,
+        )
+        .expect("the piped value should bind `value`, not the explicitly supplied `prefix`");
+}
+
+#[test]
 fn structured_pipe_typechecks_function_calls_and_reports_input_mismatch() {
     Engine::default()
         .check_source(
             r#"
             function add(value: int, amount: int) -> int { return value + amount; };
             function main() -> int {
-                var value: int = 5 |> add(3);
+                var value: int = 5 |> add(amount: 3);
                 return value;
             };
             "#,
@@ -481,7 +497,7 @@ fn structured_pipe_typechecks_function_calls_and_reports_input_mismatch() {
             r#"
             function add(value: int, amount: int) -> int { return value + amount; };
             function main() -> int {
-                var value: int = "bad" |> add(3);
+                var value: int = "bad" |> add(amount: 3);
                 return value;
             };
             "#,
@@ -503,8 +519,8 @@ fn table_is_a_builtin_generic_type_with_schema_aware_methods() {
     let source = r#"
         function inspect(rows: Table<Record>) -> int {
             var copied: List<Record> = rows.rows();
-            var first: Table<Record> = rows.take(1);
-            var rest: Table<Record> = rows.skip(1);
+            var first: Table<Record> = rows.take(count: 1);
+            var rest: Table<Record> = rows.skip(count: 1);
             var columns: List<str> = rows.columns();
             var schema: Schema = rows.schema();
             if rows.isEmpty() { return 0; }

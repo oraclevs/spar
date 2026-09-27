@@ -1342,12 +1342,8 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Token::OrOr
                 } else {
-                    return Err(SparError::LexError {
-                        message:
-                            "unexpected '|' — use '|>' for structured values or '||' for boolean OR"
-                                .into(),
-                        span: self.span_at(start, line, col),
-                    });
+                    self.advance();
+                    Token::Pipe
                 }
             }
 
@@ -3218,7 +3214,7 @@ mod tests {
         let tokens = Lexer::new(
             r#"shell {
                 sleep 1 &
-                println(message: "done");
+                println(value: "done");
             }"#,
         )
         .tokenize()

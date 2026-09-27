@@ -5,32 +5,32 @@ struct User {
 };
 
 impl User {
-    function isAdult(self) -> bool {
+    fn isAdult(self) -> bool {
         return self.age >= 18;
     };
 
-    function deactivate(mut self) -> void {
+    fn deactivate(mut self) -> void {
         self.active = false;
     };
 
-    private function normalizedName(self) -> str {
+    private fn normalizedName(self) -> str {
         return self.name.trim();
     };
 };
 
-function mapAge(user: User, amount: int) -> int {
+fn mapAge(user: User, amount: int) -> int {
     return user.age + amount;
 };
 
-function main() -> int {
+fn main() -> int {
     var minimumAge: int = 21;
-    var adultCheck: fn(User) -> bool = fn(user) => user.age >= minimumAge;
+    var adultCheck: fn(user: User) -> bool = |user: User| user.age >= minimumAge;
     var mut user = User(name: "OCC", age: 24);
 
     if !user.isAdult() { return 1; }
-    if !adultCheck(user) { return 2; }
+    if !adultCheck(user: user) { return 2; }
 
-    var mapped: int = user |> mapAge(6);
+    var mapped: int = user |> mapAge(amount: 6);
     if mapped != 30 { return 3; }
 
     user.deactivate();

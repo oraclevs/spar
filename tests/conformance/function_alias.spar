@@ -1,0 +1,4 @@
+function identity(value: int) -> int {
+    return value;
+};
+var result: int = identity(value: 7);

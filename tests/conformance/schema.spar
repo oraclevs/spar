@@ -1,4 +1,4 @@
 schema Server {
     host: str;
-    port?: int;
+    port: Option<int>;
 };

@@ -40,13 +40,13 @@ fn write_manifest(dir: &Path, name: &str, version: &str, deps: &[(&str, &str)]) 
     let deps_section = if deps.is_empty() {
         String::new()
     } else {
-        format!("[Dependencies] {{\n{deps_block}}};\n")
+        format!("struct Dependencies {{\n{deps_block}}};\n")
     };
     fs::create_dir_all(dir).unwrap();
     fs::write(
         dir.join("spar.package.spar"),
         format!(
-            "[Package] {{\n    name: str = \"{name}\";\n    version: str = \"{version}\";\n    kind: str = \"library\";\n}};\n{deps_section}",
+            "struct Package {{\n    name: str = \"{name}\";\n    version: str = \"{version}\";\n    kind: str = \"library\";\n}};\n{deps_section}",
         ),
     )
     .unwrap();
@@ -114,7 +114,7 @@ fn transitive_graph_supports_two_versions_of_same_package() {
     commit_all(&app_b, "initial");
     tag(&app_b, "v1.0.0");
 
-    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    a: str = \"github:owner/app-a@1.0.0\";\n    b: str = \"github:owner/app-b@1.0.0\";\n};\n".to_string();
+    let root_manifest_src = "struct Package {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\nstruct Dependencies {\n    a: str = \"github:owner/app-a@1.0.0\";\n    b: str = \"github:owner/app-b@1.0.0\";\n};\n".to_string();
     let root_manifest =
         PackageManifest::parse(&root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 
@@ -148,7 +148,7 @@ fn dependency_cycle_is_detected_and_reported() {
     write_manifest(&a_dir, "a", "1.0.0", &[("b", "path:../b")]);
     write_manifest(&b_dir, "b", "1.0.0", &[("a", "path:../a")]);
 
-    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    a: str = \"path:a\";\n};\n";
+    let root_manifest_src = "struct Package {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\nstruct Dependencies {\n    a: str = \"path:a\";\n};\n";
     let root_manifest =
         PackageManifest::parse(root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 
@@ -168,7 +168,7 @@ fn local_override_is_used_without_any_network_access() {
     let http_override = root.path().join("http-dev");
     write_manifest(&http_override, "http", "9.9.9", &[]);
 
-    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    http: str = \"github:owner/http@1.0.0\";\n};\n[Overrides] {\n    http: str = \"path:http-dev\";\n};\n";
+    let root_manifest_src = "struct Package {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\nstruct Dependencies {\n    http: str = \"github:owner/http@1.0.0\";\n};\nstruct Overrides {\n    http: str = \"path:http-dev\";\n};\n";
     let root_manifest =
         PackageManifest::parse(root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 
@@ -187,7 +187,7 @@ fn local_override_is_used_without_any_network_access() {
 #[test]
 fn offline_network_policy_rejects_a_github_fetch_before_touching_git() {
     let root = tempfile::tempdir().unwrap();
-    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    http: str = \"github:owner/http@1.0.0\";\n};\n";
+    let root_manifest_src = "struct Package {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\nstruct Dependencies {\n    http: str = \"github:owner/http@1.0.0\";\n};\n";
     let root_manifest =
         PackageManifest::parse(root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 
@@ -209,7 +209,7 @@ fn resolves_a_branch_selector_to_its_current_commit() {
     write_manifest(&repo, "http", "1.0.0", &[]);
     commit_all(&repo, "initial");
 
-    let root_manifest_src = "[Package] {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\n[Dependencies] {\n    http: str = \"github:owner/http#main\";\n};\n";
+    let root_manifest_src = "struct Package {\n    name: str = \"root\";\n    version: str = \"1.0.0\";\n    kind: str = \"config\";\n};\nstruct Dependencies {\n    http: str = \"github:owner/http#main\";\n};\n";
     let root_manifest =
         PackageManifest::parse(root_manifest_src, &root.path().join("spar.package.spar")).unwrap();
 

@@ -964,6 +964,8 @@ pub(crate) fn runtime_value_to_json(value: &Value) -> Result<serde_json::Value, 
                 })
                 .collect(),
         )),
+        Value::Option(None) => Ok(serde_json::Value::Null),
+        Value::Option(Some(value)) => runtime_value_to_json(value),
         Value::Error {
             message,
             kind,
@@ -979,7 +981,7 @@ pub(crate) fn runtime_value_to_json(value: &Value) -> Result<serde_json::Value, 
             }
             Ok(serde_json::Value::Object(object))
         }
-        Value::Option(_)
+        Value::Args(_)
         | Value::Result(_)
         | Value::Shell(_)
         | Value::MixedShell(_)

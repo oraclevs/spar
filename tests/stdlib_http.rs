@@ -24,12 +24,12 @@ fn http_get_works_against_loopback_server() {
     let address = listener.local_addr().unwrap();
     let source = format!(
         r#"
-        import pkg {{ get }} from "std/http";
-        async function main() -> int {{
+        import pkg {{ get, HttpResponse }} from "std/http";
+        async fn main() -> int {{
             var response: HttpResponse = await get(url: "http://{address}/health");
             if response.status != 200 {{ return 1; }}
             if response.body != "pong" {{ return 2; }}
-            if response.contentType != "" {{ return 3; }}
+            if !response.contentType.isNone() {{ return 3; }}
             return 0;
         }};
         "#
@@ -53,18 +53,18 @@ fn http_response_methods_expose_text_json_and_success_status() {
     let address = listener.local_addr().unwrap();
     let source = format!(
         r#"
-        import pkg {{ get }} from "std/http";
-        async function main() -> int {{
+        import pkg {{ get, HttpResponse }} from "std/http";
+        async fn main() -> int {{
             var response: HttpResponse = await get(url: "http://{address}/user");
             if response.text() != "{{\"name\":\"Ada\",\"active\":true}}" {{ return 1; }}
             if response.isSuccess() != true {{ return 2; }}
             if response.isClientError() != false {{ return 3; }}
             if response.isServerError() != false {{ return 4; }}
-            var payload: Record = response.json();
+            var payload: Record = response.json<Record>();
             if payload.name.asStr() != "Ada" {{ return 5; }}
             if payload.active.asBool() != true {{ return 6; }}
             if payload.name != "Ada" {{ return 7; }}
-            if !payload.has("name") {{ return 8; }}
+            if !payload.has(name: "name") {{ return 8; }}
             return 0;
         }};
         "#
@@ -96,8 +96,8 @@ fn http_response_status_helpers_classify_client_and_server_errors() {
         let address = listener.local_addr().unwrap();
         let source = format!(
             r#"
-            import pkg {{ get }} from "std/http";
-            async function main() -> int {{
+            import pkg {{ get, HttpResponse }} from "std/http";
+            async fn main() -> int {{
                 var response: HttpResponse = await get(url: "http://{address}/status");
                 if response.{expected_method}() != true {{ return 1; }}
                 if response.isSuccess() != false {{ return 2; }}
@@ -129,10 +129,10 @@ fn http_response_json_rejects_invalid_or_non_object_json() {
         let address = listener.local_addr().unwrap();
         let source = format!(
             r#"
-            import pkg {{ get }} from "std/http";
-            async function main() -> int {{
+            import pkg {{ get, HttpResponse }} from "std/http";
+            async fn main() -> int {{
                 var response: HttpResponse = await get(url: "http://{address}/json");
-                var payload: Record = response.json();
+                var payload: Record = response.json<Record>();
                 return 0;
             }};
             "#
@@ -164,10 +164,10 @@ fn http_response_reports_the_content_type() {
     let address = listener.local_addr().unwrap();
     let source = format!(
         r#"
-        import pkg {{ get }} from "std/http";
-        async function main() -> int {{
+        import pkg {{ get, HttpResponse }} from "std/http";
+        async fn main() -> int {{
             var response: HttpResponse = await get(url: "http://{address}/page");
-            if response.contentType != "text/html; charset=utf-8" {{ return 1; }}
+            if response.contentType.unwrap() != "text/html; charset=utf-8" {{ return 1; }}
             return 0;
         }};
         "#

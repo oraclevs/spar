@@ -1,0 +1,3 @@
+[Server] {
+    port: int = 8080;
+};

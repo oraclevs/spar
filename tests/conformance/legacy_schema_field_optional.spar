@@ -1,0 +1,3 @@
+schema Cache {
+    ttl?: int;
+};

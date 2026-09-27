@@ -82,7 +82,7 @@ pub fn init(dir: &Path, name: &str, kind: PackageKind) -> Result<PackageManifest
             })?;
         }
         let stub = match kind {
-            PackageKind::Application => "function main() -> int {\n    return 0;\n};\n",
+            PackageKind::Application => "fn main() -> int {\n    return 0;\n};\n",
             PackageKind::Library => "// This library's public exports go here.\n",
             PackageKind::Config => "",
         };
@@ -160,7 +160,7 @@ fn validate_alias(alias: &str) -> Result<(), PackageError> {
 }
 
 /// Adds (or updates) one dependency: validates the request, writes it
-/// into the manifest's `[Dependencies]`, re-resolves the whole graph,
+/// into the manifest's `struct Dependencies`, re-resolves the whole graph,
 /// materializes it, and writes both the manifest and the lockfile.
 /// Nothing is written if resolution fails partway through.
 pub fn add(

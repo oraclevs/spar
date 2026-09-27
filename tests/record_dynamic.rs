@@ -38,8 +38,8 @@ fn as_methods_bridge_dynamic_values_to_static_types() {
         if age + 1 != 4 { return 2; }
         if !active { return 3; }
         if ratio != 2.0 { return 4; }
-        if !payload.has("name") { return 5; }
-        if payload.has("missing") { return 6; }
+        if !payload.has(name: "name") { return 5; }
+        if payload.has(name: "missing") { return 6; }
         if payload.keys().length() != 4 { return 7; }
     "#)
     .unwrap();

@@ -175,24 +175,18 @@ fn eval_function_parameter_default_and_explicit_override() {
 }
 
 #[test]
-fn eval_function_returning_section() {
+fn eval_function_returning_named_struct() {
     let src = r#"
-        function makeConf(host: str) -> section { return { host: str = host; }; };
-        [Server]{
-            server: section = makeConf(host: "localhost");
-        };
+        struct Conf { host: str; };
+        struct ConfValue: Conf { host = ""; };
+        function makeConf(host: str) -> Conf { return ConfValue(host: host); };
+        var conf: Conf = makeConf(host: "localhost");
     "#;
     let r = eval_src(src);
-    // Section-valued fields are stored at their nested path, not as scalar values in the parent
-    let nested_path = vec!["Server".to_string(), "server".to_string()];
-    let nested = r
-        .sections
-        .get(&nested_path)
-        .expect("nested section must be in sections map");
-    assert_eq!(
-        nested["host"],
-        crate::evaluator::ConfigValue::Str("localhost".into())
-    );
+    let crate::evaluator::ConfigValue::Object(conf) = &r.globals["conf"] else {
+        panic!("expected named struct value")
+    };
+    assert_eq!(conf["host"], crate::evaluator::ConfigValue::Str("localhost".into()));
 }
 
 #[test]
@@ -325,33 +319,17 @@ fn list_index_basic() {
 }
 
 #[test]
-fn spread_function_call() {
-    let src = r#"
-        function defaults() -> section { return { tier: str = "free"; }; };
-        [App]{ ...defaults(); limit: int = 500; };
-    "#;
-    let r = eval_src(src);
-    assert_eq!(
-        r.sections[&vec!["App".to_string()]]["limit"],
-        crate::evaluator::ConfigValue::Int(500)
-    );
-    assert_eq!(
-        r.sections[&vec!["App".to_string()]]["tier"],
-        crate::evaluator::ConfigValue::Str("free".into())
-    );
+fn spread_named_struct_fields() {
+    let result = eval_src(r#"struct Defaults { tier: str = "free"; }; var app: Record = { ...Defaults(); limit: 500; };"#);
+    let crate::evaluator::ConfigValue::Object(app) = &result.globals["app"] else { panic!("expected record"); };
+    assert_eq!(app["limit"], crate::evaluator::ConfigValue::Int(500));
 }
 
 #[test]
-fn spread_explicit_overrides() {
-    let src = r#"
-        function defaults() -> section { return { env: str = "dev"; }; };
-        [App]{ ...defaults(); env: str = "prod"; };
-    "#;
-    let r = eval_src(src);
-    assert_eq!(
-        r.sections[&vec!["App".to_string()]]["env"],
-        crate::evaluator::ConfigValue::Str("prod".into())
-    );
+fn spread_named_struct_explicit_field_overrides() {
+    let result = eval_src(r#"struct Defaults { env: str = "dev"; }; var app: Record = { ...Defaults(); env: "prod"; };"#);
+    let crate::evaluator::ConfigValue::Object(app) = &result.globals["app"] else { panic!("expected record"); };
+    assert_eq!(app["env"], crate::evaluator::ConfigValue::Str("prod".into()));
 }
 
 #[test]
@@ -369,20 +347,20 @@ fn eval_dep_ordered_globals() {
 fn eval_multiple_sections_same_prefix() {
     // Both [Server] and [Server.Prod] (nested) must be evaluated
     let src = r#"
-        [Server]{
+        struct Server {
             host: str = "0.0.0.0";
-            prod: section = {
+            prod: Record = {
                 host: str = "prod.example.com";
             };
         };
     "#;
     let r = eval_src(src);
-    let server = &r.sections[&vec!["Server".to_string()]];
+    let server = &r.structs[&vec!["Server".to_string()]];
     assert_eq!(
         server["host"],
         crate::evaluator::ConfigValue::Str("0.0.0.0".into())
     );
-    let server_prod = &r.sections[&vec!["Server".to_string(), "prod".to_string()]];
+    let server_prod = &r.structs[&vec!["Server".to_string(), "prod".to_string()]];
     assert_eq!(
         server_prod["host"],
         crate::evaluator::ConfigValue::Str("prod.example.com".into())
@@ -448,23 +426,26 @@ fn for_loop_return_propagates_out() {
 }
 
 #[test]
-fn bool_type_in_return_section_evaluates() {
+fn bool_type_in_returned_named_struct_evaluates() {
     let src = r#"
-        function builderFunc(major: int) -> section {
-            if major <= 0 {
-                return { error: bool = true; message: str = "bad"; };
-            }
-            return { error: bool = false; version: str = "ok"; };
+        struct BuildResult {
+            error: bool;
+            version: Option<str> = none();
+            message: Option<str> = none();
         };
-        [Release]{ ...builderFunc(major: 2); };
+        struct BuildError: BuildResult { error = true; message = some(value: "bad"); };
+        struct BuildOk: BuildResult { error = false; version = some(value: "ok"); };
+        function builderFunc(major: int) -> BuildResult {
+            if major <= 0 { return BuildError(); }
+            return BuildOk();
+        };
+        var release: BuildResult = builderFunc(major: 2);
     "#;
     let r = eval_src(src);
-    let rel = &r.sections[&vec!["Release".to_string()]];
-    assert_eq!(rel["error"], crate::evaluator::ConfigValue::Bool(false));
-    assert_eq!(
-        rel["version"],
-        crate::evaluator::ConfigValue::Str("ok".into())
-    );
+    let crate::evaluator::ConfigValue::Object(release) = &r.globals["release"] else {
+        panic!("expected named struct result")
+    };
+    assert_eq!(release["error"], crate::evaluator::ConfigValue::Bool(false));
 }
 
 #[test]
@@ -478,31 +459,20 @@ fn private_function_callable_within_same_file() {
 }
 
 #[test]
-fn eval_same_section_qualified_self_reference() {
-    let src = r#"
-        [A]{
-            a1: str = "hi";
-            a2: str = A.a1;
-        };
-    "#;
-    let r = eval_src(src);
-    let path = vec!["A".to_string()];
-    assert_eq!(
-        r.sections[&path]["a2"],
-        crate::evaluator::ConfigValue::Str("hi".into())
-    );
+fn rejects_same_section_qualified_self_reference() {
+    assert!(crate::Engine::default().check_source(r#"struct A { a1: str = "hi"; a2: str = A.a1; };"#).is_err());
 }
 
 #[test]
 fn eval_cross_section_nested_to_nested_reference() {
     let src = r#"
-        [X]{
-            nested: section = {
+        struct X {
+            nested: Record = {
                 v: str = Y.inner.val;
             };
         };
-        [Y]{
-            inner: section = {
+        struct Y {
+            inner: Record = {
                 val: str = "target";
             };
         };
@@ -513,7 +483,7 @@ fn eval_cross_section_nested_to_nested_reference() {
         let r = eval_src(src);
         let path = vec!["X".to_string(), "nested".to_string()];
         assert_eq!(
-            r.sections[&path]["v"],
+            r.structs[&path]["v"],
             crate::evaluator::ConfigValue::Str("target".into())
         );
     }
@@ -522,13 +492,13 @@ fn eval_cross_section_nested_to_nested_reference() {
 #[test]
 fn eval_genuine_nested_cycle_reports_cyclic_error_not_overflow() {
     let src = r#"
-        [X]{
-            nested: section = {
+        struct X {
+            nested: Record = {
                 v: str = Y.inner.val;
             };
         };
-        [Y]{
-            inner: section = {
+        struct Y {
+            inner: Record = {
                 val: str = X.nested.v;
             };
         };
@@ -549,8 +519,8 @@ fn eval_genuine_nested_cycle_reports_cyclic_error_not_overflow() {
 #[test]
 fn eval_self_reference_multi_level_nesting() {
     let src = r#"
-        [Postgres]{
-            environment: section = {
+        struct Postgres {
+            environment: Record = {
                 postgresDb: str = "my_app";
                 postgresUser: str = self.environment.postgresDb;
             };
@@ -559,123 +529,75 @@ fn eval_self_reference_multi_level_nesting() {
     let r = eval_src(src);
     let path = vec!["Postgres".to_string(), "environment".to_string()];
     assert_eq!(
-        r.sections[&path]["postgresUser"],
+        r.structs[&path]["postgresUser"],
         crate::evaluator::ConfigValue::Str("my_app".into())
     );
 }
 
 #[test]
-fn eval_self_reference_direct_child_field() {
-    let src = r#"
-        [A]{
-            a1: str = "hi";
-            a2: str = self.a1;
-        };
-    "#;
-    let r = eval_src(src);
-    let path = vec!["A".to_string()];
-    assert_eq!(
-        r.sections[&path]["a2"],
-        crate::evaluator::ConfigValue::Str("hi".into())
-    );
+fn rejects_self_reference_direct_child_field() {
+    assert!(crate::Engine::default().check_source(r#"struct A { a1: str = "hi"; a2: str = self.a1; };"#).is_err());
 }
 
 #[test]
-fn eval_spread_inside_nested_field_body() {
+fn eval_named_struct_inside_nested_field() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        [ProductionEnvironment] -> EnvironmentType {
-            nodeEnv: "production";
-            port: "3000";
-        };
-        [Api] -> ServiceType {
-            image: "my-api";
-            environment: { ...ProductionEnvironment; };
-        };
+        struct EnvironmentType { nodeEnv: str; port: str; };
+        struct ServiceType { image: str; environment: EnvironmentType; };
+        struct ProductionEnvironment: EnvironmentType { nodeEnv = "production"; port = "3000"; };
+        struct Api: ServiceType { image = "my-api"; environment = ProductionEnvironment(); };
     "#;
     let r = eval_src(src);
     let path = vec!["Api".to_string(), "environment".to_string()];
-    let nested = r
-        .sections
-        .get(&path)
-        .expect("nested environment section must be in sections map");
-    assert_eq!(
-        nested["nodeEnv"],
-        crate::evaluator::ConfigValue::Str("production".into())
-    );
-    assert_eq!(
-        nested["port"],
-        crate::evaluator::ConfigValue::Str("3000".into())
-    );
+    let nested = r.structs.get(&path).expect("nested named struct must be materialized");
+    assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
+    assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
 }
 
 #[test]
-fn eval_spread_inside_nested_field_body_ordering_is_deterministic() {
-    // Regression guard for the class of bug Phase 1 fixed: build_dep_graph
-    // must recurse into FieldValue::Nested to find this spread's
-    // dependency on [ProductionEnvironment] — otherwise evaluation order
-    // between the two top-level sections is left to HashMap iteration
-    // order and flakes across runs. Run enough iterations that a flake
-    // would show.
+fn eval_nested_named_struct_ordering_is_deterministic() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        [ProductionEnvironment] -> EnvironmentType {
-            nodeEnv: "production";
-            port: "3000";
-        };
-        [Api] -> ServiceType {
-            image: "my-api";
-            environment: { ...ProductionEnvironment; };
-        };
+        struct EnvironmentType { nodeEnv: str; port: str; };
+        struct ServiceType { image: str; environment: EnvironmentType; };
+        struct ProductionEnvironment: EnvironmentType { nodeEnv = "production"; port = "3000"; };
+        struct Api: ServiceType { image = "my-api"; environment = ProductionEnvironment(); };
     "#;
     for _ in 0..20 {
         let r = eval_src(src);
         let path = vec!["Api".to_string(), "environment".to_string()];
-        let nested = r
-            .sections
-            .get(&path)
-            .expect("nested environment section must be in sections map");
-        assert_eq!(
-            nested["nodeEnv"],
-            crate::evaluator::ConfigValue::Str("production".into())
-        );
-        assert_eq!(
-            nested["port"],
-            crate::evaluator::ConfigValue::Str("3000".into())
-        );
+        let nested = r.structs.get(&path).expect("nested environment struct");
+        assert_eq!(nested["nodeEnv"], crate::evaluator::ConfigValue::Str("production".into()));
+        assert_eq!(nested["port"], crate::evaluator::ConfigValue::Str("3000".into()));
     }
 }
 
-// ── Expr::Object evaluation ───────────────────────────────────────────────────
-
 #[test]
-fn object_literal_evaluates_to_section_config_value() {
-    let src = "type [Leaf]{ name: str; };\nvar x: Leaf = { name: \"a\"; };\n";
+fn named_struct_constructor_evaluates_to_struct_config_value() {
+    let src = "struct Leaf { name: str; };\nstruct LeafA: Leaf { name = \"a\"; };\nvar x: Leaf = LeafA();\n";
     let r = eval_src(src);
-    let crate::evaluator::ConfigValue::Section(map) = &r.globals["x"] else {
-        panic!("expected ConfigValue::Section, got {:?}", r.globals["x"])
+    let crate::evaluator::ConfigValue::Object(map) = &r.globals["x"] else {
+        panic!("expected named struct ConfigValue, got {:?}", r.globals["x"])
     };
     assert_eq!(map["name"], crate::evaluator::ConfigValue::Str("a".into()));
 }
 
 #[test]
-fn list_of_object_literals_evaluates_to_list_of_section_config_values() {
-    let src =
-        "type [Leaf]{ name: str; };\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n";
+fn list_of_named_structs_evaluates_to_list_of_struct_config_values() {
+    let src = r#"
+        struct Leaf { name: str; };
+        struct LeafA: Leaf { name = "a"; };
+        struct LeafB: Leaf { name = "b"; };
+        var xs: List<Leaf> = [LeafA(), LeafB()];
+    "#;
     let r = eval_src(src);
     let crate::evaluator::ConfigValue::List(items) = &r.globals["xs"] else {
         panic!("expected ConfigValue::List, got {:?}", r.globals["xs"])
     };
     assert_eq!(items.len(), 2);
-    let crate::evaluator::ConfigValue::Section(first) = &items[0] else {
-        panic!("expected Section element")
+    let crate::evaluator::ConfigValue::Object(first) = &items[0] else {
+        panic!("expected named struct element")
     };
-    assert_eq!(
-        first["name"],
-        crate::evaluator::ConfigValue::Str("a".into())
-    );
+    assert_eq!(first["name"], crate::evaluator::ConfigValue::Str("a".into()));
 }
 
 #[test]
@@ -691,14 +613,15 @@ fn enum_variant_evaluates_to_bare_string() {
 #[test]
 fn eval_named_field_access_on_loop_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
+        struct Jude: Human { name = "jude"; age = 5; };
         function looper(people: [Human]) -> str {
             for person in people {
                 return person.name;
             }
             return "none";
         };
-        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var people: [Human] = [Jude()];
         var result: str = looper(people: people);
     "#;
     let r = eval_src(src);
@@ -711,8 +634,9 @@ fn eval_named_field_access_on_loop_var() {
 #[test]
 fn eval_named_field_access_on_global_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human{ name: str; age: int; };
+        struct Mike: Human { name = "Mike"; age = 5; };
+        var person: Human = Mike();
         var pname: str = person.name;
     "#;
     let r = eval_src(src);
@@ -728,7 +652,8 @@ fn eval_original_bug_report_repro() {
     // (docs/superpowers/specs/2026-08-26-functiongroup-and-named-field-access-design.md,
     // Part B), minus the unrelated `print` builtin finding.
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
+        struct Jude: Human { name = "jude"; age = 5; };
 
         function looper(people: [Human]) -> int {
             for person in people {
@@ -740,7 +665,7 @@ fn eval_original_bug_report_repro() {
             return 0;
         };
 
-        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var people: [Human] = [Jude()];
         var result: int = looper(people: people);
     "#;
     let r = eval_src(src);
@@ -795,13 +720,13 @@ fn eval_function_group_design_doc_example() {
             private function semantic(hor: float, vet: float) -> [int] { return [1, 2, 3, 5]; }
         };
 
-        [MainCont]{
+        #[emit] struct MainCont {
             padding: [int] = EdgeInsect::only();
         };
     "#;
     let r = eval_src(src);
     let path = vec!["MainCont".to_string()];
-    let padding = r.sections[&path]["padding"].clone();
+    let padding = r.structs[&path]["padding"].clone();
     match padding {
         crate::evaluator::ConfigValue::List(items) => {
             assert_eq!(items.len(), 4);
@@ -938,14 +863,15 @@ fn eval_cross_file_private_function_group_not_exported() {
 #[test]
 fn eval_dot_field_access_on_loop_var() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
+        struct Jude: Human { name = "jude"; age = 5; };
         function looper(people: [Human]) -> str {
             for person in people {
                 return person.name;
             }
             return "none";
         };
-        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var people: [Human] = [Jude()];
         var result: str = looper(people: people);
     "#;
     let r = eval_src(src);
@@ -958,8 +884,8 @@ fn eval_dot_field_access_on_loop_var() {
 #[test]
 fn eval_dot_field_access_after_index() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var people: [Human] = [{ name: "jude"; age: 5; }];
+        struct Human{ name: str; age: int; };
+        var people: [Human] = [Jude()];
         var result: str = people[0].name;
     "#;
     let r = eval_src(src);
@@ -970,19 +896,8 @@ fn eval_dot_field_access_after_index() {
 }
 
 #[test]
-fn eval_self_dot_field_access() {
-    let src = r#"
-        [Server]{
-            port: int = 8080;
-            display: str = "port-${self.port}";
-        };
-    "#;
-    let r = eval_src(src);
-    let path = vec!["Server".to_string()];
-    assert_eq!(
-        r.sections[&path]["display"],
-        crate::evaluator::ConfigValue::Str("port-8080".into())
-    );
+fn rejects_self_dot_field_access() {
+    assert!(crate::Engine::default().check_source(r#"struct Server { port: int = 8080; display: str = "port-${self.port}"; };"#).is_err());
 }
 
 #[test]
@@ -991,7 +906,7 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
     // new dot syntax — confirms the whole pipeline still produces the
     // same result under the new grammar.
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" {
@@ -1001,7 +916,7 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
             }
             return 0;
         };
-        var people: [Human] = [{ name: "jude"; age: 5; }];
+        var people: [Human] = [Jude()];
         var result: int = looper(people: people);
     "#;
     let r = eval_src(src);

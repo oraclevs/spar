@@ -55,15 +55,15 @@ fn v2_language_acceptance_composes_data_functions_and_value_methods() {
                 ] |> collectTable();
 
                 var active: Table<User> = users
-                    |> filter(fn(user: User) -> bool => user.active);
-                var projected: Table<Record> = active |> select(["name", "team"]);
+                    |> filter(predicate: |user: User| user.active);
+                var projected: Table<Record> = active |> select(fields: ["name", "team"]);
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(fn(user: User) -> str => user.team);
+                    |> groupBy(key: |user: User| user.team);
 
                 if projected.count() != 2 { return 1; }
-                if active.take(1).count() != 1 { return 2; }
-                if get(source: groups, key: "red").count() != groups.get("red").count() { return 3; }
-                if !"  spar  ".trim().upper().contains("SPAR") { return 4; }
+                if active.take(count: 1).count() != 1 { return 2; }
+                if get(source: groups, key: "red").count() != groups.get(key: "red").count() { return 3; }
+                if !"  spar  ".trim().upper().contains(needle: "SPAR") { return 4; }
                 return 0;
             };
             "#,
@@ -86,10 +86,10 @@ fn v2_language_acceptance_covers_option_and_result_values() {
                 var okValue: Result<int, str> = ok<int, str>(value: 11);
                 var errValue: Result<int, str> = err<int, str>(error: "boom");
 
-                if someValue.unwrapOr(0) != 7 { return 1; }
-                if noneValue.unwrapOr(9) != 9 { return 2; }
-                if okValue.unwrapOr(0) != 11 { return 3; }
-                if errValue.unwrapOr(13) != 13 { return 4; }
+                if someValue.unwrapOr(fallback: 0) != 7 { return 1; }
+                if noneValue.unwrapOr(fallback: 9) != 9 { return 2; }
+                if okValue.unwrapOr(fallback: 0) != 11 { return 3; }
+                if errValue.unwrapOr(fallback: 13) != 13 { return 4; }
                 if !errValue.isErr() || !okValue.isOk() { return 5; }
                 return 0;
             };

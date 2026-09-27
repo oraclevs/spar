@@ -9,11 +9,11 @@ fn data_pipeline_maps_filters_slices_and_collects_lists() {
 
             function main() -> int {
                 var values: [int] = [1, 2, 3, 4, 5, 6]
-                    |> filter(fn(value: int) -> bool => value == 2 || value == 4 || value == 6)
-                    |> map(fn(value: int) -> int => value * 10)
-                    |> take(2)
+                    |> filter(predicate: |value: int| value == 2 || value == 4 || value == 6)
+                    |> map(transform: |value: int| value * 10)
+                    |> take(count: 2)
                     |> collect();
-                return values[0] + values[1] + count(values);
+                return values[0] + values[1] + count(source: values);
             };
             "#,
         )
@@ -32,8 +32,8 @@ fn data_first_last_skip_sort_unique_flatten_and_get_are_composable() {
             function main() -> int {
                 var values: [int] = [3, 1, 3, 2, 2]
                     |> unique()
-                    |> sortBy(fn(value: int) -> int => value)
-                    |> skip(1);
+                    |> sortBy(key: |value: int| value)
+                    |> skip(count: 1);
                 var nested: [[int]] = [[4, 5], [6]];
                 var flat: [int] = nested |> flatten();
                 return first(source: values) + last(source: values) + get(source: flat, key: 2);
@@ -62,14 +62,14 @@ fn collect_table_filter_select_schema_and_methods_share_semantics() {
                 ] |> collectTable();
 
                 var active: Table<User> = table
-                    |> filter(fn(user: User) -> bool => user.active);
-                var names: Table<Record> = active |> select(["name"]);
-                var tableSchema: Schema = schema(names);
+                    |> filter(predicate: |user: User| user.active);
+                var names: Table<Record> = active |> select(fields: ["name"]);
+                var tableSchema: Schema = schema(source: names);
 
                 if active.count() != 2 { return 1; }
                 if names.count() != 2 { return 2; }
-                if names.take(1).count() != 1 { return 3; }
-                if names.skip(1).count() != 1 { return 4; }
+                if names.take(count: 1).count() != 1 { return 3; }
+                if names.skip(count: 1).count() != 1 { return 4; }
                 return 20;
             };
             "#,
@@ -95,7 +95,7 @@ fn group_by_returns_map_of_tables_and_get_is_strict_lookup() {
                     User(name: "Ngozi", team: "red")
                 ] |> collectTable();
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(fn(user: User) -> str => user.team);
+                    |> groupBy(key: |user: User| user.team);
                 var red: Table<User> = get(source: groups, key: "red");
                 var blue: Table<User> = get(source: groups, key: "blue");
                 return red.count() * 10 + blue.count();
@@ -123,8 +123,8 @@ fn where_unique_by_and_inspect_preserve_table_shape() {
                     User(name: "Ada", age: 31)
                 ] |> collectTable();
                 var result: Table<User> = users
-                    |> where(fn(user: User) -> bool => user.age >= 24)
-                    |> uniqueBy(fn(user: User) -> str => user.name)
+                    |> where(predicate: |user: User| user.age >= 24)
+                    |> uniqueBy(key: |user: User| user.name)
                     |> inspect();
                 return result.count();
             };

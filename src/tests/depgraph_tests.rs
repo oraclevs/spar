@@ -5,7 +5,7 @@ fn g(name: &str) -> DeclId {
     DeclId::Global(name.to_string())
 }
 fn s(name: &str) -> DeclId {
-    DeclId::Section(name.to_string())
+    DeclId::Struct(name.to_string())
 }
 
 fn make_graph(edges: &[(&str, &[&str])]) -> HashMap<DeclId, HashSet<DeclId>> {

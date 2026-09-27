@@ -11,7 +11,7 @@ fn mixed_pipeline_crosses_bytes_values_and_bytes_without_a_foreign_shell() {
             import pkg { take } from "std/data";
 
             function firstOnly(rows: Stream<Record>) -> Stream<Record> {
-                return rows |> take(1);
+                return rows |> take(count: 1);
             };
 
             function main() -> shell {
@@ -159,7 +159,7 @@ fn mixed_pipeline_scoc_ping_auto_streams_live_output() {
                         '64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=10.0 ms' \
                         '64 bytes from 1.1.1.1: icmp_seq=2 ttl=57 time=11.0 ms'
                         | from ping
-                        |> take(1)
+                        |> take(count: 1)
                         |> to jsonl
                         | cat;
                 };

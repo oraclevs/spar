@@ -36,7 +36,12 @@ pub enum ConfigValue {
     Float(f64),
     Bool(bool),
     List(Vec<ConfigValue>),
-    Section(indexmap::IndexMap<String, ConfigValue>),
+    Object(indexmap::IndexMap<String, ConfigValue>),
+    /// A first-class Spar `Map<K, V>` value crossing the evaluator/runtime
+    /// module boundary. Unlike `Object`, keys retain their native Spar type.
+    Map(Vec<(ConfigValue, ConfigValue)>),
+    Option(Option<Box<ConfigValue>>),
+    Result(Result<Box<ConfigValue>, Box<ConfigValue>>),
     Shell(spar_command::ShellPlan),
     ShellProgram(crate::runtime::ShellProgramValue),
     Promise(PromiseHandle),
@@ -56,9 +61,16 @@ impl ConfigValue {
             ConfigValue::Float(f) => f.to_string(),
             ConfigValue::Bool(b) => b.to_string(),
             ConfigValue::List(_) => unreachable!("lists cannot appear in string interpolation"),
-            ConfigValue::Section(_) => {
-                unreachable!("sections cannot appear in string interpolation")
+            ConfigValue::Object(_) => {
+                unreachable!("structs cannot appear in string interpolation")
             }
+            ConfigValue::Map(_) => {
+                unreachable!("maps cannot appear in string interpolation")
+            }
+            ConfigValue::Option(Some(value)) => value.coerce_to_str(),
+            ConfigValue::Option(None) => "None".into(),
+            ConfigValue::Result(Ok(value)) => value.coerce_to_str(),
+            ConfigValue::Result(Err(value)) => value.coerce_to_str(),
             ConfigValue::Shell(_) => {
                 unreachable!("shell plans cannot appear in string interpolation")
             }
@@ -77,7 +89,10 @@ impl ConfigValue {
             ConfigValue::Float(_) => "float",
             ConfigValue::Bool(_) => "bool",
             ConfigValue::List(_) => "list",
-            ConfigValue::Section(_) => "section",
+            ConfigValue::Object(_) => "Record",
+            ConfigValue::Map(_) => "Map",
+            ConfigValue::Option(_) => "Option",
+            ConfigValue::Result(_) => "Result",
             ConfigValue::Shell(_) => "shell",
             ConfigValue::ShellProgram(_) => "shell",
             ConfigValue::Promise(_) => "Promise",
@@ -86,10 +101,22 @@ impl ConfigValue {
     }
 }
 
+fn type_field_shape_is_option(shape: &TypeFieldShape) -> bool {
+    matches!(
+        shape,
+        TypeFieldShape::Applied { name, arguments }
+            if name == "Option" && arguments.len() == 1
+    ) || matches!(
+        shape,
+        TypeFieldShape::Primitive(SparType::Applied { name, arguments })
+            if name == "Option" && arguments.len() == 1
+    )
+}
+
 #[derive(Debug)]
 pub struct EvalResult {
     pub globals: HashMap<String, ConfigValue>,
-    pub sections: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+    pub structs: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     pub warnings: Vec<String>,
     pub(crate) interactive_value: Option<ConfigValue>,
 }
@@ -120,10 +147,6 @@ enum EvalErr {
     ImportRef {
         alias: String,
         symbol: String,
-    },
-    NotScalar {
-        name: String,
-        span: Span,
     },
     TypeMismatch {
         expected: &'static str,
@@ -165,7 +188,6 @@ impl EvalErr {
             EvalErr::Fatal { span, .. }
             | EvalErr::CyclicRef { span, .. }
             | EvalErr::DivisionByZero(span)
-            | EvalErr::NotScalar { span, .. }
             | EvalErr::PathNotFound { span, .. } => span.line == 0,
             EvalErr::TypeMismatch { .. } | EvalErr::MaxCallDepth { .. } | EvalErr::Host { .. } => {
                 true
@@ -188,10 +210,6 @@ impl EvalErr {
                 span: span.clone(),
             },
             EvalErr::DivisionByZero(_) => EvalErr::DivisionByZero(span.clone()),
-            EvalErr::NotScalar { name, .. } => EvalErr::NotScalar {
-                name,
-                span: span.clone(),
-            },
             EvalErr::PathNotFound { path, .. } => EvalErr::PathNotFound {
                 path,
                 span: span.clone(),
@@ -233,10 +251,6 @@ impl EvalErr {
                 ),
                 span: Span::dummy(),
             },
-            EvalErr::NotScalar { name, span } => SparError::EvalError {
-                message: format!("'{}' is a nested section, not a scalar value", name),
-                span,
-            },
             EvalErr::PathNotFound { path, span } => SparError::EvalError {
                 message: format!("undefined path: `{path}` does not refer to any known field"),
                 span,
@@ -263,10 +277,10 @@ type EvalResult_ = Result<ConfigValue, EvalErr>;
 
 // ── Evaluator ─────────────────────────────────────────────────────────────────
 
-/// Tracks the fields of the top-level section currently being built, keyed
+/// Tracks the fields of the top-level struct currently being built, keyed
 /// by full absolute path, as they're computed — so a reference to an
 /// already-computed sibling (via its own name, or via `self::`) can be
-/// resolved without re-entering `eval_section_by_path` for a section that's
+/// resolved without re-entering `eval_struct_by_path` for a struct that's
 /// already mid-evaluation (which would trip its cyclic-reference guard).
 struct SelfFrame {
     top_name: String,
@@ -286,9 +300,9 @@ pub struct Evaluator {
     symbols: SymbolTable,
     call_depth: usize,
     global_cache: HashMap<String, ConfigValue>,
-    section_cache: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+    struct_cache: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     evaluating: HashSet<String>,
-    evaluating_sects: HashSet<Vec<String>>,
+    evaluating_structs: HashSet<Vec<String>>,
     self_stack: Vec<SelfFrame>,
     errors: Vec<SparError>,
     warnings: Vec<String>,
@@ -356,7 +370,7 @@ fn load_imported_program(
         }]);
     }
 
-    let source = std::fs::read_to_string(path).map_err(|error| {
+    let source = crate::stdlib::read_module_source(path).map_err(|error| {
         vec![SparError::ResolveError {
             message: format!("cannot read import file '{}': {error}", path.display()),
             hint: None,
@@ -440,9 +454,9 @@ impl Evaluator {
             symbols,
             call_depth: 0,
             global_cache: HashMap::new(),
-            section_cache: HashMap::new(),
+            struct_cache: HashMap::new(),
             evaluating: HashSet::new(),
-            evaluating_sects: HashSet::new(),
+            evaluating_structs: HashSet::new(),
             self_stack: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -638,7 +652,7 @@ impl Evaluator {
     }
 
     /// Evaluate a single expression against an already-computed evaluation
-    /// result (globals + sections) — used by `task_lowering` to resolve
+    /// result (globals + structs) — used by `task_lowering` to resolve
     /// ordinary Spar values referenced from task metadata and shell
     /// interpolation, and by the `spar` binary at task-run time to
     /// evaluate a `TemplatePart::Expr` (a `${...}` interpolation that
@@ -695,7 +709,7 @@ impl Evaluator {
     ) -> Result<(ConfigValue, Option<i32>), SparError> {
         let mut ev = Evaluator::new(symbols.clone(), program.clone());
         ev.global_cache = result.globals.clone();
-        ev.section_cache = result.sections.clone();
+        ev.struct_cache = result.structs.clone();
         for (key, value) in environment {
             ev.runtime_context.env_set(key.clone(), value.clone());
         }
@@ -711,7 +725,7 @@ impl Evaluator {
             let names: Vec<_> = cycle
                 .iter()
                 .map(|d| match d {
-                    DeclId::Global(n) | DeclId::Section(n) => n.clone(),
+                    DeclId::Global(n) | DeclId::Struct(n) => n.clone(),
                 })
                 .collect();
             SparError::EvalError {
@@ -725,8 +739,10 @@ impl Evaluator {
                 DeclId::Global(name) => {
                     self.eval_global(name);
                 }
-                DeclId::Section(name) => {
-                    self.eval_section_by_top_name(name);
+                DeclId::Struct(name) => {
+                    if self.program.items.iter().any(|item| matches!(item, TopLevelItem::Struct(decl) if decl.name == *name && decl.is_emit())) {
+                        self.eval_struct_by_top_name(name);
+                    }
                 }
             }
         }
@@ -770,7 +786,7 @@ impl Evaluator {
         if self.errors.is_empty() {
             Ok(EvalResult {
                 globals: self.global_cache.clone(),
-                sections: self.section_cache.clone(),
+                structs: self.struct_cache.clone(),
                 warnings: self.warnings.clone(),
                 interactive_value,
             })
@@ -883,17 +899,17 @@ impl Evaluator {
                     }
                     graph.insert(node, deps);
                 }
-                TopLevelItem::Section(s) => {
-                    let top_name = s.path[0].clone();
-                    let node = DeclId::Section(top_name.clone());
+                TopLevelItem::Struct(s) => {
+                    let top_name = s.name.clone();
+                    let node = DeclId::Struct(top_name.clone());
                     let mut deps = HashSet::new();
                     self.collect_items_deps(&s.items, &mut deps);
-                    // A section referencing its own name is not a real
-                    // cross-decl dependency — intra-section ordering is
+                    // A struct referencing its own name is not a real
+                    // cross-decl dependency — intra-struct ordering is
                     // handled during evaluation itself (see Task 2/4),
                     // and topological_sort treats any self-loop as an
                     // unresolvable cycle.
-                    deps.remove(&DeclId::Section(top_name));
+                    deps.remove(&DeclId::Struct(top_name));
                     graph.entry(node).or_default().extend(deps);
                 }
                 TopLevelItem::Dynamic(d) => {
@@ -906,19 +922,19 @@ impl Evaluator {
         graph
     }
 
-    /// Recurses into `FieldValue::Nested` at any depth — a spread or expr
+    /// Recurses into `FieldValue::Object` at any depth — a spread or expr
     /// reference nested inside a field's own `{ ... }` body (not just a
-    /// section's own top-level items) still needs a dependency edge, same
+    /// struct's own top-level items) still needs a dependency edge, same
     /// as a top-level one.
-    fn collect_items_deps(&self, items: &[SectionItem], deps: &mut HashSet<DeclId>) {
+    fn collect_items_deps(&self, items: &[ObjectItem], deps: &mut HashSet<DeclId>) {
         for item in items {
             match item {
-                SectionItem::Field(f) => match &f.value {
+                ObjectItem::Field(f) => match &f.value {
                     Some(FieldValue::Expr(e)) => self.collect_expr_deps(e, deps),
-                    Some(FieldValue::Nested(sub)) => self.collect_items_deps(sub, deps),
+                    Some(FieldValue::Object(sub)) => self.collect_items_deps(sub, deps),
                     None => {}
                 },
-                SectionItem::Spread(sp) => {
+                ObjectItem::Spread(sp) => {
                     self.collect_expr_deps(&sp.expr, deps);
                 }
             }
@@ -953,8 +969,8 @@ impl Evaluator {
                 if let Some(top) = nr.segments.first() {
                     if self.symbols.globals.contains_key(top.as_str()) {
                         deps.insert(DeclId::Global(top.clone()));
-                    } else if self.symbols.sections.keys().any(|k| k.first() == Some(top)) {
-                        deps.insert(DeclId::Section(top.clone()));
+                    } else if self.symbols.structs.keys().any(|k| k.first() == Some(top)) {
+                        deps.insert(DeclId::Struct(top.clone()));
                     }
                 }
             }
@@ -984,7 +1000,7 @@ impl Evaluator {
             Expr::Grouped(inner, _) => self.collect_expr_deps(inner, deps),
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
-                    self.collect_expr_deps(arg, deps);
+                    self.collect_expr_deps(&arg.value, deps);
                 }
             }
             Expr::String(s) => {
@@ -1001,7 +1017,7 @@ impl Evaluator {
             Expr::MethodCall { receiver, args, .. } => {
                 self.collect_expr_deps(receiver, deps);
                 for argument in args {
-                    self.collect_expr_deps(argument, deps);
+                    self.collect_expr_deps(&argument.value, deps);
                 }
             }
             Expr::StructuredPipe { input, stage, .. } => {
@@ -1086,41 +1102,41 @@ impl Evaluator {
     }
 }
 
-// ── Section evaluation ────────────────────────────────────────────────────────
+// ── Struct evaluation ─────────────────────────────────────────────────────────
 
 impl Evaluator {
-    fn eval_section_by_top_name(&mut self, top_name: &str) {
-        // Collect all section paths with this top name first (avoid borrow conflicts)
+    fn eval_struct_by_top_name(&mut self, top_name: &str) {
+        // Collect all struct paths with this top name first (avoid borrow conflicts)
         let paths: Vec<Vec<String>> = self
             .program
             .items
             .iter()
             .filter_map(|item| {
-                if let TopLevelItem::Section(s) = item {
-                    if s.path.first().map(|s| s.as_str()) == Some(top_name) {
-                        return Some(s.path.clone());
+                if let TopLevelItem::Struct(s) = item {
+                    if s.name == top_name {
+                        return Some(vec![s.name.clone()]);
                     }
                 }
                 None
             })
             .collect();
         for path in paths {
-            self.eval_section_by_path(&path);
+            self.eval_struct_by_path(&path);
         }
     }
 
-    fn eval_section_by_path(
+    fn eval_struct_by_path(
         &mut self,
         path: &[String],
     ) -> Option<indexmap::IndexMap<String, ConfigValue>> {
         let path_vec = path.to_vec();
-        if let Some(cached) = self.section_cache.get(&path_vec) {
+        if let Some(cached) = self.struct_cache.get(&path_vec) {
             return Some(cached.clone());
         }
-        if self.evaluating_sects.contains(&path_vec) {
+        if self.evaluating_structs.contains(&path_vec) {
             self.errors.push(SparError::EvalError {
                 message: format!(
-                    "cyclic section reference: `[{}]` spreads into itself",
+                    "cyclic struct reference: `{}` spreads into itself",
                     path_vec.join(".")
                 ),
                 span: Span::dummy(),
@@ -1129,8 +1145,8 @@ impl Evaluator {
         }
 
         let decl = self.program.items.iter().find_map(|item| {
-            if let TopLevelItem::Section(d) = item {
-                if d.path == path_vec {
+            if let TopLevelItem::Struct(d) = item {
+                if path_vec.len() == 1 && d.name == path_vec[0] {
                     Some(d.clone())
                 } else {
                     None
@@ -1142,43 +1158,21 @@ impl Evaluator {
 
         let decl = decl?;
 
-        self.evaluating_sects.insert(path_vec.clone());
+        self.evaluating_structs.insert(path_vec.clone());
         self.self_stack.push(SelfFrame {
             top_name: path_vec[0].clone(),
             fields: HashMap::new(),
         });
-        let fields = self.eval_section_decl(&decl);
+        let fields = self.eval_struct_decl(&decl);
         self.self_stack.pop();
-        self.evaluating_sects.remove(&path_vec);
+        self.evaluating_structs.remove(&path_vec);
 
-        self.section_cache.insert(path_vec, fields.clone());
+        self.struct_cache.insert(path_vec, fields.clone());
         Some(fields)
     }
 
-    fn eval_section_decl(&mut self, decl: &SectionDecl) -> indexmap::IndexMap<String, ConfigValue> {
-        let path = decl.path.clone();
-        let mut items = decl.items.clone();
-        if let Some(binding) = &decl.type_binding {
-            if let Some((_, fields)) = self.type_fields_for_binding(&binding.ty) {
-                for field in fields {
-                    if field.default.is_some()
-                        && !items.iter().any(|item| {
-                            matches!(item, SectionItem::Field(existing) if existing.name == field.name)
-                        })
-                    {
-                        items.push(SectionItem::Field(FieldDecl {
-                            name: field.name,
-                            optional: field.optional,
-                            ty: None,
-                            value: field.default.map(FieldValue::Expr),
-                            end_line: field.span.line,
-                            span: field.span,
-                        }));
-                    }
-                }
-            }
-        }
-        self.eval_section_fields(&items, &path, &HashMap::new())
+    fn eval_struct_decl(&mut self, decl: &StructDecl) -> indexmap::IndexMap<String, ConfigValue> {
+        self.eval_struct_fields(&decl.items, &[decl.name.clone()], &HashMap::new())
     }
 
     fn type_fields_for_binding(
@@ -1210,70 +1204,46 @@ impl Evaluator {
         Some((crate::typechecker::display_type(ty), fields))
     }
 
-    fn eval_section_fields(
+    fn eval_struct_fields(
         &mut self,
-        items: &[SectionItem],
+        items: &[ObjectItem],
         parent_path: &[String],
         local_scope: &HashMap<String, ConfigValue>,
     ) -> indexmap::IndexMap<String, ConfigValue> {
-        let mut result: indexmap::IndexMap<String, ConfigValue> = indexmap::IndexMap::new();
+        let mut result = indexmap::IndexMap::new();
 
         for item in items {
             match item {
-                SectionItem::Spread(spread) => {
-                    let target = self.eval_spread(&spread.expr, local_scope);
-                    if let Some(fields) = target {
-                        for (k, v) in fields {
-                            result.entry(k).or_insert(v);
+                ObjectItem::Spread(spread) => {
+                    if let Some(fields) = self.eval_spread(&spread.expr, local_scope) {
+                        for (name, value) in fields {
+                            result.entry(name).or_insert(value);
                         }
                     }
                 }
-
-                SectionItem::Field(field) => {
-                    match &field.value {
-                        Some(FieldValue::Expr(val_expr)) => {
-                            let val_expr = val_expr.clone();
-                            match self.eval_expr(&val_expr, local_scope) {
-                                Ok(ConfigValue::Section(map)) => {
-                                    // Section-returning function call — register at nested path
-                                    let nested_path =
-                                        [parent_path, std::slice::from_ref(&field.name)].concat();
-                                    if let Some(frame) = self.self_stack.last_mut() {
-                                        frame.fields.insert(
-                                            nested_path.clone(),
-                                            ConfigValue::Section(map.clone()),
-                                        );
-                                    }
-                                    self.section_cache.insert(nested_path, map);
-                                }
-                                Ok(val) => {
-                                    let field_path =
-                                        [parent_path, std::slice::from_ref(&field.name)].concat();
-                                    if let Some(frame) = self.self_stack.last_mut() {
-                                        frame.fields.insert(field_path, val.clone());
-                                    }
-                                    result.insert(field.name.clone(), val);
-                                }
-                                Err(e) => {
-                                    self.push_eval_error(e);
-                                }
-                            }
-                        }
-                        Some(FieldValue::Nested(sub_items)) => {
-                            let nested_path =
+                ObjectItem::Field(field) => {
+                    let Some(value) = &field.value else {
+                        continue;
+                    };
+                    let evaluated = match value {
+                        FieldValue::Expr(expression) => self.eval_expr(expression, local_scope),
+                        // The parser no longer produces this variant. Keep it only
+                        // for compiler-synthesized values until FieldValue itself is
+                        // collapsed to Expr in the AST cleanup.
+                        FieldValue::Object(items) => Ok(ConfigValue::Object(
+                            self.eval_object_items(items, local_scope),
+                        )),
+                    };
+                    match evaluated {
+                        Ok(value) => {
+                            let field_path =
                                 [parent_path, std::slice::from_ref(&field.name)].concat();
-                            let nested_map =
-                                self.eval_section_fields(sub_items, &nested_path, &HashMap::new());
                             if let Some(frame) = self.self_stack.last_mut() {
-                                frame.fields.insert(
-                                    nested_path.clone(),
-                                    ConfigValue::Section(nested_map.clone()),
-                                );
+                                frame.fields.insert(field_path, value.clone());
                             }
-                            self.section_cache.insert(nested_path, nested_map);
-                            // Do NOT insert into result — nested sections aren't scalar values
+                            result.insert(field.name.clone(), value);
                         }
-                        None => {}
+                        Err(error) => self.push_eval_error(error),
                     }
                 }
             }
@@ -1282,29 +1252,41 @@ impl Evaluator {
         result
     }
 
-    /// Moves the sections registered directly under `path` in `section_cache`
-    /// into `map` as `ConfigValue::Section` values (recursively), removing
-    /// them from the cache.
-    fn inline_nested_sections(
+    fn eval_object_items(
         &mut self,
-        path: &[String],
-        map: &mut indexmap::IndexMap<String, ConfigValue>,
-    ) {
-        let children: Vec<Vec<String>> = self
-            .section_cache
-            .keys()
-            .filter(|key| key.len() == path.len() + 1 && key.starts_with(path))
-            .cloned()
-            .collect();
-        for child_path in children {
-            let Some(mut child) = self.section_cache.remove(&child_path) else {
-                continue;
-            };
-            self.inline_nested_sections(&child_path, &mut child);
-            if let Some(name) = child_path.last() {
-                map.insert(name.clone(), ConfigValue::Section(child));
+        items: &[ObjectItem],
+        local_scope: &HashMap<String, ConfigValue>,
+    ) -> indexmap::IndexMap<String, ConfigValue> {
+        let mut result = indexmap::IndexMap::new();
+        for item in items {
+            match item {
+                ObjectItem::Spread(spread) => {
+                    if let Some(fields) = self.eval_spread(&spread.expr, local_scope) {
+                        for (name, value) in fields {
+                            result.entry(name).or_insert(value);
+                        }
+                    }
+                }
+                ObjectItem::Field(field) => {
+                    let Some(value) = &field.value else {
+                        continue;
+                    };
+                    let evaluated = match value {
+                        FieldValue::Expr(expression) => self.eval_expr(expression, local_scope),
+                        FieldValue::Object(items) => Ok(ConfigValue::Object(
+                            self.eval_object_items(items, local_scope),
+                        )),
+                    };
+                    match evaluated {
+                        Ok(value) => {
+                            result.insert(field.name.clone(), value);
+                        }
+                        Err(error) => self.push_eval_error(error),
+                    }
+                }
             }
         }
+        result
     }
 
     fn eval_spread(
@@ -1312,52 +1294,13 @@ impl Evaluator {
         expr: &Expr,
         local_scope: &HashMap<String, ConfigValue>,
     ) -> Option<indexmap::IndexMap<String, ConfigValue>> {
-        match expr {
-            Expr::NamespaceRef(nr) => match nr.segments.as_slice() {
-                [name] => self.eval_section_by_path(std::slice::from_ref(name)),
-                [alias, name] => {
-                    self.warnings.push(format!(
-                        "spread `...{alias}::{name}` skipped — \
-                         cross-file spreads are resolved by the CLI"
-                    ));
-                    None
-                }
-                segs => {
-                    self.warnings.push(format!(
-                        "spread `...{}` skipped — cross-file spreads are resolved by the CLI",
-                        segs.join("::")
-                    ));
-                    None
-                }
-            },
-            Expr::FieldAccess { base, field, .. } if matches!(base.as_ref(), Expr::NamespaceRef(nr) if nr.segments == ["global"]) => {
-                self.eval_section_by_path(std::slice::from_ref(field))
+        match self.eval_expr(expr, local_scope) {
+            Ok(ConfigValue::Object(fields)) => Some(fields),
+            Ok(value) => {
+                self.push_eval_error(EvalErr::TypeMismatch { expected: "Record/struct", got: value.type_name() });
+                None
             }
-            other => {
-                let span = match other {
-                    Expr::Call { span, .. } => span.clone(),
-                    Expr::FnCall(fc) => fc.span.clone(),
-                    _ => Span::dummy(),
-                };
-                match self.eval_expr(other, local_scope) {
-                    Ok(ConfigValue::Section(map)) => Some(map),
-                    Ok(v) => {
-                        self.push_eval_error(EvalErr::TypeMismatch {
-                            expected: "section",
-                            got: v.type_name(),
-                        });
-                        None
-                    }
-                    Err(EvalErr::CyclicRef { name, .. }) => {
-                        self.push_eval_error(EvalErr::CyclicRef { name, span });
-                        None
-                    }
-                    Err(e) => {
-                        self.push_eval_error(e);
-                        None
-                    }
-                }
-            }
+            Err(error) => { self.push_eval_error(error); None }
         }
     }
 
@@ -1385,11 +1328,11 @@ impl Evaluator {
                     Ok(items[i as usize].clone())
                 }
             }
-            (ConfigValue::Section(mut fields), ConfigValue::Int(i)) => {
+            (ConfigValue::Object(mut fields), ConfigValue::Int(i)) => {
                 let Some(ConfigValue::List(items)) = fields.shift_remove("values") else {
                     return Err(EvalErr::TypeMismatch {
                         expected: "list or Bytes",
-                        got: "section",
+                        got: "Record",
                     });
                 };
                 if i < 0 || i as usize >= items.len() {
@@ -1441,23 +1384,11 @@ impl Evaluator {
             Expr::Literal(Literal::Bool(b)) => Ok(ConfigValue::Bool(*b)),
             Expr::String(s) => self.eval_interp_string(s, local_scope),
             Expr::Object(items, _) => {
-                // parent_path is empty — an anonymous object literal has no
-                // path identity of its own. Nested self-references /
-                // section_cache entries inside an object literal are
-                // therefore not uniquely path-addressed if multiple object
-                // literals exist in the same evaluation scope; deliberate,
-                // documented scope limitation — object literals are
-                // structural data (JSON-object-like), not full
-                // cross-referenceable sections.
-                // Nested object literals register their own fields in
-                // `section_cache` under the path they are given. Use a private
-                // scratch prefix, then move those entries into the returned
-                // map so a literal keeps its nested objects inline instead of
-                // leaking them out as root-level sections.
-                let scratch = vec![format!("\u{0}object@{:p}", items.as_ptr())];
-                let mut map = self.eval_section_fields(items, &scratch, local_scope);
-                self.inline_nested_sections(&scratch, &mut map);
-                Ok(ConfigValue::Section(map))
+                // Anonymous object literals are dynamic data only. They never
+                // receive struct identity or entries in the named-struct cache.
+                Ok(ConfigValue::Object(
+                    self.eval_object_items(items, local_scope),
+                ))
             }
             Expr::Closure { .. } => Err(EvalErr::Fatal {
                 message:
@@ -1575,7 +1506,7 @@ impl Evaluator {
                                 message: format!("could not execute shell plan: {error}"),
                             }
                         })?;
-                    Ok(ConfigValue::Section(indexmap::IndexMap::from([
+                    Ok(ConfigValue::Object(indexmap::IndexMap::from([
                         ("success".to_string(), ConfigValue::Bool(outcome.success)),
                         (
                             "exitCode".to_string(),
@@ -1693,16 +1624,6 @@ impl Evaluator {
                     let value = match value {
                         ReturnValue::Void => ConfigValue::Int(0),
                         ReturnValue::Expr(expression) => self.eval_expr(expression, local_scope)?,
-                        ReturnValue::SectionBlock(fields) => {
-                            let mut section = indexmap::IndexMap::new();
-                            for field in fields {
-                                section.insert(
-                                    field.name.clone(),
-                                    self.eval_expr(&field.value, local_scope)?,
-                                );
-                            }
-                            ConfigValue::Section(section)
-                        }
                     };
                     return Ok((
                         spar_command::ShellPlan { steps },
@@ -2080,73 +2001,54 @@ impl Evaluator {
         Ok(ConfigValue::Str(result))
     }
 
-    fn eval_section_field_direct(
+    fn eval_struct_field_direct(
         &mut self,
-        section_path: &[String],
+        struct_path: &[String],
         field_name: &str,
         span: &Span,
     ) -> EvalResult_ {
-        if let Some(cached) = self.section_cache.get(section_path) {
-            if let Some(val) = cached.get(field_name) {
-                return Ok(val.clone());
-            }
-        }
+        let Some(top_name) = struct_path.first() else {
+            return Err(EvalErr::PathNotFound {
+                path: field_name.to_string(),
+                span: span.clone(),
+            });
+        };
 
-        // If the owning top-level section is the one currently being
-        // built, section_cache won't have it yet by definition — check
-        // the in-progress accumulator instead of recursing into
-        // eval_section_by_path, which would trip its own reentrancy guard
-        // and report a false cycle for what is really just a reference to
-        // an already-computed sibling.
-        if let Some(top) = section_path.first() {
-            if let Some(frame) = self.self_stack.last() {
-                if &frame.top_name == top {
-                    let mut key = section_path.to_vec();
+        // While a top-level struct is being initialized, fields that have
+        // already been computed live in the self frame. This preserves
+        // sibling/self references without giving nested objects independent
+        // declaration identity.
+        if let Some(frame) = self.self_stack.last() {
+            if &frame.top_name == top_name {
+                let mut key = vec![top_name.clone()];
+                if struct_path.len() == 1 {
                     key.push(field_name.to_string());
-                    return frame
-                        .fields
-                        .get(&key)
-                        .cloned()
-                        .ok_or_else(|| EvalErr::PathNotFound {
-                            path: format!("{}::{field_name}", section_path.join("::")),
-                            span: span.clone(),
-                        });
+                    if let Some(value) = frame.fields.get(&key) {
+                        return Ok(value.clone());
+                    }
+                } else {
+                    key.push(struct_path[1].clone());
+                    if let Some(mut value) = frame.fields.get(&key).cloned() {
+                        for segment in &struct_path[2..] {
+                            value = object_field(value, segment, span)?;
+                        }
+                        return object_field(value, field_name, span);
+                    }
                 }
             }
         }
 
-        // Not cached yet — fully evaluate the owning top-level section.
-        // eval_section_by_path recursively walks every FieldValue::Nested
-        // under it and populates section_cache at every resulting path
-        // (see eval_section_fields), so this works for any depth, not
-        // just a direct top-level field. Its own `evaluating_sects` guard
-        // reports a clear cyclic-section error and returns None if we're
-        // already in the middle of evaluating this same top-level path.
-        if let Some(top) = section_path.first() {
-            self.eval_section_by_path(std::slice::from_ref(top));
-        }
-
-        if let Some(cached) = self.section_cache.get(section_path) {
-            if let Some(val) = cached.get(field_name) {
-                return Ok(val.clone());
-            }
-        }
-
-        // Still missing: either the path names a nested section (not a
-        // scalar) at `field_name`, or the path is simply wrong.
-        let mut deeper = section_path.to_vec();
-        deeper.push(field_name.to_string());
-        if self.section_cache.contains_key(&deeper) {
-            Err(EvalErr::NotScalar {
-                name: format!("{}::{field_name}", section_path.join(".")),
+        let fields = self
+            .eval_struct_by_path(std::slice::from_ref(top_name))
+            .ok_or_else(|| EvalErr::PathNotFound {
+                path: top_name.clone(),
                 span: span.clone(),
-            })
-        } else {
-            Err(EvalErr::PathNotFound {
-                path: format!("{}::{field_name}", section_path.join("::")),
-                span: span.clone(),
-            })
+            })?;
+        let mut value = ConfigValue::Object(fields);
+        for segment in &struct_path[1..] {
+            value = object_field(value, segment, span)?;
         }
+        object_field(value, field_name, span)
     }
 
     #[allow(dead_code)]
@@ -2215,11 +2117,11 @@ impl Evaluator {
                     sub.effect_ledger = self.effect_ledger.clone();
                     let result = if imported
                         .symbols
-                        .lookup_section(std::slice::from_ref(name))
+                        .lookup_struct(std::slice::from_ref(name))
                         .is_some()
                     {
-                        sub.eval_section_by_path(std::slice::from_ref(name))
-                            .map(ConfigValue::Section)
+                        sub.eval_struct_by_path(std::slice::from_ref(name))
+                            .map(ConfigValue::Object)
                             .ok_or_else(|| EvalErr::ImportRef {
                                 alias: ns.to_string(),
                                 symbol: name.to_string(),
@@ -2246,7 +2148,7 @@ impl Evaluator {
             // 3+ segments: either `alias::EnumName::Variant` (rest[0] names
             // an enum in the imported file — recurse, same deferred policy
             // as the resolver/typechecker) or `alias::var::field[::field…]`
-            // (rest[0] names a plain var/section — evaluate it whole in the
+            // (rest[0] names a plain var/struct — evaluate it whole in the
             // imported file's own evaluator, then walk the remaining
             // segments as ordinary field access on that value). These are
             // NOT the same shape: recursing with `rest` unconditionally (as
@@ -2281,11 +2183,11 @@ impl Evaluator {
                     let head = &rest[0];
                     let value = if imported
                         .symbols
-                        .lookup_section(std::slice::from_ref(head))
+                        .lookup_struct(std::slice::from_ref(head))
                         .is_some()
                     {
-                        sub.eval_section_by_path(std::slice::from_ref(head))
-                            .map(ConfigValue::Section)
+                        sub.eval_struct_by_path(std::slice::from_ref(head))
+                            .map(ConfigValue::Object)
                     } else {
                         sub.eval_global(head)
                     };
@@ -2296,7 +2198,7 @@ impl Evaluator {
                     })?;
                     for field in &rest[1..] {
                         value = match value {
-                            ConfigValue::Section(map) => {
+                            ConfigValue::Object(map) => {
                                 map.get(field)
                                     .cloned()
                                     .ok_or_else(|| EvalErr::PathNotFound {
@@ -2338,15 +2240,10 @@ impl Evaluator {
                 return self.eval_namespace_ref(&imported, local_scope);
             }
         }
-        // A chain of bare identifiers rooted at `self`/`global` or a known
-        // top-level section (`self.a.b`, `global.Section.field`,
-        // `Section.nested.deeper.field`) is a static path — nested-section
-        // intermediates aren't independently addressable ConfigValues while
-        // still being built (see `eval_section_fields`'s "Do NOT insert
-        // into result" note, and `self`'s frame.fields is only populated
-        // for a nested section *after* that section finishes evaluating),
-        // so the whole path must be resolved in one `eval_section_field_direct`
-        // call rather than hop-by-hop.
+        // A chain rooted at `self`, `global`, or a known top-level struct
+        // can be resolved from the named struct value and then traversed
+        // through ordinary object fields. Nested objects do not have their
+        // own declaration/cache identity.
         if let Some((is_self, rest)) = self.flatten_prefixed_path(base) {
             if is_self {
                 let top_name = self
@@ -2357,28 +2254,26 @@ impl Evaluator {
                         path: "self".to_string(),
                         span: span.clone(),
                     })?;
-                let mut section_path = vec![top_name];
-                section_path.extend(rest);
-                return self.eval_section_field_direct(&section_path, field, span);
+                let mut struct_path = vec![top_name];
+                struct_path.extend(rest);
+                return self.eval_struct_field_direct(&struct_path, field, span);
             }
             if rest.is_empty() {
                 return self
                     .eval_global(field)
                     .ok_or_else(|| self.unresolved_global(field, span));
             }
-            return self.eval_section_field_direct(&rest, field, span);
+            return self.eval_struct_field_direct(&rest, field, span);
         }
-        if let Some(section_path) = self.flatten_static_section_path(base, local_scope) {
-            return self.eval_section_field_direct(&section_path, field, span);
+        if let Some(struct_path) = self.flatten_static_struct_path(base, local_scope) {
+            return self.eval_struct_field_direct(&struct_path, field, span);
         }
         let base_val = self.eval_expr(base, local_scope)?;
         match base_val {
-            ConfigValue::Section(map) => {
-                map.get(field).cloned().ok_or_else(|| EvalErr::CyclicRef {
-                    name: field.to_string(),
-                    span: span.clone(),
-                })
-            }
+            ConfigValue::Object(map) => map.get(field).cloned().ok_or_else(|| EvalErr::CyclicRef {
+                name: field.to_string(),
+                span: span.clone(),
+            }),
             ConfigValue::Error {
                 message,
                 kind,
@@ -2425,12 +2320,12 @@ impl Evaluator {
     }
 
     /// If `expr` is a chain of bare-identifier `FieldAccess`es rooted at a
-    /// known top-level section name (not shadowed by a local), returns the
-    /// full section path (e.g. `Section.nested.deeper` → `["Section",
+    /// known top-level struct name (not shadowed by a local), returns the
+    /// full struct path (e.g. `Struct.nested.deeper` → `["Struct",
     /// "nested", "deeper"]`). Returns `None` for anything else (a call,
     /// index, self/global base, or a root that's a local/global var) —
     /// those fall through to normal per-hop expression evaluation.
-    fn flatten_static_section_path(
+    fn flatten_static_struct_path(
         &self,
         expr: &Expr,
         local_scope: &HashMap<String, ConfigValue>,
@@ -2441,7 +2336,7 @@ impl Evaluator {
                 if !local_scope.contains_key(name.as_str())
                     && self
                         .symbols
-                        .lookup_section(std::slice::from_ref(name))
+                        .lookup_struct(std::slice::from_ref(name))
                         .is_some()
                 {
                     Some(vec![name.clone()])
@@ -2450,7 +2345,7 @@ impl Evaluator {
                 }
             }
             Expr::FieldAccess { base, field, .. } => {
-                let mut path = self.flatten_static_section_path(base, local_scope)?;
+                let mut path = self.flatten_static_struct_path(base, local_scope)?;
                 path.push(field.clone());
                 Some(path)
             }
@@ -2464,36 +2359,12 @@ impl Evaluator {
         local_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
         // Positional calls are now also used for first-class callables. Preserve
-        // compatibility for ordinary Spar functions by binding positional
-        // arguments to the declaration's parameter order before falling back to
-        // the legacy built-ins below.
-        if let Some(function) = self.program.items.iter().find_map(|item| match item {
-            TopLevelItem::Function(function) if function.name == fc.name => Some(function.clone()),
-            _ => None,
-        }) {
-            if fc.args.len() > function.params.len() {
-                return Err(EvalErr::Fatal {
-                    message: format!(
-                        "function '{}' expects at most {} argument(s), got {}",
-                        fc.name,
-                        function.params.len(),
-                        fc.args.len()
-                    ),
-                    span: fc.span.clone(),
-                });
-            }
-            let args = function
-                .params
-                .iter()
-                .zip(fc.args.iter())
-                .map(|(parameter, value)| CallArg {
-                    param_name: parameter.name.clone(),
-                    param_name_span: fc.span.clone(),
-                    value: value.clone(),
-                    span: fc.span.clone(),
-                })
-                .collect::<Vec<_>>();
-            return self.eval_call(&fc.name, &args, &fc.span, local_scope);
+        // Calls already carry canonical named arguments; bind by name through the
+        // same evaluator path used by ordinary named calls.
+        if self.program.items.iter().any(
+            |item| matches!(item, TopLevelItem::Function(function) if function.name == fc.name),
+        ) {
+            return self.eval_call(&fc.name, &fc.args, &fc.span, local_scope);
         }
 
         // Selective imports keep the imported function under its local name. The
@@ -2524,10 +2395,10 @@ impl Evaluator {
                     });
                 }
                 let mut bound = HashMap::new();
-                for (parameter, expression) in function.params.iter().zip(fc.args.iter()) {
+                for argument in &fc.args {
                     bound.insert(
-                        parameter.name.clone(),
-                        self.eval_expr(expression, local_scope)?,
+                        argument.param_name.clone(),
+                        self.eval_expr(&argument.value, local_scope)?,
                     );
                 }
                 if function.is_async {
@@ -3076,7 +2947,7 @@ impl Evaluator {
     }
 
     /// `Struct(field: value, ...)` outside function bodies: clone the struct's
-    /// canonical section and apply the named overrides.
+    /// canonical struct and apply the named overrides.
     fn eval_struct_constructor(
         &mut self,
         name: &str,
@@ -3084,23 +2955,23 @@ impl Evaluator {
         call_span: &Span,
         caller_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
-        let path = vec![name.to_string()];
-        let mut section =
-            self.eval_section_by_path(&path)
-                .ok_or_else(|| EvalErr::PathNotFound {
-                    path: name.to_string(),
-                    span: call_span.clone(),
-                })?;
-        for (field, value) in self.eval_explicit_args(args, caller_scope)? {
-            if !section.contains_key(&field) {
-                return Err(EvalErr::Fatal {
-                    message: format!("struct '{name}' has no field '{field}'"),
-                    span: call_span.clone(),
-                });
-            }
-            section.insert(field, value);
+        let declaration = self.program.items.iter().find_map(|item| match item {
+            TopLevelItem::Struct(decl) if decl.name == name => Some(decl.clone()),
+            _ => None,
+        }).ok_or_else(|| EvalErr::PathNotFound { path: name.to_string(), span: call_span.clone() })?;
+        let supplied = self.eval_explicit_args(args, caller_scope)?;
+        let mut fields = indexmap::IndexMap::new();
+        for field in declaration.type_decl().fields {
+            let value = if let Some((_, value)) = supplied.iter().find(|(key, _)| key.as_str() == field.name.as_str()) {
+                value.clone()
+            } else if let Some(default) = field.default {
+                self.eval_expr(&default, &HashMap::new())?
+            } else {
+                return Err(EvalErr::Fatal { message: format!("struct '{name}' is missing required field '{}'", field.name), span: call_span.clone() });
+            };
+            fields.insert(field.name, value);
         }
-        Ok(ConfigValue::Section(section))
+        Ok(ConfigValue::Object(fields))
     }
 
     fn eval_call(
@@ -3458,15 +3329,6 @@ impl Evaluator {
                         // bare `return;` just needs any placeholder here.
                         ReturnValue::Void => ConfigValue::Int(0),
                         ReturnValue::Expr(e) => self.eval_expr(&e.clone(), local_scope)?,
-                        ReturnValue::SectionBlock(fields) => {
-                            let fields = fields.clone();
-                            let mut map = indexmap::IndexMap::new();
-                            for rf in &fields {
-                                let v = self.eval_expr(&rf.value, local_scope)?;
-                                map.insert(rf.name.clone(), v);
-                            }
-                            ConfigValue::Section(map)
-                        }
                     };
                     return Ok(StatementFlow::Return(val));
                 }
@@ -3589,29 +3451,43 @@ fn assign_config_field_path(
         });
     };
     let got = target.type_name();
-    let ConfigValue::Section(section) = target else {
+    let ConfigValue::Object(object) = target else {
         return Err(EvalErr::TypeMismatch {
-            expected: "section",
+            expected: "Record/struct",
             got,
         });
     };
     if rest.is_empty() {
-        if !section.contains_key(field) {
+        if !object.contains_key(field) {
             return Err(EvalErr::PathNotFound {
                 path: field.clone(),
                 span: span.clone(),
             });
         }
-        section.insert(field.clone(), value);
+        object.insert(field.clone(), value);
         return Ok(());
     }
-    let nested = section
-        .get_mut(field)
-        .ok_or_else(|| EvalErr::PathNotFound {
-            path: field.clone(),
-            span: span.clone(),
-        })?;
+    let nested = object.get_mut(field).ok_or_else(|| EvalErr::PathNotFound {
+        path: field.clone(),
+        span: span.clone(),
+    })?;
     assign_config_field_path(nested, rest, value, span)
+}
+
+fn object_field(value: ConfigValue, field: &str, span: &Span) -> EvalResult_ {
+    match value {
+        ConfigValue::Object(map) => map
+            .get(field)
+            .cloned()
+            .ok_or_else(|| EvalErr::PathNotFound {
+                path: field.to_string(),
+                span: span.clone(),
+            }),
+        other => Err(EvalErr::TypeMismatch {
+            expected: "Record/struct",
+            got: other.type_name(),
+        }),
+    }
 }
 
 fn restore_block_scope(
@@ -3682,21 +3558,21 @@ mod tests {
         result.globals[name].clone()
     }
 
-    fn section_field(result: &EvalResult, path: &[&str], field: &str) -> ConfigValue {
+    fn struct_field(result: &EvalResult, path: &[&str], field: &str) -> ConfigValue {
         let key: Vec<String> = path.iter().map(|s| s.to_string()).collect();
-        result.sections[&key][field].clone()
+        result.structs[&key][field].clone()
     }
 
     #[test]
     fn section_complete_when_var_references_its_field() {
         let src = r#"
-[Man]{ aster: int = 6; };
-[MetaData]{
+#[emit] struct Man { aster: int = 6; };
+#[emit] struct MetaData {
     tool:    str = "stackforge";
-    version: int = Man.aster;
+    version: int = Man().aster;
     flag:    bool = false;
 };
-var x: str = MetaData.tool;
+var x: str = MetaData().tool;
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
@@ -3706,9 +3582,9 @@ var x: str = MetaData.tool;
         let result = Evaluator::evaluate(&program, &symbols).unwrap();
 
         let metadata = result
-            .sections
+            .structs
             .get(&vec!["MetaData".to_string()])
-            .expect("MetaData section must exist in EvalResult");
+            .expect("MetaData struct must exist in EvalResult");
 
         assert!(
             metadata.contains_key("tool"),
@@ -3725,10 +3601,10 @@ var x: str = MetaData.tool;
     }
 
     #[test]
-    fn variable_can_reference_section_field_correctly() {
+    fn variable_can_reference_struct_field_correctly() {
         let src = r#"
-[Config]{ host: str = "localhost"; };
-var endpoint: str = Config.host;
+#[emit] struct Config { host: str = "localhost"; };
+var endpoint: str = Config().host;
 "#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
         let program = crate::parser::Parser::new(tokens).parse().unwrap();
@@ -3742,7 +3618,7 @@ var endpoint: str = Config.host;
             Some(&ConfigValue::Str("localhost".to_string()))
         );
         assert!(result
-            .sections
+            .structs
             .get(&vec!["Config".to_string()])
             .unwrap()
             .contains_key("host"));
@@ -3848,7 +3724,7 @@ var endpoint: str = Config.host;
 
     #[test]
     fn test_str_coercion_of_int() {
-        let r = eval_ok("var x: str = str(42);");
+        let r = eval_ok("var x: str = str(value: 42);");
         assert_eq!(global(&r, "x"), ConfigValue::Str("42".into()));
     }
 
@@ -3861,7 +3737,7 @@ var endpoint: str = Config.host;
     #[test]
     fn test_env_var_set() {
         std::env::set_var("SPAR_TEST_VAR", "hello");
-        let r = eval_ok(r#"var x: str = env("SPAR_TEST_VAR");"#);
+        let r = eval_ok(r#"var x: str = env(name: "SPAR_TEST_VAR");"#);
         std::env::remove_var("SPAR_TEST_VAR");
         assert_eq!(global(&r, "x"), ConfigValue::Str("hello".into()));
     }
@@ -3869,7 +3745,7 @@ var endpoint: str = Config.host;
     #[test]
     fn test_env_var_missing_error() {
         std::env::remove_var("SPAR_TEST_MISSING_XYZ");
-        let errs = eval_err(r#"var x: str = env("SPAR_TEST_MISSING_XYZ");"#);
+        let errs = eval_err(r#"var x: str = env(name: "SPAR_TEST_MISSING_XYZ");"#);
         assert!(
             errs.iter()
                 .any(|e| e.contains("not set") || e.contains("EnvVar")),
@@ -3880,7 +3756,7 @@ var endpoint: str = Config.host;
     #[test]
     fn test_env_fallback_var_set() {
         std::env::set_var("SPAR_TEST_VAR2", "set");
-        let r = eval_ok(r#"var x: str = env("SPAR_TEST_VAR2") ?? "default";"#);
+        let r = eval_ok(r#"var x: str = env(name: "SPAR_TEST_VAR2") ?? "default";"#);
         std::env::remove_var("SPAR_TEST_VAR2");
         assert_eq!(global(&r, "x"), ConfigValue::Str("set".into()));
     }
@@ -3888,7 +3764,7 @@ var endpoint: str = Config.host;
     #[test]
     fn test_env_fallback_var_missing() {
         std::env::remove_var("SPAR_TEST_MISSING_XYZ");
-        let r = eval_ok(r#"var x: str = env("SPAR_TEST_MISSING_XYZ") ?? "default";"#);
+        let r = eval_ok(r#"var x: str = env(name: "SPAR_TEST_MISSING_XYZ") ?? "default";"#);
         assert_eq!(global(&r, "x"), ConfigValue::Str("default".into()));
     }
 
@@ -3905,16 +3781,16 @@ var endpoint: str = Config.host;
     }
 
     #[test]
-    fn test_namespace_ref_section_field() {
-        let r = eval_ok("[Db]{ pool: int = 5; }; var p: int = Db.pool;");
+    fn test_namespace_ref_struct_field() {
+        let r = eval_ok("#[emit] struct Db { pool: int = 5; }; var p: int = Db().pool;");
         assert_eq!(global(&r, "p"), ConfigValue::Int(5));
     }
 
     #[test]
-    fn test_namespace_ref_nested_section_field_3seg() {
+    fn test_namespace_ref_nested_record_field_3seg() {
         let r = eval_ok(
             r#"
-            [Server]{ rateLimit: section = { enabled: bool = true; }; };
+            struct Server { rateLimit: Record = { enabled: true; }; };
             var isDone: bool = Server.rateLimit.enabled;
         "#,
         );
@@ -3939,58 +3815,38 @@ var endpoint: str = Config.host;
     }
 
     #[test]
-    fn test_simple_section_evaluation() {
-        let r = eval_ok(r#"[Server]{ port: int = 8080; host: str = "localhost"; };"#);
+    fn test_simple_struct_evaluation() {
+        let r = eval_ok(r#"#[emit] struct Server { port: int = 8080; host: str = "localhost"; };"#);
         assert_eq!(
-            section_field(&r, &["Server"], "port"),
+            struct_field(&r, &["Server"], "port"),
             ConfigValue::Int(8080)
         );
         assert_eq!(
-            section_field(&r, &["Server"], "host"),
+            struct_field(&r, &["Server"], "host"),
             ConfigValue::Str("localhost".into())
         );
     }
 
     #[test]
-    fn test_section_field_references_global() {
-        let r = eval_ok("var timeout: int = 30; [Db]{ timeout: int = global.timeout; };");
-        assert_eq!(section_field(&r, &["Db"], "timeout"), ConfigValue::Int(30));
+    fn test_struct_field_references_global() {
+        let r = eval_ok("var timeout: int = 30; #[emit] struct Db { timeout: int = global.timeout; };");
+        assert_eq!(struct_field(&r, &["Db"], "timeout"), ConfigValue::Int(30));
     }
 
     #[test]
     fn test_spread_merges_fields() {
-        let r = eval_ok(
-            r#"
-            [Defaults]{ workers: int = 4; timeout: int = 30; };
-            [Server]{ ...Defaults; port: int = 8080; };
-        "#,
-        );
-        assert_eq!(
-            section_field(&r, &["Server"], "workers"),
-            ConfigValue::Int(4)
-        );
-        assert_eq!(
-            section_field(&r, &["Server"], "port"),
-            ConfigValue::Int(8080)
-        );
+        let result = eval_ok("struct Defaults { workers: int = 4; timeout: int = 30; }; var server: Record = { ...Defaults(); port: 8080; };");
+        let ConfigValue::Object(server) = &result.globals["server"] else { panic!("expected record"); };
+        assert_eq!(server["workers"], ConfigValue::Int(4));
+        assert_eq!(server["port"], ConfigValue::Int(8080));
     }
 
     #[test]
     fn test_spread_explicit_overrides_spread() {
-        let r = eval_ok(
-            r#"
-            [Defaults]{ workers: int = 4; port: int = 3000; };
-            [Server]{ ...Defaults; port: int = 8080; };
-        "#,
-        );
-        assert_eq!(
-            section_field(&r, &["Server"], "port"),
-            ConfigValue::Int(8080)
-        );
-        assert_eq!(
-            section_field(&r, &["Server"], "workers"),
-            ConfigValue::Int(4)
-        );
+        let result = eval_ok("struct Defaults { workers: int = 4; port: int = 3000; }; var server: Record = { ...Defaults(); port: 8080; };");
+        let ConfigValue::Object(server) = &result.globals["server"] else { panic!("expected record"); };
+        assert_eq!(server["workers"], ConfigValue::Int(4));
+        assert_eq!(server["port"], ConfigValue::Int(8080));
     }
 
     #[test]
@@ -4007,25 +3863,34 @@ var endpoint: str = Config.host;
     }
 
     #[test]
-    fn nested_section_evaluated_in_sections_map() {
-        let r = eval_ok(r#"[Outer]{ inner: section = { key: str = "v"; }; };"#);
-        let nested_key = vec!["Outer".to_string(), "inner".to_string()];
-        assert!(
-            r.sections.contains_key(&nested_key),
-            "nested section must appear in EvalResult.sections"
-        );
-        assert_eq!(r.sections[&nested_key]["key"], ConfigValue::Str("v".into()));
+    fn record_field_stays_nested_value_without_hidden_struct_identity() {
+        let r = eval_ok(r#"#[emit] struct Outer { inner: Record = { key: "v"; }; };"#);
+        let outer = &r.structs[&vec!["Outer".to_string()]];
+        let ConfigValue::Object(inner) = &outer["inner"] else {
+            panic!("inner must be a dynamic object value");
+        };
+        assert_eq!(inner["key"], ConfigValue::Str("v".into()));
+        assert!(!r
+            .structs
+            .contains_key(&vec!["Outer".to_string(), "inner".to_string()]));
     }
 
     #[test]
-    fn nested_section_twice_deep_evaluated() {
-        let r = eval_ok("[A]{ b: section = { c: section = { val: int = 1; }; }; };");
-        let inner_key = vec!["A".to_string(), "b".to_string(), "c".to_string()];
-        assert!(
-            r.sections.contains_key(&inner_key),
-            "two-deep nested section must appear in EvalResult.sections"
+    fn deeply_nested_records_stay_inline_values() {
+        let r = eval_ok("#[emit] struct A { b: Record = { c: { val: 1; }; }; };");
+        let top = &r.structs[&vec!["A".to_string()]];
+        let ConfigValue::Object(b) = &top["b"] else {
+            panic!("b must be object")
+        };
+        let ConfigValue::Object(c) = &b["c"] else {
+            panic!("c must be object")
+        };
+        assert_eq!(c["val"], ConfigValue::Int(1));
+        assert_eq!(
+            r.structs.len(),
+            1,
+            "nested records must not create named struct cache entries"
         );
-        assert_eq!(r.sections[&inner_key]["val"], ConfigValue::Int(1));
     }
 
     // ── Group 5: early-return evaluator ──────────────────────────────────────
@@ -4075,25 +3940,25 @@ var endpoint: str = Config.host;
     }
 
     #[test]
-    fn section_returning_function_result_in_section_cache() {
+    fn named_struct_return_stays_a_normal_field_value() {
         let r = eval_ok(
             r#"
-            function makeDb() -> section {
-                return { host: str = "localhost"; port: int = 5432; };
+            #[emit] struct Db { host: str = "localhost"; port: int = 5432; };
+            fn makeDb() -> Db {
+                return Db();
             };
-            [App]{ db: section = makeDb(); };
+            #[emit] struct App { db: Db = makeDb(); };
         "#,
         );
-        let db_path = vec!["App".to_string(), "db".to_string()];
-        assert!(
-            r.sections.contains_key(&db_path),
-            "section fn result must appear in sections map"
-        );
-        assert_eq!(
-            r.sections[&db_path]["host"],
-            ConfigValue::Str("localhost".into())
-        );
-        assert_eq!(r.sections[&db_path]["port"], ConfigValue::Int(5432));
+        let app = &r.structs[&vec!["App".to_string()]];
+        let ConfigValue::Object(db) = &app["db"] else {
+            panic!("db must be a Db value")
+        };
+        assert_eq!(db["host"], ConfigValue::Str("localhost".into()));
+        assert_eq!(db["port"], ConfigValue::Int(5432));
+        assert!(!r
+            .structs
+            .contains_key(&vec!["App".to_string(), "db".to_string()]));
     }
 
     #[test]

@@ -18,7 +18,7 @@ fn manifest() -> PackageManifest {
 #[test]
 fn manifest_renderer_binds_package_to_builtin_shape() {
     let source = manifest().render();
-    assert!(source.starts_with("struct Package: SparPackage {"));
+    assert!(source.starts_with("struct Package {"));
     assert!(PackageManifest::parse(&source, Path::new("spar.package.spar")).is_ok());
 }
 
@@ -27,9 +27,9 @@ fn compiler_preloads_manifest_shape_and_reports_missing_required_fields() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("spar.package.spar");
     let source = concat!(
-        "struct Package: SparPackage {\n",
-        "    version = \"1.0.0\";\n",
-        "    kind = \"application\";\n",
+        "struct Package {\n",
+        "    version: str = \"1.0.0\";\n",
+        "    kind: str = \"application\";\n",
         "};\n",
     );
     let compilation = Compiler::new(CompileOptions {
@@ -58,10 +58,10 @@ fn compiler_preloads_generated_lock_shapes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("spar.package.lock.spar");
     let source = concat!(
-        "struct Lock: SparPackageLock {\n",
-        "    formatVersion = 1;\n",
-        "    root: List<SparLockedDependency> = [];\n",
-        "    packages: List<SparLockedPackage> = [];\n",
+        "struct Lock {\n",
+        "    formatVersion: int = 1;\n",
+        "    root: List<Record> = [];\n",
+        "    packages: List<Record> = [];\n",
         "};\n",
     );
     let compilation = Compiler::new(CompileOptions {
@@ -114,7 +114,7 @@ fn ordinary_spar_files_do_not_receive_reserved_metadata_types() {
         evaluate: false,
         ..CompileOptions::for_path("app.spar")
     })
-    .compile("[Config] { enabled: bool = true; };");
+    .compile("struct Config { enabled: bool = true; };");
     assert!(compilation.errors.is_empty(), "{:#?}", compilation.errors);
     assert!(!compilation
         .symbols

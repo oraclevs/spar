@@ -1,4 +1,4 @@
-use crate::ast::SparType;
+use crate::ast::{CallableParamType, SparType};
 use crate::runtime::{NativeFunction, NativeIntrinsic, NativeMethod, NativeRegistry};
 
 fn ty(name: &str) -> SparType {
@@ -42,7 +42,10 @@ fn map_type(key: SparType, value: SparType) -> SparType {
 
 fn callable(input: SparType, output: SparType) -> SparType {
     SparType::Function {
-        params: vec![input],
+        params: vec![CallableParamType {
+            name: "value".into(),
+            ty: input,
+        }],
         return_type: Box::new(output),
     }
 }
@@ -241,17 +244,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     register_sequence_methods(registry, "Table", table(t.clone()), t.clone());
     register_sequence_methods(registry, "Stream", stream(t.clone()), t.clone());
 
-    registry
-        .register_method(NativeMethod::intrinsic(
-            "Map",
-            "get",
-            map_type(k.clone(), t.clone()),
-            vec![("key", k)],
-            t,
-            false,
-            NativeIntrinsic::DataGet,
-        ))
-        .expect("Map.get registration must be unique");
 }
 
 fn register_function(
@@ -460,6 +452,7 @@ fn register_sequence_methods(
         ),
     ];
 
+
     if matches!(owner, "List" | "Stream") {
         let flattened_element = ty("F");
         let nested_receiver = match owner {
@@ -490,6 +483,17 @@ fn register_sequence_methods(
 
     for method in methods {
         let name = method.name.clone();
+        if owner == "List"
+            && matches!(
+                name.as_str(),
+                "map" | "filter" | "take" | "skip" | "first" | "last" | "get"
+            )
+        {
+            // These are core List methods. `std/data` keeps the free-function
+            // forms and the extra sequence-oriented methods, but must not
+            // shadow the core safe/canonical List surface.
+            continue;
+        }
         registry
             .register_method(method)
             .unwrap_or_else(|_| panic!("{owner}.{name} registration must be unique"));

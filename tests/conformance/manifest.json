@@ -1,9 +1,40 @@
 {
-  "version": 1,
+  "version": 2,
   "valid": [
     "basic.spar",
     "functions.spar",
     "schema.spar",
-    "phase0_compatibility.spar"
+    "no_sections.spar",
+    "function_alias.spar"
+  ],
+  "invalid": [
+    {
+      "file": "legacy_section.spar",
+      "contains": "legacy section declarations were removed"
+    },
+    {
+      "file": "legacy_type_brackets.spar",
+      "contains": "legacy `type [Name]` syntax was removed"
+    },
+    {
+      "file": "legacy_section_type.spar",
+      "contains": "the `section` type was removed"
+    },
+    {
+      "file": "legacy_nullable.spar",
+      "contains": "nullable `?` declarations were removed"
+    },
+    {
+      "file": "legacy_positional_call.spar",
+      "contains": "positional arguments were removed"
+    },
+    {
+      "file": "legacy_schema_optional.spar",
+      "contains": "schema `?` optionality was removed"
+    },
+    {
+      "file": "legacy_schema_field_optional.spar",
+      "contains": "schema field `?` optionality was removed"
+    }
   ]
 }

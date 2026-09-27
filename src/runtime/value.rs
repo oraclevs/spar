@@ -14,9 +14,13 @@ pub enum Value {
     Bool(bool),
     String(String),
     Bytes(Vec<u8>),
+    /// Opaque shell argv expansion produced by `List<str>.asArgs()`.
+    /// Each element is already one argv entry; the shell runtime must never
+    /// join or re-tokenize these strings.
+    Args(Vec<String>),
     List(Vec<Value>),
     Object(IndexMap<String, Value>),
-    Map(Vec<(Value, Value)>),
+    Map(MapValue),
     Option(std::option::Option<Box<Value>>),
     Result(std::result::Result<Box<Value>, Box<Value>>),
     Table(TableValue),
@@ -36,6 +40,205 @@ pub enum Value {
     Function(crate::compiled::FunctionId),
 }
 
+/// Backing store for `Map<K,V>`. Preserves insertion order (like
+/// `Value::Object`'s `IndexMap`) while giving `get`/`insert`/`remove`/
+/// `containsKey` O(1) average cost instead of the O(n) linear scan a bare
+/// `Vec<(Value, Value)>` forced on every one of those calls.
+///
+/// Measured impact of the old representation: building an author index over
+/// a real 574-work / 1,370-author dataset (`researchgraph`, a Spar consumer
+/// project) — an ordinary "look up or insert into a growing map" loop — cost
+/// ~48s, versus <1s for every other pipeline stage (JSON load, graph build,
+/// BFS, stats, CSV/JSON export) combined. See `SPAR_RUNTIME_FINDINGS.md`
+/// Finding 17 in that project.
+#[derive(Clone, Debug, Default)]
+pub struct MapValue {
+    entries: IndexMap<MapKey, Value>,
+}
+
+/// A hashable, `Eq` projection of a map key. Spar's `Map<K,V>` keys are
+/// almost always `str`/`int`/`bool`/`float` in practice; any other value
+/// type still works correctly as a key (`Other`), just without the O(1)
+/// fast path — every `Other` key shares one hash bucket and is then
+/// compared with real `Value` equality within it, which stays correct, just
+/// not fast for that rare case.
+#[derive(Clone, Debug)]
+enum MapKey {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+    FloatBits(u64),
+    Other(Box<Value>),
+}
+
+impl MapKey {
+    fn from_value(value: &Value) -> MapKey {
+        match value {
+            Value::String(value) => MapKey::Str(value.clone()),
+            Value::Int(value) => MapKey::Int(*value),
+            Value::Bool(value) => MapKey::Bool(*value),
+            Value::Float(value) => MapKey::FloatBits(value.to_bits()),
+            other => MapKey::Other(Box::new(other.clone())),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        match self {
+            MapKey::Str(value) => Value::String(value.clone()),
+            MapKey::Int(value) => Value::Int(*value),
+            MapKey::Bool(value) => Value::Bool(*value),
+            MapKey::FloatBits(bits) => Value::Float(f64::from_bits(*bits)),
+            MapKey::Other(value) => (**value).clone(),
+        }
+    }
+}
+
+impl PartialEq for MapKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MapKey::Str(a), MapKey::Str(b)) => a == b,
+            (MapKey::Int(a), MapKey::Int(b)) => a == b,
+            (MapKey::Bool(a), MapKey::Bool(b)) => a == b,
+            (MapKey::FloatBits(a), MapKey::FloatBits(b)) => a == b,
+            (MapKey::Other(a), MapKey::Other(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MapKey {}
+
+impl std::hash::Hash for MapKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            MapKey::Str(value) => {
+                0u8.hash(state);
+                value.hash(state);
+            }
+            MapKey::Int(value) => {
+                1u8.hash(state);
+                value.hash(state);
+            }
+            MapKey::Bool(value) => {
+                2u8.hash(state);
+                value.hash(state);
+            }
+            MapKey::FloatBits(value) => {
+                3u8.hash(state);
+                value.hash(state);
+            }
+            // Every non-primitive key collides into this one bucket. Still
+            // correct — `PartialEq` is still checked for every candidate in
+            // the bucket — just O(n) among non-primitive keys specifically,
+            // which real programs essentially never key a map by.
+            MapKey::Other(_) => 4u8.hash(state),
+        }
+    }
+}
+
+impl MapValue {
+    pub fn new() -> Self {
+        Self {
+            entries: IndexMap::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// O(1) average.
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        self.entries.get(&MapKey::from_value(key))
+    }
+
+    /// O(1) average.
+    pub fn contains_key(&self, key: &Value) -> bool {
+        self.entries.contains_key(&MapKey::from_value(key))
+    }
+
+    /// O(1) average. Matches the old `Vec`-based behavior: an existing key's
+    /// value is replaced in place (keeping its original position), a new key
+    /// is appended.
+    pub fn insert(&mut self, key: Value, value: Value) -> Option<Value> {
+        self.entries.insert(MapKey::from_value(&key), value)
+    }
+
+    /// O(1) average lookup + O(n) shift, matching the old `Vec::remove`'s
+    /// order-preserving cost — removal was never the bottleneck; lookup was.
+    pub fn remove(&mut self, key: &Value) -> Option<Value> {
+        self.entries.shift_remove(&MapKey::from_value(key))
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn contains_value(&self, value: &Value) -> bool {
+        self.entries.values().any(|existing| existing == value)
+    }
+
+    /// Reconstructs each key value; O(n), same as any other "list every
+    /// entry" operation.
+    pub fn iter(&self) -> impl Iterator<Item = (Value, &Value)> + '_ {
+        self.entries.iter().map(|(key, value)| (key.to_value(), value))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = Value> + '_ {
+        self.entries.keys().map(MapKey::to_value)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.entries.values()
+    }
+}
+
+impl From<Vec<(Value, Value)>> for MapValue {
+    /// Later duplicate keys win (a real map's semantics), matching what
+    /// `.insert()` would produce if called once per pair in order.
+    fn from(pairs: Vec<(Value, Value)>) -> Self {
+        let mut map = MapValue::new();
+        for (key, value) in pairs {
+            map.insert(key, value);
+        }
+        map
+    }
+}
+
+impl FromIterator<(Value, Value)> for MapValue {
+    fn from_iter<I: IntoIterator<Item = (Value, Value)>>(iter: I) -> Self {
+        let mut map = MapValue::new();
+        for (key, value) in iter {
+            map.insert(key, value);
+        }
+        map
+    }
+}
+
+impl IntoIterator for MapValue {
+    type Item = (Value, Value);
+    type IntoIter = std::vec::IntoIter<(Value, Value)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries
+            .into_iter()
+            .map(|(key, value)| (key.to_value(), value))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+impl PartialEq for MapValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries.len() == other.entries.len()
+            && self.entries.iter().eq(other.entries.iter())
+    }
+}
+
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -45,8 +248,9 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::String(_) => "str",
             Value::Bytes(_) => "Bytes",
+            Value::Args(_) => "Args",
             Value::List(_) => "list",
-            Value::Object(_) => "section",
+            Value::Object(_) => "Record",
             Value::Map(_) => "Map",
             Value::Option(_) => "Option",
             Value::Result(_) => "Result",
@@ -60,6 +264,78 @@ impl Value {
         }
     }
 
+    pub fn render_display(&self) -> String {
+        self.render_with_context(false)
+    }
+
+    fn render_with_context(&self, structural: bool) -> String {
+        match self {
+            Value::Void => "void".into(),
+            Value::Int(value) => value.to_string(),
+            Value::Float(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::String(value) if structural => format!("{value:?}"),
+            Value::String(value) => value.clone(),
+            Value::Bytes(values) => format!("Bytes({})", values.len()),
+            Value::Args(values) => format!("<args count={}>", values.len()),
+            Value::List(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(|value| value.render_with_context(true))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Object(values) => format!(
+                "{{{}}}",
+                values
+                    .iter()
+                    .map(|(key, value)| format!("{}: {}", render_object_key(key), value.render_with_context(true)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Map(entries) => format!(
+                "{{{}}}",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{}: {}",
+                        key.render_with_context(true),
+                        value.render_with_context(true)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Option(Some(value)) => {
+                format!("Some({})", value.render_with_context(true))
+            }
+            Value::Option(None) => "None".into(),
+            Value::Result(Ok(value)) => format!("Ok({})", value.render_with_context(true)),
+            Value::Result(Err(value)) => format!("Err({})", value.render_with_context(true)),
+            Value::Table(table) => format!("<table rows={}>", table.len()),
+            Value::Schema(schema) => format!("<schema fields={}>", schema.fields.len()),
+            Value::Error {
+                message,
+                kind,
+                code,
+                cause,
+            } => {
+                let mut rendered = format!(
+                    "error(kind: {kind:?}, message: {message:?}, code: {code}"
+                );
+                if let Some(cause) = cause {
+                    rendered.push_str(&format!(", cause: {}", cause.render_with_context(true)));
+                }
+                rendered.push(')');
+                rendered
+            }
+            Value::Shell(_) | Value::MixedShell(_) | Value::ShellProgram(_) => "<shell>".into(),
+            Value::Promise(_) => "<promise>".into(),
+            Value::Resource(_) => "<resource>".into(),
+            Value::Closure(_) | Value::Function(_) => "<fn>".into(),
+        }
+    }
+
     pub fn from_config(value: ConfigValue) -> Self {
         match value {
             ConfigValue::Str(value) => Value::String(value),
@@ -69,12 +345,27 @@ impl Value {
             ConfigValue::List(values) => {
                 Value::List(values.into_iter().map(Value::from_config).collect())
             }
-            ConfigValue::Section(values) => Value::Object(
+            ConfigValue::Object(values) => Value::Object(
                 values
                     .into_iter()
                     .map(|(key, value)| (key, Value::from_config(value)))
                     .collect(),
             ),
+            ConfigValue::Map(values) => Value::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (Value::from_config(key), Value::from_config(value))
+                    })
+                    .collect(),
+            ),
+            ConfigValue::Option(value) => {
+                Value::Option(value.map(|value| Box::new(Value::from_config(*value))))
+            }
+            ConfigValue::Result(value) => Value::Result(match value {
+                Ok(value) => Ok(Box::new(Value::from_config(*value))),
+                Err(value) => Err(Box::new(Value::from_config(*value))),
+            }),
             ConfigValue::Shell(plan) => Value::Shell(plan),
             ConfigValue::ShellProgram(program) => Value::ShellProgram(program),
             ConfigValue::Promise(handle) => Value::Promise(handle),
@@ -100,6 +391,7 @@ impl Value {
             | Value::Bool(_)
             | Value::String(_)
             | Value::Bytes(_) => true,
+            Value::Args(_) => false,
             Value::List(values) => values.iter().all(Value::is_data_comparable),
             Value::Object(values) => values.values().all(Value::is_data_comparable),
             Value::Map(entries) => entries
@@ -141,7 +433,7 @@ impl Value {
             Value::Float(value) => Ok(ConfigValue::Float(value)),
             Value::Bool(value) => Ok(ConfigValue::Bool(value)),
             Value::String(value) => Ok(ConfigValue::Str(value)),
-            Value::Bytes(values) => Ok(ConfigValue::Section(indexmap::IndexMap::from([(
+            Value::Bytes(values) => Ok(ConfigValue::Object(indexmap::IndexMap::from([(
                 "values".into(),
                 ConfigValue::List(
                     values
@@ -150,30 +442,38 @@ impl Value {
                         .collect(),
                 ),
             )]))),
+            Value::Args(_) => Err(SparError::EvalError {
+                message: "Args values are shell-only and cannot be converted to configuration values".into(),
+                span: span.clone(),
+            }),
             Value::List(values) => Ok(ConfigValue::List(
                 values
                     .into_iter()
                     .map(|value| value.try_into_config(span))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            Value::Object(values) => Ok(ConfigValue::Section(
+            Value::Object(values) => Ok(ConfigValue::Object(
                 values
                     .into_iter()
                     .map(|(key, value)| value.try_into_config(span).map(|value| (key, value)))
                     .collect::<Result<indexmap::IndexMap<_, _>, _>>()?,
             )),
-            Value::Map(_) => Err(SparError::EvalError {
-                message: "map values cannot be converted to configuration values directly".into(),
-                span: span.clone(),
-            }),
-            Value::Option(_) => Err(SparError::EvalError {
-                message: "Option values cannot be converted to configuration values directly".into(),
-                span: span.clone(),
-            }),
-            Value::Result(_) => Err(SparError::EvalError {
-                message: "Result values cannot be converted to configuration values directly".into(),
-                span: span.clone(),
-            }),
+            Value::Map(values) => Ok(ConfigValue::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((key.try_into_config(span)?, value.try_into_config(span)?))
+                    })
+                    .collect::<Result<Vec<_>, SparError>>()?,
+            )),
+            Value::Option(value) => Ok(ConfigValue::Option(match value {
+                Some(value) => Some(Box::new(value.try_into_config(span)?)),
+                None => None,
+            })),
+            Value::Result(value) => Ok(ConfigValue::Result(match value {
+                Ok(value) => Ok(Box::new(value.try_into_config(span)?)),
+                Err(value) => Err(Box::new(value.try_into_config(span)?)),
+            })),
             Value::Table(_) => Err(SparError::EvalError {
                 message: "table values cannot be converted to configuration values; serialize them explicitly".into(),
                 span: span.clone(),
@@ -216,6 +516,19 @@ impl Value {
     }
 }
 
+fn render_object_key(key: &str) -> String {
+    let mut chars = key.chars();
+    let is_identifier = chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+    if is_identifier {
+        key.to_string()
+    } else {
+        format!("{key:?}")
+    }
+}
+
 impl From<ConfigValue> for Value {
     fn from(value: ConfigValue) -> Self {
         Value::from_config(value)
@@ -227,8 +540,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn display_renderer_handles_sum_and_error_values_without_panicking() {
+        let samples = vec![
+            Value::Void,
+            Value::Int(1),
+            Value::Float(1.5),
+            Value::Bool(true),
+            Value::String("x".into()),
+            Value::Bytes(vec![1, 2]),
+            Value::List(vec![Value::String("x".into())]),
+            Value::Map(vec![(Value::String("k".into()), Value::Int(1))].into()),
+            Value::Option(None),
+            Value::Option(Some(Box::new(Value::Int(1)))),
+            Value::Result(Ok(Box::new(Value::Int(1)))),
+            Value::Result(Err(Box::new(Value::String("bad".into())))),
+            Value::Error {
+                message: "broken".into(),
+                kind: "test".into(),
+                code: 7,
+                cause: None,
+            },
+        ];
+        for sample in samples {
+            let rendered = sample.render_display();
+            assert!(!rendered.is_empty(), "{sample:?}");
+        }
+    }
+
+    #[test]
     fn config_round_trip_preserves_data_values() {
-        let source = ConfigValue::Section(indexmap::IndexMap::from([
+        let source = ConfigValue::Object(indexmap::IndexMap::from([
             ("name".into(), ConfigValue::Str("spar".into())),
             ("count".into(), ConfigValue::Int(3)),
         ]));

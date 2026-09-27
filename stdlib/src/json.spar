@@ -1,11 +1,11 @@
-function parse<T>(text: str) -> T {
-    return nativeJson::parse(text: text);
+fn parse<T>(text: str) -> T {
+    return nativeJson::parse<T>(text: text);
 };
 
-function stringify<T>(value: T) -> str {
+fn stringify(value: Any) -> str {
     return nativeJson::stringify(value: value);
 };
 
-function stringifyPretty<T>(value: T) -> str {
+fn stringifyPretty(value: Any) -> str {
     return nativeJson::stringifyPretty(value: value);
 };

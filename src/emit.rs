@@ -2,7 +2,7 @@
 //! playground.
 //!
 //! `build_emit_json` is the single source of truth for the shape of emitted
-//! config (top-level vars and sections marked `#[emit]`, keys sorted) — as a
+//! config (top-level vars and structs marked `#[emit]`, keys sorted) — as a
 //! `serde_json::Value`, which every supported output format serializes from.
 //! Both the CLI (`spar emit`, with imports) and `emit_to_json`/`emit_to_yaml`/
 //! `emit_to_toml` (single-file, no imports) funnel through it so their output
@@ -67,7 +67,7 @@ pub fn emit_to_toml(src: &str) -> Result<String, Vec<String>> {
     toml::to_string_pretty(&value).map_err(|e| vec![e.to_string()])
 }
 
-/// Build the emitted JSON value: top-level vars and sections marked
+/// Build the emitted JSON value: top-level vars and structs marked
 /// `#[emit]`, all keys sorted.
 pub fn build_emit_json(
     result: &EvalResult,
@@ -90,14 +90,14 @@ pub fn build_emit_json(
         }
     }
 
-    // Top-level sections marked #[emit] (path length == 1)
+    // Top-level structs marked #[emit] (path length == 1)
     let mut section_keys: Vec<&Vec<String>> =
-        result.sections.keys().filter(|p| p.len() == 1).collect();
+        result.structs.keys().filter(|p| p.len() == 1).collect();
     section_keys.sort();
 
     for path in section_keys {
         let emitted = symbols
-            .sections
+            .structs
             .get(path)
             .map(|entry| entry.emit)
             .unwrap_or(false);
@@ -139,7 +139,7 @@ fn sort_keys(value: serde_json::Value) -> serde_json::Value {
 fn build_section_value(path: &[String], result: &EvalResult) -> Result<serde_json::Value, String> {
     let mut map = serde_json::Map::new();
 
-    if let Some(fields) = result.sections.get(path) {
+    if let Some(fields) = result.structs.get(path) {
         let mut pairs: Vec<_> = fields.iter().collect();
         pairs.sort_by_key(|(k, _)| k.as_str());
         for (field_name, value) in pairs {
@@ -148,7 +148,7 @@ fn build_section_value(path: &[String], result: &EvalResult) -> Result<serde_jso
     }
 
     let mut nested: Vec<&Vec<String>> = result
-        .sections
+        .structs
         .keys()
         .filter(|p| p.len() == path.len() + 1 && p.starts_with(path))
         .collect();
@@ -172,7 +172,7 @@ fn config_value_to_json(val: &ConfigValue) -> Result<serde_json::Value, String> 
                 .map(config_value_to_json)
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        ConfigValue::Section(map) => {
+        ConfigValue::Object(map) => {
             let mut obj = serde_json::Map::new();
             let mut pairs: Vec<_> = map.iter().collect();
             pairs.sort_by_key(|(k, _)| k.as_str());
@@ -181,6 +181,23 @@ fn config_value_to_json(val: &ConfigValue) -> Result<serde_json::Value, String> 
             }
             serde_json::Value::Object(obj)
         }
+        ConfigValue::Map(entries) => {
+            let mut obj = serde_json::Map::new();
+            for (key, value) in entries {
+                let ConfigValue::Str(key) = key else {
+                    return Err(
+                        "JSON/TOML emission requires Map keys to be str; convert non-string keys explicitly"
+                            .into(),
+                    );
+                };
+                obj.insert(key.clone(), config_value_to_json(value)?);
+            }
+            serde_json::Value::Object(obj)
+        }
+        ConfigValue::Option(None) => serde_json::Value::Null,
+        ConfigValue::Option(Some(value)) => config_value_to_json(value)?,
+        ConfigValue::Result(Ok(value)) => serde_json::json!({ "ok": config_value_to_json(value)? }),
+        ConfigValue::Result(Err(value)) => serde_json::json!({ "err": config_value_to_json(value)? }),
         ConfigValue::Shell(plan) => shell_plan_to_json(plan),
         ConfigValue::ShellProgram(_) => {
             return Err("deferred shell programs cannot be emitted as configuration data".into())

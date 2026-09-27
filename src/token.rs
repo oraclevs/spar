@@ -16,7 +16,7 @@ pub enum Token {
     TypeInt,
     TypeFloat,
     TypeBool,
-    TypeSection, // the keyword "section" as a type annotation
+    TypeSection, // removed legacy keyword, retained only for migration diagnostics
     TypeVoid,    // the keyword "void" — only legal as a function return type
     TypeShell,
 
@@ -60,6 +60,7 @@ pub enum Token {
     GtEq,
     AndAnd,
     OrOr,
+    Pipe,           // `|` closure delimiter outside shell mode
     StructuredPipe, // `|>` Spar structured-value pipe
     Bang,
     At,          // `@`
@@ -205,6 +206,7 @@ impl Token {
             Token::GtEq => "'>='",
             Token::AndAnd => "'&&'",
             Token::OrOr => "'||'",
+            Token::Pipe => "'|'",
             Token::Bang => "'!'",
             Token::At => "'@'",
             Token::HashBracket => "'#['",

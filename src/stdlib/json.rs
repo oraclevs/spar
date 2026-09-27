@@ -1,28 +1,24 @@
 use crate::ast::SparType;
-use crate::runtime::{NativeFunction, NativeRegistry, Value};
+use crate::runtime::{NativeFunction, NativeIntrinsic, NativeRegistry, Value};
 
-use super::support::{error, serde_to_value, string_arg, value_to_serde};
+use super::support::{error, value_to_serde};
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
     registry
-        .register(NativeFunction::sync(
+        .register(NativeFunction::sync_intrinsic(
             "nativeJson",
             "parse",
             vec![("text", SparType::Str)],
             SparType::TypeParameter("T".into()),
             true,
-            |_context, args| {
-                let parsed: serde_json::Value = serde_json::from_str(string_arg(args, 0, "text")?)
-                    .map_err(|e| error(format!("invalid JSON: {e}")))?;
-                serde_to_value(parsed)
-            },
+            NativeIntrinsic::JsonParse,
         ))
         .expect("nativeJson::parse registration must be unique");
     registry
         .register(NativeFunction::sync(
             "nativeJson",
             "stringify",
-            vec![("value", SparType::TypeParameter("T".into()))],
+            vec![("value", SparType::Any)],
             SparType::Str,
             true,
             |_context, args| {
@@ -39,7 +35,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeJson",
             "stringifyPretty",
-            vec![("value", SparType::TypeParameter("T".into()))],
+            vec![("value", SparType::Any)],
             SparType::Str,
             true,
             |_context, args| {

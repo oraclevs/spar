@@ -1,20 +1,20 @@
-async function all<T>(promises: [Promise<T>]) -> [T] {
+async fn all<T>(promises: [Promise<T>]) -> [T] {
     return for promise in promises { await promise };
 };
 
-async function race<T>(promises: [Promise<T>]) -> T {
+async fn race<T>(promises: [Promise<T>]) -> T {
     return nativeAsync::race(promises: promises);
 };
 
-async function timeout<T>(promise: Promise<T>, millis: int) -> T {
+async fn timeout<T>(promise: Promise<T>, millis: int) -> T {
     return nativeAsync::timeout(promise: promise, millis: millis);
 };
 
-async function resolve<T>(value: T) -> T {
+async fn resolve<T>(value: T) -> T {
     return value;
 };
 
-async function delay(millis: int) -> void {
+async fn delay(millis: int) -> void {
     nativeTime::sleepMillis(millis: millis);
     return;
 };

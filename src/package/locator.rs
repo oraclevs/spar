@@ -38,7 +38,7 @@ impl ModuleLocator {
 
     /// A locator for resolving imports *inside* an already-resolved
     /// dependency (`id`), so its own `import pkg` requests follow its own
-    /// `[Dependencies]` edges, not the root project's.
+    /// `struct Dependencies` edges, not the root project's.
     pub fn for_package(id: PackageId, lockfile: Lockfile, store: PackageStore) -> Self {
         Self {
             current: Some(id),

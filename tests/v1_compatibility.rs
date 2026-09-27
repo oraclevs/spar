@@ -108,8 +108,8 @@ fn emit_keeps_public_configuration_and_hides_internal_values() {
             var visible: int = 2;
             export var exportedButUnmarked: int = 3;
             #[emit]
-            [Public] { name: str = "spar"; };
-            private [Private] { token: str = "hidden"; };
+            struct Public { name: str = "spar"; };
+            private struct Private { token: str = "hidden"; };
         "#,
     )
     .unwrap();

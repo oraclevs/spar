@@ -74,6 +74,16 @@ pub(crate) enum CompiledMethodTarget {
     Native(crate::runtime::NativeMethodId),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum CompiledLValue {
+    Local(LocalSlot),
+    Global(String),
+    Field {
+        base: Box<CompiledLValue>,
+        field: String,
+    },
+}
+
 // Spans are retained on every node so later diagnostics can point at them.
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -81,16 +91,23 @@ pub(crate) enum CompiledExpression {
     Constant(crate::ConfigValue, Span),
     Local(LocalSlot, Span),
     Global(String, Span),
+    /// Internal placeholder used only in checked user-function/method calls.
+    /// It preserves a skipped named parameter so the callee can evaluate that
+    /// parameter's default expression in its own frame.
+    DefaultArgument(Span),
     DirectCall {
         function: FunctionId,
         arguments: Vec<CompiledExpression>,
+        /// Static return type instantiated at this call site. Runtime-native
+        /// reflection (for example typed JSON decoding) uses this to preserve
+        /// generic type information across an otherwise-erased function call.
+        return_type: Option<SparType>,
         span: Span,
     },
     MethodCall {
         target: CompiledMethodTarget,
         receiver: Option<Box<CompiledExpression>>,
-        receiver_slot: Option<LocalSlot>,
-        receiver_global: Option<String>,
+        receiver_lvalue: Option<CompiledLValue>,
         arguments: Vec<CompiledExpression>,
         mutates_receiver: bool,
         span: Span,
@@ -121,6 +138,10 @@ pub(crate) enum CompiledExpression {
     NativeCall {
         function: crate::runtime::NativeFunctionId,
         arguments: Vec<CompiledExpression>,
+        /// Checked return type at the native call site. This may still contain
+        /// a function type parameter; the runtime resolves it from the current
+        /// generic call frame before invoking reified intrinsics.
+        return_type: Option<SparType>,
         span: Span,
     },
     Panic {
@@ -140,6 +161,7 @@ pub(crate) enum CompiledExpression {
     },
     List(Vec<CompiledExpression>, Span),
     Object(Vec<CompiledObjectItem>, Span),
+    Map(Vec<CompiledObjectItem>, Span),
     Operation {
         operation: TypedOperation,
         operands: Vec<CompiledExpression>,
@@ -622,7 +644,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
                 visit_expression(value, visit);
             }
         }
-        CompiledExpression::Object(items, _) => {
+        CompiledExpression::Object(items, _) | CompiledExpression::Map(items, _) => {
             for item in items {
                 match item {
                     CompiledObjectItem::Field { value, .. } | CompiledObjectItem::Spread(value) => {
@@ -676,6 +698,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
         CompiledExpression::Constant(_, _)
         | CompiledExpression::Local(_, _)
         | CompiledExpression::Global(_, _)
+        | CompiledExpression::DefaultArgument(_)
         | CompiledExpression::FunctionRef { .. }
         | CompiledExpression::ImportedValue { .. }
         | CompiledExpression::Shell(_)
@@ -774,7 +797,7 @@ impl ModuleGraphBuilder {
             {
                 *existing
             } else {
-                let source = std::fs::read_to_string(&path).map_err(|error| {
+                let source = crate::stdlib::read_module_source(&path).map_err(|error| {
                     vec![SparError::ResolveError {
                         message: format!("cannot read import file '{}': {error}", path.display()),
                         hint: None,
@@ -820,7 +843,7 @@ impl ModuleGraphBuilder {
                     .map(|function| (function.key.clone(), function.id))
             })
             .collect();
-        let parameters: HashMap<FunctionId, Vec<String>> = self
+        let parameters: HashMap<FunctionId, Vec<(String, SparType)>> = self
             .modules
             .iter()
             .flat_map(|module| {
@@ -833,7 +856,7 @@ impl ModuleGraphBuilder {
                             declaration
                                 .params
                                 .iter()
-                                .map(|parameter| parameter.name.clone())
+                                .map(|parameter| (parameter.name.clone(), parameter.ty.clone()))
                                 .collect(),
                         )
                     })
@@ -946,7 +969,7 @@ impl ModuleGraphBuilder {
     }
 }
 
-fn function_declarations(program: &Program) -> Vec<&crate::ast::FunctionDecl> {
+pub(crate) fn function_declarations(program: &Program) -> Vec<&crate::ast::FunctionDecl> {
     program
         .items
         .iter()

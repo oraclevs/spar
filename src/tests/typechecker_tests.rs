@@ -33,6 +33,40 @@ fn resolve_or_type_err(src: &str) -> String {
     }
 }
 
+
+#[test]
+fn any_accepts_concrete_values_but_does_not_flow_back_implicitly() {
+    use crate::ast::SparType;
+    use crate::typechecker::is_assignable;
+
+    for concrete in [
+        SparType::Int,
+        SparType::Str,
+        SparType::List(Box::new(SparType::Int)),
+        SparType::Applied {
+            name: "Map".into(),
+            arguments: vec![SparType::Str, SparType::Int],
+        },
+        SparType::Named("User".into()),
+        SparType::Applied {
+            name: "Option".into(),
+            arguments: vec![SparType::Int],
+        },
+        SparType::Applied {
+            name: "Result".into(),
+            arguments: vec![SparType::Int, SparType::Str],
+        },
+    ] {
+        assert!(is_assignable(&SparType::Any, &concrete), "{concrete:?}");
+    }
+    assert!(!is_assignable(&SparType::Int, &SparType::Any));
+
+    check_ok("var integer: Any = 7; var text: Any = \"spar\"; var list: Any = [1, 2, 3];");
+
+    let errors = check_err("var opaque: Any = 7; var concrete: int = opaque;");
+    assert!(errors.contains("declared as 'int'") || errors.contains("declared as `int`"), "{errors}");
+}
+
 #[test]
 fn async_call_returns_promise_and_await_unwraps_it() {
     check_ok(
@@ -172,46 +206,30 @@ fn unconstrained_generic_parameters_reject_primitive_operations() {
 fn applied_generic_type_substitutes_fields() {
     check_ok(
         r#"
-        type [Box<T>] { value: T; };
-        var boxed: Box<int> = { value: 7; };
+        struct Box<T> { value: T; };
+        struct IntBox: Box<int> { value = 7; };
+        var boxed: Box<int> = IntBox();
         var value: int = boxed.value;
         "#,
     );
 
-    let mismatch =
-        check_err("type [Box<T>] { value: T; }; var boxed: Box<int> = { value: \"bad\"; };");
+    let mismatch = check_err(
+        r#"struct Box<T> { value: T; }; struct Broken: Box<int> { value = "bad"; };"#,
+    );
     assert!(mismatch.contains("int"), "{mismatch}");
 }
 
 #[test]
 fn canonical_structs_conform_to_generic_types_and_lists() {
-    check_ok(
-        r#"
-        type Pair<T, V> { left: T; right: V; };
-        struct Example: Pair<str, int> { left = "hello"; right = 42; };
-        var names: List<str> = ["Obi", "Ada"];
-        "#,
-    );
-
-    let mismatch = check_err(
-        r#"type Pair<T, V> { left: T; right: V; }; struct Broken: Pair<str, int> { left = 42; right = "wrong"; };"#,
-    );
-    assert!(mismatch.contains("expects"), "{mismatch}");
-    assert!(mismatch.contains("str"), "{mismatch}");
+    check_ok(r#"struct Pair<T, V> { left: T; right: V; }; var example: Pair<str, int> = Pair<str, int>(left: "hello", right: 42); var names: List<str> = ["Obi", "Ada"];"#);
+    let error = check_err(r#"struct Pair<T, V> { left: T; right: V; }; var broken: Pair<str, int> = Pair<str, int>(left: 42, right: "wrong");"#);
+    assert!(error.contains("str"), "{error}");
 }
 
 #[test]
 fn structural_type_defaults_are_checked_and_satisfy_required_fields() {
-    check_ok(
-        r#"
-        type ServerConfig { host: str = "localhost"; port: int = 8080; debug: bool = false; };
-        struct Development: ServerConfig { debug = true; };
-        "#,
-    );
-    let error = check_err(
-        r#"type ServerConfig { port: int = "wrong"; }; struct Development: ServerConfig { };"#,
-    );
-    assert!(error.contains("port"), "{error}");
+    check_ok(r#"struct Server { host: str = "localhost"; port: int = 8080; debug: bool = false; }; var development: Server = Server(debug: true);"#);
+    let error = check_err(r#"struct Server { port: int = "wrong"; };"#);
     assert!(error.contains("int"), "{error}");
 }
 
@@ -234,11 +252,11 @@ fn caught_error_binding_has_error_fields_and_ignored_catch_is_valid() {
 fn nested_applied_generic_fields_are_instantiated_recursively() {
     check_ok(
         r#"
-        type [Pair<T, U>] { left: T; right: U; };
-        type [Box<T>] { value: T; };
-        var nested: Box<Pair<int, str>> = {
-            value: { left: 1; right: "one"; };
-        };
+        struct Pair<T, U> { left: T; right: U; };
+        struct Box<T> { value: T; };
+        struct PairValue: Pair<int, str> { left = 1; right = "one"; };
+        struct NestedValue: Box<Pair<int, str>> { value = PairValue(); };
+        var nested: Box<Pair<int, str>> = NestedValue();
         var left: int = nested.value.left;
         "#,
     );
@@ -259,7 +277,7 @@ fn shell_type_mismatch_errors() {
 fn exec_shell_has_exec_result_type() {
     check_ok(
         r#"
-        type [ExecResult]{ success: bool; exitCode: int; };
+        struct ExecResult{ success: bool; exitCode: int; };
         function f() -> bool {
             var r = exec shell { true; };
             return r.success;
@@ -448,13 +466,13 @@ fn typecheck_comprehension_source_must_be_list() {
 }
 
 #[test]
-fn typecheck_section_field_can_be_function_call() {
+fn record_field_can_be_function_call() {
     let src = r#"
-        function makeServer(host: str) -> section {
-            return { host: str = host; };
+        function makeServer(host: str) -> Record {
+            return { host: host; };
         };
-        [App]{
-            server: section = makeServer(host: "localhost");
+        struct App {
+            server: Record = makeServer(host: "localhost");
         };
     "#;
     check_ok(src);
@@ -543,14 +561,14 @@ fn nested_for_loops_typecheck() {
 }
 
 #[test]
-fn bool_type_in_return_section_typechecks() {
+fn record_object_return_typechecks() {
     check_ok(
         r#"
-        function f(major: int) -> section {
+        function f(major: int) -> Record {
             if major <= 0 {
-                return { error: bool = true; message: str = "bad"; };
+                return { error: true; message: "bad"; };
             }
-            return { error: bool = false; };
+            return { error: false; };
         };
     "#,
     );
@@ -559,11 +577,11 @@ fn bool_type_in_return_section_typechecks() {
 #[test]
 fn typecheck_valid_type_binding_with_inferred_field_types_passes() {
     let src = r#"
-        type [PostgresType]{
+        struct PostgresType{
             image: str;
-            restart?: str;
+            restart: Option<str> = none();
         };
-        [Postgres] -> PostgresType {
+        struct Postgres: PostgresType {
             image: "postgres:16";
         };
     "#;
@@ -572,83 +590,43 @@ fn typecheck_valid_type_binding_with_inferred_field_types_passes() {
 
 #[test]
 fn typecheck_valid_type_binding_with_explicit_redundant_type_passes() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: str = "postgres:16";
-        };
-    "#;
-    check_ok(src);
+    check_ok(r#"struct Postgres { image: str = "postgres:16"; }; var postgres: Postgres = Postgres();"#);
 }
 
 #[test]
 fn typecheck_type_binding_missing_required_field() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-        };
-    "#;
-    let err = check_err(src);
-    assert!(err.contains("missing required field"), "got: {err}");
+    let error = check_err(r#"struct Postgres { image: str; }; var postgres: Postgres = Postgres();"#);
+    assert!(error.contains("missing required argument"), "{error}");
 }
 
 #[test]
 fn typecheck_type_binding_rejects_extra_field() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: "postgres:16";
-            extra: "not allowed";
-        };
-    "#;
-    let err = check_err(src);
-    assert!(err.contains("is not declared in type"), "got: {err}");
+    let error = resolve_or_type_err(r#"struct Postgres { image: str; }; var postgres: Postgres = Postgres(image: "postgres:16", extra: "not allowed");"#);
+    assert!(error.contains("extra"), "{error}");
 }
 
 #[test]
 fn typecheck_type_binding_rejects_wrong_inferred_type() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: 16;
-        };
-    "#;
-    let err = check_err(src);
-    assert!(err.contains("expects `str`"), "got: {err}");
+    let error = check_err(r#"struct Postgres { image: str; }; var postgres: Postgres = Postgres(image: 16);"#);
+    assert!(error.contains("str"), "{error}");
 }
 
 #[test]
 fn typecheck_type_binding_rejects_wrong_explicit_type() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: int = 16;
-        };
-    "#;
-    let err = check_err(src);
-    assert!(err.contains("expects `str`"), "got: {err}");
+    let error = check_err(r#"struct Postgres { image: str; }; var postgres: Postgres = Postgres(image: 16);"#);
+    assert!(error.contains("str"), "{error}");
 }
 
 #[test]
 fn typecheck_type_binding_validates_named_nested_type_with_inferred_fields() {
     let src = r#"
-        type [Border]{
+        struct Border{
             width: int;
         };
-        type [Decoration]{
+        struct Decoration{
             border: Border;
         };
-        [Style] -> Decoration {
+        struct Style: Decoration {
             border: {
                 width: 4;
             };
@@ -660,13 +638,13 @@ fn typecheck_type_binding_validates_named_nested_type_with_inferred_fields() {
 #[test]
 fn typecheck_type_binding_rejects_bad_named_nested_field() {
     let src = r#"
-        type [Border]{
+        struct Border{
             width: int;
         };
-        type [Decoration]{
+        struct Decoration{
             border: Border;
         };
-        [Style] -> Decoration {
+        struct Style: Decoration {
             border: {
                 width: "not an int";
             };
@@ -678,19 +656,14 @@ fn typecheck_type_binding_rejects_bad_named_nested_field() {
 
 #[test]
 fn typecheck_untyped_field_without_binding_is_error() {
-    let src = r#"
-        [Man]{
-            name: "Mike";
-        };
-    "#;
-    let err = check_err(src);
-    assert!(err.contains("has no type"), "got: {err}");
+    let errors = crate::Engine::default().check_source("struct Server { port = 8080; };").unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("expected ':'")));
 }
 
 #[test]
 fn typecheck_unbound_section_still_requires_explicit_types() {
     // Regression: sections with no binding are completely unaffected.
-    check_ok(r#"[Man]{ name: str = "Mike"; };"#);
+    check_ok(r#"struct Man { name: str = "Mike"; };"#);
 }
 
 // ── Spread in nested field bodies ────────────────────────────────────────
@@ -698,13 +671,13 @@ fn typecheck_unbound_section_still_requires_explicit_types() {
 #[test]
 fn spread_in_nested_field_matching_bound_source_passes() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        [ProductionEnvironment] -> EnvironmentType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct ProductionEnvironment: EnvironmentType {
             nodeEnv: "production";
             port: "3000";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...ProductionEnvironment; };
         };
@@ -715,13 +688,13 @@ fn spread_in_nested_field_matching_bound_source_passes() {
 #[test]
 fn spread_in_nested_field_missing_required_field_errors() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        type [PartialEnvType]{ nodeEnv: str; };
-        [Partial] -> PartialEnvType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct PartialEnvType{ nodeEnv: str; };
+        struct Partial: PartialEnvType {
             nodeEnv: "production";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...Partial; };
         };
@@ -736,14 +709,14 @@ fn spread_in_nested_field_missing_required_field_errors() {
 #[test]
 fn spread_in_nested_field_wrong_primitive_type_errors() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        type [BadEnvType]{ nodeEnv: str; port: int; };
-        [Bad] -> BadEnvType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct BadEnvType{ nodeEnv: str; port: int; };
+        struct Bad: BadEnvType {
             nodeEnv: "production";
             port: 3000;
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...Bad; };
         };
@@ -758,15 +731,15 @@ fn spread_in_nested_field_wrong_primitive_type_errors() {
 #[test]
 fn spread_in_nested_field_extra_field_errors() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        type [ExtraEnvType]{ nodeEnv: str; port: str; extra: str; };
-        [WithExtra] -> ExtraEnvType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct ExtraEnvType{ nodeEnv: str; port: str; extra: str; };
+        struct WithExtra: ExtraEnvType {
             nodeEnv: "production";
             port: "3000";
             extra: "surprise";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...WithExtra; };
         };
@@ -783,13 +756,13 @@ fn spread_in_nested_field_unbound_source_with_explicit_types_passes() {
     // Source has no `-> Type` binding, but every field is explicitly
     // typed — shape derives straight from those, no Named type needed.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        [ProductionEnvironment]{
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct ProductionEnvironment {
             nodeEnv: str = "production";
             port: str = "3000";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...ProductionEnvironment; };
         };
@@ -800,12 +773,12 @@ fn spread_in_nested_field_unbound_source_with_explicit_types_passes() {
 #[test]
 fn spread_in_nested_field_unbound_source_wrong_shape_errors() {
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        [ProductionEnvironment]{
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct ProductionEnvironment {
             nodeEnv: str = "production";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...ProductionEnvironment; };
         };
@@ -819,36 +792,13 @@ fn spread_in_nested_field_unbound_source_wrong_shape_errors() {
 
 #[test]
 fn spread_only_top_level_bound_section_checked_against_whole_type() {
-    let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        [ProductionEnvironment] -> EnvironmentType {
-            nodeEnv: "production";
-            port: "3000";
-        };
-        [Backup] -> EnvironmentType {
-            ...ProductionEnvironment;
-        };
-    "#;
-    check_ok(src);
+    check_ok(r#"struct Environment { nodeEnv: str; port: str; }; var production: Environment = Environment(nodeEnv: "production", port: "3000"); var backup: Environment = Environment(nodeEnv: production.nodeEnv, port: production.port);"#);
 }
 
 #[test]
 fn spread_only_top_level_bound_section_wrong_shape_errors() {
-    let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [PartialEnvType]{ nodeEnv: str; };
-        [Partial] -> PartialEnvType {
-            nodeEnv: "production";
-        };
-        [Backup] -> EnvironmentType {
-            ...Partial;
-        };
-    "#;
-    let err = check_err(src);
-    assert!(
-        err.contains("missing required field") && err.contains("port"),
-        "got: {err}"
-    );
+    let error = check_err(r#"struct Environment { nodeEnv: str; port: str; }; var backup: Environment = Environment(nodeEnv: "production");"#);
+    assert!(error.contains("missing required argument 'port'"), "{error}");
 }
 
 #[test]
@@ -857,13 +807,13 @@ fn spread_mixed_with_explicit_fields_full_coverage_passes() {
     // fields for coverage purposes: Partial covers nodeEnv, the explicit
     // field covers port — together they satisfy EnvironmentType.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        type [PartialEnvType]{ nodeEnv: str; };
-        [Partial] -> PartialEnvType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct PartialEnvType{ nodeEnv: str; };
+        struct Partial: PartialEnvType {
             nodeEnv: "production";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...Partial; port: "3000"; };
         };
@@ -876,13 +826,13 @@ fn spread_mixed_with_explicit_fields_still_missing_required_errors() {
     // Neither the spread nor the explicit fields cover `port` — must
     // still be a missing-required-field error, not silently accepted.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        type [PartialEnvType]{ nodeEnv: str; };
-        [Partial] -> PartialEnvType {
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        struct PartialEnvType{ nodeEnv: str; };
+        struct Partial: PartialEnvType {
             nodeEnv: "production";
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...Partial; };
         };
@@ -901,16 +851,16 @@ fn spread_mixed_with_explicit_fields_contributes_undeclared_field_errors() {
     // type doesn't declare at all, must be a type error — not silently
     // accepted just because it's "mixed" with another field.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; databaseUrl: str; redisUrl: str; };
-        type [VolumeType]{ postgresData: [str]; };
-        type [PostgresType]{ volumes: VolumeType; };
-        [ProductionEnvironment] -> EnvironmentType {
+        struct EnvironmentType{ nodeEnv: str; port: str; databaseUrl: str; redisUrl: str; };
+        struct VolumeType{ postgresData: [str]; };
+        struct PostgresType{ volumes: VolumeType; };
+        struct ProductionEnvironment: EnvironmentType {
             nodeEnv: "production";
             port: "3000";
             databaseUrl: "None";
             redisUrl: "None";
         };
-        [Postgres] -> PostgresType {
+        struct Postgres: PostgresType {
             volumes: {
                 postgresData: ["postgres_data:/var/lib/postgresql/data"];
                 ...ProductionEnvironment;
@@ -931,12 +881,12 @@ fn spread_mixed_with_unresolvable_source_still_skipped() {
     // when mixed with other fields — this deliberately has a WRONG shape
     // (missing `port`) and must still pass.
     let src = r#"
-        type [EnvironmentType]{ nodeEnv: str; port: str; };
-        type [ServiceType]{ image: str; environment: EnvironmentType; };
-        function makeEnv() -> section {
-            return { nodeEnv: str = "production"; };
+        struct EnvironmentType{ nodeEnv: str; port: str; };
+        struct ServiceType{ image: str; environment: EnvironmentType; };
+        function makeEnv() -> Record {
+            return { nodeEnv: "production"; };
         };
-        [Api] -> ServiceType {
+        struct Api: ServiceType {
             image: "my-api";
             environment: { ...makeEnv(); };
         };
@@ -944,29 +894,20 @@ fn spread_mixed_with_unresolvable_source_still_skipped() {
     check_ok(src);
 }
 
-// ── Expr::Object shape validation against SparType::Named ────────────────────
+// ── Dynamic object literals vs named structured values ────────────────────────
 
 #[test]
-fn object_literal_matching_named_type_passes() {
-    check_ok("type [Leaf]{ name: str; size: int; };\nvar x: Leaf = { name: \"a\"; size: 1; };\n");
+fn object_literal_cannot_implicitly_construct_named_type() {
+    let err = check_err("struct Leaf { name: str = \"\"; size: int = 0; };\nvar x: Leaf = { name: \"a\"; size: 1; };\n");
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
 }
 
 #[test]
-fn object_literal_missing_required_field_errors() {
-    let err = check_err("type [Leaf]{ name: str; size: int; };\nvar x: Leaf = { name: \"a\"; };\n");
-    assert!(err.contains("missing required field"), "got: {err}");
-}
-
-#[test]
-fn object_literal_extra_field_errors() {
-    let err = check_err("type [Leaf]{ name: str; };\nvar x: Leaf = { name: \"a\"; extra: 1; };\n");
-    assert!(err.contains("not declared in type"), "got: {err}");
-}
-
-#[test]
-fn object_literal_wrong_field_type_errors() {
-    let err = check_err("type [Leaf]{ name: str; };\nvar x: Leaf = { name: 1; };\n");
-    assert!(err.contains("expects"), "got: {err}");
+fn named_type_constructor_is_required_for_structured_value() {
+    check_ok("struct Leaf { name: str = \"\"; size: int = 0; };\nvar x: Leaf = Leaf(name: \"a\", size: 1);\n");
 }
 
 #[test]
@@ -976,112 +917,139 @@ fn object_literal_against_primitive_type_errors() {
 }
 
 #[test]
-fn list_of_named_type_object_literals_passes() {
-    check_ok(
-        "type [Leaf]{ name: str; };\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n",
-    );
-}
-
-#[test]
-fn list_of_named_type_bad_element_errors() {
+fn list_of_named_type_requires_named_constructors() {
     let err = check_err(
-        "type [Leaf]{ name: str; };\nvar xs: [Leaf] = [{ name: \"a\"; }, { wrong: 1; }];\n",
+        "struct Leaf { name: str = \"\"; };\nvar xs: [Leaf] = [{ name: \"a\"; }, { name: \"b\"; }];\n",
     );
-    assert!(err.contains("not declared in type"), "got: {err}");
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
 }
 
 #[test]
-fn nested_object_literal_inside_object_literal_validates_recursively() {
+fn list_of_named_type_constructors_passes() {
+    check_ok(
+        "struct Leaf { name: str = \"\"; };\nvar xs: [Leaf] = [Leaf(name: \"a\"), Leaf(name: \"b\")];\n",
+    );
+}
+
+#[test]
+fn nested_named_values_require_named_constructors() {
     check_ok(concat!(
-        "type [Branch]{ label: str; };\n",
-        "type [Leaf]{ name: str; sub: Branch; };\n",
-        "var x: Leaf = { name: \"a\"; sub: { label: \"b\"; }; };\n",
+        "struct Branch { label: str = \"\"; };\n",
+        "struct Leaf { name: str = \"\"; sub: Branch = Branch(label: \"\"); };\n",
+        "var x: Leaf = Leaf(name: \"a\", sub: Branch(label: \"b\"));\n",
     ));
 }
 
-// ── Function-body-local shape validation ──────────────────────────────────────
+// ── Function-body structured-value validation ─────────────────────────────────
 
 #[test]
-fn local_var_object_literal_matching_named_type_passes() {
-    // Confirmed via resolver.rs::check_ns_ref_with_locals: this language has
-    // no field-access-on-a-local-variable syntax (`local.field`/`local::field`
-    // only resolves for top-level SECTIONS, not locals) — so this test only
-    // exercises that the local var's own declaration typechecks, not that
-    // its fields are later readable.
-    check_ok(concat!(
-        "type [Leaf]{ name: str; };\n",
+fn local_var_named_type_requires_constructor() {
+    let err = check_err(concat!(
+        "struct Leaf { name: str = \"\"; };\n",
         "function f() -> str {\n",
         "    var l: Leaf = { name: \"a\"; };\n",
+        "    return \"ok\";\n",
+        "};\n",
+    ));
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn local_var_named_type_constructor_passes() {
+    check_ok(concat!(
+        "struct Leaf { name: str = \"\"; };\n",
+        "function f() -> str {\n",
+        "    var l: Leaf = Leaf(name: \"a\");\n",
         "    return \"ok\";\n",
         "};\n",
     ));
 }
 
 #[test]
-fn function_return_bare_object_literal_matching_named_type_passes() {
-    check_ok(concat!(
-        "type [Leaf]{ name: str; size: int; };\n",
+fn function_return_bare_object_literal_cannot_construct_named_type() {
+    let err = check_err(concat!(
+        "struct Leaf { name: str = \"\"; size: int = 0; };\n",
         "function makeLeaf(n: str) -> Leaf {\n",
         "    return { name: n; size: 0; };\n",
         "};\n",
     ));
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
 }
 
 #[test]
-fn function_return_bare_object_literal_missing_field_errors() {
-    let err = check_err(concat!(
-        "type [Leaf]{ name: str; size: int; };\n",
+fn function_return_named_constructor_passes() {
+    check_ok(concat!(
+        "struct Leaf { name: str = \"\"; size: int = 0; };\n",
         "function makeLeaf(n: str) -> Leaf {\n",
-        "    return { name: n; };\n",
+        "    return Leaf(name: n, size: 0);\n",
         "};\n",
     ));
-    assert!(err.contains("missing required field"), "got: {err}");
 }
 
 #[test]
-fn function_return_list_of_named_type_passes() {
-    check_ok(concat!(
-        "type [Leaf]{ name: str; };\n",
+fn function_return_list_of_named_type_requires_constructors() {
+    let err = check_err(concat!(
+        "struct Leaf { name: str = \"\"; };\n",
         "function makeLeaves() -> [Leaf] {\n",
         "    return [{ name: \"a\"; }, { name: \"b\"; }];\n",
         "};\n",
     ));
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
 }
 
-// Regression guard: the EXISTING `-> section { return { field: type = value; }; }`
-// form must keep working exactly as before.
 #[test]
-fn section_return_block_with_explicit_types_still_works_regression() {
+fn function_return_list_of_named_type_constructors_passes() {
     check_ok(concat!(
-        "function borderConf() -> section {\n",
-        "    return { sides: [int] = [2, 4]; width: int = 5; };\n",
+        "struct Leaf { name: str = \"\"; };\n",
+        "function makeLeaves() -> [Leaf] {\n",
+        "    return [Leaf(name: \"a\"), Leaf(name: \"b\")];\n",
         "};\n",
     ));
 }
 
-// ── Function-call argument checking for Named types ───────────────────────────
-
 #[test]
-fn function_call_with_named_type_object_literal_arg_passes() {
-    // As in the local-var/return tests above: no field-access-on-param
-    // syntax exists in this language, so `useLeaf`'s body doesn't read
-    // `l`'s fields — the point is that the CALL SITE's object-literal
-    // argument typechecks.
+fn record_return_uses_dynamic_object_literal() {
     check_ok(concat!(
-        "type [Leaf]{ name: str; };\n",
-        "function useLeaf(l: Leaf) -> str { return \"ok\"; };\n",
-        "var r: str = useLeaf(l: { name: \"a\"; });\n",
+        "function borderConf() -> Record {\n",
+        "    return { sides: [2, 4]; width: 5; };\n",
+        "};\n",
     ));
 }
 
+// ── Function-call argument checking for named structured values ───────────────
+
 #[test]
-fn function_call_with_named_type_object_literal_arg_missing_field_errors() {
+fn function_call_named_type_requires_constructor() {
     let err = check_err(concat!(
-        "type [Leaf]{ name: str; size: int; };\n",
-        "function useLeaf(l: Leaf) -> int { return 1; };\n",
-        "var r: int = useLeaf(l: { name: \"a\"; });\n",
+        "struct Leaf { name: str = \"\"; };\n",
+        "function useLeaf(l: Leaf) -> str { return \"ok\"; };\n",
+        "var r: str = useLeaf(l: { name: \"a\"; });\n",
     ));
-    assert!(err.contains("expects"), "got: {err}");
+    assert!(
+        err.contains("constructor") || err.contains("Leaf("),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn function_call_named_type_constructor_passes() {
+    check_ok(concat!(
+        "struct Leaf { name: str = \"\"; };\n",
+        "function useLeaf(l: Leaf) -> str { return \"ok\"; };\n",
+        "var r: str = useLeaf(l: Leaf(name: \"a\"));\n",
+    ));
 }
 
 // ── enum variant type-checking ────────────────────────────────────────────────
@@ -1107,11 +1075,101 @@ fn plain_string_literal_rejected_for_enum_typed_field() {
     assert!(err.contains("Devices") || err.contains("str"), "got: {err}");
 }
 
+
+#[test]
+fn named_function_arguments_can_be_reordered() {
+    check_ok(
+        r#"
+        fn describe(name: str, age: int) -> str { return name; };
+        var value: str = describe(age: 34, name: "Mike");
+        "#,
+    );
+}
+
+#[test]
+fn named_function_call_rejects_duplicate_argument() {
+    let errors = check_err(
+        r#"
+        fn greet(name: str) -> str { return name; };
+        var value: str = greet(name: "Mike", name: "Obi");
+        "#,
+    );
+    assert!(errors.contains("duplicate argument 'name'"), "got: {errors}");
+}
+
+#[test]
+fn named_function_call_rejects_unknown_argument() {
+    let errors = check_err(
+        r#"
+        fn greet(name: str) -> str { return name; };
+        var value: str = greet(value: "Mike");
+        "#,
+    );
+    assert!(errors.contains("no parameter named 'value'"), "got: {errors}");
+}
+
+#[test]
+fn named_function_call_rejects_missing_required_argument() {
+    let errors = check_err(
+        r#"
+        fn greet(name: str, prefix: str) -> str { return name; };
+        var value: str = greet(name: "Mike");
+        "#,
+    );
+    assert!(errors.contains("missing required argument 'prefix'"), "got: {errors}");
+}
+
+#[test]
+fn named_function_call_allows_omitting_defaulted_argument() {
+    check_ok(
+        r#"
+        fn greet(name: str, prefix: str = "Hello") -> str { return name; };
+        var value: str = greet(name: "Mike");
+        "#,
+    );
+}
+
+#[test]
+fn function_valued_parameter_is_called_with_its_declared_parameter_name() {
+    check_ok(
+        r#"
+        fn apply(callback: fn(value: int) -> int) -> int {
+            return callback(value: 7);
+        };
+        fn double(value: int) -> int { return value * 2; };
+        var answer: int = apply(callback: double);
+        "#,
+    );
+}
+
+#[test]
+fn function_valued_parameter_rejects_wrong_named_argument() {
+    let errors = check_err(
+        r#"
+        fn apply(callback: fn(value: int) -> int) -> int {
+            return callback(input: 7);
+        };
+        "#,
+    );
+    assert!(errors.contains("no parameter named 'input'"), "got: {errors}");
+}
+
+#[test]
+fn struct_constructor_rejects_unknown_named_argument() {
+    let errors = check_err(
+        r#"
+        struct User { name: str = ""; age: int = 0; };
+        var user: User = User(name: "Mike", unknown: 1);
+        "#,
+    );
+    assert!(errors.contains("no field named 'unknown'") || errors.contains("no parameter named 'unknown'"), "got: {errors}");
+}
+
 #[test]
 fn named_field_access_on_global_var_has_correct_type() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: str = person.name;
     "#;
     check_ok(src);
@@ -1120,8 +1178,8 @@ fn named_field_access_on_global_var_has_correct_type() {
 #[test]
 fn named_field_access_on_global_var_type_mismatch_errors() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: int = person.name;
     "#;
     let errs = check_err(src);
@@ -1131,7 +1189,7 @@ fn named_field_access_on_global_var_type_mismatch_errors() {
 #[test]
 fn named_field_access_on_loop_var_has_correct_type() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
@@ -1171,8 +1229,8 @@ fn local_function_group_call_return_type_mismatch_errors() {
 #[test]
 fn dot_field_access_on_global_var_has_correct_type() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: str = person.name;
     "#;
     check_ok(src);
@@ -1181,8 +1239,8 @@ fn dot_field_access_on_global_var_has_correct_type() {
 #[test]
 fn dot_field_access_type_mismatch_errors() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: int = person.name;
     "#;
     let errs = check_err(src);
@@ -1192,7 +1250,7 @@ fn dot_field_access_type_mismatch_errors() {
 #[test]
 fn dot_field_access_on_loop_var_has_correct_type() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
@@ -1206,39 +1264,25 @@ fn dot_field_access_on_loop_var_has_correct_type() {
 
 #[test]
 fn self_dot_field_access_has_correct_type() {
-    // New coverage — self.field was never type-checked at all before
-    // this change (confirmed: no "self" handling existed in typechecker.rs).
-    let src = r#"
-        [Server]{
-            port: int = 8080;
-            doubled: int = self.port + self.port;
-        };
-    "#;
-    check_ok(src);
+    check_ok("struct Server { port: int = 8080; }; impl Server { fn doubled(self) -> int { return self.port + self.port; }; };");
 }
 
 #[test]
 fn self_dot_field_access_type_mismatch_errors() {
-    let src = r#"
-        [Server]{
-            port: int = 8080;
-            bad: str = self.port;
-        };
-    "#;
-    let errs = check_err(src);
-    assert!(errs.contains("type mismatch"), "got: {errs}");
+    let error = check_err("struct Server { port: int = 8080; }; impl Server { fn bad(self) -> str { return self.port; }; };");
+    assert!(error.contains("str"), "{error}");
 }
 
 #[test]
 fn bound_type_accepts_list_of_named_object_literals() {
     check_ok(
         r#"
-        type AliasConfig {
+        struct AliasConfig {
             name: str;
             command: List<str>;
         };
-        type RootConfig {
-            aliases?: List<AliasConfig>;
+        struct RootConfig {
+            aliases: Option<List<AliasConfig>> = none();
         };
         struct Config: RootConfig {
             aliases = [
@@ -1253,19 +1297,138 @@ fn bound_type_accepts_list_of_named_object_literals() {
 fn contextual_native_shell_words_typecheck_as_ordinary_names() {
     check_ok(
         r#"
-        type Tool {
-            command: str;
-            exec: str;
-            shell: str;
+        struct Tool {
+            command: str = "";
+            exec: str = "";
+            shell: str = "";
         };
         var command: str = "run";
         var exec: str = command;
         var shell: str = exec;
-        var tool: Tool = { command: command; exec: exec; shell: shell; };
+        var tool: Tool = Tool(command: command, exec: exec, shell: shell);
         function command(exec: str, shell: str) -> str {
             return "${exec}:${shell}";
         };
         var result: str = command(exec: tool.exec, shell: tool.shell);
         "#,
+    );
+}
+
+#[test]
+fn named_type_constructor_supports_typed_nested_values() {
+    check_ok(
+        r#"
+        struct Address {
+            country: str = "";
+            city: str = "";
+        };
+        struct User {
+            name: str = "";
+            address: Address = Address();
+        };
+        var user: User = User(
+            name: "Mike",
+            address: Address(country: "Nigeria", city: "Awka"),
+        );
+        "#,
+    );
+}
+
+#[test]
+fn object_literal_is_not_an_implicit_named_struct_value() {
+    let errors = check_err(
+        r#"
+        struct Address { city: str; };
+        var address: Address = { city: "Awka"; };
+        "#,
+    );
+    assert!(
+        errors.contains("Address") && (errors.contains("constructor") || errors.contains("type mismatch")),
+        "{errors}"
+    );
+}
+
+#[test]
+fn semantic_field_queries_resolve_named_and_generic_fields() {
+    use crate::ast::SparType;
+    use crate::semantics::SemanticSnapshot;
+
+    let src = r#"
+        struct Boxed<T> { value: T; };
+        struct Address { city: str; };
+    "#;
+    let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+    let prog = crate::parser::Parser::new(tokens).parse().expect("parse");
+    let symbols = crate::resolver::Resolver::new()
+        .resolve(&prog, &[])
+        .expect("resolve");
+
+    let semantic = SemanticSnapshot::new(symbols.clone());
+
+    assert_eq!(
+        semantic.field_type(&SparType::Named("Address".into()), "city"),
+        Some(SparType::Str)
+    );
+    assert_eq!(
+        semantic.field_type(
+            &SparType::Applied {
+                name: "Boxed".into(),
+                arguments: vec![SparType::Int],
+            },
+            "value",
+        ),
+        Some(SparType::Int)
+    );
+    assert_eq!(
+        semantic.field_type(
+            &SparType::Applied {
+                name: "MapEntry".into(),
+                arguments: vec![SparType::Str, SparType::Bool],
+            },
+            "value",
+        ),
+        Some(SparType::Bool)
+    );
+}
+
+#[test]
+fn function_value_named_arguments_infer_by_name_not_source_order() {
+    check_ok(
+        r#"
+        fn main() -> int {
+            var choose: fn(first: int, second: str) -> int = |first: int, second: str| first;
+            return choose(second: "ignored", first: 7);
+        };
+        "#,
+    );
+}
+
+#[test]
+fn semantic_fields_for_bound_struct_include_omitted_option_fields() {
+    use crate::ast::SparType;
+    use crate::semantics::SemanticSnapshot;
+
+    let src = r#"struct User { name: str = "Mike"; sex: Option<str> = none(); };"#;
+    let compilation = crate::Compiler::new(crate::CompileOptions { evaluate: false, ..Default::default() }).compile(src);
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    let symbols = compilation.symbols.unwrap();
+    let semantic = SemanticSnapshot::new(symbols);
+
+    let fields = semantic.fields_for_type(&SparType::Named("User".into()));
+    assert!(fields.iter().any(|field| field.name == "name" && field.ty == SparType::Str));
+    assert!(fields.iter().any(|field| {
+        field.name == "sex"
+            && field.ty
+                == SparType::Applied {
+                    name: "Option".into(),
+                    arguments: vec![SparType::Str],
+                }
+    }));
+    assert_eq!(
+        semantic.field_type(&SparType::Named("User".into()), "sex"),
+        Some(SparType::Applied {
+            name: "Option".into(),
+            arguments: vec![SparType::Str],
+        })
     );
 }

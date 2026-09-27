@@ -30,13 +30,13 @@ fn closure_forms_expression_typed_and_block() {
         status(
             r#"
             function main() -> int {
-                var double: fn(int) -> int = fn(x) => x * 2;
-                var typed: fn(int) -> int = fn(x: int) -> int => x + 1;
-                var block: fn(int) -> int = fn(x: int) -> int {
-                    var y: int = x * 10;
+                var double: fn(value: int) -> int = |value: int| value * 2;
+                var typed: fn(value: int) -> int = |value: int| value + 1;
+                var block: fn(value: int) -> int = |value: int| {
+                    var y: int = value * 10;
                     return y;
                 };
-                return double(4) + typed(1) + block(1);
+                return double(value: 4) + typed(value: 1) + block(value: 1);
             };
             "#
         ),
@@ -50,9 +50,9 @@ fn named_functions_are_first_class_values() {
         status(
             r#"
             function inc(n: int) -> int { return n + 1; };
-            function apply(f: fn(int) -> int, v: int) -> int { return f(v); };
+            fn apply(f: fn(value: int) -> int, v: int) -> int { return f(value: v); };
             function main() -> int {
-                var f: fn(int) -> int = inc;
+                var f: fn(value: int) -> int = inc;
                 return apply(f: f, v: 41) + apply(f: inc, v: 0);
             };
             "#
@@ -66,13 +66,13 @@ fn closures_capture_by_value_and_outlive_their_scope() {
     assert_eq!(
         status(
             r#"
-            function makeAdder(n: int) -> fn(int) -> int {
-                return fn(x: int) -> int => x + n;
+            fn makeAdder(n: int) -> fn(value: int) -> int {
+                return |value: int| value + n;
             };
             function main() -> int {
-                var add5: fn(int) -> int = makeAdder(n: 5);
-                var add10: fn(int) -> int = makeAdder(n: 10);
-                return add5(1) * 100 + add10(1);
+                var add5: fn(value: int) -> int = makeAdder(n: 5);
+                var add10: fn(value: int) -> int = makeAdder(n: 10);
+                return add5(value: 1) * 100 + add10(value: 1);
             };
             "#
         ),
@@ -87,7 +87,7 @@ fn captured_value_is_a_snapshot_not_a_reference() {
             r#"
             function main() -> int {
                 var mut base: int = 1;
-                var read: fn() -> int = fn() -> int => base;
+                var read: fn() -> int = || base;
                 base = 99;
                 return read();
             };
@@ -102,11 +102,11 @@ fn generic_callable_types_infer_through_calls() {
     assert_eq!(
         status(
             r#"
-            function twice<T>(f: fn(T) -> T, v: T) -> T { return f(f(v)); };
+            fn twice<T>(f: fn(value: T) -> T, v: T) -> T { return f(value: f(value: v)); };
             function main() -> int {
-                var s: str = twice(f: fn(x: str) -> str => x + "!", v: "a");
+                var s: str = twice(f: |value: str| value + "!", v: "a");
                 if s != "a!!" { return 1; }
-                return twice(f: fn(x: int) -> int => x * 3, v: 2);
+                return twice(f: |value: int| value * 3, v: 2);
             };
             "#
         ),
@@ -119,8 +119,8 @@ fn closure_type_errors_are_reported() {
     let message = error(
         r#"
         function main() -> int {
-            var f: fn(int) -> int = fn(x: int) -> int => x;
-            return f("nope");
+            var f: fn(value: int) -> int = |value: int| value;
+            return f(value: "nope");
         };
         "#,
     );
@@ -131,7 +131,7 @@ fn closure_type_errors_are_reported() {
     let message = error(
         r#"
         function main() -> int {
-            var f: fn(int) -> str = fn(x: int) -> int => x;
+            var f: fn(value: int) -> str = |value: int| value;
             return 0;
         };
         "#,
@@ -230,7 +230,7 @@ fn impl_instance_static_and_mut_self_methods() {
                 function label(self) -> str {{ return self.name + "!"; }};
             }};
             function main() -> int {{
-                var mut kid: User = User.child("Tobi");
+                var mut kid: User = User.child(name: "Tobi");
                 if kid.isAdult() {{ return 1; }}
                 kid.birthday();
                 kid.birthday();
@@ -338,7 +338,7 @@ fn structured_pipe_forms_and_chaining() {
             function add(value: int, by: int) -> int { return value + by; };
             function double(value: int) -> int { return value * 2; };
             function main() -> int {
-                var viaClosure: int = 3 |> fn(x: int) -> int => x + 100;
+                var viaClosure: int = 3 |> |value: int| value + 100;
                 var chained: int = 1 |> add(by: 2) |> double |> add(by: 1);
                 if viaClosure != 103 { return 1; }
                 return chained;

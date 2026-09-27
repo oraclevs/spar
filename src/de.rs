@@ -61,7 +61,7 @@ pub fn from_str<T: serde::de::DeserializeOwned>(src: &str) -> Result<T, SparDese
 pub fn from_eval<T: serde::de::DeserializeOwned>(result: &EvalResult) -> Result<T, SparDeserError> {
     T::deserialize(SparDeserializer {
         globals: &result.globals,
-        sections: &result.sections,
+        structs: &result.structs,
     })
 }
 
@@ -69,7 +69,7 @@ pub fn from_eval<T: serde::de::DeserializeOwned>(result: &EvalResult) -> Result<
 
 struct SparDeserializer<'de> {
     globals: &'de HashMap<String, ConfigValue>,
-    sections: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+    structs: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
 }
 
 impl<'de> de::Deserializer<'de> for SparDeserializer<'de> {
@@ -80,7 +80,7 @@ impl<'de> de::Deserializer<'de> for SparDeserializer<'de> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
-        visitor.visit_map(RootMapAccess::new(self.globals, self.sections))
+        visitor.visit_map(RootMapAccess::new(self.globals, self.structs))
     }
 
     fn deserialize_struct<V: Visitor<'de>>(
@@ -150,10 +150,19 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
             ConfigValue::Float(f) => visitor.visit_f64(*f),
             ConfigValue::Bool(b) => visitor.visit_bool(*b),
             ConfigValue::List(vs) => visitor.visit_seq(ListSeqAccess { iter: vs.iter() }),
-            ConfigValue::Section(map) => visitor.visit_map(SectionMapAccess {
+            ConfigValue::Object(map) => visitor.visit_map(ObjectMapAccess {
                 iter: map.iter(),
                 next_value: None,
             }),
+            ConfigValue::Map(entries) => visitor.visit_map(ConfigMapAccess {
+                iter: entries.iter(),
+                next_value: None,
+            }),
+            ConfigValue::Option(Some(value)) => ValueDeserializer { value }.deserialize_any(visitor),
+            ConfigValue::Option(None) => visitor.visit_unit(),
+            ConfigValue::Result(_) => Err(<SparDeserError as de::Error>::custom(
+                "Result values are runtime values and cannot be deserialized as configuration",
+            )),
             ConfigValue::Shell(_) | ConfigValue::ShellProgram(_) => {
                 Err(<SparDeserError as de::Error>::custom(
                     "shell plans are runtime values and cannot be deserialized as configuration",
@@ -169,7 +178,11 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
-        visitor.visit_some(self)
+        match self.value {
+            ConfigValue::Option(None) => visitor.visit_none(),
+            ConfigValue::Option(Some(value)) => visitor.visit_some(ValueDeserializer { value }),
+            _ => visitor.visit_some(self),
+        }
     }
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
@@ -247,13 +260,13 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     }
 }
 
-// ── SectionDeserializer ───────────────────────────────────────────────────────
+// ── ObjectDeserializer ───────────────────────────────────────────────────────
 
-struct SectionDeserializer<'de> {
+struct ObjectDeserializer<'de> {
     fields: &'de indexmap::IndexMap<String, ConfigValue>,
 }
 
-impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
+impl<'de> de::Deserializer<'de> for ObjectDeserializer<'de> {
     type Error = SparDeserError;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
@@ -261,7 +274,7 @@ impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SparDeserError> {
-        visitor.visit_map(SectionMapAccess {
+        visitor.visit_map(ObjectMapAccess {
             iter: self.fields.iter(),
             next_value: None,
         })
@@ -291,7 +304,7 @@ impl<'de> de::Deserializer<'de> for SectionDeserializer<'de> {
 
 enum RootEntry<'de> {
     Value(&'de ConfigValue),
-    Section(&'de indexmap::IndexMap<String, ConfigValue>),
+    Object(&'de indexmap::IndexMap<String, ConfigValue>),
 }
 
 struct RootMapAccess<'de> {
@@ -302,18 +315,18 @@ struct RootMapAccess<'de> {
 impl<'de> RootMapAccess<'de> {
     fn new(
         globals: &'de HashMap<String, ConfigValue>,
-        sections: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+        structs: &'de HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     ) -> Self {
         let mut entries: Vec<(&'de str, RootEntry<'de>)> = Vec::new();
 
         for (k, v) in globals {
             entries.push((k.as_str(), RootEntry::Value(v)));
         }
-        for (path, fields) in sections {
+        for (path, fields) in structs {
             if path.len() == 1 {
-                entries.push((path[0].as_str(), RootEntry::Section(fields)));
+                entries.push((path[0].as_str(), RootEntry::Object(fields)));
             }
-            // Multi-segment sections not exposed at root — dot-joined keys
+            // Multi-segment structs not exposed at root — dot-joined keys
             // don't map to struct field names.
         }
 
@@ -344,19 +357,54 @@ impl<'de> MapAccess<'de> for RootMapAccess<'de> {
         self.index += 1;
         match &entry.1 {
             RootEntry::Value(cv) => seed.deserialize(ValueDeserializer { value: cv }),
-            RootEntry::Section(fds) => seed.deserialize(SectionDeserializer { fields: fds }),
+            RootEntry::Object(fds) => seed.deserialize(ObjectDeserializer { fields: fds }),
         }
     }
 }
 
-// ── SectionMapAccess ──────────────────────────────────────────────────────────
+// ── ObjectMapAccess ──────────────────────────────────────────────────────────
 
-struct SectionMapAccess<'de> {
+struct ObjectMapAccess<'de> {
     iter: indexmap::map::Iter<'de, String, ConfigValue>,
     next_value: Option<&'de ConfigValue>,
 }
 
-impl<'de> MapAccess<'de> for SectionMapAccess<'de> {
+// ── ConfigMapAccess ─────────────────────────────────────────────────────────
+
+struct ConfigMapAccess<'de> {
+    iter: std::slice::Iter<'de, (ConfigValue, ConfigValue)>,
+    next_value: Option<&'de ConfigValue>,
+}
+
+impl<'de> MapAccess<'de> for ConfigMapAccess<'de> {
+    type Error = SparDeserError;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, SparDeserError> {
+        match self.iter.next() {
+            None => Ok(None),
+            Some((key, value)) => {
+                self.next_value = Some(value);
+                seed.deserialize(ValueDeserializer { value: key }).map(Some)
+            }
+        }
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, SparDeserError> {
+        let value = self
+            .next_value
+            .take()
+            .expect("next_value_seed called before next_key_seed");
+        seed.deserialize(ValueDeserializer { value })
+    }
+}
+
+impl<'de> MapAccess<'de> for ObjectMapAccess<'de> {
     type Error = SparDeserError;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(
@@ -503,7 +551,7 @@ mod tests {
     fn test_nested_section() {
         let src = r#"
             var port: int = 8080;
-            [Database]{ host: str = "localhost"; pool: int = 5; };
+            #[emit] struct Database { host: str = "localhost"; pool: int = 5; };
         "#;
         let cfg: WithSection = from_str(src).unwrap();
         assert_eq!(cfg.port, 8080);
@@ -536,7 +584,7 @@ mod tests {
     #[test]
     fn test_env_fallback() {
         std::env::remove_var("SPAR_DE_MISSING");
-        let src = r#"var mode: str = env("SPAR_DE_MISSING") ?? "production";"#;
+        let src = r#"var mode: str = env(name: "SPAR_DE_MISSING") ?? "production";"#;
         let cfg: ModeField = from_str(src).unwrap();
         assert_eq!(cfg.mode, "production");
     }
@@ -554,7 +602,7 @@ mod tests {
         globals.insert("port".into(), ConfigValue::Int(9000));
         let result = crate::evaluator::EvalResult {
             globals,
-            sections: std::collections::HashMap::new(),
+            structs: std::collections::HashMap::new(),
             warnings: vec![],
             interactive_value: None,
         };
@@ -575,7 +623,7 @@ mod tests {
                 "value".into(),
                 ConfigValue::Promise(PromiseHandle::new(1)),
             )]),
-            sections: std::collections::HashMap::new(),
+            structs: std::collections::HashMap::new(),
             warnings: vec![],
             interactive_value: None,
         };

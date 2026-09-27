@@ -148,7 +148,7 @@ pub struct Session {
     options: CompileOptions,
     committed_source: String,
     globals: HashMap<String, ConfigValue>,
-    sections: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+    structs: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     identifiers: BTreeSet<String>,
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
@@ -161,7 +161,7 @@ pub struct Session {
 struct EvaluatedCandidate {
     source: String,
     globals: HashMap<String, ConfigValue>,
-    sections: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
+    structs: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     identifiers: BTreeSet<String>,
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
@@ -175,7 +175,7 @@ impl Session {
             options,
             committed_source: String::new(),
             globals: HashMap::new(),
-            sections: HashMap::new(),
+            structs: HashMap::new(),
             identifiers: BTreeSet::new(),
             functions: BTreeSet::new(),
             function_params: BTreeMap::new(),
@@ -303,21 +303,24 @@ impl Session {
         while self.identifiers.contains(&function_name)
             || self
                 .committed_source
-                .contains(&format!("function {function_name}"))
+                .contains(&format!("fn {function_name}"))
+                || self
+                    .committed_source
+                    .contains(&format!("function {function_name}"))
         {
             suffix += 1;
             function_name = format!("sparshInteractiveShellPreview{suffix}");
         }
 
         let function_source =
-            format!("function {function_name}() -> shell {{ return shell {{\n{trimmed};\n}}; }};");
+            format!("fn {function_name}() -> shell {{ return shell {{\n{trimmed};\n}}; }};");
         let runtime_source = join_committed_source(&self.committed_source, &function_source);
         let options = CompileOptions {
             evaluate: false,
             ..self.options.clone()
         };
         let (origin, origin_line) = fragment_origin(&self.committed_source);
-        let prefix = format!("function {function_name}() -> shell {{ return shell {{\n");
+        let prefix = format!("fn {function_name}() -> shell {{ return shell {{\n");
         let relocate_body = |errors: Vec<SparError>| {
             relocate_errors(
                 errors,
@@ -451,6 +454,7 @@ impl Session {
         let mut function_name = "sparshInteractivePreview".to_string();
         let mut suffix = 0_u64;
         while self.identifiers.contains(&function_name)
+            || committed.contains(&format!("fn {function_name}"))
             || committed.contains(&format!("function {function_name}"))
         {
             suffix += 1;
@@ -462,11 +466,11 @@ impl Session {
         let async_keyword = if uses_await { "async " } else { "" };
         let function_source = if expression_type == crate::ast::SparType::Void {
             format!(
-                "{async_keyword}function {function_name}() -> void {{ {expression}; return; }};"
+                "{async_keyword}fn {function_name}() -> void {{ {expression}; return; }};"
             )
         } else {
             format!(
-                "{async_keyword}function {function_name}() -> {return_type} {{ return {expression}; }};"
+                "{async_keyword}fn {function_name}() -> {return_type} {{ return {expression}; }};"
             )
         };
         let runtime_source = if committed.trim().is_empty() {
@@ -479,9 +483,9 @@ impl Session {
         // expression; put them back at that expression's place in the fragment.
         let (committed_origin, committed_line) = fragment_origin(&committed);
         let wrapper_prefix = if expression_type == crate::ast::SparType::Void {
-            format!("{async_keyword}function {function_name}() -> void {{ ")
+            format!("{async_keyword}fn {function_name}() -> void {{ ")
         } else {
-            format!("{async_keyword}function {function_name}() -> {return_type} {{ return ")
+            format!("{async_keyword}fn {function_name}() -> {return_type} {{ return ")
         };
         let expression_offset = normalized.rfind(expression.as_str());
         let to_fragment = |errors: Vec<SparError>| {
@@ -549,7 +553,7 @@ impl Session {
 
         self.committed_source = committed;
         self.globals = result.globals;
-        self.sections = result.sections;
+        self.structs = result.structs;
         self.identifiers = identifiers;
         self.functions = functions;
         self.function_params = function_params;
@@ -588,7 +592,7 @@ impl Session {
     ) -> Result<InteractiveEvalResult, Vec<SparError>> {
         self.committed_source = evaluated.source;
         self.globals = evaluated.globals;
-        self.sections = evaluated.sections;
+        self.structs = evaluated.structs;
         self.identifiers = evaluated.identifiers;
         self.functions = evaluated.functions;
         self.function_params = evaluated.function_params;
@@ -785,7 +789,7 @@ impl Session {
         Ok(EvaluatedCandidate {
             source: candidate,
             globals: result.globals,
-            sections: result.sections,
+            structs: result.structs,
             identifiers,
             functions,
             function_params,
@@ -799,28 +803,42 @@ impl Session {
         self.globals.get(name)
     }
 
-    /// The evaluated value of a top-level `struct`/section declaration.
-    /// Nested sections are included as `ConfigValue::Section` values under
-    /// their own names (the evaluator stores them under separate path keys).
-    pub fn section(&self, name: &str) -> Option<ConfigValue> {
-        let path = vec![name.to_string()];
-        self.sections
-            .contains_key(&path)
-            .then(|| self.assemble_section(&path))
+    /// Explicitly construct a configuration declaration using its field defaults.
+    /// A missing declaration selects no configuration; invalid defaults remain errors.
+    pub fn construct_default(&self, name: &str) -> Result<Option<ConfigValue>, Vec<SparError>> {
+        if !self.identifiers.contains(name) {
+            return Ok(None);
+        }
+        let mut options = self.options.clone();
+        options.evaluate = false;
+        let compilation = Compiler::new(options).compile(&self.committed_source).into_result()?;
+        if !compilation.symbols.as_ref().is_some_and(|symbols| symbols.structs.contains_key(&vec![name.to_string()])) {
+            return Ok(None);
+        }
+        match self.eval_transient(&format!("{name}()"))? {
+            InteractiveEvalResult::Value(value) => Ok(Some(value)),
+            InteractiveEvalResult::Empty => Ok(None),
+        }
     }
 
-    fn assemble_section(&self, path: &[String]) -> ConfigValue {
-        let mut fields = self.sections.get(path).cloned().unwrap_or_default();
+    /// Compatibility adapter for callers that accept missing or invalid defaults.
+    /// Use `construct_default` when constructor diagnostics must be preserved.
+    pub fn struct_value(&self, name: &str) -> Option<ConfigValue> {
+        self.construct_default(name).ok().flatten()
+    }
+
+    fn assemble_struct(&self, path: &[String]) -> ConfigValue {
+        let mut fields = self.structs.get(path).cloned().unwrap_or_default();
         for nested in self
-            .sections
+            .structs
             .keys()
             .filter(|candidate| candidate.len() == path.len() + 1 && candidate.starts_with(path))
         {
             if let Some(name) = nested.last() {
-                fields.insert(name.clone(), self.assemble_section(nested));
+                fields.insert(name.clone(), self.assemble_struct(nested));
             }
         }
-        ConfigValue::Section(fields)
+        ConfigValue::Object(fields)
     }
 
     /// Names currently visible to an interactive client for completion.
@@ -882,6 +900,7 @@ fn interactive_value_type(value: &crate::runtime::Value) -> Option<crate::ast::S
         Value::Bool(_) => Some(SparType::Bool),
         Value::String(_) => Some(SparType::Str),
         Value::Bytes(_) => Some(SparType::Named("Bytes".into())),
+        Value::Args(_) => Some(SparType::Named("Args".into())),
         Value::List(values) => Some(SparType::List(Box::new(merged(
             values.iter().map(interactive_value_type),
         )?))),
@@ -889,7 +908,7 @@ fn interactive_value_type(value: &crate::runtime::Value) -> Option<crate::ast::S
         Value::Map(entries) => Some(SparType::Applied {
             name: "Map".into(),
             arguments: vec![
-                merged(entries.iter().map(|(key, _)| interactive_value_type(key)))?,
+                merged(entries.iter().map(|(key, _)| interactive_value_type(&key)))?,
                 merged(
                     entries
                         .iter()
@@ -1105,59 +1124,59 @@ mod tests {
             .eval(
                 r#"struct Config {
     name: str = "top";
-    prompt: section = {
+    prompt: Record = {
         depth: int = 1;
-        inner: section = { flag: bool = true; };
+        inner: Record = { flag: bool = true; };
     };
 };"#,
             )
             .unwrap();
 
-        let ConfigValue::Section(config) = session.section("Config").expect("Config") else {
-            panic!("expected a section");
+        let ConfigValue::Object(config) = session.struct_value("Config").expect("Config") else {
+            panic!("expected a struct/object value");
         };
         assert_eq!(config.get("name"), Some(&ConfigValue::Str("top".into())));
-        let Some(ConfigValue::Section(prompt)) = config.get("prompt") else {
-            panic!("nested `prompt` section missing: {config:?}");
+        let Some(ConfigValue::Object(prompt)) = config.get("prompt") else {
+            panic!("nested `prompt` object missing: {config:?}");
         };
         assert_eq!(prompt.get("depth"), Some(&ConfigValue::Int(1)));
-        let Some(ConfigValue::Section(inner)) = prompt.get("inner") else {
-            panic!("doubly nested section missing: {prompt:?}");
+        let Some(ConfigValue::Object(inner)) = prompt.get("inner") else {
+            panic!("doubly nested object missing: {prompt:?}");
         };
         assert_eq!(inner.get("flag"), Some(&ConfigValue::Bool(true)));
-        assert!(session.section("Missing").is_none());
+        assert!(session.struct_value("Missing").is_none());
     }
 
     #[test]
-    fn nested_object_literals_stay_inside_their_typed_field() {
+    fn named_nested_struct_values_stay_inside_their_typed_field() {
         let mut session = crate::Engine::default().session();
         session
             .eval(
-                r#"type Deep { z?: int; };
-type Sub { x?: int; deep?: Deep; };
-type P { a?: int; sub?: Sub; };
-struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
+                r#"struct Deep { z: int = 3; };
+struct Sub { x: int = 2; deep: Deep = Deep(); };
+struct Prompt { a: int = 1; sub: Sub = Sub(); };
+struct Config { prompt: Prompt = Prompt(); };"#,
             )
             .unwrap();
 
-        let ConfigValue::Section(config) = session.section("Config").expect("Config") else {
-            panic!("expected a section");
+        let ConfigValue::Object(config) = session.struct_value("Config").expect("Config") else {
+            panic!("expected a struct/object value");
         };
-        let Some(ConfigValue::Section(prompt)) = config.get("prompt") else {
+        let Some(ConfigValue::Object(prompt)) = config.get("prompt") else {
             panic!("prompt missing: {config:?}");
         };
         assert_eq!(prompt.get("a"), Some(&ConfigValue::Int(1)));
-        let Some(ConfigValue::Section(sub)) = prompt.get("sub") else {
+        let Some(ConfigValue::Object(sub)) = prompt.get("sub") else {
             panic!("nested object literal `sub` missing from prompt: {prompt:?}");
         };
         assert_eq!(sub.get("x"), Some(&ConfigValue::Int(2)));
-        let Some(ConfigValue::Section(deep)) = sub.get("deep") else {
+        let Some(ConfigValue::Object(deep)) = sub.get("deep") else {
             panic!("doubly nested literal missing: {sub:?}");
         };
         assert_eq!(deep.get("z"), Some(&ConfigValue::Int(3)));
         assert!(
-            session.section("sub").is_none() && session.section("deep").is_none(),
-            "nested object literals must not leak out as root sections"
+            session.struct_value("sub").is_none() && session.struct_value("deep").is_none(),
+            "nested object literals must not leak out as root structs"
         );
     }
 
@@ -1465,7 +1484,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
 
         let result = session
             .eval_interactive_shell_preview_with_context(
-                "printf 'name,age,team\\nObi,24,core\\nAda,31,ops\\n' | from csv |> where(fn(row) => row.age > 20)",
+                "printf 'name,age,team\\nObi,24,core\\nAda,31,ops\\n' | from csv |> where(predicate: |row| row.age > 20)",
                 &cwd,
                 &environment,
                 None,
@@ -1543,7 +1562,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
 
         let errors = session
             .eval_interactive_shell_preview_with_context(
-                "printf 'age\\n24\\n' | from csv |> where(fn(row) => row.age > )",
+                "printf 'age\\n24\\n' | from csv |> where(predicate: |row| row.age > )",
                 &cwd,
                 &environment,
                 None,
@@ -1568,7 +1587,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(fn(r) => r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
         )
         .expect("mixed pipeline without `to` should run");
 
@@ -1625,7 +1644,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         plain.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut plain,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(fn(r) => r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
         );
         // No terminal and no `to`: falls back to JSON Lines bytes.
         assert!(
@@ -1640,7 +1659,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(fn(r) => r.age > 20) | cat; }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20) | cat; }}"),
         );
         assert!(result.is_err(), "{result:?}");
     }
@@ -1652,7 +1671,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         session.enable_data_prelude();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(fn(r) => r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
         )
         .expect("`where` should resolve through the prelude");
         assert!(
@@ -1731,7 +1750,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
     fn mixed_pipeline_errors_point_at_the_typed_stage() {
         let mut session = session_with_history();
         let cwd = std::env::current_dir().unwrap();
-        let body = "  printf x | from csv |> where(fn(r) => r.age > 20)";
+        let body = "  printf x | from csv |> where(predicate: |r| r.age > 20)";
         let errors = session
             .eval_interactive_shell_preview_with_context(body, &cwd, &[], None, 20)
             .unwrap_err();
@@ -1889,7 +1908,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
                 .into_iter()
                 .collect(),
         );
-        let source = "_ |> take(1)";
+        let source = "_ |> take(count: 1)";
         let errors = session
             .eval_interactive_preview_with_context(source, &cwd, &[], Some(record), 20)
             .unwrap_err();
@@ -1910,7 +1929,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         let mut session = Engine::default().session();
         let error = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(fn(r) => r.age > 20); }}"),
+            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |r| r.age > 20); }}"),
         )
         .unwrap_err();
         let SparError::TypeError { hint, .. } = &error[0] else {
@@ -1929,7 +1948,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         let environment = std::env::vars_os().collect::<Vec<_>>();
         let first = session
             .eval_interactive_preview_with_context(
-                r#"import pkg { take } from "std/data"; var numbers: [int] = [1, 2, 3]; numbers |> take(3)"#,
+                r#"import pkg { take } from "std/data"; var numbers: [int] = [1, 2, 3]; numbers |> take(count: 3)"#,
                 &cwd,
                 &environment,
                 None,
@@ -1943,7 +1962,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
         };
         let second = session
             .eval_interactive_preview_with_context(
-                "_ |> take(2)",
+                "_ |> take(count: 2)",
                 &cwd,
                 &environment,
                 Some(previous),
@@ -2011,7 +2030,7 @@ struct Config { prompt: P = { a: 1; sub: { x: 2; deep: { z: 3; }; }; }; };"#,
             InputCompleteness::Incomplete
         );
         assert_eq!(
-            input_completeness("users |> take(2)"),
+            input_completeness("users |> take(count: 2)"),
             InputCompleteness::Complete
         );
     }

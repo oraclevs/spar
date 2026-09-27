@@ -72,7 +72,7 @@ mod tests {
             dir.join("spar.package.spar"),
             format!(
                 r#"
-                [Package] {{
+                struct Package {{
                     name: str = "{name}";
                     version: str = "1.0.0";
                     kind: str = "library";
@@ -112,7 +112,7 @@ mod tests {
         fs::write(
             dep.join("spar.package.spar"),
             r#"
-            [Package] {
+            struct Package {
                 name: str = "broken";
                 version: str = "1.0.0";
                 kind: str = "library";

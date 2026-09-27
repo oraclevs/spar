@@ -6,11 +6,12 @@ use crate::resolver::{FunctionEntry, GlobalEntry, SymbolTable};
 
 pub fn display_type(ty: &SparType) -> String {
     match ty {
+        SparType::Any => "Any".into(),
         SparType::Str => "str".into(),
         SparType::Int => "int".into(),
         SparType::Float => "float".into(),
         SparType::Bool => "bool".into(),
-        SparType::Section => "section".into(),
+        SparType::InlineRecord => "Record".into(),
         SparType::Void => "void".into(),
         SparType::Shell => "shell".into(),
         SparType::Error => "error".into(),
@@ -33,7 +34,7 @@ pub fn display_type(ty: &SparType) -> String {
             "fn({}) -> {}",
             params
                 .iter()
-                .map(display_type)
+                .map(|param| format!("{}: {}", param.name, display_type(&param.ty)))
                 .collect::<Vec<_>>()
                 .join(", "),
             display_type(return_type)
@@ -70,6 +71,42 @@ fn await_hint(expected: &SparType, actual: &SparType) -> Option<String> {
         .then(|| "use `await` to obtain the promise result".to_string())
 }
 
+fn is_legacy_callable_param(name: &str) -> bool {
+    name.strip_prefix("arg")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+pub(crate) fn is_assignable(expected: &SparType, actual: &SparType) -> bool {
+    if expected == &SparType::Any {
+        return actual != &SparType::Void;
+    }
+    if expected == actual {
+        return true;
+    }
+    match (expected, actual) {
+        (
+            SparType::Function {
+                params: expected_params,
+                return_type: expected_return,
+            },
+            SparType::Function {
+                params: actual_params,
+                return_type: actual_return,
+            },
+        ) if expected_params.len() == actual_params.len() => {
+            expected_params
+                .iter()
+                .zip(actual_params)
+                .all(|(expected, actual)| {
+                    (expected.name == actual.name || is_legacy_callable_param(&expected.name))
+                        && expected.ty == actual.ty
+                })
+                && expected_return == actual_return
+        }
+        _ => false,
+    }
+}
+
 pub(crate) type TypeSubstitution = HashMap<String, SparType>;
 
 const SEQUENCE_SHAPE_KEY: &str = "__spar_sequence_shape";
@@ -87,8 +124,10 @@ fn is_row_type(ty: &SparType) -> bool {
 /// A value fits a pipe parameter when the types are equal, or when a dynamic
 /// `Record` is piped where a list of records is expected (see
 /// `sequence_parts`); the runtime checks the value really is a list.
-fn pipe_type_accepts(expected: &SparType, actual: &SparType) -> bool {
-    if actual == expected {
+pub(crate) fn pipe_type_accepts(expected: &SparType, actual: &SparType) -> bool {
+    if is_assignable(expected, actual)
+        || unify_generic(expected, actual, &mut TypeSubstitution::new(), &Span::dummy()).is_ok()
+    {
         return true;
     }
     let record = SparType::Named("Record".into());
@@ -186,7 +225,10 @@ pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) ->
         } => SparType::Function {
             params: params
                 .iter()
-                .map(|param| substitute_type(param, substitution))
+                .map(|param| CallableParamType {
+                    name: param.name.clone(),
+                    ty: substitute_type(&param.ty, substitution),
+                })
                 .collect(),
             return_type: Box::new(substitute_type(return_type, substitution)),
         },
@@ -202,9 +244,47 @@ fn mentions_type_parameter(ty: &SparType) -> bool {
         SparType::Function {
             params,
             return_type,
-        } => params.iter().any(mentions_type_parameter) || mentions_type_parameter(return_type),
+        } => {
+            params
+                .iter()
+                .any(|param| mentions_type_parameter(&param.ty))
+                || mentions_type_parameter(return_type)
+        }
         _ => false,
     }
+}
+
+fn collect_type_parameter_names(ty: &SparType, out: &mut Vec<String>) {
+    match ty {
+        SparType::TypeParameter(name) => out.push(name.clone()),
+        SparType::List(inner) => collect_type_parameter_names(inner, out),
+        SparType::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_type_parameter_names(argument, out);
+            }
+        }
+        SparType::Function {
+            params,
+            return_type,
+        } => {
+            for param in params {
+                collect_type_parameter_names(&param.ty, out);
+            }
+            collect_type_parameter_names(return_type, out);
+        }
+        _ => {}
+    }
+}
+
+fn external_type_parameter_names(params: &[(String, SparType)], ret: &SparType) -> Vec<String> {
+    let mut names = Vec::new();
+    for (_, ty) in params {
+        collect_type_parameter_names(ty, &mut names);
+    }
+    collect_type_parameter_names(ret, &mut names);
+    let mut seen = HashSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+    names
 }
 
 pub(crate) fn unify_generic(
@@ -214,6 +294,7 @@ pub(crate) fn unify_generic(
     span: &Span,
 ) -> Result<(), SparError> {
     match pattern {
+        SparType::Any if actual != &SparType::Void => Ok(()),
         SparType::TypeParameter(name) => match substitution.get(name) {
             Some(existing) if existing != actual => Err(SparError::TypeError {
                 message: format!(
@@ -306,7 +387,17 @@ pub(crate) fn unify_generic(
                 return_type: actual_return,
             } if pattern_params.len() == actual_params.len() => {
                 for (pattern, actual) in pattern_params.iter().zip(actual_params) {
-                    unify_generic(pattern, actual, substitution, span)?;
+                    if pattern.name != actual.name && !is_legacy_callable_param(&pattern.name) {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "callable parameter name mismatch: expected '{}', found '{}'",
+                                pattern.name, actual.name
+                            ),
+                            hint: None,
+                            span: span.clone(),
+                        });
+                    }
+                    unify_generic(&pattern.ty, &actual.ty, substitution, span)?;
                 }
                 unify_generic(pattern_return, actual_return, substitution, span)
             }
@@ -354,7 +445,7 @@ fn substitute_field_shape(
                 .map(|argument| substitute_type(argument, substitution))
                 .collect(),
         },
-        TypeFieldShape::Section(fields) => TypeFieldShape::Section(
+        TypeFieldShape::InlineRecord(fields) => TypeFieldShape::InlineRecord(
             fields
                 .iter()
                 .map(|field| substitute_type_field(field, substitution))
@@ -363,15 +454,30 @@ fn substitute_field_shape(
     }
 }
 
+fn type_field_shape_is_option(shape: &TypeFieldShape) -> bool {
+    matches!(
+        shape,
+        TypeFieldShape::Applied { name, arguments }
+            if name == "Option" && arguments.len() == 1
+    ) || matches!(
+        shape,
+        TypeFieldShape::Primitive(SparType::Applied { name, arguments })
+            if name == "Option" && arguments.len() == 1
+    )
+}
+
+fn type_field_is_omittable(field: &TypeField) -> bool {
+    field.default.is_some() || type_field_shape_is_option(&field.shape)
+}
+
 pub(crate) fn substitute_type_field(
     field: &TypeField,
     substitution: &TypeSubstitution,
 ) -> TypeField {
     TypeField {
         name: field.name.clone(),
-        optional: field.optional,
         shape: substitute_field_shape(&field.shape, substitution),
-        default: field.default.clone(),
+        default: field.default.as_ref().map(|value| crate::loader::scope::substitute_default(value, substitution)),
         span: field.span.clone(),
     }
 }
@@ -393,7 +499,7 @@ pub(crate) fn pipe_stage_parameters_with_locals(
         symbols,
         errors: Vec::new(),
         schema_bindings: HashMap::new(),
-        current_section: None,
+        current_struct: None,
         current_impl,
         mutable_bindings: HashSet::new(),
         current_method_receiver_mutable: false,
@@ -418,7 +524,7 @@ pub(crate) fn infer_expression_with_locals(
         symbols,
         errors: Vec::new(),
         schema_bindings: HashMap::new(),
-        current_section: None,
+        current_struct: None,
         current_impl,
         mutable_bindings: HashSet::new(),
         current_method_receiver_mutable: false,
@@ -431,20 +537,20 @@ pub(crate) fn infer_expression_with_locals(
 /// fields, so shape comparison only ever has to handle two cases.
 enum ShapeKind {
     Primitive(SparType),
-    Section(Vec<TypeField>),
+    InlineRecord(Vec<TypeField>),
 }
 
 /// `items` is exactly one `...Source;` spread and nothing else — the
 /// spread-only body pattern that gets a structural shape check instead of
 /// the "can't statically verify" skip a mixed spread+fields body gets.
-fn spread_only_source(items: &[SectionItem]) -> Option<&SpreadStmt> {
+fn spread_only_source(items: &[ObjectItem]) -> Option<&SpreadStmt> {
     match items {
-        [SectionItem::Spread(s)] => Some(s),
+        [ObjectItem::Spread(s)] => Some(s),
         _ => None,
     }
 }
 
-/// The spread's source section name, if it's a same-file, single-segment
+/// The spread's source struct name, if it's a same-file, single-segment
 /// reference (`...Name;`) — the only shape a shape can be statically
 /// resolved for. Anything else (a function call, a multi-segment/
 /// cross-file reference) has no statically-known shape to check.
@@ -458,12 +564,12 @@ fn spread_source_name(spread: &SpreadStmt) -> Option<&str> {
 pub struct TypeChecker<'a> {
     symbols: &'a SymbolTable,
     errors: Vec<SparError>,
-    /// Section name → schema-derived field list, for sections validated
-    /// against an `import schema "...";` but with no `-> Type` binding of
+    /// Struct name → schema-derived field list, for structs validated
+    /// against an `import schema "...";` but with no type binding of
     /// their own. Empty unless populated via `check_with_schema`.
     schema_bindings: HashMap<String, Vec<SchemaField>>,
-    /// The section currently being checked, for `self.field` type lookups.
-    current_section: Option<Vec<String>>,
+    /// The struct currently being checked, for `self.field` type lookups.
+    current_struct: Option<Vec<String>>,
     current_impl: Option<String>,
     mutable_bindings: HashSet<String>,
     current_method_receiver_mutable: bool,
@@ -474,14 +580,67 @@ pub struct TypeChecker<'a> {
 }
 
 impl<'a> TypeChecker<'a> {
-    fn type_fields_for(&self, ty: &SparType) -> Option<(String, Vec<TypeField>)> {
+    /// Return the compiler-resolved fields for a named/applied structured type.
+    /// Tooling should use this instead of reimplementing generic substitution.
+    pub fn fields_for_type(
+        ty: &SparType,
+        symbols: &SymbolTable,
+    ) -> Option<(String, Vec<TypeField>)> {
         match ty {
             SparType::Named(name) => {
-                let entry = self.symbols.types.get(name)?;
-                Some((name.clone(), entry.fields.clone()))
+                if let Some(entry) = symbols.types.get(name) {
+                    return Some((name.clone(), entry.fields.clone()));
+                }
+                let struct_entry = symbols.structs.get(&vec![name.clone()])?;
+                let mut fields = struct_entry
+                    .type_binding
+                    .as_ref()
+                    .and_then(|binding| Self::fields_for_type(binding, symbols))
+                    .map(|(_, fields)| fields)
+                    .unwrap_or_default();
+                for (field_name, entry) in &struct_entry.fields {
+                    if let Some(existing) =
+                        fields.iter_mut().find(|field| field.name == *field_name)
+                    {
+                        if let Some(ty) = &entry.ty {
+                            existing.shape = TypeFieldShape::Primitive(ty.clone());
+                        }
+                        existing.span = entry.span.clone();
+                    } else {
+                        fields.push(TypeField {
+                            name: field_name.clone(),
+                            shape: TypeFieldShape::Primitive(
+                                entry.ty.clone().unwrap_or(SparType::Any),
+                            ),
+                            default: None,
+                            span: entry.span.clone(),
+                        });
+                    }
+                }
+                fields.sort_by_key(|field| field.span.start);
+                Some((name.clone(), fields))
+            }
+            SparType::Applied { name, arguments } if name == "MapEntry" && arguments.len() == 2 => {
+                Some((
+                    display_type(ty),
+                    vec![
+                        TypeField {
+                            name: "key".into(),
+                            shape: TypeFieldShape::Primitive(arguments[0].clone()),
+                            default: None,
+                            span: Span::dummy(),
+                        },
+                        TypeField {
+                            name: "value".into(),
+                            shape: TypeFieldShape::Primitive(arguments[1].clone()),
+                            default: None,
+                            span: Span::dummy(),
+                        },
+                    ],
+                ))
             }
             SparType::Applied { name, arguments } => {
-                let entry = self.symbols.types.get(name)?;
+                let entry = symbols.types.get(name)?;
                 if entry.type_parameters.len() != arguments.len() {
                     return None;
                 }
@@ -504,6 +663,31 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Resolve one field using the same field/generic rules as the checker.
+    pub fn field_type(ty: &SparType, field_name: &str, symbols: &SymbolTable) -> Option<SparType> {
+        if matches!(ty, SparType::InlineRecord)
+            || matches!(ty, SparType::Named(name) if name == "Record")
+        {
+            return Some(SparType::InlineRecord);
+        }
+        let (_, fields) = Self::fields_for_type(ty, symbols)?;
+        let field = fields.iter().find(|field| field.name == field_name)?;
+        Some(match &field.shape {
+            TypeFieldShape::Primitive(ty) => ty.clone(),
+            TypeFieldShape::Named(name) => SparType::Named(name.clone()),
+            TypeFieldShape::TypeParameter(name) => SparType::TypeParameter(name.clone()),
+            TypeFieldShape::Applied { name, arguments } => SparType::Applied {
+                name: name.clone(),
+                arguments: arguments.clone(),
+            },
+            TypeFieldShape::InlineRecord(_) => SparType::InlineRecord,
+        })
+    }
+
+    fn type_fields_for(&self, ty: &SparType) -> Option<(String, Vec<TypeField>)> {
+        Self::fields_for_type(ty, self.symbols)
+    }
+
     /// Infer the fully resolved type of an expression using the same rules as
     /// normal type checking. Language tooling should use this instead of
     /// duplicating Spar's inference logic.
@@ -512,7 +696,7 @@ impl<'a> TypeChecker<'a> {
             symbols,
             errors: Vec::new(),
             schema_bindings: HashMap::new(),
-            current_section: None,
+            current_struct: None,
             current_impl: None,
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
@@ -526,7 +710,7 @@ impl<'a> TypeChecker<'a> {
             symbols,
             errors: Vec::new(),
             schema_bindings: HashMap::new(),
-            current_section: None,
+            current_struct: None,
             current_impl: None,
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
@@ -548,9 +732,9 @@ impl<'a> TypeChecker<'a> {
         Self::check(program, symbols)
     }
 
-    /// Like `check`, but also given every section's schema-derived field
+    /// Like `check`, but also given every struct's schema-derived field
     /// list (from `loader::validate_schema_imports`'s `Ok` value) — a
-    /// section with no `-> Type` binding but a name present in `bindings`
+    /// struct with no type binding but a name present in `bindings`
     /// is checked against its schema shape instead of requiring every
     /// field to declare its own type explicitly.
     pub fn check_with_schema(
@@ -562,7 +746,7 @@ impl<'a> TypeChecker<'a> {
             symbols,
             errors: Vec::new(),
             schema_bindings,
-            current_section: None,
+            current_struct: None,
             current_impl: None,
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
@@ -591,7 +775,7 @@ impl<'a> TypeChecker<'a> {
                 TopLevelItem::Import(_) => {}
                 TopLevelItem::Var(decl) => self.check_var(decl),
                 TopLevelItem::Dynamic(decl) => self.check_dynamic(decl),
-                TopLevelItem::Section(decl) => self.check_section(decl),
+                TopLevelItem::Struct(decl) => self.check_struct(decl),
                 TopLevelItem::Impl(decl) => {
                     let owner = match &decl.target {
                         SparType::Named(name) => name.clone(),
@@ -611,7 +795,7 @@ impl<'a> TypeChecker<'a> {
                     self.current_impl = previous;
                 }
                 TopLevelItem::Function(f) => self.check_function_decl(f),
-                TopLevelItem::SchemaSection(_) => {}
+                TopLevelItem::Schema(_) => {}
                 TopLevelItem::Type(decl) => self.check_type_decl(decl),
                 TopLevelItem::Enum(_) => {} // nothing to typecheck — resolver already validated the declaration
                 TopLevelItem::FunctionGroup(g) => {
@@ -634,12 +818,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_var(&mut self, decl: &VarDecl) {
-        // Rule A: 'section' is not a valid type for global variables
-        if decl.ty == SparType::Section {
+        // Anonymous inline-record shapes are internal-only; source code uses Record/Map or named structs.
+        if decl.ty == SparType::InlineRecord {
             self.push_type_error(
                 format!(
-                    "'section' is not a valid type for variable '{}' — \
-                     declare a named section with '[SectionName]{{ ... }};' instead",
+                    "anonymous inline record is not a valid declared type for variable '{}' — use `Record`, `Map<K, V>`, or a named struct instead",
                     decl.name
                 ),
                 None,
@@ -647,10 +830,10 @@ impl<'a> TypeChecker<'a> {
             );
             return;
         }
-        if !decl.optional && decl.value.is_none() {
+        if decl.value.is_none() {
             self.push_type_error(
                 format!(
-                    "required variable `{}` has no value — add `= <value>` or mark optional with `?`",
+                    "required variable `{}` has no value — add `= <value>` or initialize it with `none()` when its type is `Option<T>`",
                     decl.name
                 ),
                 None,
@@ -664,10 +847,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_dynamic(&mut self, decl: &DynamicDecl) {
-        if !decl.optional && decl.value.is_none() {
+        if decl.value.is_none() {
             self.push_type_error(
                 format!(
-                    "required dynamic variable `{}` has no value — add `= [...]` or mark optional with `?`",
+                    "required dynamic variable `{}` has no value — add `= [...]` or initialize it explicitly",
                     decl.name
                 ),
                 None,
@@ -689,7 +872,7 @@ impl<'a> TypeChecker<'a> {
                     name: name.clone(),
                     arguments: arguments.clone(),
                 }),
-                TypeFieldShape::Section(_) => None,
+                TypeFieldShape::InlineRecord(_) => None,
             };
             if let Some(expected) = expected {
                 self.check_expr_type(default, &expected, &field.name, &field.span);
@@ -697,9 +880,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn check_section(&mut self, decl: &SectionDecl) {
-        let prev_section = self.current_section.replace(decl.path.clone());
-        let path_str = decl.path.join(".");
+    fn check_struct(&mut self, decl: &StructDecl) {
+        for field in decl.type_decl().fields {
+            if matches!(&field.default, Some(Expr::Call { name, args, .. }) if name == &decl.name && args.is_empty()) {
+                self.push_type_error("recursive struct default; use an explicit optional boundary such as Option<T> = none()", None, field.span);
+            }
+        }
+        if decl.is_emit() && (!decl.type_parameters.is_empty() || decl.type_decl().fields.iter().any(|field| field.default.is_none())) {
+            self.push_type_error("#[emit] struct requires a concrete declaration with defaults for every field", None, decl.span.clone());
+        }
+        let struct_path = vec![decl.name.clone()];
+        let prev_section = self.current_struct.replace(struct_path);
+        let path_str = decl.name.clone();
         match &decl.type_binding {
             Some(binding) => self.check_type_binding(decl, binding, &path_str),
             None => {
@@ -707,7 +899,7 @@ impl<'a> TypeChecker<'a> {
                     .items
                     .iter()
                     .filter_map(|i| {
-                        if let SectionItem::Field(f) = i {
+                        if let ObjectItem::Field(f) = i {
                             Some(f)
                         } else {
                             None
@@ -718,14 +910,14 @@ impl<'a> TypeChecker<'a> {
                     Some(schema_fields) => {
                         self.check_schema_bound_fields(&fields, &schema_fields, &path_str)
                     }
-                    None => self.check_untyped_section_fields(&fields, &path_str),
+                    None => self.check_untyped_struct_fields(&fields, &path_str),
                 }
             }
         }
-        self.current_section = prev_section;
+        self.current_struct = prev_section;
     }
 
-    /// A section with no `-> Type` binding but a matching `import schema`
+    /// A struct with no type binding but a matching `import schema`
     /// entry — each field's expected shape comes from the schema instead of
     /// requiring `field: Type = value;` to spell the type out again. An
     /// explicit local type, if present, still wins (existing behavior,
@@ -748,18 +940,18 @@ impl<'a> TypeChecker<'a> {
                 Some(sf) => self.check_field_against_schema(field, sf, path_str),
                 None => match &field.value {
                     Some(FieldValue::Expr(e)) => self.check_expr_internal(e),
-                    Some(FieldValue::Nested(items)) => {
+                    Some(FieldValue::Object(items)) => {
                         let subs: Vec<&FieldDecl> = items
                             .iter()
                             .filter_map(|i| {
-                                if let SectionItem::Field(f) = i {
+                                if let ObjectItem::Field(f) = i {
                                     Some(f)
                                 } else {
                                     None
                                 }
                             })
                             .collect();
-                        self.check_untyped_section_fields(
+                        self.check_untyped_struct_fields(
                             &subs,
                             &format!("{path_str}.{}", field.name),
                         );
@@ -771,92 +963,43 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_field_against_schema(&mut self, field: &FieldDecl, sf: &SchemaField, path_str: &str) {
-        match &sf.shape {
-            SchemaFieldShape::Primitive(expected_ty) => match &field.value {
-                Some(FieldValue::Expr(val)) => {
-                    self.check_expr_type(val, expected_ty, &field.name, &field.span)
-                }
-                Some(FieldValue::Nested(_)) => {
-                    self.push_type_error(
-                        format!(
-                            "field `{}` in section `[{path_str}]` must be `{}` (required by the bound schema) \
-                             but uses a section body `{{ ... }}`",
-                            field.name, display_type(expected_ty)
-                        ),
-                        None,
-                        field.span.clone(),
-                    );
-                }
-                None => {
-                    if !field.optional {
-                        self.push_type_error(
-                            format!(
-                                "required field `{}` in section `[{path_str}]` has no value",
-                                field.name
-                            ),
-                            None,
-                            field.span.clone(),
-                        );
-                    }
-                }
-            },
-            SchemaFieldShape::Section(nested_schema_fields) => match &field.value {
-                Some(FieldValue::Nested(items)) => {
-                    let subs: Vec<&FieldDecl> = items
-                        .iter()
-                        .filter_map(|i| {
-                            if let SectionItem::Field(f) = i {
-                                Some(f)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    let nested_path = format!("{path_str}.{}", field.name);
-                    self.check_schema_bound_fields(&subs, nested_schema_fields, &nested_path);
-                }
-                Some(FieldValue::Expr(e)) => {
-                    let actual = self.infer_type(e);
-                    if actual != Some(SparType::Section) {
-                        self.push_type_error(
-                            format!(
-                                "field '{}' in '[{path_str}]' must be a nested section (required by the bound \
-                                 schema) but value is {}",
-                                field.name,
-                                    actual.as_ref().map(display_type).unwrap_or_else(|| "unknown".into()),
-                            ),
-                            None,
-                            field.span.clone(),
-                        );
-                    }
-                    self.check_expr_internal(e);
-                }
-                None => {
-                    if !field.optional {
-                        self.push_type_error(
-                            format!(
-                                "required field `{}` in section `[{path_str}]` has no value",
-                                field.name
-                            ),
-                            None,
-                            field.span.clone(),
-                        );
-                    }
-                }
-            },
+        let SchemaFieldShape::Type(expected_ty) = &sf.shape;
+        match &field.value {
+            Some(FieldValue::Expr(value)) => {
+                self.check_expr_type(value, expected_ty, &field.name, &field.span)
+            }
+            Some(FieldValue::Object(_)) => {
+                self.push_type_error(
+                    format!(
+                        "field `{}` in struct `{path_str}` must be `{}` (required by the bound schema) but uses an anonymous object body `{{ ... }}`",
+                        field.name, display_type(expected_ty)
+                    ),
+                    Some("construct a named struct value, or declare the schema field as `Record`/`Map` when dynamic data is intended".into()),
+                    field.span.clone(),
+                );
+            }
+            None => {
+                self.push_type_error(
+                    format!(
+                        "required field `{}` in struct `{path_str}` has no value",
+                        field.name
+                    ),
+                    None,
+                    field.span.clone(),
+                );
+            }
         }
     }
 
-    /// Every field in a section with no `-> TypeName` binding must have an
+    /// Every field in an unbound struct must have an
     /// explicit type — there is nothing to infer it from.
-    fn check_untyped_section_fields(&mut self, fields: &[&FieldDecl], path_str: &str) {
+    fn check_untyped_struct_fields(&mut self, fields: &[&FieldDecl], path_str: &str) {
         for field in fields {
             match &field.ty {
                 Some(ty) => self.check_field(field, ty, path_str),
                 None => self.push_type_error(
                     format!(
-                        "field `{}` in section `[{path_str}]` has no type — sections without \
-                         a `-> Type` binding must declare each field's type explicitly",
+                        "field `{}` in struct `{path_str}` has no type — unbound structs must declare each field's type explicitly",
                         field.name
                     ),
                     None,
@@ -869,13 +1012,12 @@ impl<'a> TypeChecker<'a> {
     fn check_field(&mut self, field: &FieldDecl, ty: &SparType, path_str: &str) {
         // Rule B: validate body vs type compatibility
         match (ty, &field.value) {
-            (SparType::Section, Some(FieldValue::Expr(e))) => {
+            (SparType::InlineRecord, Some(FieldValue::Expr(e))) => {
                 let actual = self.infer_type(e);
-                if actual != Some(SparType::Section) {
+                if actual != Some(SparType::InlineRecord) {
                     self.push_type_error(
                         format!(
-                            "field '{}' in '[{path_str}]' has type 'section' but value is {} \
-                             — use '= {{ ... }}' for a nested section body or a function returning 'section'",
+                            "field '{}' in struct `{path_str}` has an internal inline-record type but value is {}",
                             field.name,
                                 actual.as_ref().map(display_type).unwrap_or_else(|| "unknown".into()),
                         ),
@@ -886,79 +1028,69 @@ impl<'a> TypeChecker<'a> {
                 self.check_expr_internal(e);
                 return;
             }
-            (other_ty, Some(FieldValue::Nested(_))) if *other_ty != SparType::Section => {
+            (other_ty, Some(FieldValue::Object(_))) if *other_ty != SparType::InlineRecord => {
                 self.push_type_error(
                     format!(
-                        "field '{}' in '[{path_str}]' has type '{}' but uses a section \
-                         body '{{ ... }}' — only 'section'-typed fields can have a nested body",
+                        "field '{}' in struct `{path_str}` has type '{}' but uses an anonymous object body '{{ ... }}' — use a named struct constructor for typed structured values, or declare the field as `Record`/`Map`",
                         field.name,
                         display_type(other_ty)
                     ),
-                    Some("change the field type to 'section' or use an expression value".into()),
+                    Some("use a named struct constructor for typed structured values, or `Record`/`Map` for dynamic data".into()),
                     field.span.clone(),
                 );
                 return;
             }
-            (SparType::Section, Some(FieldValue::Nested(sub_items))) => {
-                // Recursively type-check the nested section. An unbound
-                // section has no `-> Type` to check a spread's contents
+            (SparType::InlineRecord, Some(FieldValue::Object(sub_items))) => {
+                // Recursively type-check the nested object shape. An unbound
+                // struct has no declared shape to check a spread's contents
                 // against — same "nothing to compare against" precedent
-                // as an unbound top-level section (check_section, above).
+                // as an unbound top-level struct (check_struct, above).
                 let nested_path = format!("{path_str}.{}", field.name);
                 let subs: Vec<&FieldDecl> = sub_items
                     .iter()
                     .filter_map(|i| {
-                        if let SectionItem::Field(f) = i {
+                        if let ObjectItem::Field(f) = i {
                             Some(f)
                         } else {
                             None
                         }
                     })
                     .collect();
-                self.check_untyped_section_fields(&subs, &nested_path);
+                self.check_untyped_struct_fields(&subs, &nested_path);
                 return;
             }
-            (SparType::Section, None) => {
-                if !field.optional {
-                    self.push_type_error(
-                        format!(
-                            "required field '{}' in section '[{path_str}]' has no value",
-                            field.name
-                        ),
-                        None,
-                        field.span.clone(),
-                    );
-                }
+            (SparType::InlineRecord, None) => {
+                self.push_type_error(
+                    format!(
+                        "required field '{}' in struct `{path_str}` has no value",
+                        field.name
+                    ),
+                    None,
+                    field.span.clone(),
+                );
                 return;
             }
             _ => {}
         }
 
-        // Original logic for non-section fields:
-        if !field.optional && field.value.is_none() {
-            self.push_type_error(
-                format!(
-                    "required field `{}` in section `[{path_str}]` has no value",
-                    field.name
-                ),
-                None,
-                field.span.clone(),
-            );
-            return;
+        // Ordinary field validation. `Option<T>` is the sole absence model,
+        // so omitting an Option field is equivalent to initializing it to `none()`.
+        if field.value.is_none() {
+            return; // Required constructor field, not an uninitialized instance.
         }
         if let Some(FieldValue::Expr(val)) = &field.value {
             self.check_expr_type(val, ty, &field.name, &field.span);
         }
     }
 
-    fn check_type_binding(&mut self, decl: &SectionDecl, binding: &TypeBinding, path_str: &str) {
+    fn check_type_binding(&mut self, decl: &StructDecl, binding: &TypeBinding, path_str: &str) {
         // If the type name itself doesn't exist, the resolver already
         // reported that — avoid a duplicate error here.
         let Some((type_name, fields)) = self.type_fields_for(&binding.ty) else {
             return;
         };
 
-        // A section that's ENTIRELY `...Source;` (no other fields) can be
+        // A struct that's ENTIRELY `...Source;` (no other fields) can be
         // checked structurally against the whole bound type — the spread
         // must supply exactly what the type requires. Reuses the same
         // "smart" shape comparison a spread-only nested field gets below.
@@ -974,7 +1106,7 @@ impl<'a> TypeChecker<'a> {
         let has_spreads = decl
             .items
             .iter()
-            .any(|i| matches!(i, SectionItem::Spread(_)));
+            .any(|i| matches!(i, ObjectItem::Spread(_)));
         if has_spreads {
             self.check_mixed_spread_and_fields(&decl.items, &fields, &type_name, path_str);
             return;
@@ -984,7 +1116,7 @@ impl<'a> TypeChecker<'a> {
             .items
             .iter()
             .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
+                if let ObjectItem::Field(f) = i {
                     Some(f)
                 } else {
                     None
@@ -1029,17 +1161,17 @@ impl<'a> TypeChecker<'a> {
             let spread_covers = covered_by_spread.is_some_and(|names| names.contains(&tf.name));
             match cf {
                 None if spread_covers => {} // a mixed-in spread supplies this field
-                None if !tf.optional && tf.default.is_none() => {
+                None if !type_field_is_omittable(tf) => {
                     self.push_type_error(
                         format!(
-                            "section `[{}]` is missing required field `{}` (required by type `{}`)",
+                            "struct `{}` is missing required field `{}` (required by type `{}`)",
                             path_str, tf.name, type_name
                         ),
                         None,
                         tf.span.clone(),
                     );
                 }
-                None => {} // optional, fine to omit
+                None => {} // defaulted or Option<T>, fine to omit
                 Some(cf) => match &tf.shape {
                     TypeFieldShape::Primitive(expected_ty) => match (&cf.ty, &cf.value) {
                         (Some(actual), _) if actual != expected_ty => {
@@ -1099,7 +1231,7 @@ impl<'a> TypeChecker<'a> {
                                 );
                         }
                     },
-                    TypeFieldShape::Section(nested_type_fields) => {
+                    TypeFieldShape::InlineRecord(nested_type_fields) => {
                         self.validate_nested_type_field(
                             cf,
                             nested_type_fields,
@@ -1109,17 +1241,8 @@ impl<'a> TypeChecker<'a> {
                         );
                     }
                     TypeFieldShape::Named(other_type_name) => {
-                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned()
-                        else {
-                            continue; // resolver already reported the undefined type
-                        };
-                        self.validate_nested_type_field(
-                            cf,
-                            &other_entry.fields,
-                            other_type_name,
-                            path_str,
-                            &tf.name,
-                        );
+                        let expected = SparType::Named(other_type_name.clone());
+                        self.validate_field_value_against_type(cf, &expected, path_str, &tf.name);
                     }
                     TypeFieldShape::TypeParameter(expected) => {
                         let expected_ty = SparType::TypeParameter(expected.clone());
@@ -1141,14 +1264,11 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     TypeFieldShape::Applied { name, arguments } => {
-                        let applied = SparType::Applied {
+                        let expected = SparType::Applied {
                             name: name.clone(),
                             arguments: arguments.clone(),
                         };
-                        let Some((label, fields)) = self.type_fields_for(&applied) else {
-                            continue;
-                        };
-                        self.validate_nested_type_field(cf, &fields, &label, path_str, &tf.name);
+                        self.validate_field_value_against_type(cf, &expected, path_str, &tf.name);
                     }
                 },
             }
@@ -1168,6 +1288,120 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn validate_field_value_against_type(
+        &mut self,
+        field: &FieldDecl,
+        expected: &SparType,
+        path_str: &str,
+        field_name: &str,
+    ) {
+        let label = format!("{}::{}", path_str, field_name);
+        if let Some(explicit) = &field.ty {
+            if !is_assignable(expected, explicit) {
+                self.push_type_error(
+                    format!(
+                        "field `{label}` declares `{}` but its bound type requires `{}`",
+                        display_type(explicit),
+                        display_type(expected),
+                    ),
+                    None,
+                    field.span.clone(),
+                );
+                return;
+            }
+        }
+
+        match &field.value {
+            Some(FieldValue::Expr(expression)) => {
+                self.check_expr_type(expression, expected, &label, &field.span);
+            }
+            Some(FieldValue::Object(items)) => {
+                let expression = Expr::Object(items.clone(), field.span.clone());
+                self.check_expr_type(&expression, expected, &label, &field.span);
+            }
+            None => self.push_type_error(
+                format!("required field `{label}` has no value"),
+                None,
+                field.span.clone(),
+            ),
+        }
+    }
+
+    fn validate_field_value_against_type_with_locals(
+        &mut self,
+        field: &FieldDecl,
+        expected: &SparType,
+        path_str: &str,
+        field_name: &str,
+        locals: &HashMap<String, SparType>,
+    ) {
+        let label = format!("{}::{}", path_str, field_name);
+        if let Some(explicit) = &field.ty {
+            if !is_assignable(expected, explicit) {
+                self.push_type_error(
+                    format!(
+                        "field `{label}` declares `{}` but its bound type requires `{}`",
+                        display_type(explicit),
+                        display_type(expected),
+                    ),
+                    None,
+                    field.span.clone(),
+                );
+                return;
+            }
+        }
+
+        let expression = match &field.value {
+            Some(FieldValue::Expr(expression)) => expression.clone(),
+            Some(FieldValue::Object(items)) => Expr::Object(items.clone(), field.span.clone()),
+            None => {
+                self.push_type_error(
+                    format!("required field `{label}` has no value"),
+                    None,
+                    field.span.clone(),
+                );
+                return;
+            }
+        };
+
+        self.expect_call_type(&expression, expected);
+        if let Err(error) = self.check_expr_with_locals(&expression, locals) {
+            self.errors.push(error);
+        }
+        match self.validate_literal_expected(
+            &expression,
+            expected,
+            Some(locals),
+            &format!("field `{label}`"),
+            &field.span,
+        ) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.errors.push(error);
+                return;
+            }
+        }
+        let actual = self.infer_type_with_locals(&expression, locals);
+        if !actual
+            .as_ref()
+            .is_some_and(|actual| is_assignable(expected, actual))
+        {
+            self.push_type_error(
+                format!(
+                    "field `{label}` expects `{}` but value has type `{}`",
+                    display_type(expected),
+                    actual
+                        .as_ref()
+                        .map(display_type)
+                        .unwrap_or_else(|| "unknown".into()),
+                ),
+                None,
+                field.span.clone(),
+            );
+        }
+    }
+
     fn validate_nested_type_field(
         &mut self,
         cf: &FieldDecl,
@@ -1176,14 +1410,14 @@ impl<'a> TypeChecker<'a> {
         path_str: &str,
         field_name: &str,
     ) {
-        // A field is a nested section if its value is FieldValue::Nested,
-        // regardless of whether its type is explicit (Some(Section)) or
+        // A field carries an inline object payload if its value is FieldValue::Object,
+        // regardless of whether its type is explicit or
         // inferred (None, under this binding).
-        let explicit_non_section = matches!(&cf.ty, Some(ty) if *ty != SparType::Section);
+        let explicit_non_section = matches!(&cf.ty, Some(ty) if *ty != SparType::InlineRecord);
         if explicit_non_section {
             self.push_type_error(
                 format!(
-                    "field `{}::{}` must be type `section` (type `{}` requires a nested section)",
+                    "field `{}::{}` must use a named struct type (type `{}` requires structured data)",
                     path_str, field_name, type_name
                 ),
                 None,
@@ -1191,12 +1425,12 @@ impl<'a> TypeChecker<'a> {
             );
             return;
         }
-        let nested_items: &[SectionItem] = match &cf.value {
-            Some(FieldValue::Nested(items)) => items,
+        let nested_items: &[ObjectItem] = match &cf.value {
+            Some(FieldValue::Object(items)) => items,
             _ => {
                 self.push_type_error(
                     format!(
-                        "field `{}::{}` must have an inline section value (`{{ ... }}`)",
+                        "field `{}::{}` must have a compatible structured value",
                         path_str, field_name
                     ),
                     None,
@@ -1208,7 +1442,7 @@ impl<'a> TypeChecker<'a> {
         let nested_path = format!("{}::{}", path_str, field_name);
 
         // A nested field body that's ENTIRELY `...Source;` gets the same
-        // structural shape check a spread-only bound section gets above —
+        // structural shape check a spread-only bound struct gets above —
         // the spread must supply exactly what this field's expected shape
         // requires.
         if let Some(spread) = spread_only_source(nested_items) {
@@ -1220,7 +1454,7 @@ impl<'a> TypeChecker<'a> {
         // attribute coverage" precedent as the top-level case.
         let has_spreads = nested_items
             .iter()
-            .any(|i| matches!(i, SectionItem::Spread(_)));
+            .any(|i| matches!(i, ObjectItem::Spread(_)));
         if has_spreads {
             self.check_mixed_spread_and_fields(
                 nested_items,
@@ -1234,7 +1468,7 @@ impl<'a> TypeChecker<'a> {
         let nested_config: Vec<&FieldDecl> = nested_items
             .iter()
             .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
+                if let ObjectItem::Field(f) = i {
                     Some(f)
                 } else {
                     None
@@ -1264,17 +1498,17 @@ impl<'a> TypeChecker<'a> {
         for tf in type_fields {
             let cf = config_fields.iter().find(|f| f.name == tf.name);
             match cf {
-                None if !tf.optional => {
+                None if !type_field_is_omittable(tf) => {
                     self.push_type_error(
                         format!(
-                            "section `[{}]` is missing required field `{}` (required by type `{}`)",
+                            "struct `{}` is missing required field `{}` (required by type `{}`)",
                             path_str, tf.name, type_name
                         ),
                         None,
                         tf.span.clone(),
                     );
                 }
-                None => {} // optional, fine to omit
+                None => {} // defaulted or Option<T>, fine to omit
                 Some(cf) => match &tf.shape {
                     TypeFieldShape::Primitive(expected_ty) => {
                         let actual_ty = match &cf.ty {
@@ -1308,7 +1542,7 @@ impl<'a> TypeChecker<'a> {
                             }
                         }
                     }
-                    TypeFieldShape::Section(nested_type_fields) => {
+                    TypeFieldShape::InlineRecord(nested_type_fields) => {
                         self.validate_nested_type_field_with_locals(
                             cf,
                             nested_type_fields,
@@ -1319,17 +1553,9 @@ impl<'a> TypeChecker<'a> {
                         );
                     }
                     TypeFieldShape::Named(other_type_name) => {
-                        let Some(other_entry) = self.symbols.types.get(other_type_name).cloned()
-                        else {
-                            continue; // resolver already reported the undefined type
-                        };
-                        self.validate_nested_type_field_with_locals(
-                            cf,
-                            &other_entry.fields,
-                            other_type_name,
-                            path_str,
-                            &tf.name,
-                            locals,
+                        let expected = SparType::Named(other_type_name.clone());
+                        self.validate_field_value_against_type_with_locals(
+                            cf, &expected, path_str, &tf.name, locals,
                         );
                     }
                     TypeFieldShape::TypeParameter(expected) => {
@@ -1354,15 +1580,12 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     TypeFieldShape::Applied { name, arguments } => {
-                        let applied = SparType::Applied {
+                        let expected = SparType::Applied {
                             name: name.clone(),
                             arguments: arguments.clone(),
                         };
-                        let Some((label, fields)) = self.type_fields_for(&applied) else {
-                            continue;
-                        };
-                        self.validate_nested_type_field_with_locals(
-                            cf, &fields, &label, path_str, &tf.name, locals,
+                        self.validate_field_value_against_type_with_locals(
+                            cf, &expected, path_str, &tf.name, locals,
                         );
                     }
                 },
@@ -1392,12 +1615,12 @@ impl<'a> TypeChecker<'a> {
         field_name: &str,
         locals: &HashMap<String, SparType>,
     ) {
-        let nested_items: &[SectionItem] = match &cf.value {
-            Some(FieldValue::Nested(items)) => items,
+        let nested_items: &[ObjectItem] = match &cf.value {
+            Some(FieldValue::Object(items)) => items,
             _ => {
                 self.push_type_error(
                     format!(
-                        "field `{}::{}` must have an inline section value (`{{ ... }}`)",
+                        "field `{}::{}` must have a compatible structured value",
                         path_str, field_name
                     ),
                     None,
@@ -1409,7 +1632,7 @@ impl<'a> TypeChecker<'a> {
         let nested_config: Vec<&FieldDecl> = nested_items
             .iter()
             .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
+                if let ObjectItem::Field(f) = i {
                     Some(f)
                 } else {
                     None
@@ -1438,7 +1661,7 @@ impl<'a> TypeChecker<'a> {
     /// contents can't be statically determined.
     fn check_mixed_spread_and_fields(
         &mut self,
-        items: &[SectionItem],
+        items: &[ObjectItem],
         expected: &[TypeField],
         expected_label: &str,
         path_str: &str,
@@ -1448,14 +1671,14 @@ impl<'a> TypeChecker<'a> {
 
         for item in items {
             match item {
-                SectionItem::Field(f) => {
+                ObjectItem::Field(f) => {
                     covered.insert(f.name.clone());
                 }
-                SectionItem::Spread(sp) => {
+                ObjectItem::Spread(sp) => {
                     let Some(name) = spread_source_name(sp) else {
                         return;
                     }; // unresolvable — skip the whole check
-                    let Some(shape) = self.derive_section_shape(name) else {
+                    let Some(shape) = self.derive_struct_shape(name) else {
                         return;
                     };
                     for tf in &shape {
@@ -1473,7 +1696,7 @@ impl<'a> TypeChecker<'a> {
         let config_fields: Vec<&FieldDecl> = items
             .iter()
             .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
+                if let ObjectItem::Field(f) = i {
                     Some(f)
                 } else {
                     None
@@ -1534,7 +1757,10 @@ impl<'a> TypeChecker<'a> {
                                 );
                             }
                         }
-                        (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
+                        (
+                            ShapeKind::InlineRecord(actual_nested),
+                            ShapeKind::InlineRecord(want_nested),
+                        ) => {
                             self.check_spread_contribution(
                                 &actual_nested,
                                 &want_nested,
@@ -1543,20 +1769,20 @@ impl<'a> TypeChecker<'a> {
                                 span,
                             );
                         }
-                        (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
+                        (ShapeKind::Primitive(_), ShapeKind::InlineRecord(_)) => {
                             self.push_type_error(
                                 format!(
-                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested section",
+                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested structured value",
                                     source_label, sf.name, expected_label
                                 ),
                                 None,
                                 span.clone(),
                             );
                         }
-                        (ShapeKind::Section(_), ShapeKind::Primitive(want)) => {
+                        (ShapeKind::InlineRecord(_), ShapeKind::Primitive(want)) => {
                             self.push_type_error(
                                 format!(
-                                    "spread `...{}` field `{}` is a nested section but `{}` expects `{}`",
+                                    "spread `...{}` field `{}` is structured data but `{}` expects `{}`",
                                     source_label, sf.name, expected_label, display_type(&want)
                                 ),
                                 None,
@@ -1569,7 +1795,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Resolve `spread`'s source section (same-file, single-segment
+    /// Resolve `spread`'s source struct (same-file, single-segment
     /// `...Name;` only — matches the scope `eval_spread`/`resolve_spread`
     /// already support) and structurally compare its shape against
     /// `expected` — exact match, recursively, same rule the rest of the
@@ -1586,7 +1812,7 @@ impl<'a> TypeChecker<'a> {
         let Some(source_name) = spread_source_name(spread) else {
             return;
         };
-        let Some(source_shape) = self.derive_section_shape(source_name) else {
+        let Some(source_shape) = self.derive_struct_shape(source_name) else {
             return;
         };
         self.check_shape_matches(
@@ -1599,15 +1825,15 @@ impl<'a> TypeChecker<'a> {
         );
     }
 
-    /// The structural shape of a top-level section: if it's type-bound,
+    /// The structural shape of a top-level struct: if it's type-bound,
     /// that type's own fields ARE its shape (its instance already has to
     /// satisfy them exactly, via the normal check_type_binding path); if
     /// unbound, every field already has an explicit type (Phase 2's rule),
     /// so derive an equivalent ad-hoc shape straight from those.
-    fn derive_section_shape(&self, name: &str) -> Option<Vec<TypeField>> {
+    fn derive_struct_shape(&self, name: &str) -> Option<Vec<TypeField>> {
         let entry = self
             .symbols
-            .sections
+            .structs
             .get(std::slice::from_ref(&name.to_string()))?;
         match &entry.type_binding {
             Some(ty) => self.type_fields_for(ty).map(|(_, fields)| fields),
@@ -1615,12 +1841,12 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Recursively build a `Vec<TypeField>` shape from an UNBOUND section's
-    /// own registered fields — nested sections are registered separately
-    /// under their own path (see resolver.rs's `register_nested_section`),
-    /// so a `section`-typed field recurses into `path + [field_name]`.
+    /// Recursively build a `Vec<TypeField>` shape from an unbound struct's
+    /// own registered fields — nested record shapes are registered separately
+    /// under their own path in the resolver,
+    /// so a inline-record field recurses into `path + [field_name]`.
     fn derive_ad_hoc_shape(&self, path: &[String]) -> Vec<TypeField> {
-        let Some(entry) = self.symbols.sections.get(path) else {
+        let Some(entry) = self.symbols.structs.get(path) else {
             return Vec::new();
         };
         entry
@@ -1628,17 +1854,16 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|(name, fe)| {
                 let shape = match &fe.ty {
-                    Some(SparType::Section) => {
+                    Some(SparType::InlineRecord) => {
                         let nested_path: Vec<String> =
                             path.iter().cloned().chain([name.clone()]).collect();
-                        TypeFieldShape::Section(self.derive_ad_hoc_shape(&nested_path))
+                        TypeFieldShape::InlineRecord(self.derive_ad_hoc_shape(&nested_path))
                     }
                     Some(other) => TypeFieldShape::Primitive(other.clone()),
                     None => TypeFieldShape::Primitive(SparType::Str), // unreachable: unbound fields always have an explicit type
                 };
                 TypeField {
                     name: name.clone(),
-                    optional: fe.optional,
                     shape,
                     default: None,
                     span: fe.span.clone(),
@@ -1650,7 +1875,7 @@ impl<'a> TypeChecker<'a> {
     /// Structural exact-match comparison between two abstract shapes —
     /// used when spreading `...Source;` into a position with a known
     /// expected shape. Every expected field must be present in `source`
-    /// with a matching type (recursively); an expected-optional field may
+    /// with a matching type (recursively); an omittable/defaulted field may
     /// be absent; any field `source` has that `expected` doesn't declare
     /// is an error — the same exact-match rule the type system already
     /// applies everywhere else (Phase 2's strictness rule).
@@ -1665,7 +1890,7 @@ impl<'a> TypeChecker<'a> {
     ) {
         for ef in expected {
             match source.iter().find(|f| f.name == ef.name) {
-                None if !ef.optional => {
+                None if !type_field_is_omittable(ef) => {
                     self.push_type_error(
                         format!(
                             "spread `...{}` in `[{}]` is missing required field `{}` (required by `{}`)",
@@ -1675,7 +1900,7 @@ impl<'a> TypeChecker<'a> {
                         span.clone(),
                     );
                 }
-                None => {} // optional, fine to omit
+                None => {} // defaulted or Option<T>, fine to omit
                 Some(sf) => {
                     let source_kind = self.expand_type_field_shape(&sf.shape);
                     let expected_kind = self.expand_type_field_shape(&ef.shape);
@@ -1696,7 +1921,10 @@ impl<'a> TypeChecker<'a> {
                                 );
                             }
                         }
-                        (ShapeKind::Section(actual_nested), ShapeKind::Section(want_nested)) => {
+                        (
+                            ShapeKind::InlineRecord(actual_nested),
+                            ShapeKind::InlineRecord(want_nested),
+                        ) => {
                             self.check_shape_matches(
                                 &actual_nested,
                                 &want_nested,
@@ -1706,20 +1934,20 @@ impl<'a> TypeChecker<'a> {
                                 span,
                             );
                         }
-                        (ShapeKind::Primitive(_), ShapeKind::Section(_)) => {
+                        (ShapeKind::Primitive(_), ShapeKind::InlineRecord(_)) => {
                             self.push_type_error(
                                 format!(
-                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested section",
+                                    "spread `...{}` field `{}` is a primitive value but `{}` expects a nested structured value",
                                     source_label, ef.name, expected_label
                                 ),
                                 None,
                                 span.clone(),
                             );
                         }
-                        (ShapeKind::Section(_), ShapeKind::Primitive(want)) => {
+                        (ShapeKind::InlineRecord(_), ShapeKind::Primitive(want)) => {
                             self.push_type_error(
                                 format!(
-                                    "spread `...{}` field `{}` is a nested section but `{}` expects `{}`",
+                                    "spread `...{}` field `{}` is structured data but `{}` expects `{}`",
                                     source_label, ef.name, expected_label, display_type(&want)
                                 ),
                                 None,
@@ -1758,7 +1986,7 @@ impl<'a> TypeChecker<'a> {
                 name: name.clone(),
                 arguments: arguments.clone(),
             },
-            TypeFieldShape::Section(_) => SparType::Section,
+            TypeFieldShape::InlineRecord(_) => SparType::InlineRecord,
         }
     }
 
@@ -1768,10 +1996,10 @@ impl<'a> TypeChecker<'a> {
     fn expand_type_field_shape(&self, shape: &TypeFieldShape) -> ShapeKind {
         match shape {
             TypeFieldShape::Primitive(ty) => ShapeKind::Primitive(ty.clone()),
-            TypeFieldShape::Section(fields) => ShapeKind::Section(fields.clone()),
+            TypeFieldShape::InlineRecord(fields) => ShapeKind::InlineRecord(fields.clone()),
             TypeFieldShape::Named(name) => match self.symbols.types.get(name) {
-                Some(entry) => ShapeKind::Section(entry.fields.clone()),
-                None => ShapeKind::Section(Vec::new()), // resolver already reported the undefined type
+                Some(entry) => ShapeKind::InlineRecord(entry.fields.clone()),
+                None => ShapeKind::InlineRecord(Vec::new()), // resolver already reported the undefined type
             },
             TypeFieldShape::TypeParameter(name) => {
                 ShapeKind::Primitive(SparType::TypeParameter(name.clone()))
@@ -1781,8 +2009,8 @@ impl<'a> TypeChecker<'a> {
                     name: name.clone(),
                     arguments: arguments.clone(),
                 })
-                .map(|(_, fields)| ShapeKind::Section(fields))
-                .unwrap_or_else(|| ShapeKind::Section(Vec::new())),
+                .map(|(_, fields)| ShapeKind::InlineRecord(fields))
+                .unwrap_or_else(|| ShapeKind::InlineRecord(Vec::new())),
         }
     }
 
@@ -1807,18 +2035,7 @@ impl<'a> TypeChecker<'a> {
                         hint: missing_data_import_hint(&call.name),
                         span: call.span.clone(),
                     })?;
-                let arguments = entry
-                    .params
-                    .iter()
-                    .skip(1)
-                    .zip(call.args.iter())
-                    .map(|((param, _), value)| CallArg {
-                        param_name: param.clone(),
-                        param_name_span: call.span.clone(),
-                        value: value.clone(),
-                        span: call.span.clone(),
-                    })
-                    .collect();
+                let arguments = call.args.clone();
                 (&call.name, &call.span, arguments)
             }
             Expr::Call {
@@ -1834,20 +2051,37 @@ impl<'a> TypeChecker<'a> {
             hint: missing_data_import_hint(name),
             span: name_span.clone(),
         })?;
-        let first = entry.params.first().ok_or_else(|| SparError::TypeError {
-            message: format!("structured pipe stage '{name}' takes no parameters"),
-            hint: None,
-            span: span.clone(),
-        })?;
-        arguments.insert(
-            0,
-            CallArg {
-                param_name: first.0.clone(),
-                param_name_span: span.clone(),
-                value: input.clone(),
+        let input_ty =
+            self.infer_type_with_locals(input, locals)
+                .ok_or_else(|| SparError::TypeError {
+                    message: "cannot determine structured pipe input type".into(),
+                    hint: None,
+                    span: span.clone(),
+                })?;
+        let supplied: HashSet<&str> = arguments
+            .iter()
+            .map(|argument| argument.param_name.as_str())
+            .collect();
+        let implicit = entry
+            .params
+            .iter()
+            .find(|(param_name, param_ty)| {
+                !supplied.contains(param_name.as_str()) && pipe_type_accepts(param_ty, &input_ty)
+            })
+            .ok_or_else(|| SparError::TypeError {
+                message: format!(
+                    "structured pipe stage '{name}' has no unsupplied parameter compatible with {}",
+                    display_type(&input_ty)
+                ),
+                hint: None,
                 span: span.clone(),
-            },
-        );
+            })?;
+        arguments.push(CallArg {
+            param_name: implicit.0.clone(),
+            param_name_span: span.clone(),
+            value: input.clone(),
+            span: span.clone(),
+        });
         let (_, parameters) =
             self.instantiate_call(name, &[], &arguments, Some(locals), name_span)?;
         Ok(parameters)
@@ -1871,7 +2105,7 @@ impl<'a> TypeChecker<'a> {
         })?;
 
         let check_callable = |callable: SparType,
-                              extra_args: &[Expr]|
+                              extra_args: &[CallArg]|
          -> Result<SparType, SparError> {
             let SparType::Function {
                 params,
@@ -1890,50 +2124,83 @@ impl<'a> TypeChecker<'a> {
                     span: span.clone(),
                 });
             };
-            if params.len() != extra_args.len() + 1 {
-                return Err(SparError::TypeError {
+
+            let mut supplied = HashSet::new();
+            for argument in extra_args {
+                if !supplied.insert(argument.param_name.as_str()) {
+                    return Err(SparError::TypeError {
+                        message: format!("duplicate argument '{}'", argument.param_name),
+                        hint: None,
+                        span: argument.param_name_span.clone(),
+                    });
+                }
+                if !params.iter().any(|param| param.name == argument.param_name) {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "structured pipe callable has no parameter named '{}'",
+                            argument.param_name
+                        ),
+                        hint: None,
+                        span: argument.param_name_span.clone(),
+                    });
+                }
+            }
+
+            let implicit = params
+                .iter()
+                .find(|param| {
+                    !supplied.contains(param.name.as_str())
+                        && pipe_type_accepts(&param.ty, &input_ty)
+                })
+                .ok_or_else(|| SparError::TypeError {
                     message: format!(
-                        "structured pipe stage expects {} argument(s) after the piped value, got {}",
-                        params.len().saturating_sub(1),
-                        extra_args.len()
+                        "structured pipe stage has no unsupplied parameter compatible with {}",
+                        display_type(&input_ty)
                     ),
                     hint: None,
                     span: span.clone(),
-                });
+                })?;
+
+            for param in &params {
+                if param.name == implicit.name {
+                    continue;
+                }
+                if !supplied.contains(param.name.as_str()) {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "structured pipe callable is missing required argument '{}'",
+                            param.name
+                        ),
+                        hint: Some(format!("add `{}: ...` to the pipe stage", param.name)),
+                        span: span.clone(),
+                    });
+                }
             }
-            if params.first() != Some(&input_ty) {
-                return Err(SparError::TypeError {
-                    message: format!(
-                        "structured pipe cannot pass {} into a first parameter of type {}",
-                        display_type(&input_ty),
-                        params
-                            .first()
-                            .map(display_type)
-                            .unwrap_or_else(|| "unknown".into())
-                    ),
-                    hint: None,
-                    span: span.clone(),
-                });
-            }
-            for (argument, expected) in extra_args.iter().zip(params.iter().skip(1)) {
-                if matches!(argument, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
+
+            for argument in extra_args {
+                let expected = params
+                    .iter()
+                    .find(|param| param.name == argument.param_name)
+                    .expect("validated named argument");
+                if matches!(&argument.value, Expr::Closure { params, .. } if params.iter().any(|param| param.ty.is_none()))
                 {
                     continue;
                 }
-                let actual = infer(argument).ok_or_else(|| SparError::TypeError {
+                let actual = infer(&argument.value).ok_or_else(|| SparError::TypeError {
                     message: "cannot determine structured pipe argument type".into(),
                     hint: None,
-                    span: argument.span().cloned().unwrap_or_else(|| span.clone()),
+                    span: argument.span.clone(),
                 })?;
-                if !pipe_type_accepts(expected, &actual) {
+                if !pipe_type_accepts(&expected.ty, &actual) {
                     return Err(SparError::TypeError {
                         message: format!(
-                            "structured pipe argument expects {} but got {}",
-                            display_type(expected),
+                            "structured pipe argument '{}' expects {} but got {}",
+                            argument.param_name,
+                            display_type(&expected.ty),
                             display_type(&actual)
                         ),
                         hint: None,
-                        span: argument.span().cloned().unwrap_or_else(|| span.clone()),
+                        span: argument.span.clone(),
                     });
                 }
             }
@@ -1943,34 +2210,27 @@ impl<'a> TypeChecker<'a> {
         match stage {
             Expr::FnCall(call) => {
                 if let Some(entry) = self.call_entry(&call.name) {
-                    if entry.params.len() != call.args.len() + 1 {
-                        return Err(SparError::TypeError {
-                            message: format!(
-                                "structured pipe stage '{}' expects {} argument(s) after the piped value, got {}",
-                                call.name,
-                                entry.params.len().saturating_sub(1),
-                                call.args.len()
-                            ),
-                            hint: None,
-                            span: span.clone(),
-                        });
-                    }
-                    let mut arguments = Vec::with_capacity(entry.params.len());
-                    let first = &entry.params[0];
+                    let mut arguments = call.args.clone();
+                    let supplied: HashSet<&str> = arguments
+                        .iter()
+                        .map(|argument| argument.param_name.as_str())
+                        .collect();
+                    let implicit = entry.params.iter().find(|(param_name, param_ty)| {
+                        !supplied.contains(param_name.as_str()) && pipe_type_accepts(param_ty, &input_ty)
+                    }).ok_or_else(|| SparError::TypeError {
+                        message: format!(
+                            "structured pipe stage '{}' has no unsupplied parameter compatible with {}",
+                            call.name, display_type(&input_ty)
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    })?;
                     arguments.push(CallArg {
-                        param_name: first.0.clone(),
+                        param_name: implicit.0.clone(),
                         param_name_span: span.clone(),
                         value: (*input).clone(),
                         span: span.clone(),
                     });
-                    for ((name, _), value) in entry.params.iter().skip(1).zip(call.args.iter()) {
-                        arguments.push(CallArg {
-                            param_name: name.clone(),
-                            param_name_span: call.span.clone(),
-                            value: (*value).clone(),
-                            span: call.span.clone(),
-                        });
-                    }
                     let (ret, parameters) = self
                         .instantiate_call(&call.name, &[], &arguments, locals, &call.span)
                         .map_err(|error| match error {
@@ -2044,31 +2304,53 @@ impl<'a> TypeChecker<'a> {
                 ..
             } => {
                 let Some(entry) = self.call_entry(name) else {
-                    return Err(SparError::TypeError {
-                        message: format!(
-                            "structured pipe cannot determine signature for function '{name}'"
-                        ),
-                        hint: None,
-                        span: name_span.clone(),
-                    });
+                    let callable = locals
+                        .and_then(|locals| locals.get(name).cloned())
+                        .or_else(|| {
+                            self.infer_namespace_type(&NamespaceRef {
+                                segments: vec![name.clone()],
+                                span: name_span.clone(),
+                            })
+                        })
+                        .ok_or_else(|| SparError::TypeError {
+                            message: format!(
+                                "structured pipe cannot determine signature for callable '{name}'"
+                            ),
+                            hint: None,
+                            span: name_span.clone(),
+                        })?;
+                    if !type_arguments.is_empty() {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "function-valued callable '{name}' does not accept call-site type arguments"
+                            ),
+                            hint: None,
+                            span: name_span.clone(),
+                        });
+                    }
+                    return check_callable(callable, args);
                 };
-                let Some((first_name, _)) = entry.params.first() else {
-                    return Err(SparError::TypeError {
-                        message: format!(
-                            "structured pipe stage '{name}' does not accept an input value"
-                        ),
-                        hint: None,
-                        span: name_span.clone(),
-                    });
-                };
-                let mut arguments = Vec::with_capacity(args.len() + 1);
+                let mut arguments = args.clone();
+                let supplied: HashSet<&str> = arguments
+                    .iter()
+                    .map(|argument| argument.param_name.as_str())
+                    .collect();
+                let implicit = entry.params.iter().find(|(param_name, param_ty)| {
+                    !supplied.contains(param_name.as_str()) && pipe_type_accepts(param_ty, &input_ty)
+                }).ok_or_else(|| SparError::TypeError {
+                    message: format!(
+                        "structured pipe stage '{name}' has no unsupplied parameter compatible with {}",
+                        display_type(&input_ty)
+                    ),
+                    hint: None,
+                    span: name_span.clone(),
+                })?;
                 arguments.push(CallArg {
-                    param_name: first_name.clone(),
+                    param_name: implicit.0.clone(),
                     param_name_span: span.clone(),
                     value: (*input).clone(),
                     span: span.clone(),
                 });
-                arguments.extend(args.iter().cloned());
                 let (ret, parameters) = self
                     .instantiate_call(name, type_arguments, &arguments, locals, name_span)
                     .map_err(|error| match error {
@@ -2151,63 +2433,65 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn instantiate_positional_named_call(
+    fn instantiate_named_fn_call(
         &self,
         call: &FnCall,
         locals: Option<&HashMap<String, SparType>>,
     ) -> Result<Option<SparType>, SparError> {
-        if self.constructor_parameters(&call.name).is_some() {
-            if call.args.is_empty() {
-                return Ok(Some(SparType::Named(call.name.clone())));
-            }
-            return Err(SparError::TypeError {
-                message: format!(
-                    "struct constructor '{}' accepts only named field overrides",
-                    call.name
-                ),
-                hint: Some(format!(
-                    "use `{}(field: value, ...)` or `{}()`",
-                    call.name, call.name
-                )),
-                span: call.span.clone(),
-            });
-        }
-
-        let Some(entry) = self.call_entry(&call.name) else {
-            return Ok(None);
+        let builtin = match call.name.as_str() {
+            "env" => Some(("name", SparType::Str, SparType::Str)),
+            "str" => Some(("value", SparType::Any, SparType::Str)),
+            "int" => Some(("value", SparType::Any, SparType::Int)),
+            "float" => Some(("value", SparType::Any, SparType::Float)),
+            "bool" => Some(("value", SparType::Any, SparType::Bool)),
+            _ => None,
         };
-
-        let required = entry
-            .params
-            .iter()
-            .filter(|(name, _)| !entry.default_params.contains(name))
-            .count();
-        if call.args.len() < required || call.args.len() > entry.params.len() {
-            return Err(SparError::TypeError {
-                message: format!(
-                    "function '{}' expects {}..={} positional argument(s), got {}",
-                    call.name,
-                    required,
-                    entry.params.len(),
-                    call.args.len()
-                ),
-                hint: None,
-                span: call.span.clone(),
-            });
+        if let Some((parameter_name, parameter_type, return_type)) = builtin {
+            let parameters = vec![(parameter_name.to_string(), parameter_type.clone())];
+            self.validate_named_argument_shape(
+                &format!("builtin function '{}'", call.name),
+                &call.args,
+                &parameters,
+                |_| true,
+                &call.span,
+            )?;
+            if parameter_type != SparType::Any {
+                let argument = call
+                    .args
+                    .iter()
+                    .find(|argument| argument.param_name == parameter_name)
+                    .expect("named argument shape was validated");
+                let actual = match locals {
+                    Some(locals) => self.infer_type_with_locals(&argument.value, locals),
+                    None => self.infer_type(&argument.value),
+                };
+                if let Some(actual) = actual {
+                    if !is_assignable(&parameter_type, &actual) {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "argument '{}' to builtin '{}' expects {} but got {}",
+                                parameter_name,
+                                call.name,
+                                display_type(&parameter_type),
+                                display_type(&actual),
+                            ),
+                            hint: None,
+                            span: argument.span.clone(),
+                        });
+                    }
+                }
+            }
+            return Ok(Some(return_type));
         }
-
-        let arguments = entry
-            .params
-            .iter()
-            .zip(call.args.iter())
-            .map(|((parameter_name, _), value)| CallArg {
-                param_name: parameter_name.clone(),
-                param_name_span: call.span.clone(),
-                value: value.clone(),
-                span: value.span().cloned().unwrap_or_else(|| call.span.clone()),
-            })
-            .collect::<Vec<_>>();
-        let (ret, _) = self.instantiate_call(&call.name, &[], &arguments, locals, &call.span)?;
+        if self.constructor_parameters(&call.name).is_some() {
+            let (ret, _) =
+                self.instantiate_call(&call.name, &[], &call.args, locals, &call.span)?;
+            return Ok(Some(ret));
+        }
+        if self.call_entry(&call.name).is_none() {
+            return Ok(None);
+        }
+        let (ret, _) = self.instantiate_call(&call.name, &[], &call.args, locals, &call.span)?;
         Ok(Some(ret))
     }
 
@@ -2239,7 +2523,7 @@ impl<'a> TypeChecker<'a> {
                 "float" => Some(SparType::Float),
                 "bool" => Some(SparType::Bool),
                 _ => {
-                    if let Ok(Some(ret)) = self.instantiate_positional_named_call(fc, None) {
+                    if let Ok(Some(ret)) = self.instantiate_named_fn_call(fc, None) {
                         return Some(ret);
                     }
                     let reference = NamespaceRef {
@@ -2268,20 +2552,18 @@ impl<'a> TypeChecker<'a> {
                 .instantiate_call(name, type_arguments, args, None, name_span)
                 .ok()
                 .map(|(ret, _)| ret),
-            Expr::Closure {
-                params,
-                return_type,
-                ..
-            } => {
-                let return_type = return_type.as_ref()?.clone();
-                let params = params
-                    .iter()
-                    .map(|param| param.ty.clone())
-                    .collect::<Option<Vec<_>>>()?;
-                Some(SparType::Function {
-                    params,
-                    return_type: Box::new(return_type),
-                })
+            Expr::Closure { params, return_type, body, .. } => {
+                let mut closure_locals = HashMap::new();
+                let params = params.iter().map(|param| {
+                    let ty = param.ty.clone()?;
+                    closure_locals.insert(param.name.clone(), ty.clone());
+                    Some(CallableParamType { name: param.name.clone(), ty })
+                }).collect::<Option<Vec<_>>>()?;
+                let result = return_type.clone().or_else(|| match body {
+                    ClosureBody::Expr(value) => self.infer_type_with_locals(value, &closure_locals),
+                    ClosureBody::Block(_) => None,
+                })?;
+                Some(SparType::Function { params, return_type: Box::new(result) })
             }
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
@@ -2339,7 +2621,14 @@ impl<'a> TypeChecker<'a> {
                     return None;
                 }
                 Some(SparType::Function {
-                    params: entry.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    params: entry
+                        .params
+                        .iter()
+                        .map(|(name, ty)| CallableParamType {
+                            name: name.clone(),
+                            ty: ty.clone(),
+                        })
+                        .collect(),
                     return_type: Box::new(callable_return_type(entry)),
                 })
             }),
@@ -2353,22 +2642,22 @@ impl<'a> TypeChecker<'a> {
     fn infer_field_access(&self, base: &Expr, field: &str) -> Option<SparType> {
         if let Expr::NamespaceRef(nr) = base {
             if nr.segments == ["self"] {
-                let section_path = self.current_section.as_ref()?;
+                let section_path = self.current_struct.as_ref()?;
                 return self
                     .symbols
-                    .lookup_section(section_path)
+                    .lookup_struct(section_path)
                     .and_then(|s| s.fields.get(field))
                     .and_then(|f| f.ty.clone());
             }
             if nr.segments == ["global"] {
                 return self.lookup_global_type(field);
             }
-            // base names a registered section directly (e.g. an imported
+            // base names a registered struct directly (e.g. an imported
             // `[Colors]{...}` spliced in as a local section) — resolve the
-            // field straight off that section rather than falling through
+            // field straight off that struct rather than falling through
             // to `infer_type`, which only knows about `SparType::Named`
-            // type instances, not sections.
-            if let Some(section) = self.symbols.lookup_section(&nr.segments) {
+            // type instances, not struct namespaces.
+            if let Some(section) = self.symbols.lookup_struct(&nr.segments) {
                 if let Some(ty) = section.fields.get(field).and_then(|f| f.ty.clone()) {
                     return Some(ty);
                 }
@@ -2396,10 +2685,7 @@ impl<'a> TypeChecker<'a> {
             if reference.segments.len() == 1 {
                 let name = &reference.segments[0];
                 if locals.and_then(|locals| locals.get(name)).is_none()
-                    && self
-                        .symbols
-                        .lookup_section(&reference.segments)
-                        .is_some_and(|section| section.canonical)
+                    && self.symbols.lookup_struct(&reference.segments).is_some()
                 {
                     return Some(name.clone());
                 }
@@ -2413,8 +2699,13 @@ impl<'a> TypeChecker<'a> {
             SparType::Named(name) => Some(name),
             SparType::Applied { name, .. } => Some(name),
             SparType::Str => Some("str".into()),
+            SparType::Int => Some("int".into()),
+            SparType::Float => Some("float".into()),
+            SparType::Bool => Some("bool".into()),
             SparType::List(_) => Some("List".into()),
-            _ => None,
+            SparType::InlineRecord => Some("Record".into()),
+            SparType::Void => None,
+            _ => Some("Any".into()),
         }
     }
 
@@ -2422,7 +2713,7 @@ impl<'a> TypeChecker<'a> {
         &self,
         receiver: &Expr,
         method: &str,
-        args: &[Expr],
+        args: &[CallArg],
         locals: Option<&HashMap<String, SparType>>,
     ) -> Result<SparType, SparError> {
         let owner = self
@@ -2470,18 +2761,56 @@ impl<'a> TypeChecker<'a> {
         } else {
             &entry.function.params[..]
         };
-        for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
+        let mut seen = HashSet::new();
+        for argument in args {
+            if !seen.insert(argument.param_name.as_str()) {
+                return Err(SparError::TypeError {
+                    message: format!("duplicate argument '{}'", argument.param_name),
+                    hint: None,
+                    span: argument.param_name_span.clone(),
+                });
+            }
+            let Some((_, pattern)) = params.iter().find(|(name, _)| name == &argument.param_name)
+            else {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "method '{method}' has no parameter named '{}'",
+                        argument.param_name
+                    ),
+                    hint: None,
+                    span: argument.param_name_span.clone(),
+                });
+            };
             let actual = match locals {
-                Some(locals) => self.infer_type_with_locals(argument, locals),
-                None => self.infer_type(argument),
+                Some(locals) => self.infer_type_with_locals(&argument.value, locals),
+                None => self.infer_type(&argument.value),
             }
             .or_else(|| {
-                self.infer_closure_signature_for_pattern(argument, pattern, &substitution, locals)
+                self.infer_closure_signature_for_pattern(
+                    &argument.value,
+                    pattern,
+                    &substitution,
+                    locals,
+                )
             });
             if let Some(actual) = actual {
-                let argument_span = argument.span().cloned().unwrap_or_else(Span::dummy);
-                unify_generic(pattern, &actual, &mut substitution, &argument_span)?;
+                unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
             }
+        }
+        let required = params
+            .iter()
+            .filter(|(name, _)| !entry.function.default_params.contains(name))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        if let Some(missing) = required
+            .into_iter()
+            .find(|name| !seen.contains(name.as_str()))
+        {
+            return Err(SparError::TypeError {
+                message: format!("method '{method}' is missing required argument '{missing}'"),
+                hint: None,
+                span: receiver.span().cloned().unwrap_or_else(Span::dummy),
+            });
         }
         Ok(substitute_type(&entry.function.ret, &substitution))
     }
@@ -2494,21 +2823,19 @@ impl<'a> TypeChecker<'a> {
             SparType::Named(type_name) if type_name == "Record" => Some(base_ty.clone()),
             SparType::Named(type_name) => {
                 let path = vec![type_name.clone()];
-                if let Some(section) = self.symbols.lookup_section(&path) {
-                    if section.canonical {
-                        if let Some(entry) = section.fields.get(field) {
-                            if let Some(ty) = &entry.ty {
-                                return Some(ty.clone());
-                            }
-                            if let Some(binding) = &section.type_binding {
-                                return self
-                                    .type_fields_for(binding)
-                                    .and_then(|(_, fields)| {
-                                        fields.into_iter().find(|candidate| candidate.name == field)
-                                    })
-                                    .map(|field| self.field_shape_to_type(&field.shape));
-                            }
+                if let Some(section) = self.symbols.lookup_struct(&path) {
+                    if let Some(entry) = section.fields.get(field) {
+                        if let Some(ty) = &entry.ty {
+                            return Some(ty.clone());
                         }
+                    }
+                    if let Some(binding) = &section.type_binding {
+                        return self
+                            .type_fields_for(binding)
+                            .and_then(|(_, fields)| {
+                                fields.into_iter().find(|candidate| candidate.name == field)
+                            })
+                            .map(|field| self.field_shape_to_type(&field.shape));
                     }
                 }
                 self.symbols
@@ -2604,30 +2931,194 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Validates an object literal's items against a declared type's own
-    /// fields — reuses `validate_type_fields`, the exact function `->
-    /// TypeName` section bindings already use for structural validation.
-    fn check_object_against_named(&mut self, items: &[SectionItem], name: &str, label: &str) {
-        self.check_object_against_type(items, &SparType::Named(name.to_string()), label);
-    }
-
-    fn check_object_against_type(&mut self, items: &[SectionItem], ty: &SparType, label: &str) {
-        let Some((type_name, fields)) = self.type_fields_for(ty) else {
-            return;
+    fn validate_object_literal_expected(
+        &self,
+        expr: &Expr,
+        expected: &SparType,
+        locals: Option<&HashMap<String, SparType>>,
+        label: &str,
+        span: &Span,
+    ) -> Result<(), SparError> {
+        let Expr::Object(items, _) = expr else {
+            return Ok(());
         };
-        let config_fields: Vec<&FieldDecl> = items
-            .iter()
-            .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
-                    Some(f)
-                } else {
-                    None
+        match expected {
+            SparType::Named(name) if name == "Record" => Ok(()),
+            SparType::Applied { name, arguments } if name == "Map" && arguments.len() == 2 => {
+                let key_type = &arguments[0];
+                let value_type = &arguments[1];
+                if !is_assignable(key_type, &SparType::Str) {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "`{label}` uses `{{ ... }}` Map syntax, whose keys are `str`, but the declared key type is `{}`",
+                            display_type(key_type),
+                        ),
+                        hint: Some("use `Map<str, V>` for object-literal Map syntax".into()),
+                        span: span.clone(),
+                    });
                 }
-            })
-            .collect();
-        self.validate_type_fields(&fields, &config_fields, &type_name, label);
+                let map_type = SparType::Applied {
+                    name: "Map".into(),
+                    arguments: arguments.clone(),
+                };
+                for item in items {
+                    match item {
+                        ObjectItem::Spread(spread) => {
+                            let actual = match locals {
+                                Some(locals) => self.infer_type_with_locals(&spread.expr, locals),
+                                None => self.infer_type(&spread.expr),
+                            };
+                            if !actual
+                                .as_ref()
+                                .is_some_and(|actual| is_assignable(&map_type, actual))
+                            {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "Map spread in `{label}` expects `{}` but found `{}`",
+                                        display_type(&map_type),
+                                        actual
+                                            .as_ref()
+                                            .map(display_type)
+                                            .unwrap_or_else(|| "unknown".into()),
+                                    ),
+                                    hint: Some("spread another Map with the same key/value types".into()),
+                                    span: spread.span.clone(),
+                                });
+                            }
+                        }
+                        ObjectItem::Field(field) => {
+                            let Some(field_value) = &field.value else {
+                                return Err(SparError::TypeError {
+                                    message: format!("Map entry '{}' has no value", field.name),
+                                    hint: None,
+                                    span: field.span.clone(),
+                                });
+                            };
+                            let owned_expr;
+                            let value_expr = match field_value {
+                                FieldValue::Expr(expr) => expr,
+                                FieldValue::Object(nested) => {
+                                    owned_expr = Expr::Object(nested.clone(), field.span.clone());
+                                    &owned_expr
+                                }
+                            };
+                            if matches!(value_expr, Expr::Object(_, _)) {
+                                self.validate_object_literal_expected(
+                                    value_expr,
+                                    value_type,
+                                    locals,
+                                    &format!("{label}.{}", field.name),
+                                    &field.span,
+                                )?;
+                                continue;
+                            }
+                            let actual = match locals {
+                                Some(locals) => self.infer_type_with_locals(value_expr, locals),
+                                None => self.infer_type(value_expr),
+                            };
+                            if !actual
+                                .as_ref()
+                                .is_some_and(|actual| is_assignable(value_type, actual) || lookup_accepts(value_type, Some(actual)))
+                            {
+                                return Err(SparError::TypeError {
+                                    message: format!(
+                                        "Map entry '{}.{}' expects `{}` but found `{}`",
+                                        label,
+                                        field.name,
+                                        display_type(value_type),
+                                        actual
+                                            .as_ref()
+                                            .map(display_type)
+                                            .unwrap_or_else(|| "unknown".into()),
+                                    ),
+                                    hint: None,
+                                    span: field.span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            SparType::Named(name) => Err(SparError::TypeError {
+                message: format!(
+                    "`{label}` expects `{name}`, but `{{ ... }}` is a dynamic object literal — use the named constructor `{name}(...)`"
+                ),
+                hint: Some(format!(
+                    "construct `{name}` explicitly with `{name}(field: value, ...)`"
+                )),
+                span: span.clone(),
+            }),
+            SparType::Applied { .. } => {
+                let expected_name = display_type(expected);
+                Err(SparError::TypeError {
+                    message: format!(
+                        "`{label}` expects `{expected_name}`, but `{{ ... }}` is a dynamic object literal — typed structured values require a named constructor"
+                    ),
+                    hint: Some(format!(
+                        "construct `{expected_name}` explicitly instead of using `{{ ... }}`"
+                    )),
+                    span: span.clone(),
+                })
+            }
+            _ => Err(SparError::TypeError {
+                message: format!(
+                    "`{label}` has type `{}` but value is a dynamic object literal `{{ ... }}` — object literals are only valid for `Record` or `Map` values",
+                    display_type(expected)
+                ),
+                hint: None,
+                span: span.clone(),
+            }),
+        }
     }
 
+    fn validate_literal_expected(
+        &self,
+        expr: &Expr,
+        expected: &SparType,
+        locals: Option<&HashMap<String, SparType>>,
+        label: &str,
+        span: &Span,
+    ) -> Result<bool, SparError> {
+        if matches!(expr, Expr::Object(_, _)) {
+            self.validate_object_literal_expected(expr, expected, locals, label, span)?;
+            return Ok(true);
+        }
+        if let (Expr::List(items, _), SparType::List(element_type)) = (expr, expected) {
+            for (index, item) in items.iter().enumerate() {
+                let item_label = format!("{label}[{index}]");
+                if self.validate_literal_expected(item, element_type, locals, &item_label, span)? {
+                    continue;
+                }
+                let actual = match locals {
+                    Some(locals) => self.infer_type_with_locals(item, locals),
+                    None => self.infer_type(item),
+                };
+                if !actual.as_ref().is_some_and(|actual| {
+                    is_assignable(element_type, actual)
+                        || lookup_accepts(element_type, Some(actual))
+                }) {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "`{item_label}` expects `{}` but found `{}`",
+                            display_type(element_type),
+                            actual
+                                .as_ref()
+                                .map(display_type)
+                                .unwrap_or_else(|| "unknown".into()),
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Validates object/list literals against their expected dynamic data type.
+    /// Named structured values are never implicitly constructed from `{ ... }`.
     fn check_expr_type(&mut self, expr: &Expr, declared_ty: &SparType, label: &str, span: &Span) {
         self.expect_call_type(expr, declared_ty);
         if matches!(declared_ty, SparType::Function { .. }) && matches!(expr, Expr::Closure { .. })
@@ -2641,81 +3132,11 @@ impl<'a> TypeChecker<'a> {
         }
         self.check_expr_internal(expr);
 
-        if let Expr::Object(items, _) = expr {
-            match declared_ty {
-                SparType::Named(name) if name == "Record" => {}
-                SparType::Named(name) => {
-                    self.check_object_against_named(items, name, label);
-                }
-                SparType::Applied { .. } => {
-                    self.check_object_against_type(items, declared_ty, label);
-                }
-                _ => {
-                    self.push_type_error(
-                        format!(
-                            "`{label}` has type `{}` but value is an object literal `{{ ... }}` — \
-                             object literals can only be used for a declared `type X {{ ... }}`",
-                            display_type(declared_ty)
-                        ),
-                        None,
-                        span.clone(),
-                    );
-                }
-            }
-            return;
-        }
-
-        // Checked BEFORE the `infer_type` early-return below: when a list's
-        // first element is an object literal, `infer_type(Expr::List)`
-        // itself returns `None` (it infers from the first element, and
-        // `infer_type(Expr::Object)` is always `None`) — so this block
-        // would never be reached if placed after that early return.
-        if let Expr::List(items, _) = expr {
-            if let SparType::List(elem_ty) = declared_ty {
-                for item in items {
-                    if let Expr::Object(obj_items, _) = item {
-                        match elem_ty.as_ref() {
-                            SparType::Named(name) if name == "Record" => {}
-                            SparType::Named(name) => {
-                                self.check_object_against_named(obj_items, name, label);
-                            }
-                            SparType::Applied { .. } => {
-                                self.check_object_against_type(obj_items, elem_ty, label);
-                            }
-                            other => {
-                                self.push_type_error(
-                                    format!(
-                                        "list element in `{label}` has type `{}` but value is an \
-                                         object literal `{{ ... }}` — object literals can only be \
-                                         used for a declared `type X {{ ... }}`",
-                                        display_type(other)
-                                    ),
-                                    None,
-                                    span.clone(),
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    if let Some(item_ty) = self.infer_type(item) {
-                        if &item_ty != elem_ty.as_ref() {
-                            self.push_type_error(
-                                format!(
-                                    "list element type mismatch in `{label}`: \
-                                     expected `{}`, found `{}`",
-                                    display_type(elem_ty),
-                                    display_type(&item_ty),
-                                ),
-                                Some(format!(
-                                    "all elements in `[{}]` must be `{}`",
-                                    display_type(elem_ty),
-                                    display_type(elem_ty),
-                                )),
-                                span.clone(),
-                            );
-                        }
-                    }
-                }
+        match self.validate_literal_expected(expr, declared_ty, None, label, span) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.errors.push(error);
                 return;
             }
         }
@@ -2725,7 +3146,7 @@ impl<'a> TypeChecker<'a> {
             None => return,
         };
 
-        if &inferred != declared_ty {
+        if !is_assignable(declared_ty, &inferred) {
             self.push_type_error(
                 format!(
                     "type mismatch for `{label}`: declared as `{}` but value is `{}`",
@@ -2747,12 +3168,12 @@ impl<'a> TypeChecker<'a> {
             Expr::Object(items, _) => {
                 for item in items {
                     match item {
-                        SectionItem::Field(f) => {
+                        ObjectItem::Field(f) => {
                             if let Some(FieldValue::Expr(e)) = &f.value {
                                 self.check_expr_internal(e);
                             }
                         }
-                        SectionItem::Spread(sp) => self.check_expr_internal(&sp.expr),
+                        ObjectItem::Spread(sp) => self.check_expr_internal(&sp.expr),
                     }
                 }
             }
@@ -2828,9 +3249,9 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
-                    self.check_expr_internal(arg);
+                    self.check_expr_internal(&arg.value);
                 }
-                if let Err(error) = self.instantiate_positional_named_call(fc, None) {
+                if let Err(error) = self.instantiate_named_fn_call(fc, None) {
                     self.errors.push(error);
                 }
             }
@@ -2977,7 +3398,7 @@ impl<'a> TypeChecker<'a> {
             Expr::MethodCall { receiver, args, .. } => {
                 self.check_expr_internal(receiver);
                 for argument in args {
-                    self.check_expr_internal(argument);
+                    self.check_expr_internal(&argument.value);
                 }
             }
             Expr::StructuredPipe { input, stage, span } => {
@@ -2985,7 +3406,7 @@ impl<'a> TypeChecker<'a> {
                 match stage.as_ref() {
                     Expr::FnCall(call) => {
                         for argument in &call.args {
-                            self.check_expr_internal(argument);
+                            self.check_expr_internal(&argument.value);
                         }
                     }
                     Expr::Call { args, .. } => {
@@ -3023,10 +3444,7 @@ impl<'a> TypeChecker<'a> {
 
     fn constructor_parameters(&self, name: &str) -> Option<Vec<(String, SparType)>> {
         let path = vec![name.to_string()];
-        let section = self.symbols.lookup_section(&path)?;
-        if !section.canonical {
-            return None;
-        }
+        let section = self.symbols.lookup_struct(&path)?;
         let mut parameters = Vec::new();
         for (field_name, field) in &section.fields {
             let ty = field.ty.clone().or_else(|| {
@@ -3089,12 +3507,14 @@ impl<'a> TypeChecker<'a> {
         let mut locals = outer_locals.cloned().unwrap_or_default();
         let mut actual_params = Vec::with_capacity(params.len());
         for (param, expected) in params.iter().zip(expected_params.iter()) {
-            let actual = param
-                .ty
-                .clone()
-                .or_else(|| (!mentions_type_parameter(expected)).then(|| expected.clone()))?;
+            let actual = param.ty.clone().or_else(|| {
+                (!mentions_type_parameter(&expected.ty)).then(|| expected.ty.clone())
+            })?;
             locals.insert(param.name.clone(), actual.clone());
-            actual_params.push(actual);
+            actual_params.push(CallableParamType {
+                name: param.name.clone(),
+                ty: actual,
+            });
         }
 
         let actual_return = match return_type {
@@ -3121,6 +3541,59 @@ impl<'a> TypeChecker<'a> {
         self.expectations.borrow_mut().insert(key, expected.clone());
     }
 
+    fn validate_named_argument_shape<F>(
+        &self,
+        callable: &str,
+        arguments: &[CallArg],
+        parameters: &[(String, SparType)],
+        is_required: F,
+        span: &Span,
+    ) -> Result<(), SparError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut seen = HashSet::new();
+        for argument in arguments {
+            if !seen.insert(argument.param_name.as_str()) {
+                return Err(SparError::TypeError {
+                    message: format!("duplicate argument '{}'", argument.param_name),
+                    hint: None,
+                    span: argument.param_name_span.clone(),
+                });
+            }
+            if !parameters
+                .iter()
+                .any(|(parameter_name, _)| parameter_name == &argument.param_name)
+            {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "{callable} has no parameter named '{}'",
+                        argument.param_name
+                    ),
+                    hint: parameters.first().map(|_| {
+                        let names = parameters
+                            .iter()
+                            .map(|(name, _)| format!("`{name}: ...`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("available named arguments: {names}")
+                    }),
+                    span: argument.param_name_span.clone(),
+                });
+            }
+        }
+        if let Some((missing, _)) = parameters.iter().find(|(parameter_name, _)| {
+            is_required(parameter_name) && !seen.contains(parameter_name.as_str())
+        }) {
+            return Err(SparError::TypeError {
+                message: format!("{callable} is missing required argument '{missing}'"),
+                hint: Some(format!("add `{missing}: ...` to the call")),
+                span: span.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn instantiate_call(
         &self,
         name: &str,
@@ -3130,23 +3603,66 @@ impl<'a> TypeChecker<'a> {
         span: &Span,
     ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
         if name == "panic" {
-            return Ok((SparType::Void, vec![("message".to_string(), SparType::Str)]));
+            let parameters = vec![("message".to_string(), SparType::Str)];
+            self.validate_named_argument_shape(
+                "function 'panic'",
+                arguments,
+                &parameters,
+                |_| true,
+                span,
+            )?;
+            return Ok((SparType::Void, parameters));
         }
         if !name.contains("::") {
-            if let Some(parameters) = self.constructor_parameters(name) {
-                if !type_arguments.is_empty() {
+            if self.constructor_parameters(name).is_some() {
+                let entry = self.symbols.types.get(name).expect("struct metadata registered");
+                if type_arguments.len() != entry.type_parameters.len() {
                     return Err(SparError::TypeError {
-                        message: format!(
-                            "struct constructor '{name}' does not accept call-site type arguments"
-                        ),
-                        hint: None,
-                        span: span.clone(),
+                        message: format!("struct '{name}' expects {} type arguments, found {}", entry.type_parameters.len(), type_arguments.len()),
+                        hint: None, span: span.clone(),
                     });
                 }
-                return Ok((SparType::Named(name.to_string()), parameters));
+                let owner = if type_arguments.is_empty() { SparType::Named(name.to_string()) }
+                    else { SparType::Applied { name: name.to_string(), arguments: type_arguments.to_vec() } };
+                let (_, fields) = Self::fields_for_type(&owner, self.symbols).expect("checked struct arity");
+                let parameters = fields.iter().map(|field| (field.name.clone(), self.field_shape_to_type(&field.shape))).collect::<Vec<_>>();
+                self.validate_named_argument_shape(
+                    &format!("struct constructor '{name}'"), arguments, &parameters,
+                    |field| fields.iter().any(|candidate| candidate.name == field && candidate.default.is_none()), span,
+                )?;
+                return Ok((owner, parameters));
             }
         }
         let Some(entry) = self.call_entry(name) else {
+            if !name.contains("::") {
+                let callable = locals
+                    .and_then(|locals| locals.get(name).cloned())
+                    .or_else(|| {
+                        let reference = NamespaceRef {
+                            segments: vec![name.to_string()],
+                            span: span.clone(),
+                        };
+                        self.infer_namespace_type(&reference)
+                    });
+                if let Some(SparType::Function {
+                    params,
+                    return_type,
+                }) = callable
+                {
+                    let parameters = params
+                        .into_iter()
+                        .map(|parameter| (parameter.name, parameter.ty))
+                        .collect::<Vec<_>>();
+                    self.validate_named_argument_shape(
+                        &format!("callable '{name}'"),
+                        arguments,
+                        &parameters,
+                        |_| true,
+                        span,
+                    )?;
+                    return Ok((*return_type, parameters));
+                }
+            }
             let segments: Vec<&str> = name.split("::").collect();
             if let [namespace, function] = segments.as_slice() {
                 if let Some(host) = self
@@ -3155,8 +3671,10 @@ impl<'a> TypeChecker<'a> {
                     .get(&(namespace.to_string(), function.to_string()))
                 {
                     return self.instantiate_external_signature(
+                        name,
                         &host.ret,
                         &host.params,
+                        type_arguments,
                         arguments,
                         locals,
                         span,
@@ -3168,8 +3686,10 @@ impl<'a> TypeChecker<'a> {
                     .get(&(namespace.to_string(), function.to_string()))
                 {
                     return self.instantiate_external_signature(
+                        name,
                         &native.ret,
                         &native.params,
+                        type_arguments,
                         arguments,
                         locals,
                         span,
@@ -3185,6 +3705,14 @@ impl<'a> TypeChecker<'a> {
                     span: span.clone(),
                 });
         };
+
+        self.validate_named_argument_shape(
+            &format!("function '{name}'"),
+            arguments,
+            &entry.params,
+            |parameter_name| !entry.default_params.contains(parameter_name),
+            span,
+        )?;
 
         let mut substitution = TypeSubstitution::new();
         for (parameter, argument) in entry.type_parameters.iter().zip(type_arguments) {
@@ -3282,13 +3810,45 @@ impl<'a> TypeChecker<'a> {
     /// in the registered signature is universally quantified for that call.
     fn instantiate_external_signature(
         &self,
+        name: &str,
         ret: &SparType,
         params: &[(String, SparType)],
+        type_arguments: &[SparType],
         arguments: &[CallArg],
         locals: Option<&HashMap<String, SparType>>,
-        _span: &Span,
+        span: &Span,
     ) -> Result<(SparType, Vec<(String, SparType)>), SparError> {
+        self.validate_named_argument_shape(
+            "native/host function",
+            arguments,
+            params,
+            |_| true,
+            span,
+        )?;
+        let type_parameters = external_type_parameter_names(params, ret);
+        if type_parameters.is_empty() && !type_arguments.is_empty() {
+            return Err(SparError::TypeError {
+                message: format!("native/host function '{name}' does not accept type arguments"),
+                hint: None,
+                span: span.clone(),
+            });
+        }
+        if type_arguments.len() > type_parameters.len() {
+            return Err(SparError::TypeError {
+                message: format!(
+                    "native/host function '{name}' accepts at most {} type argument{}, found {}",
+                    type_parameters.len(),
+                    if type_parameters.len() == 1 { "" } else { "s" },
+                    type_arguments.len()
+                ),
+                hint: None,
+                span: span.clone(),
+            });
+        }
         let mut substitution = TypeSubstitution::new();
+        for (parameter, argument) in type_parameters.iter().zip(type_arguments) {
+            substitution.insert(parameter.clone(), argument.clone());
+        }
         for closures_pass in [false, true] {
             for argument in arguments {
                 if is_untyped_closure_expr(&argument.value) != closures_pass {
@@ -3324,6 +3884,36 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
+        if type_parameters
+            .iter()
+            .any(|parameter| !substitution.contains_key(parameter))
+        {
+            let expected = self
+                .expectations
+                .borrow()
+                .get(&(span.start, span.end))
+                .cloned();
+            if let Some(expected) = expected {
+                let mut trial = substitution.clone();
+                if unify_generic(ret, &expected, &mut trial, span).is_ok() {
+                    substitution = trial;
+                }
+            }
+        }
+
+        if let Some(parameter) = type_parameters
+            .iter()
+            .find(|parameter| !substitution.contains_key(*parameter))
+        {
+            return Err(SparError::TypeError {
+                message: format!(
+                    "cannot infer type parameter '{parameter}' for native/host function '{name}'; add an explicit type argument such as {name}<{parameter}>(...)"
+                ),
+                hint: Some("supply an explicit leading type argument".into()),
+                span: span.clone(),
+            });
+        }
+
         Ok((
             substitute_type(ret, &substitution),
             params
@@ -3331,282 +3921,6 @@ impl<'a> TypeChecker<'a> {
                 .map(|(name, ty)| (name.clone(), substitute_type(ty, &substitution)))
                 .collect(),
         ))
-    }
-
-    /// Coarse structural shape check: does this object literal have every
-    /// required field of `name`'s declared type, correctly typed (for
-    /// primitive fields — nested/Named fields recurse), with no extra
-    /// fields? No per-field error detail (unlike `validate_type_fields`) —
-    /// intentionally matches `check_call`'s existing whole-argument error
-    /// granularity, not a shortcut.
-    fn object_matches_named_type(&self, items: &[SectionItem], name: &str) -> bool {
-        let Some(entry) = self.symbols.types.get(name) else {
-            return false;
-        };
-        let config_fields: Vec<&FieldDecl> = items
-            .iter()
-            .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
-                    Some(f)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for tf in &entry.fields {
-            let cf = config_fields.iter().find(|f| f.name == tf.name);
-            match cf {
-                None if !tf.optional => return false,
-                None => continue,
-                Some(cf) => match &tf.shape {
-                    TypeFieldShape::Primitive(expected_ty) => {
-                        let actual = match &cf.ty {
-                            Some(t) => Some(t.clone()),
-                            None => match &cf.value {
-                                Some(FieldValue::Expr(e)) => self.infer_type(e),
-                                _ => None,
-                            },
-                        };
-                        if actual.as_ref() != Some(expected_ty) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.nested_items_match_type_fields(nested_items, nested) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.object_matches_named_type(nested_items, other_name) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::TypeParameter(expected) => {
-                        let actual = cf.ty.clone().or_else(|| match &cf.value {
-                            Some(FieldValue::Expr(expression)) => self.infer_type(expression),
-                            _ => None,
-                        });
-                        if actual != Some(SparType::TypeParameter(expected.clone())) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Applied { name, arguments } => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.object_matches_type(
-                            nested_items,
-                            &SparType::Applied {
-                                name: name.clone(),
-                                arguments: arguments.clone(),
-                            },
-                        ) {
-                            return false;
-                        }
-                    }
-                },
-            }
-        }
-        for cf in &config_fields {
-            if !entry.fields.iter().any(|tf| tf.name == cf.name) {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn object_matches_type(&self, items: &[SectionItem], ty: &SparType) -> bool {
-        let Some((_, fields)) = self.type_fields_for(ty) else {
-            return false;
-        };
-        self.nested_items_match_type_fields(items, &fields)
-    }
-
-    /// Locals-aware twin of `object_matches_named_type`, for a call
-    /// argument built inside a function body.
-    fn object_matches_named_type_with_locals(
-        &self,
-        items: &[SectionItem],
-        name: &str,
-        locals: &HashMap<String, SparType>,
-    ) -> bool {
-        let Some(entry) = self.symbols.types.get(name) else {
-            return false;
-        };
-        let config_fields: Vec<&FieldDecl> = items
-            .iter()
-            .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
-                    Some(f)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for tf in &entry.fields {
-            let cf = config_fields.iter().find(|f| f.name == tf.name);
-            match cf {
-                None if !tf.optional => return false,
-                None => continue,
-                Some(cf) => match &tf.shape {
-                    TypeFieldShape::Primitive(expected_ty) => {
-                        let actual = match &cf.ty {
-                            Some(t) => Some(t.clone()),
-                            None => match &cf.value {
-                                Some(FieldValue::Expr(e)) => self.infer_type_with_locals(e, locals),
-                                _ => None,
-                            },
-                        };
-                        if actual.as_ref() != Some(expected_ty) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.nested_items_match_type_fields(nested_items, nested) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.object_matches_named_type_with_locals(
-                            nested_items,
-                            other_name,
-                            locals,
-                        ) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::TypeParameter(expected) => {
-                        let actual = cf.ty.clone().or_else(|| match &cf.value {
-                            Some(FieldValue::Expr(expression)) => {
-                                self.infer_type_with_locals(expression, locals)
-                            }
-                            _ => None,
-                        });
-                        if actual != Some(SparType::TypeParameter(expected.clone())) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Applied { name, arguments } => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        let applied = SparType::Applied {
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        };
-                        let Some((_, fields)) = self.type_fields_for(&applied) else {
-                            return false;
-                        };
-                        if !self.nested_items_match_type_fields(nested_items, &fields) {
-                            return false;
-                        }
-                    }
-                },
-            }
-        }
-        for cf in &config_fields {
-            if !entry.fields.iter().any(|tf| tf.name == cf.name) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Structural check for a nested `section`-shaped field (not a `Named`
-    /// type — an inline `TypeFieldShape::Section(...)`).
-    fn nested_items_match_type_fields(
-        &self,
-        items: &[SectionItem],
-        type_fields: &[TypeField],
-    ) -> bool {
-        let config_fields: Vec<&FieldDecl> = items
-            .iter()
-            .filter_map(|i| {
-                if let SectionItem::Field(f) = i {
-                    Some(f)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for tf in type_fields {
-            let cf = config_fields.iter().find(|f| f.name == tf.name);
-            match cf {
-                None if !tf.optional => return false,
-                None => continue,
-                Some(cf) => match &tf.shape {
-                    TypeFieldShape::Primitive(expected_ty) => {
-                        let actual = match &cf.ty {
-                            Some(t) => Some(t.clone()),
-                            None => match &cf.value {
-                                Some(FieldValue::Expr(e)) => self.infer_type(e),
-                                _ => None,
-                            },
-                        };
-                        if actual.as_ref() != Some(expected_ty) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Section(nested) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.nested_items_match_type_fields(nested_items, nested) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Named(other_name) => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.object_matches_named_type(nested_items, other_name) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::TypeParameter(expected) => {
-                        let actual = cf.ty.clone().or_else(|| match &cf.value {
-                            Some(FieldValue::Expr(expression)) => self.infer_type(expression),
-                            _ => None,
-                        });
-                        if actual != Some(SparType::TypeParameter(expected.clone())) {
-                            return false;
-                        }
-                    }
-                    TypeFieldShape::Applied { name, arguments } => {
-                        let Some(FieldValue::Nested(nested_items)) = &cf.value else {
-                            return false;
-                        };
-                        if !self.object_matches_type(
-                            nested_items,
-                            &SparType::Applied {
-                                name: name.clone(),
-                                arguments: arguments.clone(),
-                            },
-                        ) {
-                            return false;
-                        }
-                    }
-                },
-            }
-        }
-        for cf in &config_fields {
-            if !type_fields.iter().any(|tf| tf.name == cf.name) {
-                return false;
-            }
-        }
-        true
     }
 
     fn check_call(&self, call: &Expr) -> Result<(), SparError> {
@@ -3645,45 +3959,26 @@ impl<'a> TypeChecker<'a> {
             else {
                 continue;
             };
-            if let Expr::Object(items, _) = &argument.value {
-                let ok = match locals {
-                    Some(locals) => match expected {
-                        SparType::Named(name) if name == "Record" => true,
-                        SparType::Named(name) => {
-                            self.object_matches_named_type_with_locals(items, name, locals)
-                        }
-                        SparType::Applied { .. } => {
-                            self.type_fields_for(expected).is_some_and(|(_, fields)| {
-                                self.nested_items_match_type_fields(items, &fields)
-                            })
-                        }
-                        _ => false,
-                    },
-                    None => match expected {
-                        SparType::Named(name) if name == "Record" => true,
-                        SparType::Named(name) => self.object_matches_named_type(items, name),
-                        SparType::Applied { .. } => self.object_matches_type(items, expected),
-                        _ => false,
-                    },
-                };
-                if !ok {
-                    return Err(SparError::TypeError {
-                        message: format!(
-                            "argument '{}' expects {} but this object literal doesn't match its shape",
-                            argument.param_name,
-                            display_type(expected),
-                        ),
-                        hint: None,
-                        span: argument.span.clone(),
-                    });
-                }
+            if self.validate_literal_expected(
+                &argument.value,
+                expected,
+                locals,
+                &format!("argument '{}'", argument.param_name),
+                &argument.span,
+            )? {
                 continue;
             }
             let actual = match locals {
                 Some(locals) => self.infer_type_with_locals(&argument.value, locals),
                 None => self.infer_type(&argument.value),
-            };
-            if actual.as_ref() != Some(expected) && !lookup_accepts(expected, actual.as_ref()) {
+            }.or_else(|| self.infer_closure_signature_for_pattern(
+                &argument.value, expected, &TypeSubstitution::new(), locals,
+            ));
+            if !actual
+                .as_ref()
+                .is_some_and(|actual| is_assignable(expected, actual))
+                && !lookup_accepts(expected, actual.as_ref())
+            {
                 return Err(SparError::TypeError {
                     message: format!(
                         "argument '{}' expects {} but got {}",
@@ -3720,12 +4015,12 @@ impl<'a> TypeChecker<'a> {
             Expr::Object(items, _) => {
                 for item in items {
                     match item {
-                        SectionItem::Field(f) => {
+                        ObjectItem::Field(f) => {
                             if let Some(FieldValue::Expr(e)) = &f.value {
                                 self.check_expr_with_locals_in_context(e, locals, is_async)?;
                             }
                         }
-                        SectionItem::Spread(sp) => {
+                        ObjectItem::Spread(sp) => {
                             self.check_expr_with_locals_in_context(&sp.expr, locals, is_async)?
                         }
                     }
@@ -3777,7 +4072,7 @@ impl<'a> TypeChecker<'a> {
                 if self.call_entry(&fc.name).is_some()
                     || self.constructor_parameters(&fc.name).is_some()
                 {
-                    self.instantiate_positional_named_call(fc, Some(locals))?;
+                    self.instantiate_named_fn_call(fc, Some(locals))?;
                 }
                 Ok(())
             }
@@ -3880,7 +4175,7 @@ impl<'a> TypeChecker<'a> {
                 let receiver_is_static = matches!(receiver.as_ref(), Expr::NamespaceRef(reference)
                     if reference.segments.len() == 1
                     && !locals.contains_key(&reference.segments[0])
-                    && self.symbols.lookup_section(&reference.segments).is_some_and(|section| section.canonical));
+                    && self.symbols.lookup_struct(&reference.segments).is_some());
                 if receiver_is_static == entry.has_receiver {
                     return Err(SparError::TypeError {
                         message: if receiver_is_static {
@@ -3901,11 +4196,19 @@ impl<'a> TypeChecker<'a> {
                     });
                 }
                 if entry.receiver_mutable {
-                    if !matches!(receiver.as_ref(), Expr::NamespaceRef(reference) if reference.segments.len() == 1)
-                    {
+                    fn receiver_root(expr: &Expr) -> Option<&str> {
+                        match expr {
+                            Expr::NamespaceRef(reference) if reference.segments.len() == 1 => {
+                                Some(reference.segments[0].as_str())
+                            }
+                            Expr::FieldAccess { base, .. } => receiver_root(base),
+                            _ => None,
+                        }
+                    }
+                    let Some(binding) = receiver_root(receiver) else {
                         return Err(SparError::TypeError {
                             message: format!(
-                                "mutable method '{method}' requires a mutable binding receiver"
+                                "mutable method '{method}' requires a mutable lvalue receiver"
                             ),
                             hint: Some(
                                 "store the value in a `var mut` binding before calling the method"
@@ -3913,20 +4216,23 @@ impl<'a> TypeChecker<'a> {
                             ),
                             span: span.clone(),
                         });
-                    }
-                    if let Expr::NamespaceRef(reference) = receiver.as_ref() {
-                        if reference.segments.len() == 1 {
-                            let binding = &reference.segments[0];
-                            if locals.contains_key(binding)
-                                && !self.mutable_bindings.contains(binding)
-                            {
-                                return Err(SparError::TypeError {
-                                    message: format!("mutable method '{method}' requires mutable binding '{binding}'"),
-                                    hint: Some(format!("declare it as `var mut {binding} = ...`")),
-                                    span: span.clone(),
-                                });
-                            }
-                        }
+                    };
+                    let receiver_is_mutable = if locals.contains_key(binding) {
+                        self.mutable_bindings.contains(binding)
+                    } else {
+                        matches!(
+                            self.symbols.lookup_global(binding),
+                            Some(GlobalEntry::Var { mutable: true, .. })
+                        )
+                    };
+                    if !receiver_is_mutable {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "mutable method '{method}' requires mutable binding '{binding}'"
+                            ),
+                            hint: Some(format!("declare it as `var mut {binding} = ...`")),
+                            span: span.clone(),
+                        });
                     }
                 }
                 let params = if entry.has_receiver {
@@ -3934,12 +4240,32 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     &entry.function.params[..]
                 };
-                if args.len() != params.len() {
+                let mut seen = HashSet::new();
+                for argument in args {
+                    if !seen.insert(argument.param_name.as_str()) {
+                        return Err(SparError::TypeError {
+                            message: format!("duplicate argument '{}'", argument.param_name),
+                            hint: None,
+                            span: argument.param_name_span.clone(),
+                        });
+                    }
+                    if !params.iter().any(|(name, _)| name == &argument.param_name) {
+                        return Err(SparError::TypeError {
+                            message: format!(
+                                "method '{method}' has no parameter named '{}'",
+                                argument.param_name
+                            ),
+                            hint: None,
+                            span: argument.param_name_span.clone(),
+                        });
+                    }
+                }
+                if let Some((missing, _)) = params.iter().find(|(name, _)| {
+                    !entry.function.default_params.contains(name) && !seen.contains(name.as_str())
+                }) {
                     return Err(SparError::TypeError {
                         message: format!(
-                            "method '{method}' expects {} argument(s), got {}",
-                            params.len(),
-                            args.len()
+                            "method '{method}' is missing required argument '{missing}'"
                         ),
                         hint: None,
                         span: span.clone(),
@@ -3960,40 +4286,54 @@ impl<'a> TypeChecker<'a> {
                         )?;
                     }
                 }
-                for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
-                    let actual = self.infer_type_with_locals(argument, locals).or_else(|| {
-                        self.infer_closure_signature_for_pattern(
-                            argument,
-                            pattern,
-                            &substitution,
-                            Some(locals),
-                        )
-                    });
+                for argument in args {
+                    let (_, pattern) = params
+                        .iter()
+                        .find(|(name, _)| name == &argument.param_name)
+                        .expect("named method argument was validated above");
+                    let actual = self
+                        .infer_type_with_locals(&argument.value, locals)
+                        .or_else(|| {
+                            self.infer_closure_signature_for_pattern(
+                                &argument.value,
+                                pattern,
+                                &substitution,
+                                Some(locals),
+                            )
+                        });
                     if let Some(actual) = actual {
-                        let argument_span =
-                            argument.span().cloned().unwrap_or_else(|| span.clone());
-                        unify_generic(pattern, &actual, &mut substitution, &argument_span)?;
+                        unify_generic(pattern, &actual, &mut substitution, &argument.span)?;
                     }
                 }
 
-                for (argument, (_, pattern)) in args.iter().zip(params.iter()) {
+                for argument in args {
+                    let (_, pattern) = params
+                        .iter()
+                        .find(|(name, _)| name == &argument.param_name)
+                        .expect("named method argument was validated above");
                     let expected = substitute_type(pattern, &substitution);
-                    if matches!(argument, Expr::Closure { .. })
+                    if matches!(&argument.value, Expr::Closure { .. })
                         && matches!(expected, SparType::Function { .. })
                     {
-                        self.check_closure_against_expected(argument, &expected, locals, is_async)?;
+                        self.check_closure_against_expected(
+                            &argument.value,
+                            &expected,
+                            locals,
+                            is_async,
+                        )?;
                     } else {
-                        self.check_expr_with_locals_in_context(argument, locals, is_async)?;
-                        if let Some(actual) = self.infer_type_with_locals(argument, locals) {
-                            if actual != expected {
+                        self.check_expr_with_locals_in_context(&argument.value, locals, is_async)?;
+                        if let Some(actual) = self.infer_type_with_locals(&argument.value, locals) {
+                            if !is_assignable(&expected, &actual) {
                                 return Err(SparError::TypeError {
                                     message: format!(
-                                        "method '{method}' argument expects '{}' but received '{}'",
+                                        "method '{method}' argument '{}' expects '{}' but received '{}'",
+                                        argument.param_name,
                                         display_type(&expected),
                                         display_type(&actual)
                                     ),
                                     hint: await_hint(&expected, &actual),
-                                    span: span.clone(),
+                                    span: argument.span.clone(),
                                 });
                             }
                         }
@@ -4015,10 +4355,18 @@ impl<'a> TypeChecker<'a> {
                 match stage.as_ref() {
                     Expr::FnCall(call) => {
                         for (index, argument) in call.args.iter().enumerate() {
-                            if is_deferred(argument) {
-                                deferred.push((argument, Some(index), None));
+                            if is_deferred(&argument.value) {
+                                deferred.push((
+                                    &argument.value,
+                                    Some(index),
+                                    Some(&argument.param_name),
+                                ));
                             } else {
-                                self.check_expr_with_locals_in_context(argument, locals, is_async)?;
+                                self.check_expr_with_locals_in_context(
+                                    &argument.value,
+                                    locals,
+                                    is_async,
+                                )?;
                             }
                         }
                     }
@@ -4225,7 +4573,7 @@ impl<'a> TypeChecker<'a> {
 
     // ── Function declaration type checking ────────────────────────────────────
 
-    /// Task parameters must be scalar (no `list`/`section` — a shell
+    /// Task parameters must be scalar (no `list`/inline record — a shell
     /// argument is always a single string on the command line), metadata
     /// fields must type as their expected scalar (`description`/`cwd`/
     /// env values as `str`, `default`/`quiet` as `bool`), and every `run`
@@ -4237,7 +4585,7 @@ impl<'a> TypeChecker<'a> {
         for param in &decl.params {
             if matches!(
                 param.ty,
-                SparType::Section | SparType::List(_) | SparType::Shell
+                SparType::InlineRecord | SparType::List(_) | SparType::Shell
             ) {
                 self.push_type_error(
                     format!(
@@ -4391,16 +4739,39 @@ impl<'a> TypeChecker<'a> {
 
     fn check_function_decl(&mut self, f: &FunctionDecl) {
         self.reject_discarded_shell_plans(&f.body.stmts);
+        let mut default_locals = HashMap::new();
         for param in &f.params {
             let Some(default) = &param.default else {
+                default_locals.insert(param.name.clone(), param.ty.clone());
                 continue;
             };
-            if let Err(error) = self.check_expr_with_locals(default, &HashMap::new()) {
+            self.expect_call_type(default, &param.ty);
+            if let Err(error) = self.check_expr_with_locals(default, &default_locals) {
                 self.errors.push(error);
                 continue;
             }
-            let actual = self.infer_type(default);
-            if actual.as_ref() != Some(&param.ty) {
+            match self.validate_literal_expected(
+                default,
+                &param.ty,
+                Some(&default_locals),
+                &param.name,
+                &param.span,
+            ) {
+                Ok(true) => {
+                    default_locals.insert(param.name.clone(), param.ty.clone());
+                    continue;
+                }
+                Err(error) => {
+                    self.errors.push(error);
+                    continue;
+                }
+                Ok(false) => {}
+            }
+            let actual = self.infer_type_with_locals(default, &default_locals);
+            if !actual
+                .as_ref()
+                .is_some_and(|actual| is_assignable(&param.ty, actual))
+            {
                 self.push_type_error(
                     format!(
                         "parameter '{}' default must be a {}, found {}",
@@ -4415,6 +4786,7 @@ impl<'a> TypeChecker<'a> {
                     param.span.clone(),
                 );
             }
+            default_locals.insert(param.name.clone(), param.ty.clone());
         }
 
         let mut local_types: HashMap<String, SparType> = f
@@ -4477,22 +4849,33 @@ impl<'a> TypeChecker<'a> {
         }
 
         let mut locals = outer_locals.clone();
-        for (param, expected_ty) in params.iter().zip(expected_params) {
+        for (param, expected_param) in params.iter().zip(expected_params) {
+            if !is_legacy_callable_param(&expected_param.name) && param.name != expected_param.name
+            {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "closure parameter is named '{}' but target callable expects '{}'",
+                        param.name, expected_param.name
+                    ),
+                    hint: Some("callable parameter names are part of the function type".into()),
+                    span: param.span.clone(),
+                });
+            }
             if let Some(explicit) = &param.ty {
-                if explicit != expected_ty {
+                if explicit != &expected_param.ty {
                     return Err(SparError::TypeError {
                         message: format!(
                             "closure parameter '{}' has type '{}' but expected '{}'",
                             param.name,
                             display_type(explicit),
-                            display_type(expected_ty)
+                            display_type(&expected_param.ty)
                         ),
                         hint: None,
                         span: param.span.clone(),
                     });
                 }
             }
-            locals.insert(param.name.clone(), expected_ty.clone());
+            locals.insert(param.name.clone(), expected_param.ty.clone());
         }
 
         if let Some(explicit_return) = return_type {
@@ -4522,7 +4905,7 @@ impl<'a> TypeChecker<'a> {
                         span: span.clone(),
                     }
                 })?;
-                if &actual != expected_return.as_ref() {
+                if !is_assignable(expected_return.as_ref(), &actual) {
                     return Err(SparError::TypeError {
                         message: format!(
                             "closure returns '{}' but expected '{}'",
@@ -4589,80 +4972,31 @@ impl<'a> TypeChecker<'a> {
                         self.errors.push(e);
                     }
 
-                    let handled_as_named_object = match (lv.ty.as_ref(), &lv.value) {
-                        (
-                            Some(ty @ (SparType::Named(_) | SparType::Applied { .. })),
-                            Expr::Object(items, _),
-                        ) => {
-                            let config_fields: Vec<&FieldDecl> = items
-                                .iter()
-                                .filter_map(|i| {
-                                    if let SectionItem::Field(f) = i {
-                                        Some(f)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            if let Some((name, fields)) = self.type_fields_for(ty) {
-                                self.validate_type_fields_with_locals(
-                                    &fields,
-                                    &config_fields,
-                                    &name,
-                                    &lv.name,
-                                    local_types,
-                                );
+                    if let Some(declared) = lv.ty.as_ref() {
+                        match self.validate_literal_expected(
+                            &lv.value,
+                            declared,
+                            Some(local_types),
+                            &format!("local variable '{}'", lv.name),
+                            &lv.span,
+                        ) {
+                            Ok(true) => {
+                                local_types.insert(lv.name.clone(), declared.clone());
+                                continue;
                             }
-                            true
-                        }
-                        (Some(SparType::List(elem_ty)), Expr::List(elems, _))
-                            if matches!(
-                                elem_ty.as_ref(),
-                                SparType::Named(_) | SparType::Applied { .. }
-                            ) =>
-                        {
-                            for elem in elems {
-                                if let Expr::Object(items, _) = elem {
-                                    let config_fields: Vec<&FieldDecl> = items
-                                        .iter()
-                                        .filter_map(|i| {
-                                            if let SectionItem::Field(f) = i {
-                                                Some(f)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect();
-                                    if let Some((name, fields)) =
-                                        self.type_fields_for(elem_ty.as_ref())
-                                    {
-                                        self.validate_type_fields_with_locals(
-                                            &fields,
-                                            &config_fields,
-                                            &name,
-                                            &lv.name,
-                                            local_types,
-                                        );
-                                    }
-                                }
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.errors.push(error);
+                                local_types.insert(lv.name.clone(), declared.clone());
+                                continue;
                             }
-                            true
                         }
-                        _ => false,
-                    };
+                    }
 
-                    if handled_as_named_object {
-                        local_types.insert(
-                            lv.name.clone(),
-                            lv.ty
-                                .clone()
-                                .expect("named object handling requires a declared type"),
-                        );
-                    } else {
-                        let actual = self.infer_type_with_locals(&lv.value, local_types);
-                        match (lv.ty.as_ref(), actual) {
+                    let actual = self.infer_type_with_locals(&lv.value, local_types);
+                    match (lv.ty.as_ref(), actual) {
                             (Some(declared), Some(ref actual))
-                                if actual == declared
+                                if is_assignable(declared, actual)
                                     || matches!((declared, actual),
                                         (SparType::Named(left), SparType::Named(right))
                                             if (left == "ExecResult" && right == "ProcessResult")
@@ -4708,7 +5042,6 @@ impl<'a> TypeChecker<'a> {
                                 });
                             }
                         }
-                    }
                 }
                 FuncStmt::Expression(expr, _) => {
                     if let Err(error) =
@@ -4734,9 +5067,25 @@ impl<'a> TypeChecker<'a> {
                         .get(name)
                         .cloned()
                         .or_else(|| self.lookup_global_type(name));
+                    if let Some(expected) = expected.as_ref() {
+                        match self.validate_literal_expected(
+                            value,
+                            expected,
+                            Some(local_types),
+                            &format!("binding '{name}'"),
+                            span,
+                        ) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.errors.push(error);
+                                continue;
+                            }
+                        }
+                    }
                     let actual = self.infer_type_with_locals(value, local_types);
                     if let (Some(expected), Some(actual)) = (expected, actual) {
-                        if expected != actual {
+                        if !is_assignable(&expected, &actual) {
                             self.errors.push(SparError::TypeError {
                                 message: format!(
                                     "binding '{name}' has type '{}' but is assigned a value of type '{}'",
@@ -4768,9 +5117,25 @@ impl<'a> TypeChecker<'a> {
                         expected =
                             expected.and_then(|ty| self.infer_field_access_from_type(&ty, field));
                     }
+                    if let Some(expected) = expected.as_ref() {
+                        match self.validate_literal_expected(
+                            value,
+                            expected,
+                            Some(local_types),
+                            "field assignment",
+                            span,
+                        ) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.errors.push(error);
+                                continue;
+                            }
+                        }
+                    }
                     let actual = self.infer_type_with_locals(value, local_types);
                     if let (Some(expected), Some(actual)) = (expected, actual) {
-                        if expected != actual {
+                        if !is_assignable(&expected, &actual) {
                             self.errors.push(SparError::TypeError {
                                 message: format!(
                                     "field assignment has type '{}' but field expects '{}'",
@@ -4865,15 +5230,39 @@ impl<'a> TypeChecker<'a> {
                 return;
             }
         }
+
         if let ReturnValue::Expr(expr) = ret_value {
             self.expect_call_type(expr, ret_ty);
+            if !matches!(ret_ty, SparType::Void) {
+                match self.validate_literal_expected(
+                    expr,
+                    ret_ty,
+                    Some(local_types),
+                    "return value",
+                    span,
+                ) {
+                    Ok(true) => {
+                        if let Err(error) =
+                            self.check_expr_with_locals_in_context(expr, local_types, is_async)
+                        {
+                            self.errors.push(error);
+                        }
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.errors.push(error);
+                        return;
+                    }
+                }
+            }
         }
+
         match (ret_ty, ret_value) {
             (SparType::Void, ReturnValue::Void) => {}
-            (SparType::Void, ReturnValue::Expr(_) | ReturnValue::SectionBlock(_)) => {
+            (SparType::Void, ReturnValue::Expr(_)) => {
                 self.errors.push(SparError::TypeError {
-                    message: "function declares return type 'void' but this 'return' provides \
-                               a value — use bare 'return;'"
+                    message: "function declares return type 'void' but this 'return' provides a value — use bare 'return;'"
                         .to_string(),
                     hint: None,
                     span: span.clone(),
@@ -4889,55 +5278,41 @@ impl<'a> TypeChecker<'a> {
                     span: span.clone(),
                 });
             }
-            (SparType::Section, ReturnValue::SectionBlock(fields)) => {
-                for field in fields {
-                    if let Err(e) =
-                        self.check_expr_with_locals_in_context(&field.value, local_types, is_async)
-                    {
-                        self.errors.push(e);
-                    }
-                    let Some(field_ty) = &field.ty else {
-                        // A `section` return has no declared type to infer
-                        // this field's type from — same "must be explicit"
-                        // precedent as an untyped top-level section.
-                        self.errors.push(SparError::TypeError {
-                            message: format!(
-                                "return field '{}' has no type — a function returning 'section' \
-                                 has nothing to infer field types from; declare each field's type explicitly",
-                                field.name
-                            ),
-                            hint: None,
-                            span: field.span.clone(),
-                        });
-                        continue;
-                    };
-                    let actual = self.infer_type_with_locals(&field.value, local_types);
-                    if actual.as_ref() != Some(field_ty) {
-                        if let Some(actual_ty) = actual {
-                            self.errors.push(SparError::TypeError {
-                                message: format!(
-                                    "return field '{}' declared as '{}' but value has type '{}'",
-                                    field.name,
-                                    display_type(field_ty),
-                                    display_type(&actual_ty)
-                                ),
-                                hint: None,
-                                span: field.span.clone(),
-                            });
-                        }
-                    }
-                }
+
+            // Dynamic object literals are deliberately limited to dynamic data.
+            // They never act as an implicit constructor for a named structured type.
+            (SparType::Named(name), ReturnValue::Expr(Expr::Object(items, _)))
+                if name == "Record" =>
+            {
+                self.check_return_object_items(items, local_types, is_async);
             }
-            (SparType::Named(name), ReturnValue::SectionBlock(fields)) if name == "Record" => {
-                for field in fields {
-                    if let Err(error) =
-                        self.check_expr_with_locals_in_context(&field.value, local_types, is_async)
-                    {
-                        self.errors.push(error);
-                    }
-                }
+            (SparType::Applied { name, .. }, ReturnValue::Expr(Expr::Object(items, _)))
+                if name == "Map" =>
+            {
+                self.check_return_object_items(items, local_types, is_async);
             }
-            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _))) if matches!(elem_ty.as_ref(), SparType::Named(name) if name == "Record") => {
+            (
+                ty @ (SparType::Named(_) | SparType::Applied { .. }),
+                ReturnValue::Expr(Expr::Object(_, _)),
+            ) => {
+                let expected = display_type(ty);
+                self.errors.push(SparError::TypeError {
+                    message: format!(
+                        "function declares return type '{expected}', but `{{ ... }}` is a dynamic object literal — return a named value instead"
+                    ),
+                    hint: Some(format!(
+                        "construct the return value explicitly with `{expected}(field: value, ...)`"
+                    )),
+                    span: span.clone(),
+                });
+            }
+
+            // A list of dynamic records/maps may contain object literals; a list of
+            // named structured values must contain explicit constructors.
+            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _)))
+                if matches!(elem_ty.as_ref(), SparType::Named(name) if name == "Record")
+                    || matches!(elem_ty.as_ref(), SparType::Applied { name, .. } if name == "Map") =>
+            {
                 for item in items {
                     if let Err(error) =
                         self.check_expr_with_locals_in_context(item, local_types, is_async)
@@ -4946,112 +5321,51 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            (SparType::Section, ReturnValue::Expr(_)) => {
+            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _)))
+                if matches!(
+                    elem_ty.as_ref(),
+                    SparType::Named(_) | SparType::Applied { .. }
+                ) && items.iter().any(|item| matches!(item, Expr::Object(_, _))) =>
+            {
+                let expected = display_type(elem_ty.as_ref());
                 self.errors.push(SparError::TypeError {
-                    message: "function declares return type 'section' but this 'return' \
-                               provides an expression — use 'return { field: type = expr; ... };'"
+                    message: format!(
+                        "function returns a list of `{expected}`, but one or more elements use `{{ ... }}` — typed list elements require named constructors"
+                    ),
+                    hint: Some(format!(
+                        "construct each element explicitly with `{expected}(...)`"
+                    )),
+                    span: span.clone(),
+                });
+            }
+
+            // InlineRecord is an internal migration marker only. Source code can
+            // no longer declare an inline-record return type.
+            (SparType::InlineRecord, ReturnValue::Expr(_)) => {
+                self.errors.push(SparError::TypeError {
+                    message: "anonymous typed object returns are no longer supported — return a named struct value, or use `Record`/`Map` for dynamic data"
                         .to_string(),
                     hint: None,
                     span: span.clone(),
                 });
             }
-            (
-                ty @ (SparType::Named(_) | SparType::Applied { .. }),
-                ReturnValue::SectionBlock(fields),
-            ) => {
-                let Some((name, type_fields)) = self.type_fields_for(ty) else {
-                    return;
-                };
-                for rf in fields {
-                    if let Err(e) =
-                        self.check_expr_with_locals_in_context(&rf.value, local_types, is_async)
-                    {
-                        self.errors.push(e);
-                    }
-                }
-                let config_fields: Vec<FieldDecl> = fields
-                    .iter()
-                    .map(|rf| FieldDecl {
-                        name: rf.name.clone(),
-                        optional: false,
-                        ty: rf.ty.clone(),
-                        value: Some(FieldValue::Expr(rf.value.clone())),
-                        span: rf.span.clone(),
-                        end_line: rf.span.line,
-                    })
-                    .collect();
-                let config_field_refs: Vec<&FieldDecl> = config_fields.iter().collect();
-                self.validate_type_fields_with_locals(
-                    &type_fields,
-                    &config_field_refs,
-                    &name,
-                    "return",
-                    local_types,
-                );
-            }
-            (SparType::List(elem_ty), ReturnValue::Expr(Expr::List(items, _)))
-                if matches!(
-                    elem_ty.as_ref(),
-                    SparType::Named(_) | SparType::Applied { .. }
-                ) =>
-            {
-                let Some((name, type_fields)) = self.type_fields_for(elem_ty.as_ref()) else {
-                    return;
-                };
-                for item in items {
-                    if let Expr::Object(obj_items, _) = item {
-                        if let Err(e) =
-                            self.check_expr_with_locals_in_context(item, local_types, is_async)
-                        {
-                            self.errors.push(e);
-                        }
-                        let config_fields: Vec<&FieldDecl> = obj_items
-                            .iter()
-                            .filter_map(|i| {
-                                if let SectionItem::Field(f) = i {
-                                    Some(f)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        self.validate_type_fields_with_locals(
-                            &type_fields,
-                            &config_fields,
-                            &name,
-                            "return",
-                            local_types,
-                        );
-                    } else {
-                        self.errors.push(SparError::TypeError {
-                            message: format!(
-                                "function declares return type '[{}]' but this list element is not an object literal",
-                                name
-                            ),
-                            hint: None,
-                            span: span.clone(),
-                        });
-                    }
-                }
-            }
-            (ty, ReturnValue::Expr(e)) => {
-                if let Err(err) = self.check_expr_with_locals_in_context(e, local_types, is_async) {
-                    self.errors.push(err);
+
+            (ty, ReturnValue::Expr(expr)) => {
+                if let Err(error) =
+                    self.check_expr_with_locals_in_context(expr, local_types, is_async)
+                {
+                    self.errors.push(error);
                 }
 
-                // A generic function body is checked before any call-site
-                // substitution exists.  `T` is therefore intentionally
-                // unresolved here: validate the expression itself, but do
-                // not reject a concrete body expression merely because it
-                // cannot equal the type parameter until invocation-time
-                // inference/substitution has happened.  Generic operations
-                // are still validated by check_expr_with_locals_in_context.
                 if matches!(ty, SparType::TypeParameter(_)) {
                     return;
                 }
 
-                let actual = self.infer_type_with_locals(e, local_types);
-                if actual.as_ref() != Some(ty) {
+                let actual = self.infer_type_with_locals(expr, local_types);
+                if !actual
+                    .as_ref()
+                    .is_some_and(|actual| is_assignable(ty, actual))
+                {
                     self.errors.push(SparError::TypeError {
                         message: format!(
                             "function declares return type '{}' but this 'return' provides '{}'",
@@ -5066,16 +5380,33 @@ impl<'a> TypeChecker<'a> {
                     });
                 }
             }
-            (ty, ReturnValue::SectionBlock(_)) => {
-                self.errors.push(SparError::TypeError {
-                    message: format!(
-                        "function declares return type '{}' but this 'return' provides a \
-                         section block — only functions returning 'section' can use '{{ ... }}'",
-                        display_type(ty)
-                    ),
-                    hint: None,
-                    span: span.clone(),
-                });
+        }
+    }
+
+    fn check_return_object_items(
+        &mut self,
+        items: &[ObjectItem],
+        local_types: &HashMap<String, SparType>,
+        is_async: bool,
+    ) {
+        for item in items {
+            match item {
+                ObjectItem::Field(field) => {
+                    if let Some(FieldValue::Expr(value)) = &field.value {
+                        if let Err(error) =
+                            self.check_expr_with_locals_in_context(value, local_types, is_async)
+                        {
+                            self.errors.push(error);
+                        }
+                    }
+                }
+                ObjectItem::Spread(spread) => {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(&spread.expr, local_types, is_async)
+                    {
+                        self.errors.push(error);
+                    }
+                }
             }
         }
     }
@@ -5142,7 +5473,7 @@ impl<'a> TypeChecker<'a> {
                     "bool" => return Some(SparType::Bool),
                     _ => {}
                 }
-                if let Ok(Some(ret)) = self.instantiate_positional_named_call(fc, Some(locals)) {
+                if let Ok(Some(ret)) = self.instantiate_named_fn_call(fc, Some(locals)) {
                     return Some(ret);
                 }
                 let callable = locals.get(&fc.name).cloned().or_else(|| {
@@ -5157,8 +5488,16 @@ impl<'a> TypeChecker<'a> {
                         params,
                         return_type,
                     } if params.len() == fc.args.len() => {
-                        if fc.args.iter().zip(params.iter()).all(|(arg, expected)| {
-                            self.infer_type_with_locals(arg, locals).as_ref() == Some(expected)
+                        if fc.args.iter().all(|arg| {
+                            let Some(expected) = params
+                                .iter()
+                                .find(|parameter| parameter.name == arg.param_name)
+                            else {
+                                return false;
+                            };
+                            self.infer_type_with_locals(&arg.value, locals)
+                                .as_ref()
+                                .is_some_and(|actual| is_assignable(&expected.ty, actual))
                         }) {
                             Some(*return_type)
                         } else {
@@ -5188,7 +5527,7 @@ impl<'a> TypeChecker<'a> {
                                 _ => None,
                             };
                         }
-                        if self.symbols.lookup_section(&nr.segments).is_some() {
+                        if self.symbols.lookup_struct(&nr.segments).is_some() {
                             return self.infer_field_access(base, field);
                         }
                     }
@@ -5207,20 +5546,18 @@ impl<'a> TypeChecker<'a> {
             Expr::StructuredPipe { input, stage, span } => self
                 .structured_pipe_type(input, stage, Some(locals), span)
                 .ok(),
-            Expr::Closure {
-                params,
-                return_type,
-                ..
-            } => {
-                let return_type = return_type.as_ref()?.clone();
-                let params = params
-                    .iter()
-                    .map(|param| param.ty.clone())
-                    .collect::<Option<Vec<_>>>()?;
-                Some(SparType::Function {
-                    params,
-                    return_type: Box::new(return_type),
-                })
+            Expr::Closure { params, return_type, body, .. } => {
+                let mut closure_locals = locals.clone();
+                let params = params.iter().map(|param| {
+                    let ty = param.ty.clone()?;
+                    closure_locals.insert(param.name.clone(), ty.clone());
+                    Some(CallableParamType { name: param.name.clone(), ty })
+                }).collect::<Option<Vec<_>>>()?;
+                let result = return_type.clone().or_else(|| match body {
+                    ClosureBody::Expr(value) => self.infer_type_with_locals(value, &closure_locals),
+                    ClosureBody::Block(_) => None,
+                })?;
+                Some(SparType::Function { params, return_type: Box::new(result) })
             }
             Expr::Call {
                 name,
@@ -5333,7 +5670,9 @@ impl<'a> TypeChecker<'a> {
                         lty,
                         SparType::Int | SparType::Float | SparType::Str | SparType::Bool
                     );
-                if same_primitive || dynamic_pair(&lty, &rty) || dynamic_pair(&rty, &lty) {
+                let same_enum = lty == rty
+                    && matches!(&lty, SparType::Named(name) if self.symbols.enums.contains_key(name));
+                if same_primitive || same_enum || dynamic_pair(&lty, &rty) || dynamic_pair(&rty, &lty) {
                     Some(SparType::Bool)
                 } else {
                     None
@@ -5451,19 +5790,16 @@ mod tests {
     }
 
     #[test]
-    fn test_section_field_as_call_argument_resolves_type() {
-        // Regression: `infer_field_access` used to only resolve a field's
-        // type off `self`, `global`, or a `SparType::Named` instance —
-        // a plain top-level section (e.g. one spliced in via a selective
-        // import) fell through to `None`, which `check_call`'s stricter
-        // "actual != expected" comparison then reported as `unknown`.
+    fn test_struct_field_as_call_argument_resolves_type() {
+        // Regression: static field access on a concrete struct must preserve
+        // the declared field type when used as a named call argument.
         check_ok(
             r##"
             function greet(name: str) -> str {
                 return name;
             };
-            [Colors]{ red: str = "#ff0000"; };
-            var msg: str = greet(name: Colors.red);
+            struct Colors { red: str = "#ff0000"; };
+            var msg: str = greet(name: Colors().red);
         "##,
         );
     }
@@ -5474,7 +5810,7 @@ mod tests {
             r#"
             var port: int = 3000;
             var name: str = "keel";
-            [Server]{ bind: str = "0.0.0.0"; };
+            struct Server { bind: str = "0.0.0.0"; };
         "#,
         );
     }
@@ -5486,8 +5822,8 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_var_no_value() {
-        check_ok("var port?: int;");
+    fn test_option_var_can_explicitly_start_none() {
+        check_ok("var port: Option<int> = none();");
     }
 
     #[test]
@@ -5574,35 +5910,35 @@ mod tests {
     }
 
     #[test]
-    fn test_section_field_ref_type() {
+    fn test_struct_field_ref_type() {
         let src = r#"
-            [Db]{ pool: int = 5; };
-            var p: int = Db.pool;
+            struct Db { pool: int = 5; };
+            var p: int = Db().pool;
         "#;
         check_ok(src);
     }
 
     #[test]
     fn test_env_in_str_field() {
-        check_ok(r#"var mode: str = env("APP_MODE");"#);
+        check_ok(r#"var mode: str = env(name: "APP_MODE");"#);
     }
 
     #[test]
     fn test_env_in_int_field() {
         assert!(has_type_error(
-            r#"var port: int = env("PORT");"#,
+            r#"var port: int = env(name: "PORT");"#,
             "type mismatch"
         ));
     }
 
     #[test]
     fn test_env_fallback_str() {
-        check_ok(r#"var mode: str = env("MODE") ?? "dev";"#);
+        check_ok(r#"var mode: str = env(name: "MODE") ?? "dev";"#);
     }
 
     #[test]
     fn test_env_fallback_int_mismatch() {
-        let src = r#"var port: int = env("PORT") ?? 3000;"#;
+        let src = r#"var port: int = env(name: "PORT") ?? 3000;"#;
         let errs = check_err(src);
         assert!(
             errs.iter()
@@ -5612,14 +5948,14 @@ mod tests {
     }
 
     #[test]
-    fn test_required_field_in_section() {
-        assert!(has_type_error("[Server]{ port: int; };", "required field"));
-        assert!(has_type_error("[Server]{ port: int; };", "port"));
+    fn test_required_field_in_struct() {
+        check_ok("struct Server { port: int; };");
+        assert!(has_type_error("struct Server { port: int; }; var server: Server = Server();", "missing required argument"));
     }
 
     #[test]
-    fn test_optional_field_in_section() {
-        check_ok("[Server]{ port?: int; };");
+    fn test_option_field_in_struct_can_default_to_none() {
+        check_ok("struct Server { port: Option<int> = none(); };");
     }
 
     #[test]
@@ -5660,74 +5996,31 @@ mod tests {
     }
 
     #[test]
-    fn section_type_nested_body_valid() {
-        check_ok(r#"[Outer]{ inner: section = { key: str = "v"; }; };"#);
+    fn named_struct_is_required_for_typed_nesting() {
+        check_ok(
+            r#"
+            struct Inner { key: str = ""; };
+            struct Outer { inner: Inner = Inner(key: "v"); };
+        "#,
+        );
     }
 
     #[test]
-    fn section_type_rejected_for_global_var() {
-        // May be rejected at parse or type-check; either is acceptable
-        let src = "var x: section;";
+    fn removed_section_type_is_rejected_by_parser() {
+        let src = "var x: section = {};";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        match crate::parser::Parser::new(tokens).parse() {
-            Err(_) => (), // parser rejection is fine
-            Ok(program) => {
-                let symbols = crate::resolver::Resolver::new()
-                    .resolve(&program, &[])
-                    .unwrap_or_else(|_| crate::resolver::SymbolTable {
-                        globals: Default::default(),
-                        sections: Default::default(),
-                        imports: Default::default(),
-                        functions: Default::default(),
-                        imported_functions: Default::default(),
-                        methods: Default::default(),
-                        types: Default::default(),
-                        enums: Default::default(),
-                        function_groups: Default::default(),
-                        tasks: Default::default(),
-                        hosts: Default::default(),
-                        natives: Default::default(),
-                        top_level_await: false,
-                    });
-                let result = TypeChecker::check(&program, &symbols);
-                assert!(result.is_err(), "var of type 'section' must be rejected");
-            }
-        }
+        let err = crate::parser::Parser::new(tokens).parse().unwrap_err();
+        assert!(err.to_string().contains("section"));
+        assert!(err.to_string().contains("Record") || err.to_string().contains("named"));
     }
 
     #[test]
-    fn section_field_with_expr_value_rejected() {
-        let src = "[A]{ inner: section = 42; };";
-        // This may be caught at parse time (section type should get nested body, not expr)
-        // But if parse succeeds, type checker must catch it
+    fn removed_legacy_section_declaration_is_rejected_by_parser() {
+        let src = "[A]{ value: int = 1; };";
         let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        match crate::parser::Parser::new(tokens).parse() {
-            Err(_) => (), // parse rejection is fine
-            Ok(program) => {
-                let symbols = crate::resolver::Resolver::new()
-                    .resolve(&program, &[])
-                    .unwrap_or_else(|_| crate::resolver::SymbolTable {
-                        globals: Default::default(),
-                        sections: Default::default(),
-                        imports: Default::default(),
-                        functions: Default::default(),
-                        imported_functions: Default::default(),
-                        methods: Default::default(),
-                        types: Default::default(),
-                        enums: Default::default(),
-                        function_groups: Default::default(),
-                        tasks: Default::default(),
-                        hosts: Default::default(),
-                        natives: Default::default(),
-                        top_level_await: false,
-                    });
-                let result = TypeChecker::check(&program, &symbols);
-                assert!(
-                    result.is_err(),
-                    "section field with expr value must be rejected"
-                );
-            }
-        }
+        let err = crate::parser::Parser::new(tokens).parse().unwrap_err();
+        assert!(err.to_string().contains("legacy section"));
+        assert!(err.to_string().contains("struct"));
     }
 
     #[test]
@@ -5794,29 +6087,36 @@ mod tests {
     }
 
     #[test]
-    fn section_fn_with_section_block_return_is_ok() {
+    fn record_function_can_return_dynamic_object_literal() {
         check_ok(
             r#"
-            function make() -> section {
-                return { port: int = 8080; };
+            function make() -> Record {
+                return { port: 8080; };
             };
         "#,
         );
     }
 
     #[test]
-    fn section_fn_expr_return_is_error() {
-        assert!(has_type_error(
-            r#"function make() -> section { return 42; };"#,
-            "section",
-        ));
+    fn struct_function_returns_named_constructor() {
+        check_ok(
+            r#"
+            struct Server { port: int = 0; };
+            function make() -> Server {
+                return Server(port: 8080);
+            };
+        "#,
+        );
     }
 
     #[test]
-    fn non_section_fn_section_block_return_is_error() {
+    fn struct_function_rejects_anonymous_object_return() {
         assert!(has_type_error(
-            r#"function make() -> int { return { port: int = 8080; }; };"#,
-            "section",
+            r#"
+            struct Server { port: int = 0; };
+            function make() -> Server { return { port: 8080; }; };
+        "#,
+            "constructor",
         ));
     }
 

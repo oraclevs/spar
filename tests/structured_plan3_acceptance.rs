@@ -11,7 +11,7 @@ fn plan3_acceptance_mixes_process_bytes_structured_values_and_back_to_bytes() {
             import pkg { take } from "std/data";
 
             function firstOnly(rows: Stream<Record>) -> Stream<Record> {
-                return rows |> take(1);
+                return rows |> take(count: 1);
             };
 
             function main() -> shell {

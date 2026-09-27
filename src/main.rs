@@ -1198,13 +1198,8 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
 // ── `exec` command ────────────────────────────────────────────────────────────
 
 fn cmd_exec(path: &str, program_args: Vec<String>) {
-    // Phase 0's `main` takes no parameters and there's no language-level API
-    // to read `program_args` yet (spec section 16) — accepted and parsed for
-    // the `--` boundary now so scripts/tooling can rely on it, exposed to
-    // Spar source itself once the runtime foundation grows one.
-    let _ = program_args;
     match Engine::new(compile_options_for_path_or_exit(Path::new(path)))
-        .execute_path(Path::new(path))
+        .execute_path_with_args(Path::new(path), program_args)
     {
         Ok(outcome) => std::process::exit(outcome.exit_status),
         Err(errors) => {
@@ -2163,7 +2158,7 @@ mod emit_tests {
 
     #[test]
     fn regular_section_in_emit_output() {
-        let json = emit_src("#[emit]\n[Server]{ port: int = 8080; };");
+        let json = emit_src("#[emit]\nstruct Server { port: int = 8080; };");
         assert!(json.get("Server").is_some());
         assert_eq!(json["Server"]["port"], 8080);
     }
@@ -2171,7 +2166,7 @@ mod emit_tests {
     #[test]
     fn unmarked_section_not_in_emit_output() {
         let json =
-            emit_src("#[emit]\nvar keep: int = 1;\nprivate [Defaults]{ timeout: int = 30; };");
+            emit_src("#[emit]\nvar keep: int = 1;\nprivate struct Defaults { timeout: int = 30; };");
         assert!(
             json.get("Defaults").is_none(),
             "unmarked section must not appear in emit"
@@ -2181,9 +2176,9 @@ mod emit_tests {
     #[test]
     fn private_section_still_resolvable_by_public_section() {
         let src = r#"
-private [Defaults]{ timeout: int = 30; };
+private struct Defaults { timeout: int = 30; };
 #[emit]
-[Server]{ timeout: int = Defaults.timeout; };
+struct Server { timeout: int = Defaults().timeout; };
 "#;
         let json = emit_src(src);
         assert!(json.get("Defaults").is_none());
@@ -2194,9 +2189,9 @@ private [Defaults]{ timeout: int = 30; };
     fn nested_section_embedded_in_parent() {
         let src = r#"
 #[emit]
-[MetaData]{
+struct MetaData {
     tool: str = "stackforge";
-    manual: section = { author: str = "occ"; };
+    manual: Record = { author: str = "occ"; };
 };
 "#;
         let json = emit_src(src);
@@ -2222,15 +2217,15 @@ private [Defaults]{ timeout: int = 30; };
         let src = r#"
 var options: [str] = ["one","two","three"];
 #[emit]
-[Man]{ aster: int = 6; };
+struct Man { aster: int = 6; };
 #[emit]
-[MetaData]{
+struct MetaData {
     tool:    str = "stackforge";
     version: int = Man.aster;
     askter:  bool = false;
-    manual: section = {
+    manual: Record = {
         main: str = "MainMan";
-        more: section = { see: int = 5; };
+        more: Record = { see: int = 5; };
         options: [str] = options;
     };
 };

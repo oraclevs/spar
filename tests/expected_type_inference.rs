@@ -55,7 +55,7 @@ fn generic_constructors_take_their_type_from_declared_variables_and_assignments(
                 c = some(value: 7);
                 if !a.isNone() { return 1; }
                 if !b.isErr() { return 2; }
-                return c.unwrapOr(0);
+                return c.unwrapOr(fallback: 0);
             };
             "#
         ),
@@ -83,7 +83,7 @@ fn without_any_expected_type_inference_still_asks_for_explicit_arguments() {
         r#"
         import pkg { none } from "std";
         function main() -> int {
-            var x: int = none().unwrapOr(1);
+            var x: int = none().unwrapOr(fallback: 1);
             return x;
         };
         "#,

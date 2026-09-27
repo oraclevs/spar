@@ -1,5 +1,5 @@
 //! Parses a dependency request string — the right-hand side of a
-//! `[Dependencies]`/`[Overrides]` manifest field — into a `PackageSource`.
+//! `struct Dependencies`/`struct Overrides` manifest field — into a `PackageSource`.
 //! Only GitHub and local-path sources exist in Phase 0; the match here is
 //! the one place a future provider (`git:`, `gitlab:`, a registry) would
 //! be added, behind the same enum.

@@ -20,7 +20,20 @@ pub enum NativeExecutionKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiverMode {
+    Shared,
+    Mutable,
+}
+
+impl ReceiverMode {
+    pub const fn is_mutable(self) -> bool {
+        matches!(self, Self::Mutable)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeIntrinsic {
+    JsonParse,
     PromiseRace,
     PromiseTimeout,
     DataMap,
@@ -41,10 +54,30 @@ pub enum NativeIntrinsic {
     DataSelect,
     DataSchema,
     DataInspect,
+    DataFind,
+    DataFindIndex,
+    DataAny,
+    DataEvery,
+    CoreMapGetOrElse,
+    CoreOptionUnwrapOrElse,
+    CoreOptionMap,
+    CoreOptionFilter,
+    CoreOptionAndThen,
+    CoreOptionOrElse,
+    CoreResultMap,
+    CoreResultMapErr,
+    CoreResultAndThen,
+    CoreResultOrElse,
 }
 
 pub type NativeCallback =
     Arc<dyn Fn(&mut RuntimeContext, &[Value]) -> Result<Value, SparError> + Send + Sync + 'static>;
+pub type NativeMutableCallback = Arc<
+    dyn Fn(&mut RuntimeContext, &mut Value, &[Value]) -> Result<Value, SparError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Clone)]
 pub struct NativeMethod {
@@ -55,6 +88,7 @@ pub struct NativeMethod {
     pub ret: SparType,
     pub execution: NativeExecutionKind,
     pub private: bool,
+    pub receiver_mode: ReceiverMode,
     pub(crate) handler: NativeHandler,
 }
 
@@ -82,7 +116,33 @@ impl NativeMethod {
             ret,
             execution: NativeExecutionKind::Sync,
             private,
+            receiver_mode: ReceiverMode::Shared,
             handler: NativeHandler::Callback(Arc::new(callback)),
+        }
+    }
+
+    pub fn sync_mut(
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        receiver: SparType,
+        params: Vec<(&str, SparType)>,
+        ret: SparType,
+        private: bool,
+        callback: impl Fn(&mut RuntimeContext, &mut Value, &[Value]) -> Result<Value, SparError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            receiver,
+            params: params.into_iter().map(|(name, ty)| (name.to_string(), ty)).collect(),
+            ret,
+            execution: NativeExecutionKind::Sync,
+            private,
+            receiver_mode: ReceiverMode::Mutable,
+            handler: NativeHandler::MutableCallback(Arc::new(callback)),
         }
     }
 
@@ -106,6 +166,7 @@ impl NativeMethod {
             ret,
             execution: NativeExecutionKind::Sync,
             private,
+            receiver_mode: ReceiverMode::Shared,
             handler: NativeHandler::Intrinsic(intrinsic),
         }
     }
@@ -125,6 +186,7 @@ pub struct NativeFunction {
 #[derive(Clone)]
 pub(crate) enum NativeHandler {
     Callback(NativeCallback),
+    MutableCallback(NativeMutableCallback),
     Intrinsic(NativeIntrinsic),
 }
 
@@ -217,6 +279,7 @@ pub struct NativeMethodSignature {
     pub ret: SparType,
     pub execution: NativeExecutionKind,
     pub private: bool,
+    pub receiver_mode: ReceiverMode,
     pub native: bool,
 }
 
@@ -333,6 +396,7 @@ impl NativeRegistry {
             ret: method.ret.clone(),
             execution: method.execution,
             private: method.private,
+            receiver_mode: method.receiver_mode,
             native: true,
         })
     }
@@ -352,6 +416,7 @@ impl NativeRegistry {
                             ret: method.ret.clone(),
                             execution: method.execution,
                             private: method.private,
+                            receiver_mode: method.receiver_mode,
                             native: true,
                         },
                     )
@@ -364,7 +429,7 @@ impl NativeRegistry {
         let function = self.functions.get(id.0 as usize)?;
         match &function.handler {
             NativeHandler::Intrinsic(intrinsic) => Some(*intrinsic),
-            NativeHandler::Callback(_) => None,
+            NativeHandler::Callback(_) | NativeHandler::MutableCallback(_) => None,
         }
     }
 
@@ -372,7 +437,7 @@ impl NativeRegistry {
         let method = self.methods.get(id.0 as usize)?;
         match &method.handler {
             NativeHandler::Intrinsic(intrinsic) => Some(*intrinsic),
-            NativeHandler::Callback(_) => None,
+            NativeHandler::Callback(_) | NativeHandler::MutableCallback(_) => None,
         }
     }
 
@@ -394,6 +459,13 @@ impl NativeRegistry {
             NativeHandler::Callback(callback) => {
                 callback(context, args).map_err(|error| with_call_span(error, span))
             }
+            NativeHandler::MutableCallback(_) => Err(SparError::EvalError {
+                message: format!(
+                    "native function '{}::{}' cannot use a mutable method callback",
+                    function.module, function.name
+                ),
+                span: span.clone(),
+            }),
             NativeHandler::Intrinsic(_) => Err(SparError::EvalError {
                 message: format!(
                     "native runtime intrinsic '{}::{}' can only execute in the compiled runtime",
@@ -422,11 +494,42 @@ impl NativeRegistry {
             NativeHandler::Callback(callback) => {
                 callback(context, args).map_err(|error| with_call_span(error, span))
             }
+            NativeHandler::MutableCallback(_) => Err(SparError::EvalError {
+                message: format!("mutable native method '{}.{}' requires mutable receiver dispatch", method.owner, method.name),
+                span: span.clone(),
+            }),
             NativeHandler::Intrinsic(_) => Err(SparError::EvalError {
                 message: format!(
                     "native runtime intrinsic '{}.{}' cannot execute as a method",
                     method.owner, method.name
                 ),
+                span: span.clone(),
+            }),
+        }
+    }
+
+
+    pub fn call_method_mut(
+        &self,
+        id: NativeMethodId,
+        context: &mut RuntimeContext,
+        receiver: &mut Value,
+        args: &[Value],
+        span: &Span,
+    ) -> Result<Value, SparError> {
+        let method = self.methods.get(id.0 as usize).ok_or_else(|| SparError::EvalError {
+            message: format!("unknown native method ID {}", id.0),
+            span: span.clone(),
+        })?;
+        match &method.handler {
+            NativeHandler::MutableCallback(callback) => callback(context, receiver, args)
+                .map_err(|error| with_call_span(error, span)),
+            NativeHandler::Callback(_) => Err(SparError::EvalError {
+                message: format!("native method '{}.{}' is not mutable", method.owner, method.name),
+                span: span.clone(),
+            }),
+            NativeHandler::Intrinsic(_) => Err(SparError::EvalError {
+                message: format!("native runtime intrinsic '{}.{}' cannot execute as a mutable method", method.owner, method.name),
                 span: span.clone(),
             }),
         }
@@ -488,4 +591,6 @@ impl std::fmt::Debug for NativeRegistry {
             .field("functions", &names)
             .finish()
     }
+
+
 }

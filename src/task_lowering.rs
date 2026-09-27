@@ -396,8 +396,9 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         // The typechecker rejects `list`/`section` task parameters before
         // lowering ever runs — this arm is unreachable in practice, but a
         // safe fallback beats a panic if that invariant ever slips.
-        SparType::List(_)
-        | SparType::Section
+        SparType::Any
+        | SparType::List(_)
+        | SparType::InlineRecord
         | SparType::Named(_)
         | SparType::TypeParameter(_)
         | SparType::Applied { .. }
@@ -470,9 +471,6 @@ fn stmts_mention_any(stmts: &[crate::ast::FuncStmt], param_names: &HashSet<Strin
         crate::ast::Statement::Return(crate::ast::ReturnValue::Expr(value), _) => {
             expr_mentions_any(value, param_names)
         }
-        crate::ast::Statement::Return(crate::ast::ReturnValue::SectionBlock(fields), _) => fields
-            .iter()
-            .any(|field| expr_mentions_any(&field.value, param_names)),
         crate::ast::Statement::If(statement) => {
             expr_mentions_any(&statement.condition, param_names)
                 || stmts_mention_any(&statement.then_stmts, param_names)
@@ -516,7 +514,7 @@ fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
             expr_mentions_any(input, param_names) || expr_mentions_any(stage, param_names)
         }
         Expr::FieldAccess { base, .. } => expr_mentions_any(base, param_names),
-        Expr::FnCall(fc) => fc.args.iter().any(|a| expr_mentions_any(a, param_names)),
+        Expr::FnCall(fc) => fc.args.iter().any(|a| expr_mentions_any(&a.value, param_names)),
         Expr::BinaryOp(op) => {
             expr_mentions_any(&op.lhs, param_names) || expr_mentions_any(&op.rhs, param_names)
         }
@@ -534,11 +532,11 @@ fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
             expr_mentions_any(source, param_names) || expr_mentions_any(body, param_names)
         }
         Expr::Object(items, _) => items.iter().any(|item| match item {
-            crate::ast::SectionItem::Field(f) => match &f.value {
+            crate::ast::ObjectItem::Field(f) => match &f.value {
                 Some(crate::ast::FieldValue::Expr(e)) => expr_mentions_any(e, param_names),
                 _ => false,
             },
-            crate::ast::SectionItem::Spread(s) => expr_mentions_any(&s.expr, param_names),
+            crate::ast::ObjectItem::Spread(s) => expr_mentions_any(&s.expr, param_names),
         }),
     }
 }

@@ -144,8 +144,8 @@ fn compiled_functions_support_recursion_defaults_and_named_arguments() {
 }
 
 #[test]
-fn compiled_expressions_build_lists_objects_interpolation_and_comprehensions() {
-    let value = execute("type [Result] { label: str; }; function main() -> int { var values: [int] = for value in [1, 2, 3] { value }; var object: Result = { label: \"sum-${values[0] + values[2]}\"; }; if object.label == \"sum-4\" { return 0; } return 1; };").unwrap();
+fn compiled_expressions_build_lists_structs_interpolation_and_comprehensions() {
+    let value = execute("struct ResultShape { label: str; }; struct ResultValue: ResultShape { label = \"sum-4\"; }; function main() -> int { var values: [int] = for value in [1, 2, 3] { value }; var object: ResultValue = ResultValue(label: \"sum-${values[0] + values[2]}\"); if object.label == \"sum-4\" { return 0; } return 1; };").unwrap();
     assert_eq!(value, Value::Int(0));
 }
 
@@ -204,10 +204,11 @@ fn compiled_generic_functions_are_erased_and_reusable() {
 fn compiled_generic_named_types_substitute_nested_fields() {
     let value = execute(
         r#"
-        type [Box<T>] { value: T; };
+        struct Box<T> { value: T; };
+        struct IntBox: Box<int> { value = 9; };
         function unbox<T>(box: Box<T>) -> T { return box.value; };
         function main() -> int {
-            var boxed: Box<int> = { value: 9; };
+            var boxed: Box<int> = IntBox();
             return unbox(box: boxed);
         };
         "#,
@@ -217,19 +218,17 @@ fn compiled_generic_named_types_substitute_nested_fields() {
 }
 
 #[test]
-fn compiled_generic_function_can_construct_applied_return_type() {
-    let value = execute(
+fn compiled_generic_function_cannot_construct_applied_return_type_from_anonymous_object() {
+    let errors = execute(
         r#"
-        type [Box<T>] { value: T; };
+        struct Box<T> { value: T; };
         function box<T>(value: T) -> Box<T> { return { value: value; }; };
-        function main() -> int {
-            var boxed: Box<int> = box(value: 13);
-            return boxed.value;
-        };
+        function main() -> int { return 0; };
         "#,
     )
-    .unwrap();
-    assert_eq!(value, Value::Int(13));
+    .expect_err("anonymous object literals must not construct named generic types");
+    let rendered = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(rendered.contains("Box") || rendered.contains("Record") || rendered.contains("object"), "{rendered}");
 }
 
 #[test]

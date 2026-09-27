@@ -1,41 +1,41 @@
-function print(message: str = "") -> void {
-    nativeIo::print(message: message);
+fn print(value: Any = "") -> void {
+    nativeIo::print(value: value);
     return;
 };
 
-function println(message: str = "") -> void {
-    nativeIo::println(message: message);
+fn println(value: Any = "") -> void {
+    nativeIo::println(value: value);
     return;
 };
 
-function eprint(message: str = "") -> void {
-    nativeIo::eprint(message: message);
+fn eprint(value: Any = "") -> void {
+    nativeIo::eprint(value: value);
     return;
 };
 
-function eprintln(message: str = "") -> void {
-    nativeIo::eprintln(message: message);
+fn eprintln(value: Any = "") -> void {
+    nativeIo::eprintln(value: value);
     return;
 };
 
-function readAll() -> str {
+fn readAll() -> str {
     return nativeIo::readAll();
 };
 
-function readLine() -> str {
+fn readLine() -> str {
     return nativeIo::readLine();
 };
 
-function readBytes() -> Bytes {
+fn readBytes() -> Bytes {
     return nativeIo::readBytes();
 };
 
-function writeBytes(content: Bytes) -> void {
+fn writeBytes(content: Bytes) -> void {
     nativeIo::writeBytes(content: content);
     return;
 };
 
-function writeErrorBytes(content: Bytes) -> void {
+fn writeErrorBytes(content: Bytes) -> void {
     nativeIo::writeErrorBytes(content: content);
     return;
 };

@@ -89,12 +89,12 @@ fn compiled_program_preserves_owned_closure_bodies() {
     let compiled = engine
         .compile_source(
             r#"
-            function make(min: int) -> fn(int) -> bool {
-                return fn(value) => value >= min;
+            fn make(min: int) -> fn(value: int) -> bool {
+                return |value: int| value >= min;
             };
-            function main() -> int {
-                var check: fn(int) -> bool = make(min: 5);
-                if check(6) { return 1; }
+            fn main() -> int {
+                var check: fn(value: int) -> bool = make(min: 5);
+                if check(value: 6) { return 1; }
                 return 0;
             };
             "#,
@@ -106,13 +106,31 @@ fn compiled_program_preserves_owned_closure_bodies() {
 }
 
 #[test]
+fn compiled_function_valued_parameter_call_uses_named_arguments() {
+    let engine = Engine::default();
+    let compiled = engine
+        .compile_source(
+            r#"
+            fn apply(callback: fn(value: int) -> int) -> int {
+                return callback(value: 6);
+            };
+            fn double(value: int) -> int { return value * 2; };
+            fn main() -> int { return apply(callback: double); };
+            "#,
+        )
+        .expect("named function-valued call should compile");
+
+    assert_eq!(engine.execute_compiled(&compiled).unwrap().exit_status, 12);
+}
+
+#[test]
 fn callable_values_are_not_comparable() {
     let errors = Engine::default()
         .check_source(
             r#"
-            function double(value: int) -> int { return value * 2; };
-            function main() -> int {
-                var callback: fn(int) -> int = double;
+            fn double(value: int) -> int { return value * 2; };
+            fn main() -> int {
+                var callback: fn(value: int) -> int = double;
                 if callback == callback { return 1; }
                 return 0;
             };

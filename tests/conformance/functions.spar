@@ -1,4 +1,4 @@
-function enabled(port: int) -> bool {
+fn enabled(port: int) -> bool {
     return port >= 1024 && port < 65536;
 };
 

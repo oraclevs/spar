@@ -1,50 +1,50 @@
 // Opaque child-process handle. Values are created only by spawn(); user-created
 // empty Process objects are rejected by the native provider as invalid handles.
-export type [Process] {};
+export struct Process {};
 
 // Command, ProcessChunk, and ProcessStream are compiler-known runtime types,
 // like ProcessResult and PipelineStatus. Their behavior still lives in
 // nativeProcess/spar-process; this module only exposes construction/execution
 // functions.
 
-function args() -> [str] {
+fn args() -> [str] {
     return nativeProcess::args();
 };
 
-function which(program: str) -> str {
+fn which(program: str) -> str {
     return nativeProcess::which(program: program);
 };
 
-function command(program: str, args: [str]) -> Command {
+fn command(program: str, args: [str]) -> Command {
     return nativeProcess::command(program: program, args: args);
 };
 
-function run(program: str, args: [str]) -> ProcessResult {
+fn run(program: str, args: [str]) -> ProcessResult {
     return nativeProcess::run(program: program, args: args);
 };
 
-function stream(program: str, args: [str]) -> ProcessStream {
+fn stream(program: str, args: [str]) -> ProcessStream {
     return nativeProcess::stream(program: program, args: args);
 };
 
-function spawn(program: str, args: [str]) -> Process {
+fn spawn(program: str, args: [str]) -> Process {
     return nativeProcess::spawn(program: program, args: args);
 };
 
-function pid(process: Process) -> int {
+fn pid(process: Process) -> int {
     return nativeProcess::pid(process: process);
 };
 
-function wait(process: Process) -> ProcessStatus {
+fn wait(process: Process) -> ProcessStatus {
     return nativeProcess::wait(process: process);
 };
 
-function kill(process: Process) -> void {
+fn kill(process: Process) -> void {
     nativeProcess::kill(process: process);
     return;
 };
 
-function exit(code: int) -> void {
+fn exit(code: int) -> void {
     nativeProcess::exit(code: code);
     return;
 };

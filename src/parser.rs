@@ -221,25 +221,22 @@ impl Parser {
             items.push(self.parse_top_level_item_or_expression()?);
         }
 
-        let is_schema_file = items.iter().any(|item| {
-            matches!(
-                item,
-                TopLevelItem::SchemaSection(_) | TopLevelItem::SchemaFrom(_)
-            )
-        });
+        let is_schema_file = items
+            .iter()
+            .any(|item| matches!(item, TopLevelItem::Schema(_) | TopLevelItem::SchemaFrom(_)));
 
         // Validate schema-file exclusivity rules
         if is_schema_file {
             for item in &items {
-                let allowed = matches!(item, TopLevelItem::SchemaSection(_))
+                let allowed = matches!(item, TopLevelItem::Schema(_))
                     || matches!(item, TopLevelItem::SchemaFrom(_))
-                    || matches!(item, TopLevelItem::Import(d) if matches!(d.kind, ImportKind::TypeSelective(_)));
+                    || matches!(item, TopLevelItem::Import(d) if matches!(d.kind, ImportKind::Selective(_)));
                 if !allowed {
                     let item_span = match item {
                         TopLevelItem::Import(d) => d.span.clone(),
                         TopLevelItem::Var(d) => d.span.clone(),
                         TopLevelItem::Dynamic(d) => d.span.clone(),
-                        TopLevelItem::Section(d) => d.span.clone(),
+                        TopLevelItem::Struct(d) => d.span.clone(),
                         TopLevelItem::Function(d) => d.span.clone(),
                         TopLevelItem::Type(d) => d.span.clone(),
                         TopLevelItem::Enum(d) => d.span.clone(),
@@ -248,7 +245,7 @@ impl Parser {
                         TopLevelItem::SchemaFrom(d) => d.span.clone(),
                         TopLevelItem::Task(d) => d.span.clone(),
                         TopLevelItem::Statement(s) => statement_span(s),
-                        TopLevelItem::SchemaSection(_) => unreachable!(),
+                        TopLevelItem::Schema(_) => unreachable!(),
                     };
                     return Err(SparError::ParseError {
                         message:
@@ -355,7 +352,7 @@ impl Parser {
         let mut item = self.parse_unattributed_top_level_item()?;
         match &mut item {
             TopLevelItem::Var(declaration) => declaration.attributes = attributes,
-            TopLevelItem::Section(declaration) => declaration.attributes = attributes,
+            TopLevelItem::Struct(declaration) => declaration.attributes = attributes,
             _ => return Err(placement_error(&attributes[0])),
         }
         Ok(item)
@@ -387,16 +384,17 @@ impl Parser {
             Token::Import     => Ok(TopLevelItem::Import(self.parse_import()?)),
             Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
-            Token::LBracket   => self.parse_section(false, false),
+            Token::LBracket   => Err(self.error("legacy section declarations were removed; declare a `struct Name { ... };` instead")),
             Token::KwStruct   => self.parse_struct(false, false),
             Token::KwImpl     => Ok(TopLevelItem::Impl(self.parse_impl_decl()?)),
-            Token::KwFunction => Ok(TopLevelItem::Function(
+            Token::KwFunction | Token::KwFn => Ok(TopLevelItem::Function(
                 self.parse_top_level_function_decl(false, false)?,
             )),
             Token::KwAsync => Ok(TopLevelItem::Function(
                 self.parse_top_level_function_decl(false, true)?,
             )),
-            Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(false)?)),
+            Token::Ident(s) if s == "type" && self.next_is(&Token::LBracket) => Err(self.error("legacy `type [Name]` syntax was removed; use `struct Name { field: Type; };`")),
+            Token::Ident(s) if s == "type" => Err(self.error("`type` declarations were removed; use `struct Name { field: Type; };`")),
             Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(false)?)),
             Token::Ident(s) if s == "functionGroup" => Ok(TopLevelItem::FunctionGroup(self.parse_function_group_decl(false)?)),
             Token::Ident(s) if s == "Schema" && self.next_is(&Token::LBracket) => Err(self.error(
@@ -424,9 +422,9 @@ impl Parser {
                 self.advance();
                 match self.peek() {
                     Token::Var      => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
-                    Token::LBracket => self.parse_section(true, false),
+                    Token::LBracket => Err(self.error("legacy section declarations were removed; use `export struct Name { ... };`")),
                     Token::KwStruct => self.parse_struct(true, false),
-                    Token::Ident(s) if s == "type" => Ok(TopLevelItem::Type(self.parse_type_decl(true)?)),
+                    Token::Ident(s) if s == "type" => Err(self.error("`type` declarations were removed; use `export struct Name { field: Type; };`")),
                     Token::Ident(s) if s == "enum" => Ok(TopLevelItem::Enum(self.parse_enum_decl(true)?)),
                     _ => Err(self.error(format!("expected 'var', 'type', 'enum', or '[' after 'export', found {}", self.peek().human_name()))),
                 }
@@ -443,12 +441,11 @@ impl Parser {
                              or 'export var' to include them in output".to_string()
                         ))
                     }
-                    Token::LBracket => {
-                        let item = self.parse_section(false, true)?;
-                        Ok(item)
-                    }
+                    Token::LBracket => Err(self.error(
+                        "legacy section declarations were removed; use `private struct Name { ... };`",
+                    )),
                     Token::KwStruct => self.parse_struct(false, true),
-                    Token::KwFunction => {
+                    Token::KwFunction | Token::KwFn => {
                         Ok(TopLevelItem::Function(
                             self.parse_top_level_function_decl(true, false)?,
                         ))
@@ -461,7 +458,7 @@ impl Parser {
                     }
                     _ => {
                         Err(self.error(format!(
-                            "'private' must be followed by 'function', 'functionGroup', or a section declaration '[SectionName]{{...}}', found {}",
+                            "'private' must be followed by 'function', 'functionGroup', or 'struct', found {}",
                             self.peek().human_name()
                         )))
                     }
@@ -515,17 +512,7 @@ impl Parser {
 
         // `import type { A, B } from "path";`
         if matches!(self.peek(), Token::Ident(s) if s == "type") {
-            self.advance();
-            let items = self.parse_import_items()?;
-            self.expect_from_keyword()?;
-            let path = self.parse_import_path()?;
-            self.expect(&Token::Semicolon)?;
-            return Ok(ImportDecl {
-                path,
-                package,
-                kind: ImportKind::TypeSelective(items),
-                span,
-            });
+            return Err(self.error("`import type` was removed; use `import { Name } from \"./module\";`"));
         }
 
         // `import { A, B as C } from "path";`
@@ -656,12 +643,11 @@ impl Parser {
 
         let (name, _) = self.expect_ident()?;
 
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
+        if self.at(&Token::Question) {
+            return Err(self.error(
+                "nullable `?` declarations were removed; use `Option<T>` and `none()` instead",
+            ));
+        }
 
         self.expect(&Token::Colon)?;
         let ty = self.parse_type()?;
@@ -678,7 +664,6 @@ impl Parser {
             exported,
             mutable,
             name,
-            optional,
             ty,
             value,
             span,
@@ -693,12 +678,11 @@ impl Parser {
 
         let (name, _) = self.expect_ident()?;
 
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
+        if self.at(&Token::Question) {
+            return Err(self.error(
+                "nullable `?` declarations were removed; use `Option<T>` and `none()` instead",
+            ));
+        }
 
         let value = if self.at(&Token::Eq) {
             self.advance();
@@ -711,24 +695,19 @@ impl Parser {
         };
 
         self.expect(&Token::Semicolon)?;
-        Ok(DynamicDecl {
-            name,
-            optional,
-            value,
-            span,
-        })
+        Ok(DynamicDecl { name, value, span })
     }
 
-    fn parse_section_item(&mut self) -> Result<SectionItem, SparError> {
+    fn parse_section_item(&mut self) -> Result<ObjectItem, SparError> {
         if self.at(&Token::HashBracket) {
             return Err(
                 self.error("attribute `#[...]` is only valid on top-level structs and vars")
             );
         }
         if self.at(&Token::DotDotDot) {
-            Ok(SectionItem::Spread(self.parse_spread()?))
+            Ok(ObjectItem::Spread(self.parse_spread()?))
         } else if self.at_ident() {
-            Ok(SectionItem::Field(self.parse_field_decl()?))
+            Ok(ObjectItem::Field(self.parse_field_decl()?))
         } else {
             Err(self.error("expected a field declaration or `...` spread"))
         }
@@ -809,42 +788,92 @@ impl Parser {
         }
     }
 
-    /// Parse a section field. Two forms:
-    /// - `name: type = value;` (or `name: type;` with no value) — type
-    ///   always explicit, legal in any section.
-    /// - `name: value;` — type omitted, inferred from the enclosing
-    ///   section's `-> TypeName` binding (a typechecker concern; the
-    ///   parser accepts this form unconditionally). No `=` in this form.
+    fn schema_declaration_follows(&self) -> bool {
+        matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.token),
+            Some(Token::Question) | Some(Token::Ident(_))
+        )
+    }
+
+    /// `schema Name { fields };` or `schema Name from Type;`.
+    fn parse_schema_item(&mut self) -> Result<TopLevelItem, SparError> {
+        let span = self.peek_span();
+        self.advance(); // consume `schema`
+        if self.at(&Token::Question) {
+            return Err(self.error(
+                "schema `?` optionality was removed; use `Option<T>` for values that may be absent",
+            ));
+        }
+        let (name, _) = self.expect_ident()?;
+        if matches!(self.peek(), Token::Ident(word) if word == "from") {
+            self.advance();
+            let (source_type, source_type_span) = self.expect_ident()?;
+            self.expect(&Token::Semicolon)?;
+            return Ok(TopLevelItem::SchemaFrom(SchemaFromDecl {
+                name,
+                source_type,
+                source_type_span,
+                span,
+            }));
+        }
+
+        self.expect(&Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            fields.push(self.parse_schema_field()?);
+        }
+        self.expect(&Token::RBrace)?;
+        self.expect(&Token::Semicolon)?;
+        Ok(TopLevelItem::Schema(SchemaDecl { name, fields, span }))
+    }
+
+    /// Parse one schema field. Inline `section` shapes and `?` optionality
+    /// were removed, so schema fields use ordinary Spar types only.
+    fn parse_schema_field(&mut self) -> Result<SchemaField, SparError> {
+        let span = self.peek_span();
+        let (name, _) = self.expect_ident()?;
+        if self.at(&Token::Question) {
+            return Err(self.error(
+                "schema field `?` optionality was removed; use `Option<T>` for values that may be absent",
+            ));
+        }
+
+        self.expect(&Token::Colon)?;
+        if self.at(&Token::TypeSection) {
+            return Err(self.error(
+                "the `section` type was removed; schema fields must use a named type, `Record`, or `Map<K, V>`",
+            ));
+        }
+        let ty = self.parse_type()?;
+        self.expect(&Token::Semicolon)?;
+        Ok(SchemaField {
+            name,
+            shape: SchemaFieldShape::Type(ty),
+            span,
+        })
+    }
+
+    /// Parse a struct field. Two forms:
+    /// - `name: type = value;` (or `name: type;` with no value).
+    /// - `name = value;` / `name: value;` for a struct bound to a declared type,
+    ///   where the field type is inferred from that binding.
     fn parse_field_decl(&mut self) -> Result<FieldDecl, SparError> {
         let span = self.peek_span();
         let (name, _) = self.expect_ident()?;
 
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
+        if self.at(&Token::Question) {
+            return Err(self
+                .error("nullable `?` fields were removed; use `Option<T>` and `none()` instead"));
+        }
 
-        // Canonical structs use `field = value;` when a target type supplies
-        // field types. Legacy sections retain the colon-based forms below.
+        // A struct bound to a declared type may infer its field type from
+        // that binding: `field = value;`.
         if self.at(&Token::Eq) {
             self.advance();
-            let value = if self.at(&Token::LBrace) {
-                self.expect(&Token::LBrace)?;
-                let mut items = Vec::new();
-                while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                    items.push(self.parse_section_item()?);
-                }
-                self.expect(&Token::RBrace)?;
-                FieldValue::Nested(items)
-            } else {
-                FieldValue::Expr(self.parse_expr()?)
-            };
+            let value = FieldValue::Expr(self.parse_expr()?);
             self.expect(&Token::Semicolon)?;
             return Ok(FieldDecl {
                 name,
-                optional,
                 ty: None,
                 value: Some(value),
                 span,
@@ -853,51 +882,29 @@ impl Parser {
         }
 
         self.expect(&Token::Colon)?;
-
         if self.at_type_start() {
             let ty = self.parse_type()?;
             let value = if self.at(&Token::Eq) {
                 self.advance();
-                if ty == SparType::Section && self.at(&Token::LBrace) {
-                    // Parse inline section body: '{' section_item* '}'
-                    self.expect(&Token::LBrace)?;
-                    let mut items = Vec::new();
-                    while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                        items.push(self.parse_section_item()?);
-                    }
-                    self.expect(&Token::RBrace)?;
-                    Some(FieldValue::Nested(items))
-                } else {
-                    Some(FieldValue::Expr(self.parse_expr()?))
-                }
+                Some(FieldValue::Expr(self.parse_expr()?))
             } else {
                 None
             };
             self.expect(&Token::Semicolon)?;
             Ok(FieldDecl {
                 name,
-                optional,
                 ty: Some(ty),
                 value,
                 span,
                 end_line: self.prev_line(),
             })
         } else {
-            let value = if self.at(&Token::LBrace) {
-                self.expect(&Token::LBrace)?;
-                let mut items = Vec::new();
-                while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                    items.push(self.parse_section_item()?);
-                }
-                self.expect(&Token::RBrace)?;
-                Some(FieldValue::Nested(items))
-            } else {
-                Some(FieldValue::Expr(self.parse_expr()?))
-            };
+            // Bound structs may also use `field: value;`. This remains an
+            // ordinary expression; `{ ... }` therefore parses as Expr::Object.
+            let value = Some(FieldValue::Expr(self.parse_expr()?));
             self.expect(&Token::Semicolon)?;
             Ok(FieldDecl {
                 name,
-                optional,
                 ty: None,
                 value,
                 span,
@@ -906,103 +913,6 @@ impl Parser {
         }
     }
 
-    fn parse_spread(&mut self) -> Result<SpreadStmt, SparError> {
-        let span = self.peek_span();
-        self.expect(&Token::DotDotDot)?;
-        let expr = self.parse_expr()?;
-        self.expect(&Token::Semicolon)?;
-        Ok(SpreadStmt { expr, span })
-    }
-
-    /// `schema Name ...` / `schema? Name ...` — a declaration, not a
-    /// variable or call that happens to be named `schema`.
-    fn schema_declaration_follows(&self) -> bool {
-        matches!(
-            self.tokens.get(self.pos + 1).map(|t| &t.token),
-            Some(Token::Question) | Some(Token::Ident(_))
-        )
-    }
-
-    /// `schema [?] Name { fields };` or `schema [?] Name from Type;`.
-    fn parse_schema_item(&mut self) -> Result<TopLevelItem, SparError> {
-        let span = self.peek_span();
-        self.advance(); // consume 'schema'
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-        let (name, _) = self.expect_ident()?;
-        if matches!(self.peek(), Token::Ident(word) if word == "from") {
-            self.advance(); // consume 'from'
-            let (source_type, source_type_span) = self.expect_ident()?;
-            self.expect(&Token::Semicolon)?;
-            return Ok(TopLevelItem::SchemaFrom(SchemaFromDecl {
-                name,
-                source_type,
-                source_type_span,
-                marker: SchemaMarker { optional },
-                span,
-            }));
-        }
-        self.expect(&Token::LBrace)?;
-        let mut fields = Vec::new();
-        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-            fields.push(self.parse_schema_field()?);
-        }
-        self.expect(&Token::RBrace)?;
-        self.expect(&Token::Semicolon)?;
-        Ok(TopLevelItem::SchemaSection(SchemaSectionDecl {
-            name,
-            marker: SchemaMarker { optional },
-            fields,
-            span,
-        }))
-    }
-
-    /// Parse a single schema field: `name: Type;` or `name?: Type;`
-    /// For section-typed fields: `name: section = { ... };`
-    fn parse_schema_field(&mut self) -> Result<SchemaField, SparError> {
-        let span = self.peek_span();
-        let (name, _) = self.expect_ident()?;
-
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        self.expect(&Token::Colon)?;
-
-        let shape = if self.at(&Token::TypeSection) {
-            self.advance(); // consume 'section'
-            self.expect(&Token::Eq)?;
-            self.expect(&Token::LBrace)?;
-            let mut nested = Vec::new();
-            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                nested.push(self.parse_schema_field()?);
-            }
-            self.expect(&Token::RBrace)?;
-            SchemaFieldShape::Section(nested)
-        } else {
-            let ty = self.parse_type()?;
-            SchemaFieldShape::Primitive(ty)
-        };
-
-        self.expect(&Token::Semicolon)?;
-        Ok(SchemaField {
-            name,
-            optional,
-            shape,
-            span,
-        })
-    }
-
-    /// Parse `type [Name]{ ... }`. The caller only `peek()`ed the `type`
-    /// ident to dispatch here — it hasn't been consumed yet, so this
-    /// function consumes it first.
     fn parse_enum_decl(&mut self, exported: bool) -> Result<EnumDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'enum' ident
@@ -1028,6 +938,7 @@ impl Parser {
         let end_line = self.prev_line();
         self.expect(&Token::Semicolon)?;
         Ok(EnumDecl {
+            origin: None,
             name,
             name_span,
             exported,
@@ -1038,18 +949,24 @@ impl Parser {
         })
     }
 
+    fn parse_spread(&mut self) -> Result<SpreadStmt, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::DotDotDot)?;
+        let expr = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+        Ok(SpreadStmt { expr, span })
+    }
+
     fn parse_type_decl(&mut self, exported: bool) -> Result<TypeDecl, SparError> {
         let span = self.peek_span();
         self.advance(); // consume the 'type' ident
-        let legacy = self.at(&Token::LBracket);
-        if legacy {
-            self.advance();
+        if self.at(&Token::LBracket) {
+            return Err(
+                self.error("legacy `type [Name]` syntax was removed; write `type Name { ... };`")
+            );
         }
         let (name, name_span) = self.expect_ident()?;
         let type_parameters = self.parse_type_parameters()?;
-        if legacy {
-            self.expect(&Token::RBracket)?;
-        }
         self.expect(&Token::LBrace)?;
         let mut fields = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -1069,8 +986,8 @@ impl Parser {
         })
     }
 
-    /// Parse a single type field: `name: Type;`, `name?: Type;`,
-    /// `name: OtherDeclaredType;`, or `name: section = { ... };`.
+    /// Parse a single type field: `name: Type;` or `name: OtherDeclaredType;`.
+    /// Nullable `?` fields and inline section fields are migration errors.
     fn parse_type_field(
         &mut self,
         type_parameters: &[TypeParameter],
@@ -1078,12 +995,10 @@ impl Parser {
         let span = self.peek_span();
         let (name, _) = self.expect_ident()?;
 
-        let optional = if self.at(&Token::Question) {
-            self.advance();
-            true
-        } else {
-            false
-        };
+        if self.at(&Token::Question) {
+            return Err(self
+                .error("nullable `?` type fields were removed; use `Option<T> = none()` instead"));
+        }
 
         self.expect(&Token::Colon)?;
         let shape = self.parse_type_field_shape(type_parameters)?;
@@ -1096,7 +1011,6 @@ impl Parser {
         self.expect(&Token::Semicolon)?;
         Ok(TypeField {
             name,
-            optional,
             shape,
             default,
             span,
@@ -1108,15 +1022,9 @@ impl Parser {
         type_parameters: &[TypeParameter],
     ) -> Result<TypeFieldShape, SparError> {
         if self.at(&Token::TypeSection) {
-            self.advance(); // consume 'section'
-            self.expect(&Token::Eq)?;
-            self.expect(&Token::LBrace)?;
-            let mut nested = Vec::new();
-            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                nested.push(self.parse_type_field(type_parameters)?);
-            }
-            self.expect(&Token::RBrace)?;
-            Ok(TypeFieldShape::Section(nested))
+            return Err(self.error(
+                "the `section` type was removed; declare a named `type` and use that type here",
+            ));
         } else {
             let ty = mark_type_parameters(self.parse_type()?, type_parameters);
             Ok(match ty {
@@ -1130,41 +1038,13 @@ impl Parser {
         }
     }
 
-    fn parse_section(&mut self, exported: bool, private: bool) -> Result<TopLevelItem, SparError> {
-        let span = self.peek_span();
-        self.expect(&Token::LBracket)?;
-
-        let (name, _) = self.expect_ident()?;
-
-        // Reject dot-separated paths (same as before)
-        if self.at(&Token::Dot) {
-            return Err(SparError::ParseError {
-                message: format!(
-                    "section names cannot contain '.': use the 'section' field type \
-                     to nest sections inside '[{}]{{ ... }};'",
-                    name
-                ),
-                span: self.peek_span(),
-            });
-        }
-
-        self.expect(&Token::RBracket)?;
-
-        // Check for a `-> TypeName` binding BEFORE the `{`
-        let type_binding = self.try_parse_type_binding()?;
-
-        let (items, end_line) = self.parse_regular_section_items()?;
-        Ok(TopLevelItem::Section(SectionDecl {
-            exported,
-            private,
-            canonical: false,
-            path: vec![name],
-            items,
-            type_binding,
-            span,
-            end_line,
-            attributes: Vec::new(),
-        }))
+    fn parse_section(
+        &mut self,
+        _exported: bool,
+        _private: bool,
+    ) -> Result<TopLevelItem, SparError> {
+        Err(self
+            .error("legacy section declarations were removed; declare a named `struct` instead"))
     }
 
     fn parse_impl_decl(&mut self) -> Result<ImplDecl, SparError> {
@@ -1191,6 +1071,7 @@ impl Parser {
         self.expect(&Token::Semicolon)?;
         self.active_type_parameters = previous_type_parameters;
         Ok(ImplDecl {
+            origin: None,
             target,
             type_parameters,
             methods,
@@ -1211,9 +1092,10 @@ impl Parser {
         } else {
             false
         };
-        self.expect(&Token::KwFunction)?;
+        self.expect_function_keyword()?;
         let (name, name_span) = self.expect_ident()?;
-        let type_parameters = self.parse_type_parameters()?;
+        let mut type_parameters = self.active_type_parameters.clone();
+        type_parameters.extend(self.parse_type_parameters()?);
         let previous_type_parameters =
             std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
         self.expect(&Token::LParen)?;
@@ -1319,28 +1201,42 @@ impl Parser {
         let span = self.peek_span();
         self.expect(&Token::KwStruct)?;
         let (name, _) = self.expect_ident()?;
-        if self.at(&Token::Lt) {
-            return Err(self.error(
-                "structs are concrete values and cannot declare type parameters; \
-                 declare a generic `type` and instantiate it from the struct",
-            ));
+        let type_parameters = self.parse_type_parameters()?;
+        if self.at(&Token::Colon) {
+            return Err(self.error("struct type bindings were removed; declare typed fields and construct a value with `Name(field: value)`"));
         }
-        let type_binding = if self.at(&Token::Colon) {
-            self.advance();
-            let type_span = self.peek_span();
-            Some(TypeBinding {
-                ty: self.parse_type()?,
-                span: type_span,
-            })
-        } else {
-            None
-        };
-        let (items, end_line) = self.parse_regular_section_items()?;
-        Ok(TopLevelItem::Section(SectionDecl {
+        let previous_type_parameters = std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
+        self.expect(&Token::LBrace)?;
+        let mut items = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            if self.at(&Token::HashBracket) {
+                return Err(self.error("attribute `#[...]` is only valid on top-level structs and vars"));
+            }
+            let field = self.parse_type_field(&type_parameters)?;
+            let ty = match field.shape {
+                TypeFieldShape::Primitive(ty) => ty,
+                TypeFieldShape::Named(name) => SparType::Named(name),
+                TypeFieldShape::TypeParameter(name) => SparType::TypeParameter(name),
+                TypeFieldShape::Applied { name, arguments } => SparType::Applied { name, arguments },
+                TypeFieldShape::InlineRecord(_) => unreachable!("source struct fields have explicit types"),
+            };
+            items.push(ObjectItem::Field(FieldDecl {
+                name: field.name, ty: Some(ty), value: field.default.map(FieldValue::Expr),
+                end_line: self.prev_line(), span: field.span,
+            }));
+        }
+        self.expect(&Token::RBrace)?;
+        let end_line = self.prev_line();
+        self.expect(&Token::Semicolon)?;
+        self.active_type_parameters = previous_type_parameters;
+        let type_binding = None;
+        Ok(TopLevelItem::Struct(StructDecl {
+            origin_private: false,
+            origin: None,
+            type_parameters,
             exported,
             private,
-            canonical: true,
-            path: vec![name],
+            name,
             items,
             type_binding,
             span,
@@ -1367,7 +1263,7 @@ impl Parser {
 
     /// Parse a regular section body: `{ ...fields/spreads... };`, including
     /// the trailing `;`.
-    fn parse_regular_section_items(&mut self) -> Result<(Vec<SectionItem>, u32), SparError> {
+    fn parse_regular_section_items(&mut self) -> Result<(Vec<ObjectItem>, u32), SparError> {
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         loop {
@@ -1466,9 +1362,6 @@ impl Parser {
         if self.at(&Token::LBracket) {
             self.advance();
             let inner = self.parse_type()?;
-            if inner == SparType::Section {
-                return Err(self.error("'[section]' is not a valid type — 'section' cannot be used as a list element type"));
-            }
             self.expect(&Token::RBracket)?;
             return Ok(SparType::List(Box::new(inner)));
         }
@@ -1480,7 +1373,19 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
-            params.push(self.parse_type()?);
+            let index = params.len();
+            let (name, ty) = if matches!(self.peek(), Token::Ident(_))
+                && self.tokens.get(self.pos + 1).map(|token| &token.token) == Some(&Token::Colon)
+            {
+                let (name, _) = self.expect_ident()?;
+                self.expect(&Token::Colon)?;
+                (name, self.parse_type()?)
+            } else {
+                // Compatibility window for the historical `fn(int) -> int`
+                // spelling. The canonical formatter always emits a name.
+                (format!("arg{index}"), self.parse_type()?)
+            };
+            params.push(CallableParamType { name, ty });
             if self.at(&Token::Comma) {
                 self.advance();
                 if self.at(&Token::RParen) {
@@ -1511,6 +1416,12 @@ impl Parser {
             // type named `command` or `exec` remains referenceable outside
             // the actual native-shell construct positions.
             let (name, _) = self.expect_ident()?;
+            if name == "Any" {
+                if self.at(&Token::Lt) {
+                    return Err(self.error("Any does not accept type arguments"));
+                }
+                return Ok(SparType::Any);
+            }
             if self.at(&Token::Lt) {
                 let arguments = self.parse_type_arguments_required()?;
                 if name == "List" {
@@ -1535,9 +1446,13 @@ impl Parser {
             Token::TypeInt     => SparType::Int,
             Token::TypeFloat   => SparType::Float,
             Token::TypeBool    => SparType::Bool,
-            Token::TypeSection => SparType::Section,
+            Token::TypeSection => {
+                return Err(self.error(
+                    "the `section` type was removed; use a named type, `Record`, or `Map<K, V>`",
+                ));
+            }
             Token::TypeShell   => SparType::Shell,
-            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', 'section', 'shell', or a declared type name), found {}", self.peek().human_name()))),
+            _ => return Err(self.error(format!("expected a type ('str', 'int', 'float', 'bool', 'shell', or a declared type name), found {}", self.peek().human_name()))),
         };
         self.advance();
         Ok(ty)
@@ -1740,7 +1655,8 @@ impl Parser {
                 let s = self.parse_interp_string()?;
                 Ok(Expr::String(s))
             }
-            Token::KwFn => self.parse_closure_expr(),
+            Token::Pipe | Token::OrOr => self.parse_pipe_closure_expr(),
+            Token::KwFn => self.parse_legacy_closure_expr(),
             Token::LBracket => self.parse_list_literal(),
             Token::LBrace => self.parse_object_literal(),
             Token::LParen => {
@@ -1834,16 +1750,10 @@ impl Parser {
                 let (field, field_span) = self.expect_ident()?;
                 if self.at(&Token::LParen) {
                     self.advance();
-                    let mut args = Vec::new();
-                    while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
-                        args.push(self.parse_expr()?);
-                        if self.at(&Token::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
+                    let args = self.parse_named_call_args()?;
                     self.expect(&Token::RParen)?;
+                    let mut span = span;
+                    span.end = self.tokens[self.pos - 1].span.end;
                     expr = Expr::MethodCall {
                         receiver: Box::new(expr),
                         method: field,
@@ -1865,7 +1775,72 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_closure_expr(&mut self) -> Result<Expr, SparError> {
+    fn parse_pipe_closure_expr(&mut self) -> Result<Expr, SparError> {
+        let span = self.peek_span();
+        let mut params = Vec::new();
+
+        if self.at(&Token::OrOr) {
+            self.advance();
+        } else {
+            self.expect(&Token::Pipe)?;
+            while !self.at(&Token::Pipe) && !self.at(&Token::Eof) {
+                let param_span = self.peek_span();
+                let (name, _) = self.expect_ident()?;
+                let ty = if self.at(&Token::Colon) {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                params.push(ClosureParam {
+                    name,
+                    ty,
+                    span: param_span,
+                });
+                if self.at(&Token::Comma) {
+                    self.advance();
+                } else if !self.at(&Token::Pipe) {
+                    return Err(self.error(format!(
+                        "expected ',' or '|' in closure parameter list, found {}",
+                        self.peek().human_name()
+                    )));
+                }
+            }
+            self.expect(&Token::Pipe)?;
+        }
+
+        let return_type = if self.at(&Token::Arrow) {
+            self.advance();
+            Some(self.parse_function_return_type()?)
+        } else {
+            None
+        };
+
+        let body = if self.at(&Token::LBrace) {
+            self.advance();
+            let mut stmts = Vec::new();
+            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+                stmts.push(self.parse_func_stmt()?);
+            }
+            let body_span = self.peek_span();
+            self.expect(&Token::RBrace)?;
+            ClosureBody::Block(FunctionBody {
+                stmts,
+                span: body_span,
+            })
+        } else {
+            ClosureBody::Expr(Box::new(self.parse_fallback_expr()?))
+        };
+
+        Ok(Expr::Closure {
+            params,
+            return_type,
+            body,
+            span,
+        })
+    }
+
+    fn parse_legacy_closure_expr(&mut self) -> Result<Expr, SparError> {
         let span = self.peek_span();
         self.expect(&Token::KwFn)?;
         self.expect(&Token::LParen)?;
@@ -2028,29 +2003,18 @@ impl Parser {
     /// contextual identifier `shell`; it must not be reinterpreted as a
     /// declaration of type `shell`. Typed section fields continue to use
     /// `parse_field_decl`.
-    fn parse_object_item(&mut self) -> Result<SectionItem, SparError> {
+    fn parse_object_item(&mut self) -> Result<ObjectItem, SparError> {
         if self.at(&Token::DotDotDot) {
-            return Ok(SectionItem::Spread(self.parse_spread()?));
+            return Ok(ObjectItem::Spread(self.parse_spread()?));
         }
 
         let span = self.peek_span();
         let (name, _) = self.expect_ident()?;
         self.expect(&Token::Colon)?;
-        let value = if self.at(&Token::LBrace) {
-            self.expect(&Token::LBrace)?;
-            let mut items = Vec::new();
-            while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                items.push(self.parse_object_item()?);
-            }
-            self.expect(&Token::RBrace)?;
-            FieldValue::Nested(items)
-        } else {
-            FieldValue::Expr(self.parse_expr()?)
-        };
+        let value = FieldValue::Expr(self.parse_expr()?);
         self.expect(&Token::Semicolon)?;
-        Ok(SectionItem::Field(FieldDecl {
+        Ok(ObjectItem::Field(FieldDecl {
             name,
-            optional: false,
             ty: None,
             value: Some(value),
             span,
@@ -2103,11 +2067,10 @@ impl Parser {
         }
 
         if self.at(&Token::LParen) {
-            if name == "env" || name == "str" || !self.call_uses_named_arguments() {
+            if matches!(name.as_str(), "env" | "str" | "int" | "float" | "bool") {
                 return self.parse_fn_call(name, span);
-            } else {
-                return self.parse_user_call(name, name_span, Vec::new());
             }
+            return self.parse_user_call(name, name_span, Vec::new());
         }
 
         let mut segments = vec![name];
@@ -2140,35 +2103,24 @@ impl Parser {
         )
     }
 
-    fn parse_fn_call(&mut self, name: String, span: Span) -> Result<Expr, SparError> {
+    fn parse_fn_call(&mut self, name: String, mut span: Span) -> Result<Expr, SparError> {
         self.expect(&Token::LParen)?;
-
-        let mut args = Vec::new();
-        if !self.at(&Token::RParen) {
-            args.push(self.parse_expr()?);
-            while self.at(&Token::Comma) {
-                self.advance();
-                if self.at(&Token::RParen) {
-                    break;
-                }
-                args.push(self.parse_expr()?);
-            }
-        }
-
+        let args = self.parse_named_call_args()?;
         self.expect(&Token::RParen)?;
+        span.end = self.tokens[self.pos - 1].span.end;
         Ok(Expr::FnCall(FnCall { name, args, span }))
     }
 
-    fn parse_user_call(
-        &mut self,
-        name: String,
-        name_span: Span,
-        type_arguments: Vec<SparType>,
-    ) -> Result<Expr, SparError> {
-        let span = name_span.clone();
-        self.expect(&Token::LParen)?;
+    fn parse_named_call_args(&mut self) -> Result<Vec<CallArg>, SparError> {
         let mut args = Vec::new();
         while !self.at(&Token::RParen) && !self.at(&Token::Eof) {
+            if !self.at_ident()
+                || self.tokens.get(self.pos + 1).map(|token| &token.token) != Some(&Token::Colon)
+            {
+                return Err(self.error(
+                    "positional arguments were removed; pass arguments by name, for example `value: ...`",
+                ));
+            }
             let param_name_span = self.peek_span();
             let (param_name, _) = self.expect_ident()?;
             self.expect(&Token::Colon)?;
@@ -2181,9 +2133,27 @@ impl Parser {
             });
             if self.at(&Token::Comma) {
                 self.advance();
+                if self.at(&Token::RParen) {
+                    break;
+                }
+            } else if !self.at(&Token::RParen) {
+                return Err(self.error("expected ',' or ')' after named argument"));
             }
         }
+        Ok(args)
+    }
+
+    fn parse_user_call(
+        &mut self,
+        name: String,
+        name_span: Span,
+        type_arguments: Vec<SparType>,
+    ) -> Result<Expr, SparError> {
+        let mut span = name_span.clone();
+        self.expect(&Token::LParen)?;
+        let args = self.parse_named_call_args()?;
         self.expect(&Token::RParen)?;
+        span.end = self.tokens[self.pos - 1].span.end;
         Ok(Expr::Call {
             name,
             name_span,
@@ -2211,6 +2181,15 @@ impl Parser {
         })
     }
 
+    fn expect_function_keyword(&mut self) -> Result<(), SparError> {
+        if self.at(&Token::KwFn) || self.at(&Token::KwFunction) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error(format!("expected 'fn', found {}", self.peek().human_name())))
+        }
+    }
+
     fn parse_function_decl(
         &mut self,
         is_private: bool,
@@ -2220,7 +2199,7 @@ impl Parser {
         if is_async {
             self.expect(&Token::KwAsync)?;
         }
-        self.expect(&Token::KwFunction)?;
+        self.expect_function_keyword()?;
         let (name, name_span) = self.expect_ident()?;
         let type_parameters = self.parse_type_parameters()?;
         let previous_type_parameters =
@@ -2304,7 +2283,11 @@ impl Parser {
         let (name, name_span) = self.expect_ident()?;
         self.expect(&Token::LBrace)?;
         let mut functions = Vec::new();
-        while self.at(&Token::KwFunction) || self.at(&Token::KwAsync) || self.at(&Token::Private) {
+        while self.at(&Token::KwFunction)
+            || self.at(&Token::KwFn)
+            || self.at(&Token::KwAsync)
+            || self.at(&Token::Private)
+        {
             if self.at(&Token::Private) {
                 self.advance();
                 let is_async = self.at(&Token::KwAsync);
@@ -2373,31 +2356,9 @@ impl Parser {
             self.advance(); // consume 'return'
             let ret_value = if self.at(&Token::Semicolon) {
                 ReturnValue::Void
-            } else if self.at(&Token::LBrace) {
-                self.advance(); // consume '{'
-                let mut fields = Vec::new();
-                while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
-                    let field_span = self.peek_span();
-                    let (field_name, _) = self.expect_ident()?;
-                    self.expect(&Token::Colon)?;
-                    let (ty, value) = if self.at_type_start() {
-                        let ty = self.parse_type()?;
-                        self.expect(&Token::Eq)?;
-                        (Some(ty), self.parse_expr()?)
-                    } else {
-                        (None, self.parse_expr()?)
-                    };
-                    self.expect(&Token::Semicolon)?;
-                    fields.push(ReturnField {
-                        name: field_name,
-                        ty,
-                        value,
-                        span: field_span,
-                    });
-                }
-                self.expect(&Token::RBrace)?;
-                ReturnValue::SectionBlock(fields)
             } else {
+                // Object returns are ordinary expressions. There is no
+                // section-specific return grammar anymore.
                 ReturnValue::Expr(self.parse_expr()?)
             };
             self.expect(&Token::Semicolon)?;
@@ -3132,7 +3093,7 @@ fn push_shell_command(
 mod tests {
     use super::*;
     use crate::ast::{
-        BinOp, Expr, FieldValue, FnCall, Literal, SectionItem, SparType, StringPart, TopLevelItem,
+        BinOp, Expr, FieldValue, FnCall, Literal, ObjectItem, SparType, StringPart, TopLevelItem,
     };
 
     fn parse_str(src: &str) -> Program {
@@ -3162,7 +3123,10 @@ mod tests {
         assert_eq!(
             decl.ty,
             SparType::Function {
-                params: vec![SparType::Int],
+                params: vec![CallableParamType {
+                    name: "arg0".into(),
+                    ty: SparType::Int
+                }],
                 return_type: Box::new(SparType::Int),
             }
         );
@@ -3174,7 +3138,16 @@ mod tests {
         assert_eq!(
             decl.ty,
             SparType::Function {
-                params: vec![SparType::Str, SparType::Int],
+                params: vec![
+                    CallableParamType {
+                        name: "arg0".into(),
+                        ty: SparType::Str
+                    },
+                    CallableParamType {
+                        name: "arg1".into(),
+                        ty: SparType::Int
+                    },
+                ],
                 return_type: Box::new(SparType::Bool),
             }
         );
@@ -3307,7 +3280,6 @@ mod tests {
         };
         assert!(!decl.exported);
         assert_eq!(decl.name, "port");
-        assert!(!decl.optional);
         assert_eq!(decl.ty, SparType::Int);
         assert!(decl.value.is_some());
         let val = decl.value.unwrap();
@@ -3315,14 +3287,9 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_var_no_value() {
-        let item = first_item("var log_level?: str;");
-        let TopLevelItem::Var(decl) = item else {
-            panic!("not var")
-        };
-        assert!(decl.optional);
-        assert_eq!(decl.ty, SparType::Str);
-        assert!(decl.value.is_none());
+    fn test_nullable_var_question_mark_is_rejected() {
+        let err = parse_err("var logLevel?: str;");
+        assert!(err.contains("Option<T>"), "got: {err}");
     }
 
     #[test]
@@ -3352,18 +3319,13 @@ mod tests {
             panic!("not dynamic")
         };
         assert_eq!(decl.name, "tags");
-        assert!(!decl.optional);
         assert!(matches!(decl.value, Some(Expr::List(_, _))));
     }
 
     #[test]
-    fn test_dynamic_var_optional_no_value() {
-        let item = first_item("dynamic var meta?;");
-        let TopLevelItem::Dynamic(decl) = item else {
-            panic!("not dynamic")
-        };
-        assert!(decl.optional);
-        assert!(decl.value.is_none());
+    fn test_dynamic_nullable_question_mark_is_rejected() {
+        let err = parse_err("dynamic var meta?;");
+        assert!(err.contains("Option<T>"), "got: {err}");
     }
 
     #[test]
@@ -3376,84 +3338,33 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_section() {
-        let item = first_item("[server]{ port: int = 3000; };");
-        let TopLevelItem::Section(decl) = item else {
-            panic!("not section")
-        };
-        assert!(!decl.exported);
-        assert_eq!(decl.path, vec!["server"]);
-        assert_eq!(decl.items.len(), 1);
-        assert!(matches!(decl.items[0], SectionItem::Field(_)));
-    }
-
-    #[test]
-    fn test_exported_section() {
-        let item = first_item("export [defaults]{ workers: int = 4; };");
-        let TopLevelItem::Section(decl) = item else {
-            panic!("not section")
-        };
-        assert!(decl.exported);
-    }
-
-    #[test]
-    fn dot_path_section_name_is_rejected() {
-        let src = "[templates.CustomFolder]{ x: int = 1; };";
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        let result = Parser::new(tokens).parse();
-        assert!(result.is_err(), "dot-path section names must be rejected");
-        let err = result.unwrap_err();
-        let msg = match &err {
-            crate::error::SparError::ParseError { message, .. } => message.clone(),
-            _ => panic!("expected ParseError"),
-        };
+    fn legacy_section_declaration_is_rejected() {
+        let err = parse_err("[server]{ port: int = 3000; };");
         assert!(
-            msg.contains("'.'") || msg.contains("section"),
-            "error message should explain the dot restriction, got: {msg}"
+            err.contains("legacy section") && err.contains("struct"),
+            "got: {err}"
         );
     }
 
     #[test]
-    fn test_optional_field_in_section() {
-        let item = first_item("[server]{ log_level?: str; };");
-        let TopLevelItem::Section(decl) = item else {
-            panic!("not section")
-        };
-        let SectionItem::Field(f) = &decl.items[0] else {
-            panic!("not field")
-        };
-        assert!(f.optional);
-        assert!(f.value.is_none());
+    fn exported_legacy_section_is_rejected() {
+        let err = parse_err("export [Defaults]{ workers: int = 4; };");
+        assert!(
+            err.contains("legacy section") && err.contains("export struct"),
+            "got: {err}"
+        );
     }
 
     #[test]
-    fn test_local_spread() {
-        let item = first_item("[project]{ ...base_project; };");
-        let TopLevelItem::Section(decl) = item else {
-            panic!("not section")
-        };
-        let SectionItem::Spread(s) = &decl.items[0] else {
-            panic!("not spread")
-        };
-        let Expr::NamespaceRef(nr) = &s.expr else {
-            panic!("expected NamespaceRef")
-        };
-        assert_eq!(nr.segments, vec!["base_project"]);
+    fn canonical_struct_rejects_declaration_spread() {
+        let error = parse_err("struct Project { ...baseProject; };");
+        assert!(error.contains("expected a name"), "{error}");
     }
 
     #[test]
-    fn test_namespaced_spread() {
-        let item = first_item("[project]{ ...global::base_project; };");
-        let TopLevelItem::Section(decl) = item else {
-            panic!("not section")
-        };
-        let SectionItem::Spread(s) = &decl.items[0] else {
-            panic!("not spread")
-        };
-        let Expr::NamespaceRef(nr) = &s.expr else {
-            panic!("expected NamespaceRef")
-        };
-        assert_eq!(nr.segments, vec!["global", "base_project"]);
+    fn nullable_struct_field_question_mark_is_rejected() {
+        let err = parse_err("struct Server { logLevel?: str; };");
+        assert!(err.contains("Option<T>"), "got: {err}");
     }
 
     #[test]
@@ -3472,7 +3383,7 @@ mod tests {
 
     #[test]
     fn test_fallback_expr() {
-        let item = first_item(r#"var port: int = env("PORT") ?? 3000;"#);
+        let item = first_item(r#"var port: int = env(name: "PORT") ?? 3000;"#);
         let TopLevelItem::Var(decl) = item else {
             panic!("not var")
         };
@@ -3519,7 +3430,7 @@ mod tests {
 
     #[test]
     fn test_env_fn_call() {
-        let item = first_item(r#"var mode: str = env("APP_MODE");"#);
+        let item = first_item(r#"var mode: str = env(name: "APP_MODE");"#);
         let TopLevelItem::Var(decl) = item else {
             panic!("not var")
         };
@@ -3528,34 +3439,30 @@ mod tests {
         };
         assert_eq!(fc.name, "env");
         assert_eq!(fc.args.len(), 1);
-        assert!(matches!(fc.args[0], Expr::String(_)));
+        assert_eq!(fc.args[0].param_name, "name");
+        assert!(matches!(&fc.args[0].value, Expr::String(_)));
     }
 
     #[test]
-    fn positional_call_syntax_is_parsed_before_semantic_resolution() {
-        let program = parse_str(r#"var x: str = foo("bar");"#);
-        let TopLevelItem::Var(var) = &program.items[0] else {
-            panic!("expected var");
-        };
-        assert!(matches!(var.value, Some(Expr::FnCall(_))));
+    fn positional_call_syntax_is_rejected_with_named_argument_migration_hint() {
+        let error = parse_err(r#"var x: str = foo("bar");"#);
+        assert!(
+            error.contains("positional arguments were removed"),
+            "{error}"
+        );
+        assert!(error.contains("value:"), "{error}");
     }
 
     #[test]
-    fn test_unclosed_section_error() {
+    fn malformed_legacy_section_reports_migration_error() {
         let err = parse_err("[server]{");
-        assert!(err.contains("unclosed section"), "got: {err}");
+        assert!(err.contains("legacy section"), "got: {err}");
     }
 
     #[test]
-    fn test_missing_semicolon_after_section() {
-        let err = parse_err("[server]{ port: int = 3000; }");
-        assert!(err.contains("expected"), "got: {err}");
-    }
-
-    #[test]
-    fn top_level_type_requires_trailing_semicolon() {
-        assert!(parse_err("type [User]{ name: str; }").contains("expected ';'"));
-        parse_str("type [User]{ name: str; };");
+    fn top_level_struct_requires_trailing_semicolon() {
+        assert!(parse_err("struct User { name: str; }").contains("expected ';'"));
+        parse_str("struct User { name: str; };");
     }
 
     #[test]
@@ -3580,74 +3487,42 @@ mod tests {
     }
 
     #[test]
-    fn test_full_program_multiple_decls() {
+    fn full_program_uses_struct_instead_of_section() {
         let src = r#"
             import "base.spar";
             var port: int = 3000;
-            [server]{ host: str = "localhost"; };
+            struct Server { host: str = "localhost"; };
         "#;
         let prog = parse_str(src);
         assert_eq!(prog.items.len(), 3);
+        assert!(matches!(&prog.items[2], TopLevelItem::Struct(decl) if decl.name == "Server"));
     }
 
     #[test]
-    fn section_field_type_parses() {
-        let src = r#"[MetaData]{ manual: section = { author: str = "occ"; }; };"#;
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        let result = Parser::new(tokens).parse();
+    fn section_type_is_rejected_everywhere() {
+        let err = parse_err("struct MetaData { manual: section; };");
         assert!(
-            result.is_ok(),
-            "section field should parse: {:?}",
-            result.err()
+            err.contains("section") && err.contains("named"),
+            "got: {err}"
         );
     }
 
     #[test]
-    fn nested_section_twice_deep_parses() {
-        let src = "[A]{ b: section = { c: section = { val: int = 1; }; }; };";
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(
-            Parser::new(tokens).parse().is_ok(),
-            "two-deep nesting should parse"
-        );
-    }
-
-    #[test]
-    fn empty_nested_section_parses() {
-        let src = "[A]{ inner: section = { }; };";
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(
-            Parser::new(tokens).parse().is_ok(),
-            "empty nested section should parse"
-        );
-    }
-
-    #[test]
-    fn list_section_type_rejected() {
-        let src = "[A]{ x: [section]; };";
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        let result = Parser::new(tokens).parse();
-        assert!(result.is_err(), "[section] should be rejected");
-    }
-
-    #[test]
-    fn section_field_value_is_nested() {
-        let src = r#"[A]{ inner: section = { key: str = "v"; }; };"#;
-        let prog = parse_str(src);
-        let TopLevelItem::Section(decl) = &prog.items[0] else {
-            panic!()
+    fn dynamic_object_literal_still_parses() {
+        let item = first_item(r#"var metadata: Record = { author: "occ"; };"#);
+        let TopLevelItem::Var(decl) = item else {
+            panic!("not var")
         };
-        let SectionItem::Field(f) = &decl.items[0] else {
-            panic!()
-        };
-        assert!(matches!(f.value, Some(FieldValue::Nested(_))));
+        assert!(matches!(decl.value, Some(Expr::Object(_, _))));
     }
 
     #[test]
-    fn private_section_parses() {
-        let src = "private [Defaults]{ timeout: int = 30; };";
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(Parser::new(tokens).parse().is_ok());
+    fn private_legacy_section_is_rejected() {
+        let err = parse_err("private [Defaults]{ timeout: int = 30; };");
+        assert!(
+            err.contains("legacy section") && err.contains("private struct"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3674,17 +3549,14 @@ function f(debug: bool) -> int {
     }
 
     #[test]
-    fn return_with_section_block_inside_if_parses() {
+    fn return_with_section_type_is_rejected() {
         let src = r#"
 function f(debug: bool) -> section {
-    if debug {
-        return { mode: str = str(true); };
-    }
-    return { mode: str = str(false); };
+    return { mode: str(true); };
 };
 "#;
-        let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
-        assert!(Parser::new(tokens).parse().is_ok());
+        let err = parse_err(src);
+        assert!(err.contains("section"), "got: {err}");
     }
 
     #[test]
@@ -3775,7 +3647,7 @@ function main() -> shell {
 function main() -> shell {
     return shell {
         sleep 1 &
-        println(message: "background started");
+        println(value: "background started");
         echo done;
     };
 };
@@ -4098,7 +3970,7 @@ function f(flag: bool) -> int {
     fn native_shell_words_are_contextual_identifiers_outside_construct_position() {
         parse_str(
             r#"
-            type [command] { value: str; };
+            type command { value: str; };
             struct Holder {
                 command: str = "field";
                 exec: str = "value";

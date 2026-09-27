@@ -1,0 +1,20 @@
+struct Address {
+    country: str = "";
+    city: str = "";
+};
+
+struct User {
+    name: str = "";
+    address: Address = Address(country: "", city: "");
+};
+
+fn main() -> int {
+    var user: User = User(
+        name: "Mike",
+        address: Address(country: "Nigeria", city: "Awka"),
+    );
+    var metadata: Record = { source: "conformance"; };
+    println(value: user.address.city);
+    println(value: metadata.source);
+    return 0;
+};

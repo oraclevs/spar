@@ -41,8 +41,8 @@ pub fn configured_precompiled_bundle() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Source-backed stdlib remains the authoritative fallback and is also what
-/// the LSP uses for source navigation.
+/// Source identity retained for diagnostics and LSP navigation. Runtime reads
+/// use the embedded snapshot, even if this checkout changes or disappears.
 pub fn source_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib")
 }
@@ -70,6 +70,39 @@ pub fn source_module_path(module: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Sources compiled into this binary, paired with its parser and native ABI.
+/// Filesystem paths remain source identities for diagnostics and navigation.
+pub fn embedded_source(path: &Path) -> Option<&'static str> {
+    let root = source_root().join("src");
+    let relative = path.strip_prefix(&root).ok()?;
+    if relative
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    match relative.to_str()? {
+        "async.spar" => Some(include_str!("../../stdlib/src/async.spar")),
+        "data.spar" => Some(include_str!("../../stdlib/src/data.spar")),
+        "env.spar" => Some(include_str!("../../stdlib/src/env.spar")),
+        "fs.spar" => Some(include_str!("../../stdlib/src/fs.spar")),
+        "http.spar" => Some(include_str!("../../stdlib/src/http.spar")),
+        "io.spar" => Some(include_str!("../../stdlib/src/io.spar")),
+        "json.spar" => Some(include_str!("../../stdlib/src/json.spar")),
+        "lib.spar" => Some(include_str!("../../stdlib/src/lib.spar")),
+        "math.spar" => Some(include_str!("../../stdlib/src/math.spar")),
+        "path.spar" => Some(include_str!("../../stdlib/src/path.spar")),
+        "prelude.spar" => Some(include_str!("../../stdlib/src/prelude.spar")),
+        "process.spar" => Some(include_str!("../../stdlib/src/process.spar")),
+        "random.spar" => Some(include_str!("../../stdlib/src/random.spar")),
+        "regex.spar" => Some(include_str!("../../stdlib/src/regex.spar")),
+        "terminal.spar" => Some(include_str!("../../stdlib/src/terminal.spar")),
+        "text.spar" => Some(include_str!("../../stdlib/src/text.spar")),
+        "time.spar" => Some(include_str!("../../stdlib/src/time.spar")),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +120,30 @@ mod tests {
             .unwrap()
             .ends_with("stdlib/src/fs.spar"));
         assert!(source_module_path("../secret").is_none());
+    }
+
+    #[test]
+    fn imports_read_the_source_compiled_with_this_binary() {
+        for module in ["lib", "data", "fs", "io", "http", "json", "prelude"] {
+            let path = source_module_path(module).unwrap();
+            let embedded = embedded_source(&path).expect("bundled module must be embedded");
+            assert_eq!(crate::stdlib::read_module_source(&path).unwrap(), embedded);
+            assert!(crate::stdlib::module_source_exists(&path));
+            let tokens = crate::Lexer::new(embedded).tokenize().unwrap();
+            crate::Parser::new(tokens).parse().unwrap();
+        }
+    }
+
+    #[test]
+    fn embedded_sources_do_not_capture_external_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fs.spar");
+        std::fs::write(&path, "export var marker = 42;").unwrap();
+        assert!(embedded_source(&path).is_none());
+        assert_eq!(
+            crate::stdlib::read_module_source(&path).unwrap(),
+            "export var marker = 42;"
+        );
+        assert!(embedded_source(&source_root().join("src/../secret.spar")).is_none());
     }
 }

@@ -38,7 +38,7 @@ pub struct ResolvedNode {
 #[derive(Debug)]
 pub struct ResolvedGraph {
     /// alias → `PackageId`, for the resolved root project's own
-    /// `[Dependencies]` (after applying its own `[Overrides]`).
+    /// `struct Dependencies` (after applying its own `struct Overrides`).
     pub root: BTreeMap<String, PackageId>,
     pub nodes: BTreeMap<PackageId, ResolvedNode>,
 }

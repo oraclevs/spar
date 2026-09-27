@@ -62,3 +62,19 @@ fn function_control_flow_uses_shared_statement_type() {
     );
     accepts_shared_statement(&statement);
 }
+
+#[test]
+fn canonical_struct_has_a_dedicated_top_level_ast_node() {
+    use crate::ast::{ObjectItem, TopLevelItem};
+
+    let tokens = crate::lexer::Lexer::new("struct User { name: str = \"Mike\"; };")
+        .tokenize()
+        .expect("lex");
+    let program = crate::parser::Parser::new(tokens).parse().expect("parse");
+
+    let TopLevelItem::Struct(user) = &program.items[0] else {
+        panic!("expected TopLevelItem::Struct");
+    };
+    assert_eq!(user.name, "User");
+    assert!(matches!(user.items.as_slice(), [ObjectItem::Field(_)]));
+}

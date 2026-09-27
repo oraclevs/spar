@@ -340,7 +340,6 @@ impl Compiler {
                 "_".into(),
                 GlobalEntry::Var {
                     ty,
-                    optional: false,
                     exported: false,
                     mutable: false,
                     emit: false,
@@ -407,28 +406,24 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
         fields: vec![
             TypeField {
                 name: "success".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::Bool),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "exitCode".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::Int),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "stdout".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "stderr".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
                 default: None,
                 span: span.clone(),
@@ -446,35 +441,33 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
         fields: vec![
             TypeField {
                 name: "code".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::Int),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "success".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::Bool),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "signal".to_string(),
-                optional: true,
-                shape: TypeFieldShape::Primitive(SparType::Int),
+                shape: TypeFieldShape::Applied {
+                    name: "Option".into(),
+                    arguments: vec![SparType::Int],
+                },
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "pid".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::Int),
                 default: None,
                 span: span.clone(),
             },
             TypeField {
                 name: "pipeline".to_string(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Named(
                     "ProcessStatus".into(),
                 )))),
@@ -491,7 +484,6 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             "Bytes",
             vec![TypeField {
                 name: "values".into(),
-                optional: false,
                 shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Int))),
                 default: None,
                 span: span.clone(),
@@ -502,22 +494,19 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             vec![
                 TypeField {
                     name: "code".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Int),
+                        shape: TypeFieldShape::Primitive(SparType::Int),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "success".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Bool),
+                        shape: TypeFieldShape::Primitive(SparType::Bool),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "processes".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Named(
+                        shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Named(
                         "ProcessStatus".into(),
                     )))),
                     default: None,
@@ -530,15 +519,13 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             vec![
                 TypeField {
                     name: "program".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Str),
+                        shape: TypeFieldShape::Primitive(SparType::Str),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "args".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Str))),
+                        shape: TypeFieldShape::Primitive(SparType::List(Box::new(SparType::Str))),
                     default: None,
                     span: span.clone(),
                 },
@@ -549,15 +536,13 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             vec![
                 TypeField {
                     name: "source".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Str),
+                        shape: TypeFieldShape::Primitive(SparType::Str),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "bytes".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Named("Bytes".into()),
+                        shape: TypeFieldShape::Named("Bytes".into()),
                     default: None,
                     span: span.clone(),
                 },
@@ -569,36 +554,31 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             vec![
                 TypeField {
                     name: "success".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Bool),
+                        shape: TypeFieldShape::Primitive(SparType::Bool),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "exitCode".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Int),
+                        shape: TypeFieldShape::Primitive(SparType::Int),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "status".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Named("PipelineStatus".into()),
+                        shape: TypeFieldShape::Named("PipelineStatus".into()),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "stdout".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Named("Bytes".into()),
+                        shape: TypeFieldShape::Named("Bytes".into()),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "stderr".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Named("Bytes".into()),
+                        shape: TypeFieldShape::Named("Bytes".into()),
                     default: None,
                     span: span.clone(),
                 },
@@ -609,29 +589,25 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             vec![
                 TypeField {
                     name: "id".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Int),
+                        shape: TypeFieldShape::Primitive(SparType::Int),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "pid".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Int),
+                        shape: TypeFieldShape::Primitive(SparType::Int),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "processGroup".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Int),
+                        shape: TypeFieldShape::Primitive(SparType::Int),
                     default: None,
                     span: span.clone(),
                 },
                 TypeField {
                     name: "state".into(),
-                    optional: false,
-                    shape: TypeFieldShape::Primitive(SparType::Str),
+                        shape: TypeFieldShape::Primitive(SparType::Str),
                     default: None,
                     span: span.clone(),
                 },

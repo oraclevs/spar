@@ -139,6 +139,7 @@ pub fn schema_type_of(value: &Value) -> SchemaType {
         Value::Bool(_) => SchemaType::Bool,
         Value::String(_) => SchemaType::Str,
         Value::Bytes(_) => SchemaType::Bytes,
+        Value::Args(_) => SchemaType::Dynamic,
         Value::List(values) => {
             let mut iter = values.iter();
             let Some(first) = iter.next() else {

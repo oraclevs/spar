@@ -165,4 +165,5 @@ fn native_method_signature_preserves_origin_privacy_and_generic_receiver_metadat
     );
     assert!(signature.private);
     assert!(signature.native);
+    assert_eq!(signature.receiver_mode, spar::ReceiverMode::Shared);
 }

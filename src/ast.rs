@@ -17,10 +17,10 @@ pub enum TopLevelItem {
     Import(ImportDecl),
     Var(VarDecl),
     Dynamic(DynamicDecl),
-    Section(SectionDecl),
+    Struct(StructDecl),
     Impl(ImplDecl),
     Function(FunctionDecl),
-    SchemaSection(SchemaSectionDecl),
+    Schema(SchemaDecl),
     Type(TypeDecl),
     SchemaFrom(SchemaFromDecl),
     Enum(EnumDecl),
@@ -288,6 +288,8 @@ pub struct ShellRedirect {
 
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
+    /// Source module and original declaration name, retained across selective aliases.
+    pub origin: Option<(std::path::PathBuf, String)>,
     pub name: String,
     pub name_span: Span,
     pub exported: bool,
@@ -314,7 +316,6 @@ pub struct TypeDecl {
 #[derive(Debug, Clone)]
 pub struct TypeField {
     pub name: String,
-    pub optional: bool,
     pub shape: TypeFieldShape,
     pub default: Option<Expr>,
     pub span: Span,
@@ -329,7 +330,9 @@ pub enum TypeFieldShape {
         name: String,
         arguments: Vec<SparType>,
     },
-    Section(Vec<TypeField>),
+    /// Internal structural shape used while validating dynamic record data.
+    /// There is no public `section` syntax that can construct this shape.
+    InlineRecord(Vec<TypeField>),
 }
 
 #[derive(Debug, Clone)]
@@ -376,28 +379,20 @@ pub struct ImportDecl {
 }
 
 #[derive(Debug, Clone)]
-pub struct SchemaMarker {
-    pub optional: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct SchemaField {
     pub name: String,
-    pub optional: bool,
     pub shape: SchemaFieldShape,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub enum SchemaFieldShape {
-    Primitive(SparType),
-    Section(Vec<SchemaField>),
+    Type(SparType),
 }
 
 #[derive(Debug, Clone)]
-pub struct SchemaSectionDecl {
+pub struct SchemaDecl {
     pub name: String,
-    pub marker: SchemaMarker,
     pub fields: Vec<SchemaField>,
     pub span: Span,
 }
@@ -407,7 +402,6 @@ pub struct SchemaFromDecl {
     pub name: String,
     pub source_type: String,
     pub source_type_span: Span,
-    pub marker: SchemaMarker,
     pub span: Span,
 }
 
@@ -430,7 +424,6 @@ pub struct VarDecl {
     pub exported: bool,
     pub mutable: bool,
     pub name: String,
-    pub optional: bool,
     pub ty: SparType,
     pub value: Option<Expr>,
     pub span: Span,
@@ -446,19 +439,21 @@ impl VarDecl {
 #[derive(Debug, Clone)]
 pub struct DynamicDecl {
     pub name: String,
-    pub optional: bool,
     pub value: Option<Expr>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct SectionDecl {
+pub struct StructDecl {
+    /// Whether the declaration was private before import localization.
+    pub origin_private: bool,
+    /// Source module and original declaration name, retained across selective aliases.
+    pub origin: Option<(std::path::PathBuf, String)>,
+    pub type_parameters: Vec<TypeParameter>,
     pub exported: bool,
     pub private: bool,
-    /// True when source used canonical `struct`; false means legacy section syntax.
-    pub canonical: bool,
-    pub path: Vec<String>,
-    pub items: Vec<SectionItem>,
+    pub name: String,
+    pub items: Vec<ObjectItem>,
     pub type_binding: Option<TypeBinding>,
     pub span: Span,
     /// Source line of the closing `}`, so the formatter can keep comments
@@ -467,7 +462,28 @@ pub struct SectionDecl {
     pub attributes: Vec<Attribute>,
 }
 
-impl SectionDecl {
+impl StructDecl {
+    /// Derived validation metadata; the struct declaration owns fields and defaults.
+    pub fn type_decl(&self) -> TypeDecl {
+        TypeDecl {
+            name: self.name.clone(), name_span: self.span.clone(),
+            type_parameters: self.type_parameters.clone(), exported: self.exported,
+            fields: self.items.iter().filter_map(|item| {
+                let ObjectItem::Field(field) = item else { return None; };
+                Some(TypeField {
+                    name: field.name.clone(),
+                    shape: TypeFieldShape::Primitive(field.ty.clone()?),
+                    default: match &field.value {
+                        Some(FieldValue::Expr(value)) => Some(value.clone()),
+                        _ => None,
+                    },
+                    span: field.span.clone(),
+                })
+            }).collect(),
+            span: self.span.clone(), end_line: self.end_line,
+        }
+    }
+
     pub fn is_emit(&self) -> bool {
         has_attribute(&self.attributes, "emit")
     }
@@ -475,6 +491,7 @@ impl SectionDecl {
 
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    pub origin: Option<std::path::PathBuf>,
     pub target: SparType,
     pub type_parameters: Vec<TypeParameter>,
     pub methods: Vec<ImplMethodDecl>,
@@ -495,7 +512,7 @@ pub struct MethodReceiver {
 }
 
 #[derive(Debug, Clone)]
-pub enum SectionItem {
+pub enum ObjectItem {
     Field(FieldDecl),
     Spread(SpreadStmt),
 }
@@ -503,15 +520,14 @@ pub enum SectionItem {
 #[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub name: String,
-    pub optional: bool,
-    /// `None` when the type is inferred from the enclosing section's
+    /// `None` when the type is inferred from the enclosing struct's
     /// `-> TypeName` binding (`name: value;`, no explicit type). Always
-    /// `Some` in a section with no binding — the typechecker enforces
+    /// `Some` in a struct with no binding — the typechecker enforces
     /// that, not the parser.
     pub ty: Option<SparType>,
     pub value: Option<FieldValue>,
     pub span: Span,
-    /// Source line of the closing `}` for a nested-section value, else the
+    /// Source line of the closing `}` for a nested-object value, else the
     /// field's own line — lets the formatter keep comments inside the body.
     pub end_line: u32,
 }
@@ -523,12 +539,21 @@ pub struct SpreadStmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CallableParamType {
+    pub name: String,
+    pub ty: SparType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum SparType {
+    Any,
     Str,
     Int,
     Float,
     Bool,
-    Section, // inline nested section body
+    /// Internal dynamic-record marker. Source code spells this `Record`;
+    /// there is no public anonymous typed-section syntax.
+    InlineRecord,
     /// Function return type only — the parser never accepts `void` for a
     /// var, param, field, or list element type, so this variant can't
     /// reach storage positions.
@@ -543,7 +568,7 @@ pub enum SparType {
         arguments: Vec<SparType>,
     },
     Function {
-        params: Vec<SparType>,
+        params: Vec<CallableParamType>,
         return_type: Box<SparType>,
     },
 }
@@ -551,13 +576,12 @@ pub enum SparType {
 /// The right-hand side of a field declaration.
 #[derive(Debug, Clone)]
 pub enum FieldValue {
-    /// Normal expression (int, float, str, bool, list fields).
+    /// Field values are ordinary expressions. Dynamic object literals use
+    /// `Expr::Object`; typed nested values use named type/struct constructors.
     Expr(Expr),
-    /// Inline nested section body (only for section-type fields). Reuses
-    /// `SectionItem` (not a bare `Vec<FieldDecl>`) so a nested body can
-    /// also contain `...SourceSection;` spreads, same as a top-level
-    /// section body already can.
-    Nested(Vec<SectionItem>),
+    /// Internal object payload retained for synthesized/config values. The
+    /// source parser does not use this for typed nesting.
+    Object(Vec<ObjectItem>),
 }
 
 #[derive(Debug, Clone)]
@@ -626,7 +650,7 @@ pub enum Expr {
         receiver: Box<Expr>,
         method: String,
         method_span: Span,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     StructuredPipe {
@@ -634,14 +658,10 @@ pub enum Expr {
         stage: Box<Expr>,
         span: Span,
     },
-    /// An anonymous object literal — `{ field: value; ...Spread; }`. Reuses
-    /// `SectionItem` verbatim, the same Field/Spread payload a nested
-    /// section body (`FieldValue::Nested`) already carries. Only reachable
-    /// via general expression parsing (list elements, var values, call
-    /// args, ...) — a `{` appearing as a FIELD's own value is still always
-    /// captured as `FieldValue::Nested` by `parse_field_decl`, never as
-    /// this variant.
-    Object(Vec<SectionItem>, Span),
+    /// An anonymous dynamic object literal — `{ field: value; ...Spread; }`.
+    /// Typed nested values are constructed through named type/struct
+    /// constructors instead of inline section bodies.
+    Object(Vec<ObjectItem>, Span),
     Shell(ShellExpr),
     ExecShell(ShellExpr),
     CommandSubstitution(ShellExpr),
@@ -735,7 +755,7 @@ pub struct NamespaceRef {
 #[derive(Debug, Clone)]
 pub struct FnCall {
     pub name: String,
-    pub args: Vec<Expr>,
+    pub args: Vec<CallArg>,
     pub span: Span,
 }
 
@@ -745,6 +765,14 @@ pub struct CallArg {
     pub param_name_span: Span,
     pub value: Expr,
     pub span: Span,
+}
+
+impl std::ops::Deref for CallArg {
+    type Target = Expr;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -884,13 +912,4 @@ pub enum ReturnValue {
     /// Bare `return;` — only legal inside a `-> void` function.
     Void,
     Expr(Expr),
-    SectionBlock(Vec<ReturnField>),
-}
-
-#[derive(Debug, Clone)]
-pub struct ReturnField {
-    pub name: String,
-    pub ty: Option<SparType>,
-    pub value: Expr,
-    pub span: Span,
 }

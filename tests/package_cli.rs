@@ -37,7 +37,7 @@ fn write_colors_manifest(dir: &Path, version: &str, red_value: &str) {
     fs::write(
         dir.join("spar.package.spar"),
         format!(
-            "[Package] {{\n    name: str = \"colors\";\n    version: str = \"{version}\";\n    kind: str = \"library\";\n}};\n",
+            "struct Package {{\n    name: str = \"colors\";\n    version: str = \"{version}\";\n    kind: str = \"library\";\n}};\n",
         ),
     )
     .unwrap();

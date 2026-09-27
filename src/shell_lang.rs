@@ -1384,7 +1384,7 @@ mod tests {
     #[test]
     fn shell_lang_parses_explicit_mixed_structured_pipeline_boundaries() {
         let expression = parse_block(
-            r#"shell { printf '%s\n' '{"name":"Obi"}' | from jsonl |> take(1) |> to jsonl | cat; }"#,
+            r#"shell { printf '%s\n' '{"name":"Obi"}' | from jsonl |> take(count: 1) |> to jsonl | cat; }"#,
         );
         assert_eq!(expression.steps.len(), 1);
         let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
@@ -1439,7 +1439,7 @@ mod tests {
 
     #[test]
     fn shell_lang_requires_from_before_structured_pipe() {
-        let tokens = Lexer::new("shell { printf x |> take(1) |> to lines; }")
+        let tokens = Lexer::new("shell { printf x |> take(count: 1) |> to lines; }")
             .tokenize()
             .expect("lex failed");
         let error = parse_shell_block(&tokens).expect_err("bytes must cross through from first");

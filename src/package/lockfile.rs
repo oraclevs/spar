@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::ast::{Expr, FieldValue, Literal, SectionItem, StringPart, TopLevelItem};
+use crate::ast::{Expr, FieldValue, Literal, ObjectItem, StringPart, TopLevelItem};
 use crate::package::error::PackageError;
 
 pub const PACKAGE_LOCK_FILE: &str = "spar.package.lock.spar";
@@ -57,7 +57,7 @@ pub struct LockedPackage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Lockfile {
-    /// alias → `PackageId`, for the root project's own `[Dependencies]`.
+    /// alias → `PackageId`, for the root project's own `struct Dependencies`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub root: BTreeMap<String, PackageId>,
     /// Every resolved package in the graph (root's direct and transitive
@@ -70,9 +70,9 @@ pub struct Lockfile {
 impl Lockfile {
     pub fn to_spar(&self) -> Result<String, PackageError> {
         let mut out = String::from(concat!(
-            "struct Lock: SparPackageLock {\n",
-            "    formatVersion = 1;\n",
-            "    root: List<SparLockedDependency> = [\n",
+            "struct Lock {\n",
+            "    formatVersion: int = 1;\n",
+            "    root: List<Record> = [\n",
         ));
         for (alias, package_id) in &self.root {
             out.push_str(&format!(
@@ -81,7 +81,7 @@ impl Lockfile {
                 escape(package_id)
             ));
         }
-        out.push_str("    ];\n    packages: List<SparLockedPackage> = [\n");
+        out.push_str("    ];\n    packages: List<Record> = [\n");
         for (id, package) in &self.packages {
             let (source_kind, source_location, revision) = match &package.source {
                 LockedSource::Github {
@@ -125,41 +125,38 @@ impl Lockfile {
         let program = crate::Parser::new(tokens)
             .parse()
             .map_err(|error| lock_err(path, &error.to_string()))?;
-        let [TopLevelItem::Section(section)] = program.items.as_slice() else {
+        let [TopLevelItem::Struct(structure)] = program.items.as_slice() else {
             return Err(lock_err(
                 path,
-                "lockfile must contain exactly one `struct Lock: SparPackageLock` declaration",
+                "lockfile must contain exactly one `struct Lock` declaration",
             ));
         };
-        if section.path.as_slice() != ["Lock"]
-            || section
-                .type_binding
-                .as_ref()
-                .and_then(|binding| match &binding.ty {
-                    crate::ast::SparType::Named(name) => Some(name.as_str()),
-                    _ => None,
-                })
-                != Some("SparPackageLock")
-        {
-            return Err(lock_err(
-                path,
-                "lockfile must use `struct Lock: SparPackageLock { ... };`",
-            ));
+        if structure.name != "Lock" || !structure.type_parameters.is_empty() {
+            return Err(lock_err(path, "lockfile must use a concrete `struct Lock { ... };` declaration"));
+        }
+        for item in &structure.items {
+            if let ObjectItem::Field(field) = item {
+                let expected = if field.name == "formatVersion" { crate::ast::SparType::Int }
+                    else { crate::ast::SparType::List(Box::new(crate::ast::SparType::Named("Record".into()))) };
+                if field.ty.as_ref() != Some(&expected) {
+                    return Err(lock_err(path, "lockfile fields require int formatVersion and List<Record> root/packages"));
+                }
+            }
         }
 
-        let fields = field_map(&section.items, path, "[Lock]")?;
+        let fields = field_map(&structure.items, path, "struct Lock")?;
         expect_fields(
             &fields,
             &["formatVersion", "root", "packages"],
             path,
-            "[Lock]",
+            "struct Lock",
         )?;
-        if int_field(&fields, "formatVersion", path, "[Lock]")? != 1 {
+        if int_field(&fields, "formatVersion", path, "struct Lock")? != 1 {
             return Err(lock_err(path, "unsupported lock formatVersion; expected 1"));
         }
 
         let mut root = BTreeMap::new();
-        for edge in list_field(&fields, "root", path, "[Lock]")? {
+        for edge in list_field(&fields, "root", path, "struct Lock")? {
             let (alias, package_id) = parse_edge(edge, path)?;
             if root.insert(alias.clone(), package_id).is_some() {
                 return Err(lock_err(path, &format!("duplicate root alias '{alias}'")));
@@ -167,7 +164,7 @@ impl Lockfile {
         }
 
         let mut packages = BTreeMap::new();
-        for package_expr in list_field(&fields, "packages", path, "[Lock]")? {
+        for package_expr in list_field(&fields, "packages", path, "struct Lock")? {
             let Expr::Object(items, _) = package_expr else {
                 return Err(lock_err(
                     path,
@@ -350,13 +347,13 @@ fn lock_err(path: &Path, message: &str) -> PackageError {
 }
 
 fn field_map<'a>(
-    items: &'a [SectionItem],
+    items: &'a [ObjectItem],
     path: &Path,
     context: &str,
 ) -> Result<BTreeMap<String, &'a Expr>, PackageError> {
     let mut fields = BTreeMap::new();
     for item in items {
-        let SectionItem::Field(field) = item else {
+        let ObjectItem::Field(field) = item else {
             return Err(lock_err(
                 path,
                 &format!("{context} may not contain spreads"),
@@ -547,8 +544,8 @@ mod tests {
         let original = lockfile_in_order(&["a", "b"]);
         let path = Path::new("spar.package.lock.spar");
         let text = original.to_spar().unwrap();
-        assert!(text.starts_with("struct Lock: SparPackageLock {"));
-        assert!(text.contains("\n    formatVersion = 1;\n    root: List<SparLockedDependency> ="));
+        assert!(text.starts_with("struct Lock {"));
+        assert!(text.contains("\n    formatVersion: int = 1;\n    root: List<Record> ="));
         assert!(!text.contains("[[packages]]"));
         let parsed = Lockfile::parse_spar(&text, path).unwrap();
         assert_eq!(original, parsed);

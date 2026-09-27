@@ -66,8 +66,8 @@ fn canonical_docker_style_pipeline_filters_projects_and_reserializes() {
                     '{{"Names":"db","Image":"pg","Status":"Exited","State":"exited"}}' \
                     '{{"Names":"cache","Image":"redis","Status":"Up","State":"running"}}'
                     | from jsonl
-                    |> where(fn(container) => container.State == "running")
-                    |> select(["Names", "Image", "Status"])
+                    |> where(predicate: |container: Record| container.State == "running")
+                    |> select(fields: ["Names", "Image", "Status"])
                     |> to jsonl
                     | cat;
             }};
@@ -93,7 +93,7 @@ fn structured_output_can_be_redirected_to_a_file() {
             return shell {{
                 printf '%s\n' '{{"n":1}}' '{{"n":2}}' '{{"n":3}}'
                     | from jsonl
-                    |> take(2)
+                    |> take(count: 2)
                     |> to jsonl
                     | cat > "{}";
             }};
@@ -118,7 +118,7 @@ fn lines_codec_maps_text_lines() {
             return shell {{
                 printf 'a\nb\nc\n'
                     | from lines
-                    |> map(fn(line: str) -> str => line + "!")
+                    |> map(transform: |line: str| line + "!")
                     |> to lines
                     | cat;
             }};
@@ -142,7 +142,7 @@ fn csv_and_tsv_decode_to_records_and_encode_back() {
                 return shell {{
                     printf '{input}'
                         | from {format}
-                        |> take(2)
+                        |> take(count: 2)
                         |> to {format}
                         | cat;
                 }};
@@ -230,7 +230,7 @@ fn take_stops_an_infinite_producer() {
         r#"{DATA}
         function main() -> shell {{
             return shell {{
-                yes | from lines |> take(3) |> to lines | cat;
+                yes | from lines |> take(count: 3) |> to lines | cat;
             }};
         }};
         "#
@@ -261,8 +261,8 @@ fn transforms_are_lazy_so_map_over_infinite_input_is_fine_with_take() {
             return shell {{
                 yes abc
                     | from lines
-                    |> map(fn(line: str) -> str => line + line)
-                    |> take(2)
+                    |> map(transform: |line: str| line + line)
+                    |> take(count: 2)
                     |> to lines
                     | cat;
             }};
@@ -341,7 +341,7 @@ fn structured_stage_directly_after_bytes_without_from_is_rejected() {
         r#"{DATA}
         function main() -> shell {{
             return shell {{
-                printf 'x' |> take(1) | cat;
+                printf 'x' |> take(count: 1) | cat;
             }};
         }};
         "#
@@ -355,7 +355,7 @@ fn structured_values_are_not_implicitly_serialized_into_unix_commands() {
         r#"{DATA}
         function main() -> shell {{
             return shell {{
-                printf '%s\n' '{{"a":1}}' | from jsonl |> take(1) | cat;
+                printf '%s\n' '{{"a":1}}' | from jsonl |> take(count: 1) | cat;
             }};
         }};
         "#

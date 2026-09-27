@@ -15,7 +15,7 @@ mod path;
 mod process;
 mod random;
 mod regex;
-mod support;
+pub(crate) mod support;
 mod terminal;
 mod text;
 mod time;
@@ -24,9 +24,8 @@ use std::path::{Path, PathBuf};
 
 pub const STD_PACKAGE_NAME: &str = "std";
 
-/// Root of the bundled standard-library sources for development builds.
-/// Release builds may replace this source-backed resolver with the versioned
-/// precompiled bundle while preserving the same package/module identities.
+/// Source identity used for bundled imports and editor navigation.
+/// Execution reads the matching sources embedded in the binary.
 pub fn bundled_root() -> PathBuf {
     bundle::source_root()
 }
@@ -55,6 +54,10 @@ const PRELUDE_NAMES: &[&str] = &[
     "rangeFrom",
     "assert",
     "panic",
+    "some",
+    "none",
+    "ok",
+    "err",
 ];
 
 /// Inject Spar-written prelude functions into an ordinary source module.
@@ -164,6 +167,28 @@ pub fn native_registry() -> crate::runtime::NativeRegistry {
     process::register(&mut registry);
     http::register(&mut registry);
     registry
+}
+
+/// Read a compiler-owned stdlib snapshot or an ordinary filesystem module.
+pub(crate) fn read_module_source(path: &Path) -> std::io::Result<String> {
+    if let Some(source) = bundle::embedded_source(path) {
+        return Ok(source.to_owned());
+    }
+    if is_bundled_std_path(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "module is not included in this compiler's standard library",
+        ));
+    }
+    std::fs::read_to_string(path)
+}
+
+pub(crate) fn module_source_exists(path: &Path) -> bool {
+    if is_bundled_std_path(path) {
+        bundle::embedded_source(path).is_some()
+    } else {
+        path.exists()
+    }
 }
 
 #[cfg(test)]

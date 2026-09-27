@@ -18,7 +18,7 @@ fn resolve_err(src: &str) -> String {
 #[test]
 fn generic_type_parameters_are_lexical_and_have_arity() {
     resolve_ok(
-        "type [Box<T>] { value: T; }; function unbox<T>(value: Box<T>) -> T { return value.value; };",
+        "struct Box<T> { value: T; }; function unbox<T>(value: Box<T>) -> T { return value.value; };",
     );
 
     let duplicate = resolve_err("function bad<T, T>(value: T) -> T { return value; };");
@@ -27,11 +27,11 @@ fn generic_type_parameters_are_lexical_and_have_arity() {
         "{duplicate}"
     );
 
-    let bare = resolve_err("type [Box<T>] { value: T; }; var value: Box = { value: 1; };");
+    let bare = resolve_err("struct Box<T> { value: T; }; var value: Box = { value: 1; };");
     assert!(bare.contains("expects 1 type argument"), "{bare}");
 
     let excess =
-        resolve_err("type [Box<T>] { value: T; }; var value: Box<int, str> = { value: 1; };");
+        resolve_err("struct Box<T> { value: T; }; var value: Box<int, str> = { value: 1; };");
     assert!(excess.contains("expects 1 type argument"), "{excess}");
 }
 
@@ -64,9 +64,77 @@ fn generic_call_type_argument_arity_is_resolved() {
 }
 
 #[test]
+fn generic_native_call_type_arguments_follow_the_registered_signature() {
+    use crate::ast::SparType;
+    use crate::runtime::{NativeFunction, NativeRegistry, Value};
+
+    fn resolve_with(natives: NativeRegistry, src: &str) -> Result<(), String> {
+        let tokens = crate::lexer::Lexer::new(src)
+            .tokenize()
+            .map_err(|error| format!("{error:?}"))?;
+        let program = crate::parser::Parser::new(tokens)
+            .parse()
+            .map_err(|error| format!("{error:?}"))?;
+        crate::resolver::Resolver::new()
+            .with_natives(natives)
+            .resolve(&program, &[])
+            .map(|_| ())
+            .map_err(|errors| format!("{errors:?}"))
+    }
+
+    fn registry() -> NativeRegistry {
+        let mut natives = NativeRegistry::new();
+        natives
+            .register(NativeFunction::sync(
+                "generic",
+                "decode",
+                vec![("text", SparType::Str)],
+                SparType::TypeParameter("T".into()),
+                false,
+                |_context, _args| Ok(Value::Int(0)),
+            ))
+            .unwrap();
+        natives
+            .register(NativeFunction::sync(
+                "generic",
+                "plain",
+                vec![("value", SparType::Int)],
+                SparType::Int,
+                false,
+                |_context, _args| Ok(Value::Int(0)),
+            ))
+            .unwrap();
+        natives
+    }
+
+    resolve_with(
+        registry(),
+        "var value: int = generic::decode<int>(text: \"1\");",
+    )
+    .expect("native return type parameters should accept explicit call-site arguments");
+
+    let excess = resolve_with(
+        registry(),
+        "var value: int = generic::decode<int, str>(text: \"1\");",
+    )
+    .expect_err("native generic arity must be validated");
+    assert!(excess.contains("at most 1 type argument"), "{excess}");
+
+    let non_generic = resolve_with(
+        registry(),
+        "var value: int = generic::plain<int>(value: 1);",
+    )
+    .expect_err("non-generic natives must reject explicit type arguments");
+    assert!(
+        non_generic.contains("does not accept type arguments"),
+        "{non_generic}"
+    );
+}
+
+#[test]
 fn exec_shell_at_module_scope_is_rejected() {
     let errors = resolve_err(
-        "type [ExecResult]{ success: bool; exitCode: int; }; var x: ExecResult = exec shell { true; };",
+        "struct ExecResult{ success: bool; exitCode: int; }; var x: ExecResult = exec shell { true; };",
     );
     assert!(
         errors.to_lowercase().contains("exec") && errors.to_lowercase().contains("function"),
@@ -77,7 +145,7 @@ fn exec_shell_at_module_scope_is_rejected() {
 #[test]
 fn exec_shell_inside_a_function_body_is_allowed() {
     resolve_ok(
-        "type [ExecResult]{ success: bool; exitCode: int; }; function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };",
+        "struct ExecResult{ success: bool; exitCode: int; }; function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };",
     );
 }
 
@@ -90,7 +158,7 @@ fn plain_shell_construction_at_module_scope_is_allowed() {
 
 #[test]
 fn named_type_on_var_resolves_when_type_exists() {
-    let src = "type [Leaf]{ name: str; };\nvar someExpr: str = \"a\";\nvar x: Leaf = someExpr;\n";
+    let src = "struct Leaf{ name: str; };\nvar someExpr: str = \"a\";\nvar x: Leaf = someExpr;\n";
     resolve_ok(src); // panics (test fails) if the declared type doesn't resolve
 }
 
@@ -126,7 +194,7 @@ fn named_type_on_function_param_and_return_errors_when_type_missing() {
 
 #[test]
 fn named_type_on_section_field_errors_when_type_missing() {
-    let src = "[Tree]{ root: Ghost = 1; };\n";
+    let src = "struct Tree { root: Ghost = 1; };\n";
     let errs = resolve_err(src);
     assert!(
         errs.contains("undefined type") && errs.contains("Ghost"),
@@ -454,22 +522,18 @@ fn valid_config_against_occ_example_passes() {
     let schema_src = r#"schema MainRoute {
     routeOne: str;
     redirect: bool;
-    main: [str];
-    x: section = {
-        host: str;
-        port?: int;
-        enabled?: bool;
-    };
+    main: List<str>;
+    x: Record;
 };
 "#;
     let config_src = r#"import schema "SCHEMA_PATH";
 
-[MainRoute]{
+struct MainRoute {
     routeOne: str = "/main";
     redirect: bool = false;
-    main: [str] = ["main", "ask"];
-    x: section = {
-        host: str = "localhost";
+    main: List<str> = ["main", "ask"];
+    x: Record = {
+        host: "localhost";
     };
 };
 "#;
@@ -480,7 +544,7 @@ fn valid_config_against_occ_example_passes() {
 #[test]
 fn missing_required_field_is_schema_error() {
     let schema_src = "schema X { a: int; b: str; };\n";
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
@@ -492,8 +556,8 @@ fn missing_required_field_is_schema_error() {
 
 #[test]
 fn missing_optional_field_is_fine() {
-    let schema_src = "schema X { a: int; b?: str; };\n";
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
+    let schema_src = "schema X { a: int; b: Option<str>; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\n";
     let result = schema_validate(schema_src, config_src);
     assert!(
         result.is_ok(),
@@ -505,7 +569,7 @@ fn missing_optional_field_is_fine() {
 #[test]
 fn extra_field_not_in_schema_is_error() {
     let schema_src = "schema X { a: int; };\n";
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; extra: str = \"x\"; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; extra: str = \"x\"; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
@@ -519,7 +583,7 @@ fn extra_field_not_in_schema_is_error() {
 fn wrong_type_on_present_field_is_schema_error() {
     let schema_src = "schema X { a: bool; };\n";
     // config declares `a` as `int` instead of `bool`
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\n";
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
@@ -548,7 +612,7 @@ fn schema_bound_section_does_not_require_explicit_field_types() {
     let schema_path = schema_file.path().to_str().unwrap().to_string();
 
     let config_src = format!(
-        "import schema \"{schema_path}\";\n[Flutter]{{ projectName: \"oracle\"; gitInit: true; }};\n"
+        "import schema \"{schema_path}\";\nstruct Flutter {{ projectName: str = \"oracle\"; gitInit: bool = true; }};\n"
     );
 
     let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
@@ -582,7 +646,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
     let schema_path = schema_file.path().to_str().unwrap().to_string();
 
     let config_src =
-        format!("import schema \"{schema_path}\";\n[Flutter]{{ gitInit: \"yes\"; }};\n");
+        format!("import schema \"{schema_path}\";\nstruct Flutter {{ gitInit: bool = \"yes\"; }};\n");
 
     let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
     let program = crate::parser::Parser::new(tokens).parse().unwrap();
@@ -605,7 +669,7 @@ fn schema_bound_section_still_checks_value_type_mismatch() {
 #[test]
 fn missing_required_section_is_schema_error() {
     let schema_src = "schema X { a: int; };\n";
-    let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n"; // [Y] not [X]
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct Y { z: int = 1; };\n"; // [Y] not [X]
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
@@ -616,19 +680,11 @@ fn missing_required_section_is_schema_error() {
 }
 
 #[test]
-fn missing_optional_section_is_fine() {
-    let _schema_src = "schema? X { a: int; };\n";
-    // config has no [X] section at all
-    let config_src = "import schema \"SCHEMA_PATH\";\n[Y]{ z: int = 1; };\n";
-    // [inference] This will also fail on extra-section check since [Y] isn't in schema.
-    // To isolate this test, schema must declare [Y] too.
-    let schema_src2 = "schema? X { a: int; };\nschema Y { z: int; };\n";
-    let result = schema_validate(schema_src2, config_src);
-    assert!(
-        result.is_ok(),
-        "omitting optional section must be fine: {:?}",
-        result.err()
-    );
+fn legacy_optional_schema_marker_is_rejected() {
+    let schema_src = "schema? X { a: int; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\n";
+    let error = schema_validate(schema_src, config_src).unwrap_err();
+    assert!(format!("{error:?}").contains("Option<T>"));
 }
 
 #[test]
@@ -636,40 +692,25 @@ fn config_section_with_no_schema_entry_is_ignored() {
     // a struct the schema never mentions is an ordinary struct
     let schema_src = "schema X { a: int; };\n";
     let config_src =
-        "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n[Unrelated]{ b: str = \"x\"; };\n";
+        "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\nstruct Unrelated { b: str = \"x\"; };\n";
     assert!(schema_validate(schema_src, config_src).is_ok());
 }
 
 #[test]
-fn nested_section_field_validated_recursively() {
-    let schema_src = r#"schema X {
-    x: section = {
-        host: str;
-        port?: int;
-    };
-};
-"#;
-    // config's x section omits required `host`
+fn schema_record_field_validates_record_declaration_type() {
+    let schema_src = "schema X { x: Record; };\n";
     let config_src = r#"import schema "SCHEMA_PATH";
-[X]{
-    x: section = {
-        port: int = 8080;
-    };
-};
+struct X { x: str = "not-a-record"; };
 "#;
     let errs = schema_validate(schema_src, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
-    assert!(
-        combined.contains("host") || combined.contains("missing"),
-        "must mention missing nested field 'host': {}",
-        combined
-    );
+    assert!(combined.contains("Record") && combined.contains("str"), "got: {combined}");
 }
 
 #[test]
 fn importing_a_non_schema_file_as_schema_is_error() {
     let not_a_schema = "var x: int = 1;\n"; // no schema declarations
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ a: int = 1; };\n";
+    let config_src = "import schema \"SCHEMA_PATH\";\nstruct X { a: int = 1; };\n";
     let errs = schema_validate(not_a_schema, config_src).unwrap_err();
     let combined = format!("{:?}", errs);
     assert!(
@@ -704,7 +745,7 @@ fn two_schema_imports_each_owning_one_section_passes() {
     // Config imports both schemas and has both sections
     let config_src = format!(
         "import schema \"{path_a}\";\nimport schema \"{path_b}\";\n\
-         [A]{{ x: int = 1; }};\n[B]{{ y: str = \"hello\"; }};\n"
+         struct A {{ x: int = 1; }};\nstruct B {{ y: str = \"hello\"; }};\n"
     );
 
     let tokens = crate::lexer::Lexer::new(&config_src).tokenize().unwrap();
@@ -724,30 +765,15 @@ fn two_schema_imports_each_owning_one_section_passes() {
 /// at runtime.  Before the fix, the validator would report every required field
 /// not literally present in the section's own `Field` items as missing.
 #[test]
-fn section_with_spread_skips_field_validation() {
-    // Schema requires both `a` and `b`
-    let schema_src = "schema X { a: int; b: str; };\n";
-    // Config only has `a` explicitly; `b` is expected to come from the spread
-    let config_src = "import schema \"SCHEMA_PATH\";\n[X]{ ...Defaults; a: int = 1; };\n";
-    let result = schema_validate(schema_src, config_src);
-    assert!(
-        result.is_ok(),
-        "section with a spread must not produce false missing-field errors: {:?}",
-        result.err()
-    );
+fn struct_declaration_spread_requires_migration() {
+    let errors = crate::Engine::default().check_source("struct X { ...Defaults; a: int = 1; };").unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("expected a name")));
 }
 
 #[test]
-fn resolver_accepts_self_reference_inside_section() {
-    let src = r#"
-        [Postgres]{
-            environment: section = {
-                postgresDb: str = "my_app";
-                postgresUser: str = self.environment.postgresDb;
-            };
-        };
-    "#;
-    let _ = resolve_ok(src); // must not error
+fn resolver_rejects_self_in_struct_default() {
+    let error = resolve_err("struct Postgres { image: str = self.image; };");
+    assert!(error.contains("self"), "{error}");
 }
 
 #[test]
@@ -763,11 +789,11 @@ fn resolver_rejects_self_reference_outside_section() {
 #[test]
 fn resolver_registers_type_with_named_field_reference() {
     let src = r#"
-        type [Border]{
-            width?: int;
+        struct Border{
+            width: Option<int>;
         };
-        type [Decoration]{
-            border?: Border;
+        struct Decoration{
+            border: Option<Border>;
         };
     "#;
     let sym = resolve_ok(src);
@@ -778,8 +804,8 @@ fn resolver_registers_type_with_named_field_reference() {
 #[test]
 fn resolver_rejects_duplicate_type() {
     let src = r#"
-        type [Border]{ width?: int; };
-        type [Border]{ width?: int; };
+        struct Border{ width: Option<int>; };
+        struct Border{ width: Option<int>; };
     "#;
     let err = resolve_err(src);
     assert!(err.contains("already defined"), "got: {err}");
@@ -787,7 +813,7 @@ fn resolver_rejects_duplicate_type() {
 
 #[test]
 fn resolver_rejects_type_named_schema() {
-    let src = r#"type [Schema]{ a: int; };"#;
+    let src = r#"struct Schema{ a: int; };"#;
     let err = resolve_err(src);
     assert!(
         err.contains("reserved") || err.contains("Schema"),
@@ -797,7 +823,7 @@ fn resolver_rejects_type_named_schema() {
 
 #[test]
 fn resolver_rejects_non_pascal_case_type_name() {
-    let src = r#"type [border]{ width?: int; };"#;
+    let src = r#"struct border{ width: Option<int>; };"#;
     let err = resolve_err(src);
     assert!(err.contains("PascalCase"), "got: {err}");
 }
@@ -805,8 +831,8 @@ fn resolver_rejects_non_pascal_case_type_name() {
 #[test]
 fn resolver_rejects_undefined_named_type_reference() {
     let src = r#"
-        type [Decoration]{
-            border?: NoSuchType;
+        struct Decoration{
+            border: Option<NoSuchType>;
         };
     "#;
     let err = resolve_err(src);
@@ -817,30 +843,14 @@ fn resolver_rejects_undefined_named_type_reference() {
 }
 
 #[test]
-fn resolver_rejects_unknown_type_binding() {
-    let src = r#"
-        [Postgres] -> NoSuchType {
-            image: str = "postgres:16";
-        };
-    "#;
-    let err = resolve_err(src);
-    assert!(
-        err.contains("undefined type") || err.contains("NoSuchType"),
-        "got: {err}"
-    );
+fn resolver_rejects_unknown_struct_field_type() {
+    let error = resolve_err("struct Postgres { image: Missing; };");
+    assert!(error.contains("Missing"), "{error}");
 }
 
 #[test]
-fn resolver_accepts_known_type_binding() {
-    let src = r#"
-        type [PostgresType]{
-            image: str;
-        };
-        [Postgres] -> PostgresType {
-            image: str = "postgres:16";
-        };
-    "#;
-    let _ = resolve_ok(src);
+fn resolver_accepts_typed_struct_constructor() {
+    resolve_ok(r#"struct Postgres { image: str = "postgres:16"; }; var postgres: Postgres = Postgres();"#);
 }
 
 #[test]
@@ -849,13 +859,13 @@ fn imported_type_selectively_can_bind_a_section() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("types.spar"),
-        "export type [PostgresType]{ image: str; };\n",
+        "export struct PostgresType{ image: str; };\n",
     )
     .unwrap();
     let src = concat!(
-        "import type { PostgresType } from \"types.spar\";\n",
-        "[Postgres] -> PostgresType {\n",
-        "    image: \"postgres:16\";\n",
+        "import { PostgresType } from \"types.spar\";\n",
+        "struct Postgres {\n",
+        "    image: str = \"postgres:16\";\n",
         "};\n",
     );
     let tokens = crate::lexer::Lexer::new(src).tokenize().unwrap();
@@ -876,13 +886,13 @@ fn object_literal_resolves_inner_namespace_ref() {
     // resolve_ok's own `.unwrap()` panics with the error detail if this
     // fails to resolve — that panic-on-Err IS the test's failure mode.
     let src =
-        "var host: str = \"h\";\ntype [Leaf]{ name: str; };\nvar x: Leaf = { name: host; };\n";
+        "var host: str = \"h\";\nvar x: Record = { name: host; };\n";
     resolve_ok(src);
 }
 
 #[test]
 fn object_literal_errors_on_undefined_inner_reference() {
-    let src = "type [Leaf]{ name: str; };\nvar x: Leaf = { name: ghost; };\n";
+    let src = "var x: Record = { name: ghost; };\n";
     let errs = resolve_err(src);
     assert!(errs.contains("ghost"), "got: {errs}");
 }
@@ -908,13 +918,13 @@ fn enum_non_pascal_case_name_errors() {
 
 #[test]
 fn enum_and_type_name_collision_errors() {
-    let errs = resolve_err("type [Devices]{ x: str; };\nenum Devices { Ios };\n");
+    let errs = resolve_err("struct Devices{ x: str; };\nenum Devices { Ios };\n");
     assert!(errs.contains("already declared as a type"), "got: {errs}");
 }
 
 #[test]
 fn type_and_enum_name_collision_errors_reverse_order() {
-    let errs = resolve_err("enum Devices { Ios };\ntype [Devices]{ x: str; };\n");
+    let errs = resolve_err("enum Devices { Ios };\nstruct Devices { x: str; };\n");
     assert!(errs.contains("already declared as an enum"), "got: {errs}");
 }
 
@@ -947,8 +957,8 @@ fn enum_variant_ref_resolves_inside_function_body() {
 #[test]
 fn named_field_access_on_global_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: str = person.name;
     "#;
     resolve_ok(src);
@@ -957,7 +967,7 @@ fn named_field_access_on_global_var_resolves() {
 #[test]
 fn named_field_access_on_function_local_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function greet(h: Human) -> str {
             var local: Human = h;
             return local.name;
@@ -969,7 +979,7 @@ fn named_field_access_on_function_local_var_resolves() {
 #[test]
 fn named_field_access_on_loop_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
@@ -1107,13 +1117,13 @@ fn function_group_name_colliding_with_import_alias_errors() {
     );
 }
 
-// ── enum-typed field inside a `type [X]{...}` declaration ───────────────────
+// ── enum-typed field inside a `struct X{...}` declaration ───────────────────
 
 #[test]
 fn type_field_referencing_enum_resolves() {
     let src = r#"
         enum Protocol { Http, Https };
-        type [Port]{ protocol?: Protocol; };
+        struct Port{ protocol: Option<Protocol>; };
     "#;
     resolve_ok(src);
 }
@@ -1123,8 +1133,8 @@ fn type_field_referencing_enum_resolves() {
 #[test]
 fn dot_field_access_on_section_resolves() {
     let src = r#"
-        [Database]{ pool: int = 5; };
-        var p: int = Database.pool;
+        struct Database { pool: int = 5; };
+        var p: int = Database().pool;
     "#;
     resolve_ok(src);
 }
@@ -1132,8 +1142,8 @@ fn dot_field_access_on_section_resolves() {
 #[test]
 fn dot_field_access_on_global_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
-        var person: Human = { name: "Mike"; age: 5; };
+        struct Human { name: str = ""; age: int = 0; };
+        var person: Human = Human(name: "Mike", age: 5);
         var pname: str = person.name;
     "#;
     resolve_ok(src);
@@ -1142,7 +1152,7 @@ fn dot_field_access_on_global_var_resolves() {
 #[test]
 fn dot_field_access_on_loop_var_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         function looper(people: [Human]) -> int {
             for person in people {
                 if person.name == "jude" { return 6; }
@@ -1157,7 +1167,7 @@ fn dot_field_access_on_loop_var_resolves() {
 #[test]
 fn dot_field_access_after_index_resolves() {
     let src = r#"
-        type [Human]{ name: str; age: int; };
+        struct Human{ name: str; age: int; };
         var people: [Human] = [{ name: "jude"; age: 5; }];
         var pname: str = people[0].name;
     "#;
@@ -1166,18 +1176,12 @@ fn dot_field_access_after_index_resolves() {
 
 #[test]
 fn self_dot_field_access_resolves() {
-    let src = r#"
-        [Server]{
-            port: int = 8080;
-            display: str = "port-${self.port}";
-        };
-    "#;
-    resolve_ok(src);
+    resolve_ok("struct Server { port: int = 8080; }; impl Server { fn portValue(self) -> int { return self.port; }; };");
 }
 
 #[test]
 fn bare_self_without_field_errors() {
-    let src = r#"[Server]{ x: int = self; };"#;
+    let src = r#"struct Server { x: int = self; };"#;
     let errs = resolve_err(src);
     assert!(errs.contains("self"), "got: {errs}");
 }
@@ -1199,7 +1203,7 @@ fn global_dot_field_access_resolves() {
 #[test]
 fn old_style_section_double_colon_field_access_errors_with_migration_hint() {
     let src = r#"
-        [Database]{ pool: int = 5; };
+        struct Database { pool: int = 5; };
         var p: int = Database::pool;
     "#;
     let errs = resolve_err(src);
@@ -1211,7 +1215,7 @@ fn old_style_section_double_colon_field_access_errors_with_migration_hint() {
 
 #[test]
 fn old_style_self_double_colon_errors_with_migration_hint() {
-    let src = r#"[Server]{ port: int = 8080; display: str = self::port; };"#;
+    let src = r#"struct Server { port: int = 8080; display: str = self::port; };"#;
     let errs = resolve_err(src);
     assert!(
         errs.to_lowercase().contains("no longer supported") || errs.contains("'.'"),

@@ -13,7 +13,7 @@ pub(crate) mod value;
 pub use context::{RuntimeContext, RuntimeInput, RuntimeOutput};
 pub use native::{
     NativeExecutionKind, NativeFunction, NativeFunctionId, NativeIntrinsic, NativeMethod,
-    NativeMethodId, NativeMethodSignature, NativeRegistry, NativeSignature,
+    NativeMethodId, NativeMethodSignature, NativeRegistry, NativeSignature, ReceiverMode,
 };
 pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
@@ -21,12 +21,13 @@ pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
 pub use value::Value;
 
+use crate::ast::SparType;
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus, TaskTable};
 use crate::compiled::{
     CompiledExpression, CompiledMethodTarget, CompiledObjectItem, CompiledProgram,
     CompiledShellCommand, CompiledShellExpr, CompiledShellMixedPipeline, CompiledShellRedirect,
     CompiledShellStep, CompiledShellWord, CompiledShellWordPart, CompiledStatement,
-    CompiledStringPart, FunctionId, LocalSlot, TypedOperation,
+    CompiledStringPart, FunctionId, LocalSlot, ModuleId, TypedOperation,
 };
 use crate::error::{Span, SparError};
 use crate::evaluator::ConfigValue;
@@ -34,6 +35,18 @@ use crate::evaluator::ConfigValue;
 #[derive(Clone)]
 pub(crate) struct Frame {
     slots: Vec<Option<Value>>,
+    /// Reified generic bindings for the current function invocation. Spar's
+    /// ordinary runtime remains type-erased; only operations that explicitly
+    /// require a checked type (typed JSON/HTTP decoding) consult this map.
+    type_bindings: HashMap<String, RuntimeTypeBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeTypeBinding {
+    ty: SparType,
+    /// Module where unqualified named types in `ty` were resolved at the call
+    /// site. This lets a generic stdlib wrapper decode caller-owned structs.
+    module: ModuleId,
 }
 
 #[derive(Clone)]
@@ -110,6 +123,7 @@ impl Frame {
     pub fn new(slot_count: usize) -> Self {
         Self {
             slots: vec![None; slot_count],
+            type_bindings: HashMap::new(),
         }
     }
 
@@ -128,6 +142,151 @@ impl Frame {
             .ok_or_else(|| internal_slot_error(slot, "is invalid", span))?;
         *destination = Some(value);
         Ok(())
+    }
+
+    /// Moves a slot's value out, leaving it temporarily empty. Every caller
+    /// of this must write a value back into the same slot before control
+    /// returns to anywhere that might read it again (including on an error
+    /// path) — see the `MethodCall` fast path in `Runtime::eval_expression`,
+    /// the only intended caller.
+    pub fn take(&mut self, slot: LocalSlot, span: &Span) -> Result<Value, SparError> {
+        let destination = self
+            .slots
+            .get_mut(slot.0 as usize)
+            .ok_or_else(|| internal_slot_error(slot, "is invalid", span))?;
+        destination
+            .take()
+            .ok_or_else(|| internal_slot_error(slot, "is uninitialized", span))
+    }
+}
+
+fn bind_runtime_type_parameters(
+    pattern: &SparType,
+    concrete: &SparType,
+    origin_module: ModuleId,
+    bindings: &mut HashMap<String, RuntimeTypeBinding>,
+) {
+    match (pattern, concrete) {
+        (SparType::TypeParameter(name), concrete) => {
+            bindings
+                .entry(name.clone())
+                .or_insert_with(|| RuntimeTypeBinding {
+                    ty: concrete.clone(),
+                    module: origin_module,
+                });
+        }
+        (SparType::List(pattern), SparType::List(concrete)) => {
+            bind_runtime_type_parameters(pattern, concrete, origin_module, bindings);
+        }
+        (
+            SparType::Applied {
+                name: pattern_name,
+                arguments: pattern_arguments,
+            },
+            SparType::Applied {
+                name: concrete_name,
+                arguments: concrete_arguments,
+            },
+        ) if pattern_name == concrete_name
+            && pattern_arguments.len() == concrete_arguments.len() =>
+        {
+            for (pattern, concrete) in pattern_arguments.iter().zip(concrete_arguments) {
+                bind_runtime_type_parameters(pattern, concrete, origin_module, bindings);
+            }
+        }
+        (
+            SparType::Function {
+                params: pattern_params,
+                return_type: pattern_return,
+            },
+            SparType::Function {
+                params: concrete_params,
+                return_type: concrete_return,
+            },
+        ) if pattern_params.len() == concrete_params.len() => {
+            for (pattern, concrete) in pattern_params.iter().zip(concrete_params) {
+                bind_runtime_type_parameters(&pattern.ty, &concrete.ty, origin_module, bindings);
+            }
+            bind_runtime_type_parameters(pattern_return, concrete_return, origin_module, bindings);
+        }
+        _ => {}
+    }
+}
+
+fn resolve_runtime_type(
+    ty: &SparType,
+    frame: &Frame,
+    default_module: ModuleId,
+) -> RuntimeTypeBinding {
+    fn resolve(ty: &SparType, frame: &Frame) -> (SparType, Option<ModuleId>) {
+        match ty {
+            SparType::TypeParameter(name) => frame
+                .type_bindings
+                .get(name)
+                .map(|binding| (binding.ty.clone(), Some(binding.module)))
+                .unwrap_or_else(|| (ty.clone(), None)),
+            SparType::List(inner) => {
+                let (inner, origin) = resolve(inner, frame);
+                (SparType::List(Box::new(inner)), origin)
+            }
+            SparType::Applied { name, arguments } => {
+                let mut origin = None;
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| {
+                        let (argument, argument_origin) = resolve(argument, frame);
+                        if origin.is_none() {
+                            origin = argument_origin;
+                        }
+                        argument
+                    })
+                    .collect();
+                (
+                    SparType::Applied {
+                        name: name.clone(),
+                        arguments,
+                    },
+                    origin,
+                )
+            }
+            SparType::Function {
+                params,
+                return_type,
+            } => {
+                let mut origin = None;
+                let params = params
+                    .iter()
+                    .map(|parameter| {
+                        let (ty, parameter_origin) = resolve(&parameter.ty, frame);
+                        if origin.is_none() {
+                            origin = parameter_origin;
+                        }
+                        crate::ast::CallableParamType {
+                            name: parameter.name.clone(),
+                            ty,
+                        }
+                    })
+                    .collect();
+                let (return_type, return_origin) = resolve(return_type, frame);
+                if origin.is_none() {
+                    origin = return_origin;
+                }
+                (
+                    SparType::Function {
+                        params,
+                        return_type: Box::new(return_type),
+                    },
+                    origin,
+                )
+            }
+            other => (other.clone(), None),
+        }
+    }
+
+    let (ty, origin) = resolve(ty, frame);
+    RuntimeTypeBinding {
+        ty,
+        module: origin.unwrap_or(default_module),
     }
 }
 
@@ -199,7 +358,7 @@ impl Drop for Runtime<'_> {
 struct ModuleState {
     results: HashMap<crate::compiled::ModuleId, crate::evaluator::EvalResult>,
     hosts: crate::HostRegistry,
-    natives: NativeRegistry,
+    natives: std::sync::Arc<NativeRegistry>,
     effect_ledger: Option<crate::session::EffectLedger>,
 }
 
@@ -208,7 +367,7 @@ impl ModuleState {
         Self {
             results: HashMap::new(),
             hosts: program.options.hosts.clone(),
-            natives: program.options.natives.clone(),
+            natives: std::sync::Arc::new(program.options.natives.clone()),
             effect_ledger: program.options.effect_ledger.clone(),
         }
     }
@@ -798,7 +957,16 @@ impl Runtime<'_> {
         id: FunctionId,
         arguments: Vec<Value>,
     ) -> Result<Value, RuntimeFault> {
-        self.call_function_with_frame(id, arguments)
+        self.call_function_typed(id, arguments, None)
+    }
+
+    fn call_function_typed(
+        &mut self,
+        id: FunctionId,
+        arguments: Vec<Value>,
+        return_type: Option<RuntimeTypeBinding>,
+    ) -> Result<Value, RuntimeFault> {
+        self.call_function_with_frame_typed(id, arguments, return_type)
             .map(|(value, _, _)| value)
     }
 
@@ -806,6 +974,15 @@ impl Runtime<'_> {
         &mut self,
         id: FunctionId,
         arguments: Vec<Value>,
+    ) -> Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> {
+        self.call_function_with_frame_typed(id, arguments, None)
+    }
+
+    fn call_function_with_frame_typed(
+        &mut self,
+        id: FunctionId,
+        arguments: Vec<Value>,
+        return_type: Option<RuntimeTypeBinding>,
     ) -> Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(
@@ -826,6 +1003,7 @@ impl Runtime<'_> {
         let default_values = function.default_values.clone();
         let slot_count = function.slot_count;
         let body = function.body.clone();
+        let declared_return_type = function.return_type.clone();
         let function_span = function.span.clone();
         if arguments.len() > parameter_slots.len() {
             return Err(runtime_error("too many direct-call arguments", &function_span).into());
@@ -833,24 +1011,47 @@ impl Runtime<'_> {
         self.call_depth += 1;
         let result: Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> = (|| {
             let mut frame = Frame::new(slot_count);
-            let supplied_count = arguments.len();
-            for (slot, value) in parameter_slots.iter().copied().zip(arguments) {
-                frame.write(slot, value, &function_span)?;
+            if let Some(actual_return) = return_type.as_ref() {
+                bind_runtime_type_parameters(
+                    &declared_return_type,
+                    &actual_return.ty,
+                    actual_return.module,
+                    &mut frame.type_bindings,
+                );
             }
-            for (index, slot) in parameter_slots
-                .iter()
-                .copied()
-                .enumerate()
-                .skip(supplied_count)
-            {
-                let default = default_values
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .ok_or_else(|| {
-                        runtime_error("missing required direct-call argument", &function_span)
-                    })?;
-                let value = self.eval_expression(default, &mut frame, module)?;
-                frame.write(slot, value, &function_span)?;
+            let mut supplied = arguments.into_iter();
+            for (index, slot) in parameter_slots.iter().copied().enumerate() {
+                match supplied.next() {
+                    Some(Value::Void) => {
+                        let default = default_values
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .ok_or_else(|| {
+                                runtime_error(
+                                    "missing required direct-call argument",
+                                    &function_span,
+                                )
+                            })?;
+                        let value = self.eval_expression(default, &mut frame, module)?;
+                        frame.write(slot, value, &function_span)?;
+                    }
+                    Some(value) => {
+                        frame.write(slot, value, &function_span)?;
+                    }
+                    None => {
+                        let default = default_values
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .ok_or_else(|| {
+                                runtime_error(
+                                    "missing required direct-call argument",
+                                    &function_span,
+                                )
+                            })?;
+                        let value = self.eval_expression(default, &mut frame, module)?;
+                        frame.write(slot, value, &function_span)?;
+                    }
+                }
             }
             let value = match self.execute_statements(&body, &mut frame, module)? {
                 RuntimeFlow::Return(value) => value,
@@ -1019,6 +1220,7 @@ impl Runtime<'_> {
             CompiledExpression::Constant(value, _) => Ok(Value::from_config(value.clone())),
             CompiledExpression::Local(slot, span) => Ok(frame.read(*slot, span)?.clone()),
             CompiledExpression::Global(name, span) => self.read_global(module, name, span),
+            CompiledExpression::DefaultArgument(_) => Ok(Value::Void),
             CompiledExpression::ImportedValue { module, path, span } => {
                 self.read_path(*module, path, span)
             }
@@ -1032,6 +1234,7 @@ impl Runtime<'_> {
                 span,
             } => {
                 let mut captured = Frame::new(*slot_count);
+                captured.type_bindings = frame.type_bindings.clone();
                 for (slot, expression) in captures {
                     let value = self.eval_expression(expression, frame, module)?;
                     captured.write(*slot, value, span)?;
@@ -1095,6 +1298,7 @@ impl Runtime<'_> {
             CompiledExpression::NativeCall {
                 function,
                 arguments,
+                return_type,
                 span,
             } => {
                 let values = arguments
@@ -1108,7 +1312,15 @@ impl Runtime<'_> {
                     .natives
                     .clone();
                 if let Some(intrinsic) = natives.intrinsic(*function) {
-                    return self.execute_native_intrinsic(intrinsic, &values, span);
+                    let requested_type = return_type
+                        .as_ref()
+                        .map(|ty| resolve_runtime_type(ty, frame, module));
+                    return self.execute_native_intrinsic(
+                        intrinsic,
+                        &values,
+                        requested_type.as_ref(),
+                        span,
+                    );
                 }
                 natives
                     .call(*function, &mut self.context, &values, span)
@@ -1158,12 +1370,78 @@ impl Runtime<'_> {
             CompiledExpression::MethodCall {
                 target,
                 receiver,
-                receiver_slot,
-                receiver_global,
+                receiver_lvalue,
                 arguments,
                 mutates_receiver,
                 span,
             } => {
+                // Fast path: `x.method(...)` on a plain local variable,
+                // calling a *native* method. The general path below reads
+                // the receiver through `eval_expression`, which always
+                // clones — for a container (`Map`/`List`/...) that clone
+                // costs O(n) on every single call regardless of what the
+                // method itself does, which dominates real workloads (see
+                // SPAR_RUNTIME_FINDINGS.md Finding 19 in the
+                // `researchgraph` project: 8,000 calls to `.length()` on a
+                // *stable* 8,000-entry map cost 5.4s). Here we move the
+                // value out of its slot instead, and always move it back
+                // before returning — including on error, since arguments
+                // are evaluated first (the only step that can fail before
+                // we touch the slot) and a native call never drops the
+                // receiver even if it errors (it's held by an owned local /
+                // `&mut` borrow the whole time, never moved away).
+                //
+                // Scoped to native methods only: a user-defined `impl`
+                // method's `self` is moved into a fresh callee frame, and if
+                // that callee errors partway there is no value left to
+                // restore. Natives don't have that problem, and every hot
+                // container call in practice (`.insert`, `.get`, `.append`,
+                // `.getOr`, ...) is a native method.
+                if let (
+                    Some(CompiledExpression::Local(slot, _)),
+                    CompiledMethodTarget::Native(method),
+                ) = (receiver.as_deref(), target)
+                {
+                    let slot = *slot;
+                    let mut args = Vec::with_capacity(arguments.len());
+                    for argument in arguments {
+                        args.push(self.eval_expression(argument, frame, module)?);
+                    }
+                    let mut receiver_value = frame.take(slot, span)?;
+                    let natives = self
+                        .state
+                        .as_ref()
+                        .ok_or_else(|| module_state_error(span))?
+                        .natives
+                        .clone();
+                    let outcome: Result<Value, RuntimeFault> = if *mutates_receiver {
+                        natives
+                            .call_method_mut(
+                                *method,
+                                &mut self.context,
+                                &mut receiver_value,
+                                &args,
+                                span,
+                            )
+                            .map_err(Into::into)
+                    } else {
+                        let mut call_values = Vec::with_capacity(1 + args.len());
+                        call_values.push(receiver_value);
+                        call_values.append(&mut args);
+                        let outcome = if let Some(intrinsic) = natives.method_intrinsic(*method) {
+                            self.execute_native_intrinsic(intrinsic, &call_values, None, span)
+                        } else {
+                            natives
+                                .call_method(*method, &mut self.context, &call_values, span)
+                                .map_err(Into::into)
+                        };
+                        receiver_value = call_values.swap_remove(0);
+                        outcome
+                    };
+                    frame.write(slot, receiver_value, span)?;
+                    return outcome;
+                }
+
                 let mut values = Vec::new();
                 if let Some(receiver) = receiver {
                     values.push(self.eval_expression(receiver, frame, module)?);
@@ -1171,9 +1449,19 @@ impl Runtime<'_> {
                 for argument in arguments {
                     values.push(self.eval_expression(argument, frame, module)?);
                 }
-                let (result, method_frame, parameter_slots) = match target {
+                let (result, updated_receiver) = match target {
                     CompiledMethodTarget::Function(function) => {
-                        self.call_function_with_frame(*function, values)?
+                        let (result, method_frame, parameter_slots) =
+                            self.call_function_with_frame(*function, values)?;
+                        let updated = if *mutates_receiver {
+                            let self_slot = parameter_slots.first().copied().ok_or_else(|| {
+                                runtime_error("mutable method is missing self parameter", span)
+                            })?;
+                            Some(method_frame.read(self_slot, span)?.clone())
+                        } else {
+                            None
+                        };
+                        (result, updated)
                     }
                     CompiledMethodTarget::Native(method) => {
                         let natives = self
@@ -1182,46 +1470,59 @@ impl Runtime<'_> {
                             .ok_or_else(|| module_state_error(span))?
                             .natives
                             .clone();
-                        let result = if let Some(intrinsic) = natives.method_intrinsic(*method) {
-                            self.execute_native_intrinsic(intrinsic, &values, span)?
+                        if *mutates_receiver {
+                            let mut iter = values.into_iter();
+                            let mut receiver_value = iter.next().ok_or_else(|| {
+                                runtime_error("mutable native method is missing receiver", span)
+                            })?;
+                            let args = iter.collect::<Vec<_>>();
+                            let result = natives.call_method_mut(
+                                *method,
+                                &mut self.context,
+                                &mut receiver_value,
+                                &args,
+                                span,
+                            )?;
+                            (result, Some(receiver_value))
                         } else {
-                            natives.call_method(*method, &mut self.context, &values, span)?
-                        };
-                        (result, Frame::new(0), Vec::new())
+                            let result = if let Some(intrinsic) = natives.method_intrinsic(*method)
+                            {
+                                self.execute_native_intrinsic(intrinsic, &values, None, span)?
+                            } else {
+                                natives.call_method(*method, &mut self.context, &values, span)?
+                            };
+                            (result, None)
+                        }
                     }
                 };
-                if *mutates_receiver {
-                    let self_slot = parameter_slots.first().copied().ok_or_else(|| {
-                        runtime_error("mutable method is missing self parameter", span)
+                if let Some(updated) = updated_receiver {
+                    let target = receiver_lvalue.as_ref().ok_or_else(|| {
+                        runtime_error("mutable method receiver has no writeback target", span)
                     })?;
-                    let updated = method_frame.read(self_slot, span)?.clone();
-                    if let Some(slot) = receiver_slot {
-                        frame.write(*slot, updated, span)?;
-                    } else if let Some(name) = receiver_global {
-                        self.write_global(module, name, updated, span)?;
-                    } else {
-                        return Err(runtime_error(
-                            "mutable method receiver has no writeback target",
-                            span,
-                        )
-                        .into());
-                    }
+                    self.write_compiled_lvalue(frame, module, target, updated, span)?;
                 }
                 Ok(result)
             }
             CompiledExpression::DirectCall {
                 function,
                 arguments,
+                return_type,
                 span: _,
             } => {
                 let values = arguments
                     .iter()
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
+                let requested_type = return_type
+                    .as_ref()
+                    .map(|ty| resolve_runtime_type(ty, frame, module));
                 if self.function_is_async(*function)? {
+                    // Async generic reification is not currently consumed by a
+                    // native reflection API. Ordinary promise execution remains
+                    // type-erased; sync generic wrappers preserve their target.
                     Ok(Value::Promise(self.tasks.spawn(*function, values)))
                 } else {
-                    self.call_function(*function, values)
+                    self.call_function_typed(*function, values, requested_type)
                 }
             }
             CompiledExpression::List(items, _) => Ok(Value::List(
@@ -1243,7 +1544,7 @@ impl Runtime<'_> {
                                 self.eval_expression(value, frame, module)?
                             else {
                                 return Err(runtime_error(
-                                    "checked object spread received a non-object",
+                                    "checked Record spread received a non-Record value",
                                     span,
                                 )
                                 .into());
@@ -1253,6 +1554,31 @@ impl Runtime<'_> {
                     }
                 }
                 Ok(Value::Object(object))
+            }
+            CompiledExpression::Map(items, span) => {
+                let mut entries = crate::runtime::value::MapValue::new();
+                for item in items {
+                    match item {
+                        CompiledObjectItem::Field { name, value } => {
+                            let value = self.eval_expression(value, frame, module)?;
+                            entries.insert(Value::String(name.clone()), value);
+                        }
+                        CompiledObjectItem::Spread(value) => {
+                            let Value::Map(values) = self.eval_expression(value, frame, module)?
+                            else {
+                                return Err(runtime_error(
+                                    "checked Map spread received a non-Map value",
+                                    span,
+                                )
+                                .into());
+                            };
+                            for (key, value) in values {
+                                entries.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Map(entries))
             }
             CompiledExpression::Operation {
                 operation,
@@ -1270,6 +1596,34 @@ impl Runtime<'_> {
                     return self
                         .eval_expression(left, frame, module)
                         .or_else(|_| self.eval_expression(right, frame, module));
+                }
+                // `&&`/`||` must short-circuit: the right operand can be
+                // unsafe to evaluate when the left already decides the
+                // result (e.g. `xs.length() > 0 && xs[0] > 0`).
+                if matches!(operation, TypedOperation::BoolAnd | TypedOperation::BoolOr) {
+                    let [left, right] = operands.as_slice() else {
+                        return Err(runtime_error(
+                            "checked boolean operation has invalid arity",
+                            span,
+                        )
+                        .into());
+                    };
+                    let left_value = self.eval_expression(left, frame, module)?;
+                    let Value::Bool(left_bool) = left_value else {
+                        return Err(runtime_error(
+                            "boolean operator received a non-bool operand",
+                            span,
+                        )
+                        .into());
+                    };
+                    let short_circuits = match operation {
+                        TypedOperation::BoolAnd => !left_bool,
+                        _ => left_bool,
+                    };
+                    if short_circuits {
+                        return Ok(Value::Bool(left_bool));
+                    }
+                    return self.eval_expression(right, frame, module);
                 }
                 let values = operands
                     .iter()
@@ -1415,9 +1769,77 @@ impl Runtime<'_> {
         &mut self,
         intrinsic: NativeIntrinsic,
         args: &[Value],
+        requested_type: Option<&RuntimeTypeBinding>,
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
         match intrinsic {
+            NativeIntrinsic::JsonParse => {
+                let target = requested_type.ok_or_else(|| {
+                    runtime_error("typed JSON parse is missing its reified target type", span)
+                })?;
+                if matches!(target.ty, SparType::TypeParameter(_)) {
+                    return Err(runtime_error(
+                        "typed JSON parse target was not resolved from the generic call site",
+                        span,
+                    )
+                    .into());
+                }
+                let text = match args.first() {
+                    Some(Value::String(text)) => text,
+                    Some(other) => {
+                        return Err(type_error("str", other, span).into());
+                    }
+                    None => {
+                        return Err(
+                            runtime_error("JSON parse requires a text argument", span).into()
+                        );
+                    }
+                };
+                let parsed: serde_json::Value = serde_json::from_str(text)
+                    .map_err(|error| runtime_error(&format!("invalid JSON: {error}"), span))?;
+
+                self.ensure_module(target.module)?;
+                let target_symbols = self
+                    .program
+                    .modules
+                    .iter()
+                    .find(|module| module.id == target.module)
+                    .map(|module| module.checked.symbols.clone())
+                    .ok_or_else(|| {
+                        runtime_error("typed JSON target module is unavailable", span)
+                    })?;
+                let imports = self.program.modules.iter()
+                    .find(|module| module.id == target.module).unwrap().import_modules.clone();
+                let functions = self.program.modules.iter().flat_map(|module|
+                    module.functions.iter().map(|function| (function.key.clone(), function.id))
+                ).collect();
+                let parameters = self.program.modules.iter().flat_map(|module|
+                    crate::compiled::function_declarations(&module.checked.program).into_iter()
+                        .zip(&module.functions).map(|(declaration, function)| (function.id,
+                            declaration.params.iter().map(|parameter| (parameter.name.clone(), parameter.ty.clone())).collect()))
+                ).collect();
+                let mut default_fault = None;
+                let mut evaluate_default = |expression: &crate::ast::Expr, ty: &SparType| {
+                    let (expression, slots) = crate::lowerer::lower_default(expression, ty, &target_symbols,
+                        crate::lowerer::LoweringContext {
+                            module: target.module, imports: &imports, functions: &functions, parameters: &parameters,
+                        })?;
+                    self.eval_expression(&expression, &mut Frame::new(slots), target.module)
+                        .map_err(|fault| {
+                            default_fault = Some(fault.clone());
+                            fault.into_error()
+                        })
+                };
+                let mut environment = crate::stdlib::support::JsonDecodeEnvironment {
+                    symbols: &target_symbols,
+                    evaluate_default: &mut evaluate_default,
+                };
+                let decoded = crate::stdlib::support::decode_json_typed(parsed, &target.ty, &mut environment);
+                match default_fault {
+                    Some(fault) => Err(fault),
+                    None => decoded.map_err(Into::into),
+                }
+            }
             NativeIntrinsic::PromiseRace => {
                 let promises = match args.first() {
                     Some(Value::List(values)) => values
@@ -1591,7 +2013,23 @@ impl Runtime<'_> {
             | NativeIntrinsic::DataGet
             | NativeIntrinsic::DataSelect
             | NativeIntrinsic::DataSchema
-            | NativeIntrinsic::DataInspect) => self.execute_data_intrinsic(intrinsic, args, span),
+            | NativeIntrinsic::DataInspect
+            | NativeIntrinsic::DataFind
+            | NativeIntrinsic::DataFindIndex
+            | NativeIntrinsic::DataAny
+            | NativeIntrinsic::DataEvery) => self.execute_data_intrinsic(intrinsic, args, span),
+            NativeIntrinsic::CoreMapGetOrElse
+            | NativeIntrinsic::CoreOptionUnwrapOrElse
+            | NativeIntrinsic::CoreOptionMap
+            | NativeIntrinsic::CoreOptionFilter
+            | NativeIntrinsic::CoreOptionAndThen
+            | NativeIntrinsic::CoreOptionOrElse
+            | NativeIntrinsic::CoreResultMap
+            | NativeIntrinsic::CoreResultMapErr
+            | NativeIntrinsic::CoreResultAndThen
+            | NativeIntrinsic::CoreResultOrElse => {
+                self.execute_core_callable_intrinsic(intrinsic, args, span)
+            }
         }
     }
 
@@ -1886,7 +2324,7 @@ impl Runtime<'_> {
                     })?;
                     output.push((key, Value::Table(table)));
                 }
-                Ok(Value::Map(output))
+                Ok(Value::Map(output.into()))
             }
             NativeIntrinsic::DataUnique => match source {
                 Value::Resource(_) => {
@@ -2006,13 +2444,9 @@ impl Runtime<'_> {
                     }
                     Value::Map(entries) => {
                         self.ensure_data_comparable(key, "map key", span)?;
-                        entries
-                            .iter()
-                            .find(|(existing, _)| existing == key)
-                            .map(|(_, value)| value.clone())
-                            .ok_or_else(|| {
-                                runtime_error("map does not contain the requested key", span).into()
-                            })
+                        entries.get(key).cloned().ok_or_else(|| {
+                            runtime_error("map does not contain the requested key", span).into()
+                        })
                     }
                     other => Err(runtime_error(
                         &format!(
@@ -2090,8 +2524,273 @@ impl Runtime<'_> {
                 )
                 .into()),
             },
+            NativeIntrinsic::DataFind => {
+                let predicate = args
+                    .get(1)
+                    .ok_or_else(|| runtime_error("find requires a predicate callable", span))?
+                    .clone();
+                let Value::List(values) = source else {
+                    return Err(type_error("List", source, span).into());
+                };
+                for value in values.iter().cloned() {
+                    if self.invoke_predicate(&predicate, value.clone(), span)? {
+                        return Ok(Value::Option(Some(Box::new(value))));
+                    }
+                }
+                Ok(Value::Option(None))
+            }
+            NativeIntrinsic::DataFindIndex => {
+                let predicate = args
+                    .get(1)
+                    .ok_or_else(|| runtime_error("findIndex requires a predicate callable", span))?
+                    .clone();
+                let Value::List(values) = source else {
+                    return Err(type_error("List", source, span).into());
+                };
+                for (index, value) in values.iter().cloned().enumerate() {
+                    if self.invoke_predicate(&predicate, value, span)? {
+                        let index = i64::try_from(index).map_err(|_| {
+                            runtime_error("list index exceeds Spar int range", span)
+                        })?;
+                        return Ok(Value::Option(Some(Box::new(Value::Int(index)))));
+                    }
+                }
+                Ok(Value::Option(None))
+            }
+            NativeIntrinsic::DataAny => {
+                let predicate = args
+                    .get(1)
+                    .ok_or_else(|| runtime_error("any requires a predicate callable", span))?
+                    .clone();
+                let Value::List(values) = source else {
+                    return Err(type_error("List", source, span).into());
+                };
+                for value in values.iter().cloned() {
+                    if self.invoke_predicate(&predicate, value, span)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            NativeIntrinsic::DataEvery => {
+                let predicate = args
+                    .get(1)
+                    .ok_or_else(|| runtime_error("every requires a predicate callable", span))?
+                    .clone();
+                let Value::List(values) = source else {
+                    return Err(type_error("List", source, span).into());
+                };
+                for value in values.iter().cloned() {
+                    if !self.invoke_predicate(&predicate, value, span)? {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
             NativeIntrinsic::DataInspect => Ok(source.clone()),
-            NativeIntrinsic::PromiseRace | NativeIntrinsic::PromiseTimeout => unreachable!(),
+            NativeIntrinsic::JsonParse
+            | NativeIntrinsic::PromiseRace
+            | NativeIntrinsic::PromiseTimeout
+            | NativeIntrinsic::CoreMapGetOrElse
+            | NativeIntrinsic::CoreOptionUnwrapOrElse
+            | NativeIntrinsic::CoreOptionMap
+            | NativeIntrinsic::CoreOptionFilter
+            | NativeIntrinsic::CoreOptionAndThen
+            | NativeIntrinsic::CoreOptionOrElse
+            | NativeIntrinsic::CoreResultMap
+            | NativeIntrinsic::CoreResultMapErr
+            | NativeIntrinsic::CoreResultAndThen
+            | NativeIntrinsic::CoreResultOrElse => unreachable!(),
+        }
+    }
+
+    fn execute_core_callable_intrinsic(
+        &mut self,
+        intrinsic: NativeIntrinsic,
+        args: &[Value],
+        span: &Span,
+    ) -> Result<Value, RuntimeFault> {
+        let receiver = args
+            .first()
+            .ok_or_else(|| runtime_error("core method intrinsic requires a receiver", span))?;
+        match intrinsic {
+            NativeIntrinsic::CoreMapGetOrElse => {
+                let Value::Map(entries) = receiver else {
+                    return Err(type_error("Map", receiver, span).into());
+                };
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| runtime_error("getOrElse requires a key", span))?;
+                if let Some(value) = entries.get(key) {
+                    return Ok(value.clone());
+                }
+                let fallback = args
+                    .get(2)
+                    .ok_or_else(|| runtime_error("getOrElse requires a fallback callable", span))?;
+                self.invoke_data_callable(fallback, vec![], span)
+            }
+            NativeIntrinsic::CoreOptionUnwrapOrElse => {
+                let Value::Option(value) = receiver else {
+                    return Err(type_error("Option", receiver, span).into());
+                };
+                if let Some(value) = value {
+                    return Ok(value.as_ref().clone());
+                }
+                let fallback = args.get(1).ok_or_else(|| {
+                    runtime_error("unwrapOrElse requires a fallback callable", span)
+                })?;
+                self.invoke_data_callable(fallback, vec![], span)
+            }
+            NativeIntrinsic::CoreOptionMap => {
+                let Value::Option(value) = receiver else {
+                    return Err(type_error("Option", receiver, span).into());
+                };
+                let Some(value) = value else {
+                    return Ok(Value::Option(None));
+                };
+                let transform = args.get(1).ok_or_else(|| {
+                    runtime_error("Option.map requires a transform callable", span)
+                })?;
+                let mapped =
+                    self.invoke_data_callable(transform, vec![value.as_ref().clone()], span)?;
+                Ok(Value::Option(Some(Box::new(mapped))))
+            }
+            NativeIntrinsic::CoreOptionFilter => {
+                let Value::Option(value) = receiver else {
+                    return Err(type_error("Option", receiver, span).into());
+                };
+                let Some(value) = value else {
+                    return Ok(Value::Option(None));
+                };
+                let predicate = args.get(1).ok_or_else(|| {
+                    runtime_error("Option.filter requires a predicate callable", span)
+                })?;
+                if self.invoke_predicate(predicate, value.as_ref().clone(), span)? {
+                    Ok(Value::Option(Some(Box::new(value.as_ref().clone()))))
+                } else {
+                    Ok(Value::Option(None))
+                }
+            }
+            NativeIntrinsic::CoreOptionAndThen => {
+                let Value::Option(value) = receiver else {
+                    return Err(type_error("Option", receiver, span).into());
+                };
+                let Some(value) = value else {
+                    return Ok(Value::Option(None));
+                };
+                let transform = args.get(1).ok_or_else(|| {
+                    runtime_error("Option.andThen requires a transform callable", span)
+                })?;
+                let mapped =
+                    self.invoke_data_callable(transform, vec![value.as_ref().clone()], span)?;
+                if matches!(mapped, Value::Option(_)) {
+                    Ok(mapped)
+                } else {
+                    Err(type_error("Option", &mapped, span).into())
+                }
+            }
+            NativeIntrinsic::CoreOptionOrElse => {
+                let Value::Option(value) = receiver else {
+                    return Err(type_error("Option", receiver, span).into());
+                };
+                if value.is_some() {
+                    return Ok(receiver.clone());
+                }
+                let fallback = args.get(1).ok_or_else(|| {
+                    runtime_error("Option.orElse requires a fallback callable", span)
+                })?;
+                let mapped = self.invoke_data_callable(fallback, vec![], span)?;
+                if matches!(mapped, Value::Option(_)) {
+                    Ok(mapped)
+                } else {
+                    Err(type_error("Option", &mapped, span).into())
+                }
+            }
+            NativeIntrinsic::CoreResultMap => {
+                let Value::Result(value) = receiver else {
+                    return Err(type_error("Result", receiver, span).into());
+                };
+                match value {
+                    Ok(value) => {
+                        let transform = args.get(1).ok_or_else(|| {
+                            runtime_error("Result.map requires a transform callable", span)
+                        })?;
+                        let mapped = self.invoke_data_callable(
+                            transform,
+                            vec![value.as_ref().clone()],
+                            span,
+                        )?;
+                        Ok(Value::Result(Ok(Box::new(mapped))))
+                    }
+                    Err(error) => Ok(Value::Result(Err(Box::new(error.as_ref().clone())))),
+                }
+            }
+            NativeIntrinsic::CoreResultMapErr => {
+                let Value::Result(value) = receiver else {
+                    return Err(type_error("Result", receiver, span).into());
+                };
+                match value {
+                    Ok(value) => Ok(Value::Result(Ok(Box::new(value.as_ref().clone())))),
+                    Err(error) => {
+                        let transform = args.get(1).ok_or_else(|| {
+                            runtime_error("Result.mapErr requires a transform callable", span)
+                        })?;
+                        let mapped = self.invoke_data_callable(
+                            transform,
+                            vec![error.as_ref().clone()],
+                            span,
+                        )?;
+                        Ok(Value::Result(Err(Box::new(mapped))))
+                    }
+                }
+            }
+            NativeIntrinsic::CoreResultAndThen => {
+                let Value::Result(value) = receiver else {
+                    return Err(type_error("Result", receiver, span).into());
+                };
+                match value {
+                    Ok(value) => {
+                        let transform = args.get(1).ok_or_else(|| {
+                            runtime_error("Result.andThen requires a transform callable", span)
+                        })?;
+                        let mapped = self.invoke_data_callable(
+                            transform,
+                            vec![value.as_ref().clone()],
+                            span,
+                        )?;
+                        if matches!(mapped, Value::Result(_)) {
+                            Ok(mapped)
+                        } else {
+                            Err(type_error("Result", &mapped, span).into())
+                        }
+                    }
+                    Err(error) => Ok(Value::Result(Err(Box::new(error.as_ref().clone())))),
+                }
+            }
+            NativeIntrinsic::CoreResultOrElse => {
+                let Value::Result(value) = receiver else {
+                    return Err(type_error("Result", receiver, span).into());
+                };
+                match value {
+                    Ok(value) => Ok(Value::Result(Ok(Box::new(value.as_ref().clone())))),
+                    Err(error) => {
+                        let fallback = args.get(1).ok_or_else(|| {
+                            runtime_error("Result.orElse requires a fallback callable", span)
+                        })?;
+                        let mapped = self.invoke_data_callable(
+                            fallback,
+                            vec![error.as_ref().clone()],
+                            span,
+                        )?;
+                        if matches!(mapped, Value::Result(_)) {
+                            Ok(mapped)
+                        } else {
+                            Err(type_error("Result", &mapped, span).into())
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -2743,6 +3442,22 @@ impl Runtime<'_> {
                         exit_code: 0,
                         signal: None,
                         pid,
+                        pipeline: vec![],
+                    };
+                    self.shell_outcome = Some(outcome.clone());
+                    continue;
+                }
+                spar_command::Step::Command(command)
+                    if command.program == "disown" && command.args.is_empty() =>
+                {
+                    if let Some(job) = self.jobs.pop() {
+                        job.detach();
+                    }
+                    outcome = crate::evaluator::ShellPlanOutcome {
+                        success: true,
+                        exit_code: 0,
+                        signal: None,
+                        pid: 0,
                         pipeline: vec![],
                     };
                     self.shell_outcome = Some(outcome.clone());
@@ -3405,6 +4120,24 @@ impl Runtime<'_> {
     ) -> Result<spar_command::CommandPlan, RuntimeFault> {
         let mut args = Vec::with_capacity(command.args.len());
         for argument in &command.args {
+            // Args is intentionally expanded only when it occupies the entire
+            // shell word. Each stored string is already one argv entry and is
+            // spliced directly without whitespace/glob re-tokenization.
+            if let [CompiledShellWordPart::Expression(expression)] = argument.parts.as_slice() {
+                let value = self.eval_expression(expression, frame, module)?;
+                match value {
+                    Value::Args(values) => {
+                        args.extend(values);
+                        continue;
+                    }
+                    value => {
+                        args.push(shell_primitive_to_string(value, &argument.span)?);
+                        continue;
+                    }
+                }
+            }
+
+            // Legacy list-spread syntax remains accepted during migration.
             let expansion = match argument.parts.as_slice() {
                 [CompiledShellWordPart::Literal(prefix), CompiledShellWordPart::Expression(expression)]
                     if prefix == "..." =>
@@ -3530,6 +4263,13 @@ impl Runtime<'_> {
                         Value::Int(value) => output.push_str(&value.to_string()),
                         Value::Float(value) => output.push_str(&value.to_string()),
                         Value::Bool(value) => output.push_str(&value.to_string()),
+                        Value::Args(_) => {
+                            return Err(runtime_error(
+                                "Args can only be expanded as an entire shell word; use `${values.asArgs()}` by itself",
+                                &word.span,
+                            )
+                            .into())
+                        }
                         other => return Err(type_error("primitive", &other, &word.span).into()),
                     }
                 }
@@ -3552,17 +4292,30 @@ impl Runtime<'_> {
         let compiled = self.program.modules.get(module.0 as usize).ok_or_else(|| {
             runtime_error(&format!("unknown module ID {}", module.0), &Span::dummy())
         })?;
-        let base_dir = compiled
-            .identity
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+        let base_dir = if module == self.program.entry {
+            self.program.base_dir()
+        } else {
+            compiled
+                .identity
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+        };
+        if module == self.program.entry {
+            if let Some(path) = &compiled.checked.program.load_env {
+                for (key, value) in crate::dotenv::load(&base_dir.join(path))? {
+                    if !self.context.env_contains(&key) {
+                        self.context.env_set(key, value);
+                    }
+                }
+            }
+        }
         let (mut result, pending_promises) = crate::Evaluator::evaluate_for_runtime(
             &compiled.checked.program,
             &compiled.checked.symbols,
             &compiled.checked.imports,
             base_dir,
             state.hosts.clone(),
-            state.natives.clone(),
+            (*state.natives).clone(),
             state.effect_ledger.clone(),
         )
         .map_err(|mut errors| {
@@ -3618,6 +4371,70 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    fn read_compiled_lvalue(
+        &mut self,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+        target: &crate::compiled::CompiledLValue,
+        span: &Span,
+    ) -> Result<Value, RuntimeFault> {
+        match target {
+            crate::compiled::CompiledLValue::Local(slot) => Ok(frame.read(*slot, span)?.clone()),
+            crate::compiled::CompiledLValue::Global(name) => self.read_global(module, name, span),
+            crate::compiled::CompiledLValue::Field { base, field } => {
+                let base = self.read_compiled_lvalue(frame, module, base, span)?;
+                let Value::Object(fields) = base else {
+                    return Err(runtime_error(
+                        "mutable field receiver traversed a non-object value",
+                        span,
+                    )
+                    .into());
+                };
+                fields.get(field).cloned().ok_or_else(|| {
+                    runtime_error(
+                        &format!("mutable receiver field '{field}' is unavailable"),
+                        span,
+                    )
+                    .into()
+                })
+            }
+        }
+    }
+
+    fn write_compiled_lvalue(
+        &mut self,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+        target: &crate::compiled::CompiledLValue,
+        updated: Value,
+        span: &Span,
+    ) -> Result<(), RuntimeFault> {
+        match target {
+            crate::compiled::CompiledLValue::Local(slot) => Ok(frame.write(*slot, updated, span)?),
+            crate::compiled::CompiledLValue::Global(name) => {
+                self.write_global(module, name, updated, span)
+            }
+            crate::compiled::CompiledLValue::Field { base, field } => {
+                let mut base_value = self.read_compiled_lvalue(frame, module, base, span)?;
+                let Value::Object(fields) = &mut base_value else {
+                    return Err(runtime_error(
+                        "mutable field receiver traversed a non-object value",
+                        span,
+                    )
+                    .into());
+                };
+                let child = fields.get_mut(field).ok_or_else(|| {
+                    runtime_error(
+                        &format!("mutable receiver field '{field}' is unavailable"),
+                        span,
+                    )
+                })?;
+                *child = updated;
+                self.write_compiled_lvalue(frame, module, base, base_value, span)
+            }
+        }
+    }
+
     fn read_global(
         &mut self,
         module: crate::compiled::ModuleId,
@@ -3670,14 +4487,28 @@ impl Runtime<'_> {
                 .ok_or_else(|| runtime_error("no background job has been started", span).into());
         }
         self.ensure_module(module)?;
-        Ok(Value::from_config(
-            self.state
-                .as_ref()
-                .and_then(|state| state.results.get(&module))
-                .and_then(|result| result.globals.get(name))
-                .cloned()
-                .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?,
-        ))
+        let value = self
+            .state
+            .as_ref()
+            .and_then(|state| state.results.get(&module))
+            .and_then(|result| result.globals.get(name))
+            .cloned()
+            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?;
+        let symbols = &self
+            .program
+            .modules
+            .get(module.0 as usize)
+            .ok_or_else(|| runtime_error("compiled module is unavailable", span))?
+            .checked
+            .symbols;
+        let expected = symbols.globals.get(name).and_then(|entry| match entry {
+            crate::resolver::GlobalEntry::Var { ty, .. } => Some(ty),
+            crate::resolver::GlobalEntry::Dynamic { .. } => None,
+        });
+        Ok(match expected {
+            Some(expected) => value_from_config_typed(value, expected, symbols),
+            None => Value::from_config(value),
+        })
     }
 
     fn write_global(
@@ -3710,19 +4541,48 @@ impl Runtime<'_> {
             .as_ref()
             .and_then(|state| state.results.get(&module))
             .ok_or_else(|| module_state_error(span))?;
-        let value = match path {
-            [name] => result.globals.get(name).cloned().or_else(|| {
-                result
-                    .sections
-                    .get(std::slice::from_ref(name))
-                    .cloned()
-                    .map(ConfigValue::Section)
-            }),
-            [section @ .., field] => result
-                .sections
-                .get(section)
-                .and_then(|fields| fields.get(field))
-                .cloned(),
+        let symbols = &self
+            .program
+            .modules
+            .get(module.0 as usize)
+            .ok_or_else(|| runtime_error("compiled module is unavailable", span))?
+            .checked
+            .symbols;
+        let (value, expected) = match path {
+            [name] => {
+                if let Some(value) = result.globals.get(name).cloned() {
+                    let expected = symbols.globals.get(name).and_then(|entry| match entry {
+                        crate::resolver::GlobalEntry::Var { ty, .. } => Some(ty.clone()),
+                        crate::resolver::GlobalEntry::Dynamic { .. } => None,
+                    });
+                    Some((value, expected))
+                } else {
+                    result
+                        .structs
+                        .get(std::slice::from_ref(name))
+                        .cloned()
+                        .map(|fields| {
+                            (
+                                ConfigValue::Object(fields),
+                                Some(SparType::Named(name.clone())),
+                            )
+                        })
+                }
+            }
+            [owner @ .., field] => {
+                let value = result
+                    .structs
+                    .get(owner)
+                    .and_then(|fields| fields.get(field))
+                    .cloned();
+                value.map(|value| {
+                    let owner_type = owner.last().map(|name| SparType::Named(name.clone()));
+                    let expected = owner_type.as_ref().and_then(|owner_type| {
+                        crate::typechecker::TypeChecker::field_type(owner_type, field, symbols)
+                    });
+                    (value, expected)
+                })
+            }
             [] => None,
         }
         .ok_or_else(|| {
@@ -3731,7 +4591,10 @@ impl Runtime<'_> {
                 span,
             )
         })?;
-        Ok(Value::from_config(value))
+        Ok(match expected.as_ref() {
+            Some(expected) => value_from_config_typed(value, expected, symbols),
+            None => Value::from_config(value),
+        })
     }
 
     fn execute_shell(
@@ -3799,14 +4662,14 @@ impl Runtime<'_> {
                 if let Some(signal) = process.signal {
                     fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
                 }
-                ConfigValue::Section(fields)
+                ConfigValue::Object(fields)
             };
             let status = structured_status.unwrap_or(spar_process::PipelineStatus {
                 code: exit_code,
                 success,
                 processes: vec![],
             });
-            let status_value = ConfigValue::Section(indexmap::IndexMap::from([
+            let status_value = ConfigValue::Object(indexmap::IndexMap::from([
                 ("code".into(), ConfigValue::Int(i64::from(status.code))),
                 ("success".into(), ConfigValue::Bool(status.success)),
                 (
@@ -3814,7 +4677,7 @@ impl Runtime<'_> {
                     ConfigValue::List(status.processes.into_iter().map(process_value).collect()),
                 ),
             ]));
-            Ok::<ConfigValue, SparError>(ConfigValue::Section(indexmap::IndexMap::from([
+            Ok::<ConfigValue, SparError>(ConfigValue::Object(indexmap::IndexMap::from([
                 ("success".into(), ConfigValue::Bool(success)),
                 ("exitCode".into(), ConfigValue::Int(i64::from(exit_code))),
                 ("status".into(), status_value),
@@ -3826,6 +4689,97 @@ impl Runtime<'_> {
             Some(ledger) => ledger.get_or_try_run((span.start, span.end), run),
             None => run(),
         }?)
+    }
+}
+
+fn value_from_config_typed(
+    value: ConfigValue,
+    expected: &SparType,
+    symbols: &crate::resolver::SymbolTable,
+) -> Value {
+    match (value, expected) {
+        (ConfigValue::List(values), SparType::List(element)) => Value::List(
+            values
+                .into_iter()
+                .map(|value| value_from_config_typed(value, element, symbols))
+                .collect(),
+        ),
+        (ConfigValue::Object(values), SparType::Applied { name, arguments })
+            if name == "Map" && arguments.len() == 2 =>
+        {
+            let value_type = &arguments[1];
+            Value::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            Value::String(key),
+                            value_from_config_typed(value, value_type, symbols),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        (ConfigValue::Map(values), SparType::Applied { name, arguments })
+            if name == "Map" && arguments.len() == 2 =>
+        {
+            let key_type = &arguments[0];
+            let value_type = &arguments[1];
+            Value::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            value_from_config_typed(key, key_type, symbols),
+                            value_from_config_typed(value, value_type, symbols),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        (ConfigValue::Option(value), SparType::Applied { name, arguments })
+            if name == "Option" && arguments.len() == 1 =>
+        {
+            Value::Option(
+                value
+                    .map(|value| Box::new(value_from_config_typed(*value, &arguments[0], symbols))),
+            )
+        }
+        (ConfigValue::Result(value), SparType::Applied { name, arguments })
+            if name == "Result" && arguments.len() == 2 =>
+        {
+            Value::Result(match value {
+                Ok(value) => Ok(Box::new(value_from_config_typed(
+                    *value,
+                    &arguments[0],
+                    symbols,
+                ))),
+                Err(value) => Err(Box::new(value_from_config_typed(
+                    *value,
+                    &arguments[1],
+                    symbols,
+                ))),
+            })
+        }
+        (ConfigValue::Object(values), ty)
+            if crate::typechecker::TypeChecker::fields_for_type(ty, symbols).is_some() =>
+        {
+            Value::Object(
+                values
+                    .into_iter()
+                    .map(|(field, value)| {
+                        let value =
+                            crate::typechecker::TypeChecker::field_type(ty, &field, symbols)
+                                .map(|field_type| {
+                                    value_from_config_typed(value.clone(), &field_type, symbols)
+                                })
+                                .unwrap_or_else(|| Value::from_config(value));
+                        (field, value)
+                    })
+                    .collect(),
+            )
+        }
+        (value, _) => Value::from_config(value),
     }
 }
 
@@ -3846,7 +4800,7 @@ fn remap_promises_in_result(
     for value in result.globals.values_mut() {
         remap_promises(value, replacements);
     }
-    for fields in result.sections.values_mut() {
+    for fields in result.structs.values_mut() {
         for value in fields.values_mut() {
             remap_promises(value, replacements);
         }
@@ -3868,11 +4822,25 @@ fn remap_promises(
                 remap_promises(value, replacements);
             }
         }
-        ConfigValue::Section(fields) => {
+        ConfigValue::Object(fields) => {
             for value in fields.values_mut() {
                 remap_promises(value, replacements);
             }
         }
+        ConfigValue::Map(entries) => {
+            for (key, value) in entries {
+                remap_promises(key, replacements);
+                remap_promises(value, replacements);
+            }
+        }
+        ConfigValue::Option(value) => {
+            if let Some(value) = value {
+                remap_promises(value, replacements);
+            }
+        }
+        ConfigValue::Result(value) => match value {
+            Ok(value) | Err(value) => remap_promises(value, replacements),
+        },
         ConfigValue::Error { cause, .. } => {
             if let Some(cause) = cause {
                 remap_promises(cause, replacements);

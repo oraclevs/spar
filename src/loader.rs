@@ -1,3 +1,6 @@
+#[path = "loader_scope.rs"]
+pub(crate) mod scope;
+
 use crate::ast::Program;
 use crate::error::SparError;
 use std::collections::{HashMap, HashSet};
@@ -212,6 +215,7 @@ fn expand_imports_inner(
 
     let old_items = std::mem::take(&mut program.items);
     let mut new_items: Vec<TopLevelItem> = Vec::with_capacity(old_items.len());
+    let mut imported_helpers = HashSet::new();
 
     for item in old_items {
         let TopLevelItem::Import(decl) = &item else {
@@ -235,6 +239,9 @@ fn expand_imports_inner(
             Ok(items) => {
                 for it in items {
                     if let Some(name) = top_level_name(&it) {
+                        if (name.starts_with("sparModule") || name.starts_with("SparModule")) && imported_helpers.contains(name) {
+                            continue;
+                        }
                         if !declared.insert(name.to_string()) {
                             let span = top_level_span(&it).unwrap_or_else(|| decl.span.clone());
                             errors.push(SparError::ResolveError {
@@ -247,6 +254,9 @@ fn expand_imports_inner(
                             });
                             continue;
                         }
+                        if (name.starts_with("sparModule") || name.starts_with("SparModule")) {
+                            imported_helpers.insert(name.to_string());
+                        }
                     }
                     new_items.push(it);
                 }
@@ -255,6 +265,74 @@ fn expand_imports_inner(
         }
     }
 
+    // A declaration reached through multiple selective-import paths has one
+    // nominal identity. Prefer a directly visible spelling over hidden names.
+    let mut canonical_types: HashMap<(PathBuf, String), String> = HashMap::new();
+    for item in &new_items {
+        let (name, origin) = match item {
+            TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
+            TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
+            _ => continue,
+        };
+        if let Some(origin) = origin {
+            canonical_types.entry(origin.clone()).and_modify(|current| {
+                if current.starts_with("SparModule") && !name.starts_with("SparModule") {
+                    *current = name.clone();
+                }
+            }).or_insert_with(|| name.clone());
+        }
+    }
+    let mut type_aliases = HashMap::new();
+    for item in &new_items {
+        let (name, origin) = match item {
+            TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
+            TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
+            _ => continue,
+        };
+        if let Some(canonical) = origin.as_ref().and_then(|key| canonical_types.get(key)) {
+            if name != canonical { type_aliases.insert(name.clone(), canonical.clone()); }
+        }
+    }
+    new_items.retain(|item| match item {
+        TopLevelItem::Struct(decl) => !type_aliases.contains_key(&decl.name),
+        TopLevelItem::Enum(decl) => !type_aliases.contains_key(&decl.name),
+        _ => true,
+    });
+    for item in &mut new_items { scope::remap_references(item, &type_aliases); }
+    // Repeated routes to the same source method are not new declarations.
+    // Keep distinct source locations so genuine duplicate methods still fail.
+    let mut imported_methods = HashSet::new();
+    for item in &mut new_items {
+        if let TopLevelItem::Impl(implementation) = item {
+            if let Some(origin) = &implementation.origin {
+                let owner = implementation.target.clone();
+                implementation.methods.retain(|method| imported_methods.insert((
+                    origin.clone(), format!("{owner:?}"), method.function.name.clone(),
+                    method.function.span.start, method.function.span.end,
+                )));
+            }
+        }
+    }
+
+    // Retain unambiguous transitive type spellings for existing callers while
+    // keeping the actual dependency declarations scoped to their source module.
+    let mut implicit_types: HashMap<String, Option<String>> = HashMap::new();
+    for item in &new_items {
+        if matches!(item, TopLevelItem::Struct(decl) if decl.origin_private) { continue; }
+        let (name, origin) = match item {
+            TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
+            TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
+            _ => continue,
+        };
+        let Some((_, original)) = origin else { continue; };
+        if !name.starts_with("SparModule") || declared.contains(original) { continue; }
+        implicit_types.entry(original.clone()).and_modify(|existing| {
+            if existing.as_ref() != Some(name) { *existing = None; }
+        }).or_insert_with(|| Some(name.clone()));
+    }
+    let implicit_types = implicit_types.into_iter().filter_map(|(original, name)|
+        name.map(|name| (original, name))).collect();
+    for item in &mut new_items { scope::remap_references(item, &implicit_types); }
     program.items = new_items;
     if errors.is_empty() {
         Ok(())
@@ -319,7 +397,7 @@ fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
     use crate::ast::TopLevelItem;
     match item {
         TopLevelItem::Var(v) => Some(&v.name),
-        TopLevelItem::Section(s) => s.path.first().map(|s| s.as_str()),
+        TopLevelItem::Struct(s) => Some(s.name.as_str()),
         TopLevelItem::Function(f) => Some(&f.name),
         TopLevelItem::Type(t) => Some(&t.name),
         _ => None,
@@ -330,7 +408,7 @@ fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span>
     use crate::ast::TopLevelItem;
     match item {
         TopLevelItem::Var(v) => Some(v.span.clone()),
-        TopLevelItem::Section(s) => Some(s.span.clone()),
+        TopLevelItem::Struct(s) => Some(s.span.clone()),
         TopLevelItem::Function(f) => Some(f.span.clone()),
         TopLevelItem::Type(t) => Some(t.span.clone()),
         _ => None,
@@ -341,7 +419,7 @@ fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span>
 /// internal local declaration in the importing file — not schema-validated,
 /// not emitted, not part of the importing file's own export surface.
 /// Root-cause fix for: splicing preserved `exported`/`private` verbatim
-/// from the source file, so an `export [Colors]{...}` pulled in via
+/// from the source file, so an `export struct Colors {...}` pulled in via
 /// `import { Colors } from "...";` was indistinguishable from a section the
 /// importing file declared and exported itself, and got flagged by schema
 /// Rule 2 as "not declared in any imported schema."
@@ -353,11 +431,11 @@ fn localize_visibility(item: crate::ast::TopLevelItem) -> crate::ast::TopLevelIt
             v.attributes.retain(|attribute| attribute.name != "emit");
             TopLevelItem::Var(v)
         }
-        TopLevelItem::Section(mut s) => {
+        TopLevelItem::Struct(mut s) => {
             s.exported = false;
             s.private = true;
             s.attributes.retain(|attribute| attribute.name != "emit");
-            TopLevelItem::Section(s)
+            TopLevelItem::Struct(s)
         }
         TopLevelItem::Function(mut f) => {
             f.is_private = true;
@@ -402,9 +480,9 @@ fn retag_top_level_span(
             v.span = span.clone();
             TopLevelItem::Var(v)
         }
-        TopLevelItem::Section(mut s) => {
+        TopLevelItem::Struct(mut s) => {
             s.span = span.clone();
-            TopLevelItem::Section(s)
+            TopLevelItem::Struct(s)
         }
         TopLevelItem::Function(mut f) => {
             f.span = span.clone();
@@ -440,11 +518,9 @@ fn rename_top_level_item(
             v.name = new_name.to_string();
             TopLevelItem::Var(v)
         }
-        TopLevelItem::Section(mut s) => {
-            if let Some(first) = s.path.first_mut() {
-                *first = new_name.to_string();
-            }
-            TopLevelItem::Section(s)
+        TopLevelItem::Struct(mut s) => {
+            s.name = new_name.to_string();
+            TopLevelItem::Struct(s)
         }
         TopLevelItem::Function(mut f) => {
             f.name = new_name.to_string();
@@ -474,7 +550,7 @@ fn impl_target_name(implementation: &crate::ast::ImplDecl) -> Option<&str> {
     }
 }
 
-fn rename_spar_type(ty: &mut crate::ast::SparType, from: &str, to: &str) {
+pub(crate) fn rename_spar_type(ty: &mut crate::ast::SparType, from: &str, to: &str) {
     use crate::ast::SparType;
     match ty {
         SparType::Named(name) if name == from => *name = to.to_string(),
@@ -492,7 +568,7 @@ fn rename_spar_type(ty: &mut crate::ast::SparType, from: &str, to: &str) {
             return_type,
         } => {
             for param in params {
-                rename_spar_type(param, from, to);
+                rename_spar_type(&mut param.ty, from, to);
             }
             rename_spar_type(return_type, from, to);
         }
@@ -525,7 +601,7 @@ fn splice_selective(
 
     let resolved = loader.resolve_import(decl).map_err(|error| vec![error])?;
     let full_path = resolved.path.clone();
-    if !full_path.exists() {
+    if !crate::stdlib::module_source_exists(&full_path) {
         return Err(vec![SparError::ResolveError {
             message: format!(
                 "cannot find import file '{}' — file does not exist",
@@ -536,7 +612,7 @@ fn splice_selective(
         }]);
     }
 
-    let src = std::fs::read_to_string(&full_path).map_err(|e| {
+    let src = crate::stdlib::read_module_source(&full_path).map_err(|e| {
         vec![SparError::ResolveError {
             message: format!("cannot read import file '{}': {}", decl.path, e),
             hint: None,
@@ -588,12 +664,13 @@ fn splice_selective(
         });
     }
 
-    let available: Vec<(&str, &TopLevelItem)> = imported_program
+    scope::isolate(&mut imported_program, requested, &canonical);
+    let mut available: Vec<(&str, &TopLevelItem)> = imported_program
         .items
         .iter()
         .filter_map(|it| match it {
             TopLevelItem::Var(v) if v.exported => Some((v.name.as_str(), it)),
-            TopLevelItem::Section(s) if s.exported => s.path.first().map(|n| (n.as_str(), it)),
+            TopLevelItem::Struct(s) if s.exported => Some((s.name.as_str(), it)),
             TopLevelItem::Function(f) if !f.is_private => Some((f.name.as_str(), it)),
             TopLevelItem::Type(t) if t.exported => Some((t.name.as_str(), it)),
             TopLevelItem::Enum(e) if e.exported => Some((e.name.as_str(), it)),
@@ -617,7 +694,7 @@ fn splice_selective(
                 });
             }
             Some((_, item)) => {
-                if types_only && !matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)) {
+                if types_only && !matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)) {
                     errors.push(SparError::ResolveError {
                         message: format!(
                             "'{}' is not a type or enum — `import type {{...}}` can only bring in \
@@ -636,7 +713,7 @@ fn splice_selective(
                 // so `import { A, B }` positions A's and B's tokens/errors
                 // at their own names in the brace list, not both at one spot.
                 spliced.push(retag_top_level_span(localized, &req.span));
-                if matches!(item, TopLevelItem::Section(section) if section.canonical) {
+                if matches!(item, TopLevelItem::Struct(_)) {
                     for implementation in imported_program.items.iter().filter_map(|candidate| {
                         let TopLevelItem::Impl(implementation) = candidate else {
                             return None;
@@ -653,8 +730,21 @@ fn splice_selective(
         }
     }
 
+    // Private dependency shapes remain internal under their module-derived name.
+    // They are added only after explicit import requests have passed visibility checks.
+    for item in &imported_program.items {
+        let name = match item {
+            TopLevelItem::Struct(decl) => &decl.name,
+            TopLevelItem::Enum(decl) => &decl.name,
+            _ => continue,
+        };
+        if name.starts_with("SparModule") && !available.iter().any(|(existing, _)| *existing == name) {
+            available.push((name, item));
+        }
+    }
+
     // Transitively pull in any type referenced by a spliced type's own
-    // fields (e.g. `packages?: Libs;` inside `FlutterType`) that the caller
+    // fields (e.g. `packages: Option<Libs>;` inside `FlutterType`) that the caller
     // didn't name explicitly. Without this, splicing only the exactly
     // requested items leaves `Libs` undeclared in the importing file even
     // though it was never meant to be a user-facing import target — it's
@@ -682,7 +772,7 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
                     );
                 }
             }
@@ -698,7 +788,7 @@ fn splice_selective(
                 for name in type_refs {
                     if !available.iter().any(|(candidate, item)| {
                         *candidate == name
-                            && matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                            && matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_))
                     }) {
                         continue;
                     }
@@ -712,7 +802,7 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
                     );
                 }
                 // Functions the spliced body calls travel with it, whether
@@ -747,7 +837,7 @@ fn splice_selective(
                 for name in type_refs {
                     if !available.iter().any(|(candidate, item)| {
                         *candidate == name
-                            && matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                            && matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_))
                     }) {
                         continue;
                     }
@@ -761,16 +851,23 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
                     );
                 }
             }
-            TopLevelItem::Section(s) => {
-                let parent_name = s.path.first().cloned().unwrap_or_default();
+            TopLevelItem::Struct(s) => {
+                let parent_name = s.name.clone();
                 let mut type_refs = Vec::new();
                 if let Some(tb) = &s.type_binding {
                     collect_spar_type_refs(&tb.ty, &mut type_refs);
                 }
+                for field in s.type_decl().fields {
+                    if let crate::ast::TypeFieldShape::Primitive(ty) = field.shape {
+                        collect_spar_type_refs(&ty, &mut type_refs);
+                    }
+                }
+                type_refs.retain(|name| !s.type_parameters.iter().any(|parameter| parameter.name == *name)
+                    && !matches!(name.as_str(), "Map" | "Option" | "Result" | "Promise" | "Table" | "Stream" | "Sequence" | "Lookup" | "MapEntry" | "List" | "Record" | "Bytes" | "Schema" | "Args"));
                 let mut section_refs = Vec::new();
                 collect_section_item_refs(&s.items, &mut section_refs);
                 for name in type_refs {
@@ -784,7 +881,7 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
                     );
                 }
                 for name in section_refs {
@@ -798,16 +895,51 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Section(_)),
+                        |item| matches!(item, TopLevelItem::Struct(_)),
                     );
                 }
             }
             _ => {}
         }
+        if let TopLevelItem::Struct(declaration) = &spliced[i] {
+            let owner = declaration.name.clone();
+            let implementations = imported_program.items.iter().filter_map(|item| match item {
+                TopLevelItem::Impl(implementation) if impl_target_name(implementation) == Some(owner.as_str()) => Some(implementation.clone()),
+                _ => None,
+            }).collect::<Vec<_>>();
+            for mut implementation in implementations {
+                implementation.methods.retain(|method| !spliced.iter().any(|item| {
+                    matches!(item, TopLevelItem::Impl(existing)
+                        if impl_target_name(existing) == Some(owner.as_str())
+                        && existing.methods.iter().any(|prior| prior.function.name == method.function.name))
+                }));
+                if !implementation.methods.is_empty() { spliced.push(TopLevelItem::Impl(implementation)); }
+            }
+        }
+        let mut dependencies = scope::dependencies(&spliced[i]).into_iter().collect::<Vec<_>>();
+        dependencies.sort();
+        for name in dependencies {
+            if pulled.contains(&name) { continue; }
+            if let Some(item) = imported_program.items.iter().find(|item| match item {
+                TopLevelItem::Var(decl) => decl.name == name,
+                TopLevelItem::Function(decl) => decl.name == name,
+                TopLevelItem::Struct(decl) => decl.name == name,
+                TopLevelItem::Enum(decl) => decl.name == name,
+                _ => false,
+            }) {
+                pulled.insert(name);
+                spliced.push(localize_visibility(item.clone()));
+            }
+        }
         i += 1;
     }
 
     if errors.is_empty() {
+        let aliases = requested.iter().filter_map(|item|
+            item.alias.as_ref().map(|alias| (item.name.clone(), alias.clone()))).collect();
+        for item in &mut spliced {
+            scope::remap_references(item, &aliases);
+        }
         Ok(spliced)
     } else {
         Err(errors)
@@ -838,11 +970,6 @@ fn collect_calls_in_statements(statements: &[crate::ast::Statement], out: &mut H
             Statement::Return(value, _) => match value {
                 ReturnValue::Void => {}
                 ReturnValue::Expr(expr) => collect_calls_in_expr(expr, out),
-                ReturnValue::SectionBlock(fields) => {
-                    for field in fields {
-                        collect_calls_in_expr(&field.value, out);
-                    }
-                }
             },
             Statement::For(looped) => {
                 collect_calls_in_expr(&looped.iterable, out);
@@ -857,16 +984,16 @@ fn collect_calls_in_statements(statements: &[crate::ast::Statement], out: &mut H
     }
 }
 
-fn collect_calls_in_items(items: &[crate::ast::SectionItem], out: &mut HashSet<String>) {
-    use crate::ast::{FieldValue, SectionItem};
+fn collect_calls_in_items(items: &[crate::ast::ObjectItem], out: &mut HashSet<String>) {
+    use crate::ast::{FieldValue, ObjectItem};
     for item in items {
         match item {
-            SectionItem::Field(field) => match &field.value {
+            ObjectItem::Field(field) => match &field.value {
                 Some(FieldValue::Expr(expr)) => collect_calls_in_expr(expr, out),
-                Some(FieldValue::Nested(nested)) => collect_calls_in_items(nested, out),
+                Some(FieldValue::Object(nested)) => collect_calls_in_items(nested, out),
                 None => {}
             },
-            SectionItem::Spread(spread) => collect_calls_in_expr(&spread.expr, out),
+            ObjectItem::Spread(spread) => collect_calls_in_expr(&spread.expr, out),
         }
     }
 }
@@ -887,7 +1014,7 @@ fn collect_calls_in_expr(expr: &crate::ast::Expr, out: &mut HashSet<String>) {
         Expr::FnCall(call) => {
             out.insert(call.name.clone());
             for argument in &call.args {
-                collect_calls_in_expr(argument, out);
+                collect_calls_in_expr(&argument.value, out);
             }
         }
         Expr::BinaryOp(operation) => {
@@ -901,7 +1028,7 @@ fn collect_calls_in_expr(expr: &crate::ast::Expr, out: &mut HashSet<String>) {
         Expr::MethodCall { receiver, args, .. } => {
             collect_calls_in_expr(receiver, out);
             for argument in args {
-                collect_calls_in_expr(argument, out);
+                collect_calls_in_expr(&argument.value, out);
             }
         }
         Expr::StructuredPipe { input, stage, .. } => {
@@ -1005,7 +1132,7 @@ fn collect_named_type_refs(fields: &[crate::ast::TypeField], out: &mut Vec<Strin
                     collect_spar_type_refs(argument, out);
                 }
             }
-            TypeFieldShape::Section(nested) => collect_named_type_refs(nested, out),
+            TypeFieldShape::InlineRecord(nested) => collect_named_type_refs(nested, out),
         }
     }
 }
@@ -1026,15 +1153,16 @@ fn collect_spar_type_refs(ty: &crate::ast::SparType, out: &mut Vec<String>) {
             return_type,
         } => {
             for param in params {
-                collect_spar_type_refs(param, out);
+                collect_spar_type_refs(&param.ty, out);
             }
             collect_spar_type_refs(return_type, out);
         }
-        SparType::Str
+        SparType::Any
+        | SparType::Str
         | SparType::Int
         | SparType::Float
         | SparType::Bool
-        | SparType::Section
+        | SparType::InlineRecord
         | SparType::Void
         | SparType::Shell
         | SparType::Error
@@ -1049,19 +1177,19 @@ fn collect_spar_type_refs(ty: &crate::ast::SparType, out: &mut Vec<String>) {
 /// carries. Only single-segment refs are treated as candidate top-level
 /// section names; a multi-segment path targets a field within an
 /// already-resolved value, not another top-level item.
-fn collect_section_item_refs(items: &[crate::ast::SectionItem], out: &mut Vec<String>) {
-    use crate::ast::{Expr, FieldValue, SectionItem};
+fn collect_section_item_refs(items: &[crate::ast::ObjectItem], out: &mut Vec<String>) {
+    use crate::ast::{Expr, FieldValue, ObjectItem};
     for item in items {
         match item {
-            SectionItem::Spread(spread) => {
+            ObjectItem::Spread(spread) => {
                 if let Expr::NamespaceRef(nref) = &spread.expr {
                     if let [name] = nref.segments.as_slice() {
                         out.push(name.clone());
                     }
                 }
             }
-            SectionItem::Field(f) => {
-                if let Some(FieldValue::Nested(nested)) = &f.value {
+            ObjectItem::Field(f) => {
+                if let Some(FieldValue::Object(nested)) = &f.value {
                     collect_section_item_refs(nested, out);
                 }
             }
@@ -1122,6 +1250,11 @@ pub(crate) fn mark_program_trusted_native(program: &mut Program) {
                     function.trusted_native = true;
                 }
             }
+            crate::ast::TopLevelItem::Impl(implementation) => {
+                for method in &mut implementation.methods {
+                    method.function.trusted_native = true;
+                }
+            }
             _ => {}
         }
     }
@@ -1162,7 +1295,7 @@ pub fn collect_imports(
         };
         let full_path = resolved.path;
         let import_locator = resolved.locator;
-        if !full_path.exists() {
+        if !crate::stdlib::module_source_exists(&full_path) {
             errors.push(SparError::ResolveError {
                 message: format!(
                     "cannot find import file '{}' — file does not exist",
@@ -1182,7 +1315,7 @@ pub fn collect_imports(
         }
 
         // Parse the imported file to extract exported names
-        let src = match std::fs::read_to_string(&full_path) {
+        let src = match crate::stdlib::read_module_source(&full_path) {
             Ok(s) => s,
             Err(e) => {
                 errors.push(SparError::ResolveError {
@@ -1230,10 +1363,8 @@ pub fn collect_imports(
                 TopLevelItem::Var(v) if v.exported => {
                     exports.insert(v.name.clone());
                 }
-                TopLevelItem::Section(s) if s.exported => {
-                    if let Some(name) = s.path.first() {
-                        exports.insert(name.clone());
-                    }
+                TopLevelItem::Struct(s) if s.exported => {
+                    exports.insert(s.name.clone());
                 }
                 TopLevelItem::Function(f) if !f.is_private => {
                     exports.insert(f.name.clone());
@@ -1270,72 +1401,34 @@ pub fn collect_imports(
 
 fn type_fields_to_schema_fields(
     type_fields: &[crate::ast::TypeField],
-    schema_prog: &Program,
+    _schema_prog: &Program,
 ) -> Vec<crate::ast::SchemaField> {
-    use crate::ast::{SchemaField, SchemaFieldShape, TopLevelItem, TypeFieldShape};
+    use crate::ast::{SchemaField, SchemaFieldShape, SparType, TypeFieldShape};
 
     type_fields
         .iter()
         .map(|tf| {
-            let shape = match &tf.shape {
-                TypeFieldShape::Primitive(ty) => SchemaFieldShape::Primitive(ty.clone()),
-                TypeFieldShape::Section(nested) => {
-                    SchemaFieldShape::Section(type_fields_to_schema_fields(nested, schema_prog))
-                }
-                TypeFieldShape::Named(other_name) => {
-                    let is_enum = schema_prog
-                        .items
-                        .iter()
-                        .any(|it| matches!(it, TopLevelItem::Enum(e) if &e.name == other_name));
-                    if is_enum {
-                        // An enum-typed field has a single named value, not
-                        // nested fields — reuse `Primitive(SparType::Named)`
-                        // rather than expanding into a `Section`, so schema
-                        // value-checking compares it the same way a `var x:
-                        // EnumName = EnumName::Variant;` declaration already does.
-                        SchemaFieldShape::Primitive(crate::ast::SparType::Named(other_name.clone()))
-                    } else {
-                        let other_fields = schema_prog.items.iter().find_map(|it| {
-                            if let TopLevelItem::Type(t) = it {
-                                if &t.name == other_name {
-                                    return Some(&t.fields);
-                                }
-                            }
-                            None
-                        });
-                        let expanded = other_fields
-                            .map(|fields| type_fields_to_schema_fields(fields, schema_prog))
-                            .unwrap_or_default();
-                        SchemaFieldShape::Section(expanded)
-                    }
-                }
-                TypeFieldShape::TypeParameter(name) => {
-                    SchemaFieldShape::Primitive(crate::ast::SparType::TypeParameter(name.clone()))
-                }
-                TypeFieldShape::Applied { name, arguments } => {
-                    SchemaFieldShape::Primitive(crate::ast::SparType::Applied {
-                        name: name.clone(),
-                        arguments: arguments.clone(),
-                    })
-                }
+            let ty = match &tf.shape {
+                TypeFieldShape::Primitive(ty) => ty.clone(),
+                TypeFieldShape::InlineRecord(_) => SparType::InlineRecord,
+                TypeFieldShape::Named(name) => SparType::Named(name.clone()),
+                TypeFieldShape::TypeParameter(name) => SparType::TypeParameter(name.clone()),
+                TypeFieldShape::Applied { name, arguments } => SparType::Applied {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
             };
             SchemaField {
                 name: tf.name.clone(),
-                optional: tf.optional,
-                shape,
+                shape: SchemaFieldShape::Type(ty),
                 span: tf.span.clone(),
             }
         })
         .collect()
 }
 
-/// Convert every `SchemaFrom`/`SchemaFrom?` in `schema_prog` into an
-/// equivalent generated `TopLevelItem::SchemaSection`, removing the
-/// `SchemaFrom` items. Must run after `expand_imports` has spliced in any
-/// `import type {...}` targets, so `source_type` lookups see real
-/// `TypeDecl`s.
 fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
-    use crate::ast::{SchemaSectionDecl, TopLevelItem};
+    use crate::ast::{SchemaDecl, TopLevelItem};
 
     let mut errors: Vec<SparError> = Vec::new();
     let mut generated: Vec<TopLevelItem> = Vec::new();
@@ -1345,13 +1438,10 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
             continue;
         };
 
-        let source = schema_prog.items.iter().find_map(|it| {
-            if let TopLevelItem::Type(t) = it {
-                if t.name == sf.source_type {
-                    return Some(t);
-                }
-            }
-            None
+        let source = schema_prog.items.iter().find_map(|item| match item {
+            TopLevelItem::Struct(decl) if decl.name == sf.source_type => Some(decl.type_decl()),
+            TopLevelItem::Type(decl) if decl.name == sf.source_type => Some(decl.clone()),
+            _ => None,
         });
 
         match source {
@@ -1359,7 +1449,7 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
                 errors.push(SparError::SchemaError {
                     message: format!(
                         "SchemaFrom references undeclared type `{}` — bring it in with \
-                         `import type {{ {} }} from \"...\";`",
+                         `import {{ {} }} from \"...\";`",
                         sf.source_type, sf.source_type
                     ),
                     span: sf.source_type_span.clone(),
@@ -1367,9 +1457,8 @@ fn expand_schema_from(schema_prog: &mut Program) -> Result<(), Vec<SparError>> {
             }
             Some(t) => {
                 let fields = type_fields_to_schema_fields(&t.fields, schema_prog);
-                generated.push(TopLevelItem::SchemaSection(SchemaSectionDecl {
+                generated.push(TopLevelItem::Schema(SchemaDecl {
                     name: sf.name.clone(),
-                    marker: sf.marker.clone(),
                     fields,
                     span: sf.span.clone(),
                 }));
@@ -1412,14 +1501,25 @@ pub fn validate_schema_imports(
     let mut bindings: std::collections::HashMap<String, Vec<crate::ast::SchemaField>> =
         std::collections::HashMap::new();
 
+    // Preserve nominal identity when schema modules import a dependency privately
+    // while the configuration imports that same declaration under a public alias.
+    let mut identity_program = program.clone();
+    if identity_program.items.iter().any(|item| matches!(item,
+        TopLevelItem::Import(decl) if matches!(decl.kind, crate::ast::ImportKind::Selective(_)))) {
+        expand_imports(&mut identity_program, &mut ImportLoader::new(base_dir))?;
+    }
+    let visible_origins: HashMap<_, _> = identity_program.items.iter().filter_map(|item| match item {
+        TopLevelItem::Struct(decl) => decl.origin.clone().map(|origin| (origin, decl.name.clone())),
+        TopLevelItem::Enum(decl) => decl.origin.clone().map(|origin| (origin, decl.name.clone())),
+        _ => None,
+    }).collect();
+
     // Build config section map once — it is the same for every schema import.
-    let mut config_sections: std::collections::HashMap<String, &crate::ast::SectionDecl> =
+    let mut config_sections: std::collections::HashMap<String, &crate::ast::StructDecl> =
         std::collections::HashMap::new();
     for cfg_item in &program.items {
-        if let TopLevelItem::Section(s) = cfg_item {
-            if let Some(name) = s.path.first() {
-                config_sections.insert(name.clone(), s);
-            }
+        if let TopLevelItem::Struct(s) = cfg_item {
+            config_sections.insert(s.name.clone(), s);
         }
     }
 
@@ -1438,7 +1538,7 @@ pub fn validate_schema_imports(
 
         // Resolve and load the schema file
         let full_path = local_module_path(base_dir, &decl.path);
-        let schema_src = match std::fs::read_to_string(&full_path) {
+        let schema_src = match crate::stdlib::read_module_source(&full_path) {
             Ok(s) => s,
             Err(e) => {
                 errors.push(SparError::SchemaError {
@@ -1504,14 +1604,31 @@ pub fn validate_schema_imports(
             continue;
         }
 
-        // Build schema section map for this import: name → (optional, fields)
-        let mut schema_sections: std::collections::HashMap<
-            String,
-            (bool, &Vec<crate::ast::SchemaField>),
-        > = std::collections::HashMap::new();
+        let schema_aliases: Vec<_> = schema_prog.items.iter().filter_map(|item| {
+            let (name, origin) = match item {
+                TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
+                TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
+                _ => return None,
+            };
+            visible_origins.get(origin.as_ref()?).map(|visible| (name.clone(), visible.clone()))
+        }).collect();
+        for item in &mut schema_prog.items {
+            if let TopLevelItem::Schema(decl) = item {
+                for field in &mut decl.fields {
+                    let crate::ast::SchemaFieldShape::Type(ty) = &mut field.shape;
+                    for (from, to) in &schema_aliases { rename_spar_type(ty, from, to); }
+                }
+            }
+        }
+
+        // Build schema declaration map for this import: name → fields.
+        // Schemas themselves are always required; value absence belongs to
+        // `Option<T>` fields rather than a second schema-level optionality model.
+        let mut schema_sections: std::collections::HashMap<String, &Vec<crate::ast::SchemaField>> =
+            std::collections::HashMap::new();
 
         for schema_item in &schema_prog.items {
-            if let TopLevelItem::SchemaSection(s) = schema_item {
+            if let TopLevelItem::Schema(s) = schema_item {
                 if let Some(first) = schema_origin.get(&s.name) {
                     errors.push(SparError::SchemaError {
                         message: format!(
@@ -1523,15 +1640,15 @@ pub fn validate_schema_imports(
                     continue;
                 }
                 schema_origin.insert(s.name.clone(), decl.path.clone());
-                schema_sections.insert(s.name.clone(), (s.marker.optional, &s.fields));
+                schema_sections.insert(s.name.clone(), &s.fields);
             }
         }
 
         // Every required schema must have a struct of the same name in this file;
         // structs with no schema are ordinary structs and are ignored.
-        for (name, (optional, schema_fields)) in &schema_sections {
+        for (name, schema_fields) in &schema_sections {
             match config_sections.get(name) {
-                None if !optional => {
+                None => {
                     let mut message = format!(
                         "schema `{}` ({}) has no matching struct in this file",
                         name, decl.path
@@ -1546,7 +1663,6 @@ pub fn validate_schema_imports(
                         span: decl.span.clone(),
                     });
                 }
-                None => {} // optional section, fine to omit
                 Some(cfg_section) => {
                     bindings.insert(name.clone(), (*schema_fields).clone());
                     // Fix 2: skip field-level validation for sections that contain spread items.
@@ -1555,13 +1671,13 @@ pub fn validate_schema_imports(
                     let has_spreads = cfg_section
                         .items
                         .iter()
-                        .any(|i| matches!(i, crate::ast::SectionItem::Spread(_)));
+                        .any(|i| matches!(i, crate::ast::ObjectItem::Spread(_)));
                     if !has_spreads {
                         let config_fields: Vec<&crate::ast::FieldDecl> = cfg_section
                             .items
                             .iter()
                             .filter_map(|i| {
-                                if let crate::ast::SectionItem::Field(f) = i {
+                                if let crate::ast::ObjectItem::Field(f) = i {
                                     Some(f)
                                 } else {
                                     None
@@ -1627,107 +1743,51 @@ fn validate_fields(
     errors: &mut Vec<crate::error::SparError>,
     section_span: &crate::error::Span,
 ) {
-    use crate::ast::{FieldValue, SchemaFieldShape, SparType};
+    use crate::ast::{SchemaFieldShape, SparType};
     use crate::error::SparError;
+
+    fn is_option_type(ty: &SparType) -> bool {
+        matches!(
+            ty,
+            SparType::Applied { name, arguments }
+                if name == "Option" && arguments.len() == 1
+        )
+    }
 
     // Check: every required schema field is present with correct type
     for sf in schema_fields {
         let cf = config_fields.iter().find(|f| f.name == sf.name);
+        let SchemaFieldShape::Type(expected_ty) = &sf.shape;
         match cf {
-            None if !sf.optional => {
+            None if !is_option_type(expected_ty) => {
                 errors.push(SparError::SchemaError {
                     message: format!(
-                        "section `{}` is missing required field `{}`",
+                        "struct `{}` is missing required field `{}`",
                         section_path, sf.name
                     ),
                     span: section_span.clone(),
                 });
             }
-            None => {} // optional, fine to omit
+            None => {} // `Option<T>` may be omitted.
             Some(cf) => {
-                match &sf.shape {
-                    SchemaFieldShape::Primitive(expected_ty) => {
-                        match &cf.ty {
-                            // Type omitted (inferred from a `-> TypeName`
-                            // binding) — can't statically verify it here
-                            // without re-deriving inference; the
-                            // type-binding's own typechecker pass already
-                            // covers this field. Same "can't statically
-                            // know" precedent as the has_spreads skip
-                            // below.
-                            None => {}
-                            Some(actual_ty) if actual_ty != expected_ty => {
-                                errors.push(SparError::SchemaError {
-                                    message: format!(
-                                        "field `{}::{}` declared as `{}` but schema expects `{}`",
-                                        section_path,
-                                        sf.name,
-                                        kl_type_name(actual_ty),
-                                        kl_type_name(expected_ty),
-                                    ),
-                                    span: cf.span.clone(),
-                                });
-                            }
-                            Some(_) => {}
-                        }
+                match &cf.ty {
+                    // Type omitted because the struct is bound to a declared type.
+                    // The normal typechecker validates the initializer against that
+                    // binding, including named nested structs.
+                    None => {}
+                    Some(actual_ty) if actual_ty != expected_ty => {
+                        errors.push(SparError::SchemaError {
+                            message: format!(
+                                "field `{}::{}` declared as `{}` but schema expects `{}`",
+                                section_path,
+                                sf.name,
+                                kl_type_name(actual_ty),
+                                kl_type_name(expected_ty),
+                            ),
+                            span: cf.span.clone(),
+                        });
                     }
-                    SchemaFieldShape::Section(nested_schema) => {
-                        // A field is a nested section if its value is
-                        // FieldValue::Nested, regardless of whether its
-                        // type is explicit (Some(Section)) or inferred
-                        // (None, from a `-> TypeName` binding).
-                        let explicit_non_section =
-                            matches!(&cf.ty, Some(ty) if *ty != SparType::Section);
-                        if explicit_non_section {
-                            errors.push(SparError::SchemaError {
-                                message: format!(
-                                    "field `{}::{}` must be type `section` (schema requires a nested section)",
-                                    section_path, sf.name
-                                ),
-                                span: cf.span.clone(),
-                            });
-                        } else {
-                            let nested_items: &[crate::ast::SectionItem] = match &cf.value {
-                                Some(FieldValue::Nested(items)) => items,
-                                _ => {
-                                    errors.push(SparError::SchemaError {
-                                        message: format!(
-                                            "field `{}::{}` must have an inline section value `= {{ ... }}`",
-                                            section_path, sf.name
-                                        ),
-                                        span: cf.span.clone(),
-                                    });
-                                    continue;
-                                }
-                            };
-                            // A spread's contributed fields can't be statically
-                            // known here — same "can't verify" precedent as the
-                            // has_spreads skip above, one level deeper.
-                            let has_spreads = nested_items
-                                .iter()
-                                .any(|i| matches!(i, crate::ast::SectionItem::Spread(_)));
-                            if !has_spreads {
-                                let nested_config: Vec<&crate::ast::FieldDecl> = nested_items
-                                    .iter()
-                                    .filter_map(|i| {
-                                        if let crate::ast::SectionItem::Field(f) = i {
-                                            Some(f)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
-                                let nested_path = format!("{}::{}", section_path, sf.name);
-                                validate_fields(
-                                    nested_schema,
-                                    &nested_config,
-                                    &nested_path,
-                                    errors,
-                                    &cf.span,
-                                );
-                            }
-                        }
-                    }
+                    Some(_) => {}
                 }
             }
         }
@@ -1749,11 +1809,12 @@ fn validate_fields(
 
 fn kl_type_name(ty: &crate::ast::SparType) -> String {
     match ty {
+        crate::ast::SparType::Any => "Any".to_string(),
         crate::ast::SparType::Str => "str".to_string(),
         crate::ast::SparType::Int => "int".to_string(),
         crate::ast::SparType::Float => "float".to_string(),
         crate::ast::SparType::Bool => "bool".to_string(),
-        crate::ast::SparType::Section => "section".to_string(),
+        crate::ast::SparType::InlineRecord => "Record".to_string(),
         crate::ast::SparType::Void => "void".to_string(),
         crate::ast::SparType::Shell => "shell".to_string(),
         crate::ast::SparType::Error => "error".to_string(),
@@ -1776,7 +1837,7 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
             "fn({}) -> {}",
             params
                 .iter()
-                .map(kl_type_name)
+                .map(|param| format!("{}: {}", param.name, kl_type_name(&param.ty)))
                 .collect::<Vec<_>>()
                 .join(", "),
             kl_type_name(return_type)
@@ -1884,7 +1945,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("shared.spar"),
-            "export type [PostgresType]{ image: str; };\ntype [Internal]{ a: int; };\n",
+            "export struct PostgresType{ image: str; };\nstruct Internal { a: int; };\n",
         )
         .unwrap();
         let src = r#"import "shared.spar" as shared;"#;
@@ -1917,8 +1978,8 @@ mod tests {
         // Config has [Server] (public) and private [Defaults]
         let src = concat!(
             "import schema \"schema.spar\";\n",
-            "[Server] { port: int = 8080; };\n",
-            "private [Defaults] { timeout: int = 30; };\n",
+            "struct Server { port: int = 8080; };\n",
+            "private struct Defaults { timeout: int = 30; };\n",
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
@@ -1939,7 +2000,7 @@ mod tests {
             dir.path().join("shared.spar"),
             concat!(
                 "export var version: str = \"1.0\";\n",
-                "export [Server]{ port: int = 8080; };\n",
+                "export struct Server { port: int = 8080; };\n",
                 "var internal: int = 42;\n",
             ),
         )
@@ -1960,9 +2021,10 @@ mod tests {
             .items
             .iter()
             .any(|it| matches!(it, TopLevelItem::Var(v) if v.name == "version")));
-        assert!(program.items.iter().any(
-            |it| matches!(it, TopLevelItem::Section(s) if s.path == vec!["Server".to_string()])
-        ));
+        assert!(program
+            .items
+            .iter()
+            .any(|it| matches!(it, TopLevelItem::Struct(s) if s.name == "Server")));
     }
 
     #[test]
@@ -1978,9 +2040,9 @@ mod tests {
             dir.path().join("shared.spar"),
             concat!(
                 "export var version: str = \"1.0\";\n",
-                "export [Server]{ port: int = 8080; };\n",
+                "export struct Server { port: int = 8080; };\n",
                 "function greet() -> str { return \"hi\"; };\n",
-                "export type [PostgresType]{ image: str; };\n",
+                "export struct PostgresType{ image: str; };\n",
             ),
         )
         .unwrap();
@@ -1992,7 +2054,7 @@ mod tests {
         for item in &program.items {
             match item {
                 TopLevelItem::Var(v) => assert!(!v.exported, "spliced var must not stay exported"),
-                TopLevelItem::Section(s) => {
+                TopLevelItem::Struct(s) => {
                     assert!(!s.exported, "spliced section must not stay exported");
                     assert!(
                         s.private,
@@ -2104,7 +2166,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("shared.spar"),
-            "export type [PostgresType]{ image: str; };\n",
+            "export struct PostgresType{ image: str; };\n",
         )
         .unwrap();
         let src = r#"import { PostgresType as PgType } from "shared.spar";"#;
@@ -2115,11 +2177,11 @@ mod tests {
         assert!(program
             .items
             .iter()
-            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PgType")));
+            .any(|it| matches!(it, TopLevelItem::Struct(t) if t.name == "PgType")));
         assert!(!program
             .items
             .iter()
-            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType")));
+            .any(|it| matches!(it, TopLevelItem::Struct(t) if t.name.ends_with("PostgresType"))));
     }
 
     #[test]
@@ -2158,7 +2220,7 @@ mod tests {
     // ── Phase 3: import type (Task 4) ────────────────────────────────────
 
     #[test]
-    fn expand_imports_type_selective_rejects_non_type_name() {
+    fn expand_imports_ordinary_selective_accepts_variables() {
         use std::fs;
         let dir = tempdir().unwrap();
         fs::write(
@@ -2166,36 +2228,35 @@ mod tests {
             "export var host: str = \"x\";\n",
         )
         .unwrap();
-        let src = r#"import type { host } from "shared.spar";"#;
+        let src = r#"import { host } from "shared.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
-        let err = expand_imports(&mut program, &mut loader).unwrap_err();
-        assert!(err.iter().any(|e| matches!(e, SparError::ResolveError { message, .. } if message.contains("is not a type"))),
-            "got: {:?}", err);
+        expand_imports(&mut program, &mut loader).unwrap();
+        assert!(program.items.iter().any(|item| matches!(item, crate::ast::TopLevelItem::Var(decl) if decl.name == "host")));
     }
 
     #[test]
     fn expand_imports_type_selective_transitively_pulls_dependent_type() {
-        // Regression: `import type { FlutterType }` must silently bring in
-        // `Libs` too — FlutterType's own field (`packages?: Libs;`) needs
+        // Regression: `import { FlutterType }` must silently bring in
+        // `Libs` too — FlutterType's own field (`packages: Option<Libs>;`) needs
         // it, and the caller never asked to import Libs directly.
         use std::fs;
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
             concat!(
-                "export type [Libs]{ dependencies?: [str]; };\n",
-                "export type [FlutterType]{ projectName: str; packages?: Libs; };\n",
+                "export struct Libs{ dependencies: Option<List<str>>; };\n",
+                "export struct FlutterType{ projectName: str; packages: Option<Libs>; };\n",
             ),
         )
         .unwrap();
-        let src = r#"import type { FlutterType } from "types.spar";"#;
+        let src = r#"import { FlutterType } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
         let has_libs = program.items.iter().any(|it| {
             matches!(
-                it, TopLevelItem::Type(t) if t.name == "Libs"
+                it, TopLevelItem::Struct(t) if t.name.ends_with("Libs")
             )
         });
         assert!(
@@ -2216,8 +2277,8 @@ mod tests {
         fs::write(
             dir.path().join("compose.spar"),
             concat!(
-                "export type [PostgresType]{ image: str; };\n",
-                "export [Postgres] -> PostgresType { image: \"postgres:16\"; };\n",
+                "export struct PostgresType{ image: str; };\n",
+                "export struct Postgres { connection: PostgresType = PostgresType(image: \"postgres:16\"); };\n",
             ),
         )
         .unwrap();
@@ -2228,7 +2289,7 @@ mod tests {
         let has_type = program
             .items
             .iter()
-            .any(|it| matches!(it, TopLevelItem::Type(t) if t.name == "PostgresType"));
+            .any(|it| matches!(it, TopLevelItem::Struct(t) if t.name.ends_with("PostgresType")));
         assert!(
             has_type,
             "PostgresType must be transitively spliced in, got items: {:?}",
@@ -2246,8 +2307,8 @@ mod tests {
         fs::write(
             dir.path().join("compose.spar"),
             concat!(
-                "private [ProductionEnvironment] { nodeEnv: \"production\"; };\n",
-                "export [Postgres] { environment: { ...ProductionEnvironment; }; };\n",
+                "private struct ProductionEnvironment { nodeEnv: \"production\"; };\n",
+                "export struct Postgres { environment: { ...ProductionEnvironment; }; };\n",
             ),
         )
         .unwrap();
@@ -2275,7 +2336,7 @@ mod tests {
             "export enum Protocol { Http, Https };\n",
         )
         .unwrap();
-        let src = r#"import type { Protocol } from "types.spar";"#;
+        let src = r#"import { Protocol } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
@@ -2329,17 +2390,17 @@ mod tests {
             dir.path().join("types.spar"),
             concat!(
                 "export enum RestartPolicy { Always, Never };\n",
-                "export type [Container]{ name: str; restart: RestartPolicy; };\n",
+                "export struct Container{ name: str; restart: RestartPolicy; };\n",
             ),
         )
         .unwrap();
-        let src = r#"import type { Container } from "types.spar";"#;
+        let src = r#"import { Container } from "types.spar";"#;
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
         let has_restart_policy = program.items.iter().any(|it| {
             matches!(
-                it, TopLevelItem::Enum(e) if e.name == "RestartPolicy"
+                it, TopLevelItem::Enum(e) if e.name.ends_with("RestartPolicy")
             )
         });
         assert!(
@@ -2357,21 +2418,21 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; };\n",
+            "export struct PostgresType{ image: str; };\n",
         )
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
                 "",
-                "import type { PostgresType } from \"types.spar\";\n",
+                "import { PostgresType } from \"types.spar\";\n",
                 "schema Postgres { image: str; };\n",
             ),
         )
         .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
-            "[Postgres]{ image: str = \"postgres:16\"; };\n",
+            "struct Postgres { image: str = \"postgres:16\"; };\n",
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
@@ -2390,18 +2451,18 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("lib.spar"),
-            "export [Colors]{ red: str = \"#ff0000\"; };\n",
+            "export struct Colors { red: str = \"#ff0000\"; };\n",
         )
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
-            "schema Container { x?: str; };\n",
+            "schema Container { x: Option<str>; };\n",
         )
         .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
             "import { Colors } from \"lib.spar\";\n",
-            "[Container]{\n",
+            "struct Container {\n",
             "    x: str = Colors::red;\n",
             "};\n",
         );
@@ -2433,15 +2494,16 @@ mod tests {
                     fields: vec![
                         crate::ast::TypeField {
                             name: "image".into(),
-                            optional: false,
                             shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Str),
                             default: None,
                             span: crate::error::Span::dummy(),
                         },
                         crate::ast::TypeField {
                             name: "port".into(),
-                            optional: true,
-                            shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Int),
+                            shape: crate::ast::TypeFieldShape::Applied {
+                                name: "Option".into(),
+                                arguments: vec![crate::ast::SparType::Int],
+                            },
                             default: None,
                             span: crate::error::Span::dummy(),
                         },
@@ -2453,7 +2515,6 @@ mod tests {
                     name: "Postgres".into(),
                     source_type: "PostgresType".into(),
                     source_type_span: crate::error::Span::dummy(),
-                    marker: crate::ast::SchemaMarker { optional: false },
                     span: crate::error::Span::dummy(),
                 }),
             ],
@@ -2468,24 +2529,30 @@ mod tests {
             .items
             .iter()
             .find_map(|it| {
-                if let TopLevelItem::SchemaSection(s) = it {
+                if let TopLevelItem::Schema(s) = it {
                     Some(s)
                 } else {
                     None
                 }
             })
-            .expect("SchemaFrom must generate a SchemaSection");
+            .expect("SchemaFrom must generate a Schema");
         assert_eq!(generated.name, "Postgres");
-        assert!(!generated.marker.optional);
         assert_eq!(generated.fields.len(), 2);
-        assert!(generated
-            .fields
-            .iter()
-            .any(|f| f.name == "image" && !f.optional));
-        assert!(generated
-            .fields
-            .iter()
-            .any(|f| f.name == "port" && f.optional));
+        assert!(generated.fields.iter().any(|f| {
+            f.name == "image"
+                && matches!(
+                    &f.shape,
+                    crate::ast::SchemaFieldShape::Type(crate::ast::SparType::Str)
+                )
+        }));
+        assert!(generated.fields.iter().any(|f| {
+            f.name == "port"
+                && matches!(
+                    &f.shape,
+                    crate::ast::SchemaFieldShape::Type(crate::ast::SparType::Applied { name, arguments })
+                        if name == "Option" && arguments == &vec![crate::ast::SparType::Int]
+                )
+        }));
     }
 
     #[test]
@@ -2502,7 +2569,6 @@ mod tests {
                     exported: true,
                     fields: vec![crate::ast::TypeField {
                         name: "width".into(),
-                        optional: false,
                         shape: crate::ast::TypeFieldShape::Primitive(crate::ast::SparType::Int),
                         default: None,
                         span: crate::error::Span::dummy(),
@@ -2517,7 +2583,6 @@ mod tests {
                     exported: true,
                     fields: vec![crate::ast::TypeField {
                         name: "border".into(),
-                        optional: false,
                         shape: crate::ast::TypeFieldShape::Named("Border".into()),
                         default: None,
                         span: crate::error::Span::dummy(),
@@ -2529,7 +2594,6 @@ mod tests {
                     name: "Deco".into(),
                     source_type: "Decoration".into(),
                     source_type_span: crate::error::Span::dummy(),
-                    marker: crate::ast::SchemaMarker { optional: true },
                     span: crate::error::Span::dummy(),
                 }),
             ],
@@ -2540,25 +2604,22 @@ mod tests {
             .items
             .iter()
             .find_map(|it| {
-                if let TopLevelItem::SchemaSection(s) = it {
+                if let TopLevelItem::Schema(s) = it {
                     Some(s)
                 } else {
                     None
                 }
             })
-            .expect("SchemaFrom must generate a SchemaSection");
-        assert!(generated.marker.optional);
+            .expect("SchemaFrom must generate a Schema");
         let border_field = generated
             .fields
             .iter()
             .find(|f| f.name == "border")
             .expect("border field");
-        match &border_field.shape {
-            crate::ast::SchemaFieldShape::Section(nested) => {
-                assert!(nested.iter().any(|f| f.name == "width"));
-            }
-            other => panic!("expected nested Section shape, got {:?}", other),
-        }
+        assert!(matches!(
+            &border_field.shape,
+            crate::ast::SchemaFieldShape::Type(crate::ast::SparType::Named(name)) if name == "Border"
+        ));
     }
 
     #[test]
@@ -2571,7 +2632,6 @@ mod tests {
                 name: "Postgres".into(),
                 source_type: "NoSuchType".into(),
                 source_type_span: crate::error::Span::dummy(),
-                marker: crate::ast::SchemaMarker { optional: false },
                 span: crate::error::Span::dummy(),
             })],
         };
@@ -2586,21 +2646,21 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; };\n",
+            "export struct PostgresType{ image: str; };\n",
         )
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
                 "",
-                "import type { PostgresType } from \"types.spar\";\n",
+                "import { PostgresType } from \"types.spar\";\n",
                 "schema Postgres from PostgresType;\n",
             ),
         )
         .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
-            "[Postgres]{ image: str = \"postgres:16\"; };\n",
+            "struct Postgres { image: str = \"postgres:16\"; };\n",
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
@@ -2615,7 +2675,7 @@ mod tests {
             dir.path().join("types.spar"),
             concat!(
                 "export enum RestartPolicy { Always, Never };\n",
-                "export type [ServiceType]{ image: str; restart: RestartPolicy; };\n",
+                "export struct ServiceType{ image: str; restart: RestartPolicy; };\n",
             ),
         )
         .unwrap();
@@ -2623,15 +2683,15 @@ mod tests {
             dir.path().join("schema.spar"),
             concat!(
                 "",
-                "import type { ServiceType } from \"types.spar\";\n",
+                "import { ServiceType } from \"types.spar\";\n",
                 "schema Service from ServiceType;\n",
             ),
         )
         .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
-            "import type { RestartPolicy } from \"types.spar\";\n",
-            "[Service]{ image: str = \"nginx\"; restart: RestartPolicy = RestartPolicy::Always; };\n",
+            "import { RestartPolicy } from \"types.spar\";\n",
+            "struct Service { image: str = \"nginx\"; restart: RestartPolicy = RestartPolicy::Always; };\n",
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
@@ -2644,21 +2704,21 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("types.spar"),
-            "export type [PostgresType]{ image: str; port: int; };\n",
+            "export struct PostgresType{ image: str; port: int; };\n",
         )
         .unwrap();
         fs::write(
             dir.path().join("schema.spar"),
             concat!(
                 "",
-                "import type { PostgresType } from \"types.spar\";\n",
+                "import { PostgresType } from \"types.spar\";\n",
                 "schema Postgres from PostgresType;\n",
             ),
         )
         .unwrap();
         let src = concat!(
             "import schema \"schema.spar\";\n",
-            "[Postgres]{ image: str = \"postgres:16\"; };\n", // missing required `port`
+            "struct Postgres { image: str = \"postgres:16\"; };\n", // missing required `port`
         );
         let program = parse_src(src);
         let result = validate_schema_imports(&program, dir.path());
@@ -2672,7 +2732,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.spar"),
-            "type [SparshConfig]{ enabled?: bool; };\n",
+            "struct SparshConfig{ enabled: Option<bool>; };\n",
         )
         .unwrap();
 
@@ -2715,8 +2775,8 @@ mod tests {
         expand_imports(&mut program, &mut loader).expect("expand must succeed");
         let mut saw_shared = false;
         for item in &program.items {
-            if let TopLevelItem::Section(s) = item {
-                if s.path == vec!["Shared".to_string()] {
+            if let TopLevelItem::Struct(s) = item {
+                if s.name == "Shared" {
                     saw_shared = true;
                     assert!(!s.is_emit(), "imported struct must lose #[emit]");
                 }
@@ -2800,12 +2860,8 @@ mod tests {
     }
 
     #[test]
-    fn optional_schema_struct_may_be_omitted() {
-        assert!(schema_result(
-            "schema? Cache { ttl: int; };",
-            "struct Other { z: int = 1; };"
-        )
-        .is_ok());
+    fn option_schema_field_may_be_omitted() {
+        assert!(schema_result("schema Cache { ttl: Option<int>; };", "struct Cache {};").is_ok());
     }
 
     #[test]

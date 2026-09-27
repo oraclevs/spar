@@ -35,7 +35,11 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(options: CompileOptions) -> Self {
+    pub fn new(mut options: CompileOptions) -> Self {
+        // Compilation and execution must use the same native method IDs.
+        options
+            .natives
+            .extend_missing(&crate::stdlib::native_registry());
         Self { options }
     }
 
@@ -244,6 +248,20 @@ impl Engine {
         self.with_path(path).execute_source(&read_source(path)?)
     }
 
+    /// Like `execute_path`, exposing `program_args` to the script through
+    /// `std/process` `args()`.
+    pub fn execute_path_with_args(
+        &self,
+        path: &Path,
+        program_args: Vec<String>,
+    ) -> Result<ExecutionOutcome, Vec<SparError>> {
+        let engine = self.with_path(path);
+        let program = engine.compile_source(&read_source(path)?)?;
+        let mut context = crate::runtime::RuntimeContext::for_base_dir(&program.options.base_dir);
+        context.set_args(program_args);
+        engine.execute_compiled_with_context(&program, context)
+    }
+
     fn check_compile(&self, source: &str) -> Result<Compilation, Vec<SparError>> {
         let options = CompileOptions {
             evaluate: false,
@@ -265,7 +283,7 @@ impl Engine {
 }
 
 fn read_source(path: &Path) -> Result<String, Vec<SparError>> {
-    std::fs::read_to_string(path).map_err(|error| {
+    crate::stdlib::read_module_source(path).map_err(|error| {
         vec![SparError::EvalError {
             message: format!("could not read '{}': {error}", path.display()),
             span: Span::dummy(),

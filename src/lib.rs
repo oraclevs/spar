@@ -21,6 +21,7 @@ pub mod parser;
 pub mod renderer;
 pub mod resolver;
 pub mod runner;
+pub mod semantics;
 pub(crate) mod runtime;
 pub mod session;
 mod shell_lang;
@@ -50,9 +51,10 @@ pub use lexer::Lexer;
 pub use parser::Parser;
 pub use renderer::ErrorRenderer;
 pub use resolver::{Resolver, SymbolTable};
+pub use semantics::{SemanticCallable, SemanticField, SemanticMethod, SemanticParameter, SemanticSnapshot};
 pub use runtime::{
     NativeExecutionKind, NativeFunction, NativeFunctionId, NativeMethod, NativeMethodId,
-    NativeMethodSignature, NativeRegistry, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput,
+    NativeMethodSignature, NativeRegistry, ReceiverMode, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput,
     Schema, SchemaField, SchemaInferenceError, SchemaType, StreamResource, StreamState, TableValue,
     Value,
 };

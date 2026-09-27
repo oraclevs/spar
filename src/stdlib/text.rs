@@ -49,18 +49,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         ))
         .expect("nativeText::replace registration must be unique");
     registry
-        .register_method(NativeMethod::sync(
-            "str",
-            "replace",
-            SparType::Str,
-            vec![("from", SparType::Str), ("to", SparType::Str)],
-            SparType::Str,
-            false,
-            replace_impl,
-        ))
-        .expect("str.replace registration must be unique");
-
-    registry
         .register(NativeFunction::sync(
             "nativeText",
             "split",
@@ -70,18 +58,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             split_impl,
         ))
         .expect("nativeText::split registration must be unique");
-    registry
-        .register_method(NativeMethod::sync(
-            "str",
-            "split",
-            SparType::Str,
-            vec![("separator", SparType::Str)],
-            SparType::List(Box::new(SparType::Str)),
-            false,
-            split_impl,
-        ))
-        .expect("str.split registration must be unique");
-
     let string_list = SparType::List(Box::new(SparType::Str));
     registry
         .register(NativeFunction::sync(
@@ -96,17 +72,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             join_impl,
         ))
         .expect("nativeText::join registration must be unique");
-    registry
-        .register_method(NativeMethod::sync(
-            "List",
-            "join",
-            string_list,
-            vec![("separator", SparType::Str)],
-            SparType::Str,
-            false,
-            join_impl,
-        ))
-        .expect("List<str>.join registration must be unique");
+
 }
 
 fn register_unary(
@@ -124,17 +90,22 @@ fn register_unary(
             callback,
         ))
         .unwrap_or_else(|_| panic!("nativeText::{name} registration must be unique"));
-    registry
-        .register_method(NativeMethod::sync(
-            "str",
-            name,
-            SparType::Str,
-            vec![],
-            SparType::Str,
-            false,
-            callback,
-        ))
-        .unwrap_or_else(|_| panic!("str.{name} registration must be unique"));
+    if name != "trim" {
+        // `trim` is part of nativeCore's canonical str surface. Keep the
+        // legacy `lower()` / `upper()` method aliases here, while all free
+        // functions remain available from std/text.
+        registry
+            .register_method(NativeMethod::sync(
+                "str",
+                name,
+                SparType::Str,
+                vec![],
+                SparType::Str,
+                false,
+                callback,
+            ))
+            .unwrap_or_else(|_| panic!("str.{name} registration must be unique"));
+    }
 }
 
 fn register_predicate(
@@ -152,17 +123,9 @@ fn register_predicate(
             callback,
         ))
         .unwrap_or_else(|_| panic!("nativeText::{name} registration must be unique"));
-    registry
-        .register_method(NativeMethod::sync(
-            "str",
-            name,
-            SparType::Str,
-            vec![("needle", SparType::Str)],
-            SparType::Bool,
-            false,
-            callback,
-        ))
-        .unwrap_or_else(|_| panic!("str.{name} registration must be unique"));
+    // Method forms (`contains`, `startsWith`, `endsWith`) belong to
+    // nativeCore so their parameter names and contracts are consistent with
+    // the language-wide standard library. std/text keeps the free functions.
 }
 
 fn trim_impl(

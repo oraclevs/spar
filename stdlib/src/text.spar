@@ -1,42 +1,42 @@
-function trim(value: str) -> str {
+fn trim(value: str) -> str {
     return nativeText::trim(value: value);
 };
 
-function lower(value: str) -> str {
+fn lower(value: str) -> str {
     return nativeText::lower(value: value);
 };
 
-function upper(value: str) -> str {
+fn upper(value: str) -> str {
     return nativeText::upper(value: value);
 };
 
-function contains(value: str, needle: str) -> bool {
+fn contains(value: str, needle: str) -> bool {
     return nativeText::contains(value: value, needle: needle);
 };
 
-function startsWith(value: str, needle: str) -> bool {
+fn startsWith(value: str, needle: str) -> bool {
     return nativeText::startsWith(value: value, needle: needle);
 };
 
-function endsWith(value: str, needle: str) -> bool {
+fn endsWith(value: str, needle: str) -> bool {
     return nativeText::endsWith(value: value, needle: needle);
 };
 
 // Parses a human-readable byte size ("10GB", "1.5 GiB", "512K", a bare
 // number of bytes) into an int, for comparing against a table's numeric
-// `size` column: `f.size > parseSize("10GB")`.
-function parseSize(value: str) -> int {
+// `size` column: `f.size > parseSize(value: "10GB")`.
+fn parseSize(value: str) -> int {
     return nativeText::parseSize(value: value);
 };
 
-function replace(value: str, from: str, to: str) -> str {
+fn replace(value: str, from: str, to: str) -> str {
     return nativeText::replace(value: value, from: from, to: to);
 };
 
-function split(value: str, separator: str) -> [str] {
+fn split(value: str, separator: str) -> [str] {
     return nativeText::split(value: value, separator: separator);
 };
 
-function join(values: [str], separator: str) -> str {
+fn join(values: [str], separator: str) -> str {
     return nativeText::join(values: values, separator: separator);
 };

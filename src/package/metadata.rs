@@ -113,10 +113,17 @@ fn type_decl(name: &str, fields: Vec<TypeField>) -> TypeDecl {
 }
 
 fn primitive(name: &str, optional: bool, ty: SparType) -> TypeField {
+    let shape = if optional {
+        TypeFieldShape::Applied {
+            name: "Option".into(),
+            arguments: vec![ty],
+        }
+    } else {
+        TypeFieldShape::Primitive(ty)
+    };
     TypeField {
         name: name.into(),
-        optional,
-        shape: TypeFieldShape::Primitive(ty),
+        shape,
         default: None,
         span: builtin_span(),
     }

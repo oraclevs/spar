@@ -12,10 +12,10 @@ fn str_methods_match_legacy_std_text_functions() {
                 var legacy: str = upper(value: trim(value: raw));
                 var modern: str = raw.trim().upper();
                 if legacy != modern { return 1; }
-                if !modern.contains("PAR") { return 2; }
-                if contains(value: modern, needle: "PAR") != modern.contains("PAR") { return 3; }
-                if replace(value: modern, from: "SP", to: "St") != modern.replace("SP", "St") { return 4; }
-                var pieces: [str] = "a,b,c".split(",");
+                if !modern.contains(needle: "PAR") { return 2; }
+                if contains(value: modern, needle: "PAR") != modern.contains(needle: "PAR") { return 3; }
+                if replace(value: modern, from: "SP", to: "St") != modern.replace(from: "SP", to: "St") { return 4; }
+                var pieces: [str] = "a,b,c".split(separator: ",");
                 if pieces.length() != 3 { return 5; }
                 return 0;
             };
@@ -41,16 +41,16 @@ fn bytes_and_list_methods_live_on_values_without_removing_free_functions() {
 
                 var values: [int] = [1, 2, 3, 4, 5];
                 var legacy: [int] = values
-                    |> filter(fn(value: int) -> bool => value >= 3)
-                    |> map(fn(value: int) -> int => value * 2)
-                    |> take(2);
+                    |> filter(predicate: |value: int| value >= 3)
+                    |> map(transform: |value: int| value * 2)
+                    |> take(count: 2);
                 var modern: [int] = values
-                    .filter(fn(value: int) -> bool => value >= 3)
-                    .map(fn(value: int) -> int => value * 2)
-                    .take(2);
+                    .filter(predicate: |value: int| value >= 3)
+                    .map(transform: |value: int| value * 2)
+                    .take(count: 2);
 
                 if count(source: legacy) != modern.count() { return 3; }
-                if get(source: legacy, key: 0) != modern.get(0) { return 4; }
+                if get(source: legacy, key: 0) != modern.get(index: 0) { return 4; }
                 if modern.first() != 6 || modern.last() != 8 { return 5; }
                 if modern.length() != 2 || modern.isEmpty() { return 6; }
                 return 0;
@@ -78,12 +78,12 @@ fn map_methods_cover_length_keys_values_and_canonical_get() {
                     User(name: "Ngozi", team: "red")
                 ] |> collectTable();
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(fn(user: User) -> str => user.team);
+                    |> groupBy(key: |user: User| user.team);
 
                 if groups.length() != 2 || groups.isEmpty() { return 1; }
                 if groups.keys().length() != 2 || groups.values().length() != 2 { return 2; }
-                if groups.get("red").count() != get(source: groups, key: "red").count() { return 3; }
-                if !groups.containsKey("blue") { return 4; }
+                if groups.get(key: "red").count() != get(source: groups, key: "red").count() { return 3; }
+                if !groups.containsKey(key: "blue") { return 4; }
                 return 0;
             };
             "#,
@@ -106,7 +106,7 @@ fn option_and_result_are_first_class_generic_values_with_core_methods() {
                 if !present.isSome() || present.isNone() { return 1; }
                 if !absent.isNone() || absent.isSome() { return 2; }
                 if present.unwrap() != 7 { return 3; }
-                if absent.unwrapOr(9) != 9 { return 4; }
+                if absent.unwrapOr(fallback: 9) != 9 { return 4; }
 
                 var success: Result<int, str> = ok<int, str>(value: 11);
                 var failure: Result<int, str> = err<int, str>(error: "boom");
@@ -114,7 +114,7 @@ fn option_and_result_are_first_class_generic_values_with_core_methods() {
                 if !failure.isErr() || failure.isOk() { return 6; }
                 if success.unwrap() != 11 { return 7; }
                 if failure.unwrapErr() != "boom" { return 8; }
-                if failure.unwrapOr(13) != 13 { return 9; }
+                if failure.unwrapOr(fallback: 13) != 13 { return 9; }
                 return 0;
             };
             "#,
@@ -197,8 +197,8 @@ fn generic_list_methods_infer_untyped_closure_parameters_and_results() {
             r#"
             function main() -> int {
                 var values: [int] = [1, 2, 3];
-                var doubled: [int] = values.map(fn(value) => value * 2);
-                var selected: [int] = doubled.filter(fn(value) => value >= 4);
+                var doubled: [int] = values.map(transform: |value: int| value * 2);
+                var selected: [int] = doubled.filter(predicate: |value: int| value >= 4);
                 return selected.first() + selected.last();
             };
             "#,
@@ -206,4 +206,36 @@ fn generic_list_methods_infer_untyped_closure_parameters_and_results() {
         .expect("generic List methods should infer closure input/output types from the receiver");
 
     assert_eq!(outcome.exit_status, 10);
+}
+
+#[test]
+fn primitive_methods_cover_string_numeric_bool_and_bytes_baseline() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(r#"
+            import pkg { bytes } from "std/random";
+
+            fn main() -> int {
+                var text: str = "  Spar Language  ";
+                if text.trimStart().startsWith(prefix: "Spar") == false { return 1; }
+                if text.trimEnd().endsWith(suffix: "Language") == false { return 2; }
+                if "SPAR".toLowerCase() != "spar" { return 3; }
+                if "spar".toUpperCase() != "SPAR" { return 4; }
+                if "abcdef".substring(start: 1, end: some(value: 4)) != "bcd" { return 5; }
+                if "abcdef".indexOf(needle: "cd").unwrap() != 2 { return 6; }
+
+                if (-7).abs() != 7 || 4.min(other: 9) != 4 || 4.max(other: 9) != 9 { return 7; }
+                if 12.clamp(min: 0, max: 10) != 10 || !4.isEven() || !5.isOdd() { return 8; }
+                if 3.toFloat() != 3.0 || 3.toString() != "3" { return 9; }
+                if (-2.5).abs() != 2.5 || 2.4.floor() != 2 || 2.4.ceil() != 3 { return 10; }
+                if 2.6.round() != 3 || 2.9.truncate() != 2 || true.toString() != "true" { return 11; }
+
+                var blob: Bytes = bytes(count: 3);
+                if blob.get(index: 0).isNone() { return 12; }
+                if blob.slice(start: 0, end: some(value: 2)).length() != 2 { return 13; }
+                return 0;
+            };
+        "#)
+        .expect("primitive baseline methods should execute");
+
+    assert_eq!(outcome.exit_status, 0);
 }

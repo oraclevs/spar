@@ -1,24 +1,8 @@
-type Pair<T, V> {
-    left: T;
-    right: V;
-};
-
-type Container<T> {
-    values: List<T>;
-};
-
-struct Example: Pair<str, int> {
-    left = "hello";
-    right = 42;
-};
-
-struct Names: Container<str> {
-    values = ["a", "b"];
-};
-
-function main() -> int {
-    if Example.left == "hello" {
-        return Example.right;
-    }
+struct Pair<T, V> { left: T; right: V; };
+struct Container<T> { values: List<T>; };
+fn main() -> int {
+    var example: Pair<str, int> = Pair<str, int>(left: "hello", right: 42);
+    var names: Container<str> = Container<str>(values: ["a", "b"]);
+    if example.left == "hello" { return example.right; }
     return 1;
 };

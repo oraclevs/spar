@@ -643,7 +643,7 @@ fn typecheck_type_binding_rejects_bad_named_nested_field() {
         var style: Decoration = Decoration(border: Border(width: "not an int"));
     "#;
     let err = check_err(src);
-    assert!(err.contains("expects `int`"), "got: {err}");
+    assert!(err.contains("expects int but got str"), "got: {err}");
 }
 
 #[test]

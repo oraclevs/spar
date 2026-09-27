@@ -4457,27 +4457,31 @@ impl Runtime<'_> {
                         pid: 0,
                         pipeline: vec![],
                     });
+            // `signal` is declared `Option<int>` on the synthetic ProcessStatus
+            // type (see compiler.rs) — always materialize a real Option value
+            // here rather than a bare int (Some case) or an absent field
+            // (None case), or `status.signal` can't be compared/unwrapped as
+            // the Option it's typed as.
+            let signal_value = |signal: Option<i32>| {
+                Value::Option(signal.map(|signal| Box::new(Value::Int(i64::from(signal)))))
+            };
             let process_value = |process: spar_process::ProcessStatus| {
-                let mut fields = indexmap::IndexMap::from([
+                let fields = indexmap::IndexMap::from([
                     ("code".into(), Value::Int(i64::from(process.code))),
                     ("success".into(), Value::Bool(process.success)),
+                    ("signal".into(), signal_value(process.signal)),
                     ("pid".into(), Value::Int(i64::from(process.pid))),
                 ]);
-                if let Some(signal) = process.signal {
-                    fields.insert("signal".into(), Value::Int(i64::from(signal)));
-                }
                 Value::Object(fields)
             };
             let pipeline = outcome.pipeline.into_iter().map(process_value).collect();
-            let mut fields = indexmap::IndexMap::from([
+            let fields = indexmap::IndexMap::from([
                 ("code".into(), Value::Int(i64::from(outcome.exit_code))),
                 ("success".into(), Value::Bool(outcome.success)),
+                ("signal".into(), signal_value(outcome.signal)),
                 ("pid".into(), Value::Int(i64::from(outcome.pid))),
                 ("pipeline".into(), Value::List(pipeline)),
             ]);
-            if let Some(signal) = outcome.signal {
-                fields.insert("signal".into(), Value::Int(i64::from(signal)));
-            }
             return Ok(Value::Object(fields));
         }
         if name == "lastJob" && self.shell_depth > 0 {
@@ -4653,15 +4657,23 @@ impl Runtime<'_> {
                         .collect(),
                 )
             };
+            // Same `Option<int>` contract as the compiled-runtime twin of
+            // this closure above — always a real Option, never a bare int
+            // or an absent field.
             let process_value = |process: spar_process::ProcessStatus| {
-                let mut fields = indexmap::IndexMap::from([
+                let fields = indexmap::IndexMap::from([
                     ("code".into(), ConfigValue::Int(i64::from(process.code))),
                     ("success".into(), ConfigValue::Bool(process.success)),
+                    (
+                        "signal".into(),
+                        ConfigValue::Option(
+                            process
+                                .signal
+                                .map(|signal| Box::new(ConfigValue::Int(i64::from(signal)))),
+                        ),
+                    ),
                     ("pid".into(), ConfigValue::Int(i64::from(process.pid))),
                 ]);
-                if let Some(signal) = process.signal {
-                    fields.insert("signal".into(), ConfigValue::Int(i64::from(signal)));
-                }
                 ConfigValue::Object(fields)
             };
             let status = structured_status.unwrap_or(spar_process::PipelineStatus {

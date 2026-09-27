@@ -309,3 +309,29 @@ fn struct_constructor_cycle_reports_cyclic_reference_not_stack_overflow() {
         compilation.errors
     );
 }
+
+// Regression: `status.signal` (inside a shell block) is declared
+// `Option<int>` on the synthetic ProcessStatus type, but the runtime built
+// a bare int for the Some case and omitted the field entirely for None,
+// so `.isSome()`/`.unwrap()` on it crashed with "Option method received
+// runtime value int" instead of working like any other Option<T>.
+#[test]
+fn shell_status_signal_is_a_real_option_not_a_bare_int_or_missing_field() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            fn main() -> shell {
+                return shell {
+                    true;
+                    if status.signal.isSome() { exit 1; }
+                    true | sh -c "kill -TERM $$";
+                    if !status.signal.isSome() { exit 2; }
+                    if status.signal.unwrap() != 15 { exit 3; }
+                    exit 0;
+                };
+            };
+            "#,
+        )
+        .expect("status.signal must behave like an ordinary Option<int>");
+    assert_eq!(outcome.exit_status, 0);
+}

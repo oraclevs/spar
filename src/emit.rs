@@ -336,7 +336,7 @@ struct Server {
     #[test]
     fn export_var_without_emit_does_not_leak_env_values() {
         let json = emit_to_json(
-            "#[emit]\nstruct Ok { a: int = 1; };\nexport var secret: str = env(\"HOME\") ?? \"x\";\n",
+            "#[emit]\nstruct Ok { a: int = 1; };\nexport var secret: str = env(name: \"HOME\") ?? \"x\";\n",
         )
         .unwrap();
         assert!(!json.contains("secret"), "{json}");

@@ -658,7 +658,7 @@ mod tests {
                 function main() -> shell {
                     return shell {
                         true | sh -c "kill -TERM $$";
-                        if status.code == 143 && !status.success && status.signal == 15 && status.pid > 0 && status.pipeline[0].success && !status.pipeline[1].success {
+                        if status.code == 143 && !status.success && status.signal.isSome() && status.signal.unwrap() == 15 && status.pid > 0 && status.pipeline[0].success && !status.pipeline[1].success {
                             exit 0;
                         }
                         exit 1;

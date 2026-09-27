@@ -2947,7 +2947,10 @@ impl<'a> TypeChecker<'a> {
             SparType::Applied { name, arguments } if name == "Map" && arguments.len() == 2 => {
                 let key_type = &arguments[0];
                 let value_type = &arguments[1];
-                if !is_assignable(key_type, &SparType::Str) {
+                // An empty `{}` has no actual keys to be the wrong type —
+                // don't reject `Map<int, V> = {};` just because object
+                // literals are otherwise str-keyed sugar.
+                if !items.is_empty() && !is_assignable(key_type, &SparType::Str) {
                     return Err(SparError::TypeError {
                         message: format!(
                             "`{label}` uses `{{ ... }}` Map syntax, whose keys are `str`, but the declared key type is `{}`",

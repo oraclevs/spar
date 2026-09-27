@@ -123,12 +123,13 @@ fn map_value_preserves_insertion_order_and_replace_in_place() {
     assert_eq!(outcome.exit_status, 0);
 }
 
-// `Map<int,_>`/`Map<bool,_>`/`Map<float,_>` cannot currently be constructed
-// via `{}` object-literal syntax in this tree independent of this change
-// (see `generic_maps_with_non_string_keys_survive_global_writeback` among
-// the pre-existing failures) — so this exercises `MapValue`'s own Rust API
-// directly rather than through `execute_source`, to pin down that its
-// hashing/equality is correct for every primitive key type, not just str.
+// `Map<int,_>`/`Map<bool,_>`/`Map<float,_>` can only be constructed via an
+// *empty* `{}` object-literal (fixed in core_collections.rs's
+// generic_maps_with_non_string_keys_survive_global_writeback) — object-
+// literal keys are identifier/string tokens, so a non-empty literal has no
+// way to spell a non-str key at all. Exercise `MapValue`'s own Rust API
+// directly here instead, to pin down that its hashing/equality is correct
+// for every primitive key type once populated via `.insert()`, not just str.
 #[test]
 fn map_value_supports_non_string_keys_including_bool_and_float() {
     let mut by_int = Value::Map(vec![].into());

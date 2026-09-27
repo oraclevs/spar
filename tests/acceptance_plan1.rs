@@ -49,7 +49,7 @@ fn named_functions_are_first_class_values() {
     assert_eq!(
         status(
             r#"
-            function inc(n: int) -> int { return n + 1; };
+            function inc(value: int) -> int { return value + 1; };
             fn apply(f: fn(value: int) -> int, v: int) -> int { return f(value: v); };
             function main() -> int {
                 var f: fn(value: int) -> int = inc;

@@ -66,7 +66,7 @@ fn canonical_docker_style_pipeline_filters_projects_and_reserializes() {
                     '{{"Names":"db","Image":"pg","Status":"Exited","State":"exited"}}' \
                     '{{"Names":"cache","Image":"redis","Status":"Up","State":"running"}}'
                     | from jsonl
-                    |> where(predicate: |container: Record| container.State == "running")
+                    |> where(predicate: |value: Record| value.State == "running")
                     |> select(fields: ["Names", "Image", "Status"])
                     |> to jsonl
                     | cat;
@@ -118,7 +118,7 @@ fn lines_codec_maps_text_lines() {
             return shell {{
                 printf 'a\nb\nc\n'
                     | from lines
-                    |> map(transform: |line: str| line + "!")
+                    |> map(transform: |value: str| value + "!")
                     |> to lines
                     | cat;
             }};
@@ -261,7 +261,7 @@ fn transforms_are_lazy_so_map_over_infinite_input_is_fine_with_take() {
             return shell {{
                 yes abc
                     | from lines
-                    |> map(transform: |line: str| line + line)
+                    |> map(transform: |value: str| value + value)
                     |> take(count: 2)
                     |> to lines
                     | cat;

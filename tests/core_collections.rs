@@ -14,7 +14,9 @@ fn list_mutation_and_safe_reads_are_first_class() {
             values.set(index: 0, value: 9);
             var removed: bool = values.remove(value: 3);
             var second: int = values.get(index: 1).unwrap();
-            return values.length() + second + (if removed { 10 } else { 0 });
+            var mut bonus: int = 0;
+            if removed { bonus = 10; }
+            return values.length() + second + bonus;
         };
     "#).expect("list collection program");
     assert_eq!(outcome.exit_status, 15);
@@ -43,7 +45,9 @@ fn map_insert_get_remove_and_clear_are_mutating_and_safe() {
             values.insert(key: "two", value: 2);
             var one: int = values.get(key: "one").unwrap();
             var removed: Option<int> = values.remove(key: "two");
-            return values.length() + one + removed.unwrap() + (if old.isNone() { 10 } else { 0 });
+            var mut bonus: int = 0;
+            if old.isNone() { bonus = 10; }
+            return values.length() + one + removed.unwrap() + bonus;
         };
     "#).expect("map collection program");
     assert_eq!(outcome.exit_status, 14);

@@ -106,7 +106,7 @@ fn text_math_json_and_regex_modules_execute() {
                 var label: str = upper(value: "spar");
                 if !contains(value: label, needle: "PAR") { return 1; }
                 if absInt(value: -9) != 9 { return 2; }
-                var encoded: str = stringify<str>(value: label);
+                var encoded: str = stringify(value: label);
                 if encoded != "\"SPAR\"" { return 3; }
                 if !isMatch(pattern: "^SP", text: label) { return 4; }
                 return 0;

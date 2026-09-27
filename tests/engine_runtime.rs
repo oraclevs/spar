@@ -416,7 +416,7 @@ fn structured_pipe_executes_calls_bare_callables_and_closures() {
             function add(value: int, amount: int) -> int { return value + amount; };
             function double(value: int) -> int { return value * 2; };
             function main() -> int {
-                var a: int = 5 |> add(by: 3);
+                var a: int = 5 |> add(amount: 3);
                 var transform: fn(value: int) -> int = double;
                 var b: int = a |> transform;
                 var c: int = b |> |value: int| value + 1;

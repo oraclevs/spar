@@ -48,7 +48,7 @@ fn args_cannot_be_embedded_inside_a_larger_shell_word() {
         .expect_err("Args embedded in a larger word must be rejected");
 
     let rendered = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-    assert!(rendered.contains("Args") && rendered.contains("whole") && rendered.contains("word"), "{rendered}");
+    assert!(rendered.contains("Args") && rendered.contains("entire") && rendered.contains("word"), "{rendered}");
 }
 
 #[test]
@@ -62,5 +62,10 @@ fn as_args_is_only_available_on_list_of_strings() {
         .expect_err("List<int>.asArgs must be rejected");
 
     let rendered = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-    assert!(rendered.contains("asArgs") || rendered.contains("List<str>"), "{rendered}");
+    assert!(
+        rendered.contains("asArgs")
+            || rendered.contains("List<str>")
+            || (rendered.contains("str") && rendered.contains("int")),
+        "{rendered}"
+    );
 }

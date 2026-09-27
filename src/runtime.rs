@@ -356,7 +356,9 @@ impl Drop for Runtime<'_> {
 }
 
 struct ModuleState {
-    results: HashMap<crate::compiled::ModuleId, crate::evaluator::EvalResult>,
+    results: std::sync::Arc<
+        std::sync::Mutex<HashMap<crate::compiled::ModuleId, crate::evaluator::EvalResult>>,
+    >,
     hosts: crate::HostRegistry,
     natives: std::sync::Arc<NativeRegistry>,
     effect_ledger: Option<crate::session::EffectLedger>,
@@ -365,10 +367,23 @@ struct ModuleState {
 impl ModuleState {
     fn new(program: &CompiledProgram) -> Self {
         Self {
-            results: HashMap::new(),
+            results: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             hosts: program.options.hosts.clone(),
             natives: std::sync::Arc::new(program.options.natives.clone()),
             effect_ledger: program.options.effect_ledger.clone(),
+        }
+    }
+
+    /// Used by Task 5 so every per-task `Runtime` sharing one top-level
+    /// execution reads/writes the same results cache instead of each
+    /// getting its own empty one.
+    #[allow(dead_code)]
+    fn share(&self) -> Self {
+        Self {
+            results: self.results.clone(),
+            hosts: self.hosts.clone(),
+            natives: self.natives.clone(),
+            effect_ledger: self.effect_ledger.clone(),
         }
     }
 }
@@ -799,7 +814,7 @@ pub(crate) fn execute_interactive_preview_with_context(
     let result = runtime
         .state
         .as_mut()
-        .and_then(|state| state.results.remove(&program.entry))
+        .and_then(|state| state.results.lock().unwrap().remove(&program.entry))
         .ok_or_else(|| {
             vec![SparError::EvalError {
                 message: "interactive runtime state is unavailable".into(),
@@ -4312,7 +4327,14 @@ impl Runtime<'_> {
             .state
             .as_ref()
             .ok_or_else(|| module_state_error(&Span::dummy()))?;
-        if state.results.contains_key(&module) {
+        let results = state.results.clone();
+        // Locked for the whole function: module initialization is rare and
+        // one-shot, so serializing it across every worker thread is cheap,
+        // and holding the lock the entire time is what stops two threads
+        // from racing to evaluate the same not-yet-loaded module's top
+        // level twice (which would double any top-level side effects).
+        let mut results_guard = results.lock().unwrap();
+        if results_guard.contains_key(&module) {
             return Ok(());
         }
         let compiled = self.program.modules.get(module.0 as usize).ok_or_else(|| {
@@ -4390,11 +4412,7 @@ impl Runtime<'_> {
             replacements.insert(pending.handle, handle);
         }
         remap_promises_in_result(&mut result, &replacements);
-        self.state
-            .as_mut()
-            .ok_or_else(|| module_state_error(&Span::dummy()))?
-            .results
-            .insert(module, result);
+        results_guard.insert(module, result);
         Ok(())
     }
 
@@ -4518,13 +4536,17 @@ impl Runtime<'_> {
                 .ok_or_else(|| runtime_error("no background job has been started", span).into());
         }
         self.ensure_module(module)?;
-        let value = self
-            .state
-            .as_ref()
-            .and_then(|state| state.results.get(&module))
-            .and_then(|result| result.globals.get(name))
-            .cloned()
-            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?;
+        let value = match self.state.as_ref() {
+            Some(state) => {
+                let guard = state.results.lock().unwrap();
+                guard
+                    .get(&module)
+                    .and_then(|result| result.globals.get(name))
+                    .cloned()
+            }
+            None => None,
+        }
+        .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?;
         let symbols = &self
             .program
             .modules
@@ -4550,10 +4572,10 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<(), RuntimeFault> {
         self.ensure_module(module)?;
-        let result = self
-            .state
-            .as_mut()
-            .and_then(|state| state.results.get_mut(&module))
+        let state = self.state.as_ref().ok_or_else(|| module_state_error(span))?;
+        let mut guard = state.results.lock().unwrap();
+        let result = guard
+            .get_mut(&module)
             .ok_or_else(|| module_state_error(span))?;
         let value = value.try_into_config(span)?;
         result.globals.insert(name.to_string(), value);
@@ -4567,10 +4589,10 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
         self.ensure_module(module)?;
-        let result = self
-            .state
-            .as_ref()
-            .and_then(|state| state.results.get(&module))
+        let state = self.state.as_ref().ok_or_else(|| module_state_error(span))?;
+        let guard = state.results.lock().unwrap();
+        let result = guard
+            .get(&module)
             .ok_or_else(|| module_state_error(span))?;
         let symbols = &self
             .program

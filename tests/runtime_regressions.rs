@@ -393,3 +393,42 @@ fn env_prefix_value_starting_with_interpolation_formats_stably() {
         "must not fabricate an empty-literal fragment: {once}"
     );
 }
+
+// Regression: ModuleState.results moved from a plain HashMap to an
+// Arc<Mutex<...>> shared across every per-task Runtime (Phase 2, real
+// concurrency). A module's top-level state (`hits` here) must still be
+// initialized exactly once and shared correctly across two separate calls
+// into the same imported module, not silently re-initialized or copied.
+#[test]
+fn imported_module_state_persists_across_two_calls_into_it() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("counter.spar"),
+        concat!(
+            "export var mut hits: int = 0;\n",
+            "fn bump() -> int { hits = hits + 1; return hits; };\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.spar"),
+        concat!(
+            "import \"counter.spar\" as counter;\n",
+            "async fn a() -> int { return counter::bump(); };\n",
+            "async fn b() -> int { return counter::bump(); };\n",
+            "async fn main() -> int {\n",
+            "    var x = await a();\n",
+            "    var y = await b();\n",
+            "    return x + y;\n",
+            "};\n",
+        ),
+    )
+    .unwrap();
+
+    let outcome = Engine::default()
+        .execute_path(&temp.path().join("main.spar"))
+        .expect("imported module state should persist across calls");
+    // If the module were double-initialized (hits reset to 0 between calls)
+    // this would read 1 + 1 = 2 instead of the correct 1 + 2 = 3.
+    assert_eq!(outcome.exit_status, 3);
+}

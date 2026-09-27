@@ -173,6 +173,32 @@ impl RuntimeContext {
         Self::new(cwd)
     }
 
+    /// Builds an independent execution context for a spawned async task: cwd,
+    /// args, environment, and stdio are inherited (stdio via shared `Arc`s, so
+    /// writes still land in the same place); `resources` starts empty because
+    /// `Box<dyn Any + Send>` handles aren't `Clone` and sharing an open handle
+    /// mutably across threads would be unsound — a spawned task owns its own
+    /// resource lifecycle.
+    pub(crate) fn spawn_child(&self) -> RuntimeContext {
+        RuntimeContext {
+            cwd: self.cwd.clone(),
+            args: self.args.clone(),
+            environment: self.environment.clone(),
+            stdin: self.stdin.clone(),
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            resources: ResourceTable::new(),
+            previous_value: None,
+            structured_terminal: self.structured_terminal,
+            capture_mixed: false,
+            mixed_capture: None,
+            cancelled: false,
+            requested_exit: None,
+            inherit_exec_output: self.inherit_exec_output,
+            last_exit_code: None,
+        }
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
@@ -439,5 +465,23 @@ mod tests {
         context.set_stdout(RuntimeOutput::Buffer(buffer.clone()));
         context.write_stdout(b"hello").unwrap();
         assert_eq!(&*buffer.lock().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn spawn_child_is_independent_but_shares_stdio() {
+        let mut parent = RuntimeContext::new(PathBuf::from("/tmp"));
+        parent.env_set("PARENT_ONLY", "1");
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        parent.set_stdout(RuntimeOutput::Buffer(buffer.clone()));
+
+        let mut child = parent.spawn_child();
+        child.env_set("CHILD_ONLY", "1");
+
+        assert!(!parent.env_contains("CHILD_ONLY"));
+        assert!(child.env_contains("PARENT_ONLY"));
+
+        child.write_stdout(b"from child").unwrap();
+        parent.write_stdout(b"from parent").unwrap();
+        assert_eq!(&*buffer.lock().unwrap(), b"from childfrom parent");
     }
 }

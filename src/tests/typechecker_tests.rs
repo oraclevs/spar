@@ -207,14 +207,13 @@ fn applied_generic_type_substitutes_fields() {
     check_ok(
         r#"
         struct Box<T> { value: T; };
-        struct IntBox: Box<int> { value = 7; };
-        var boxed: Box<int> = IntBox();
+        var boxed: Box<int> = Box<int>(value: 7);
         var value: int = boxed.value;
         "#,
     );
 
     let mismatch = check_err(
-        r#"struct Box<T> { value: T; }; struct Broken: Box<int> { value = "bad"; };"#,
+        r#"struct Box<T> { value: T; }; var broken: Box<int> = Box<int>(value: "bad");"#,
     );
     assert!(mismatch.contains("int"), "{mismatch}");
 }
@@ -254,9 +253,7 @@ fn nested_applied_generic_fields_are_instantiated_recursively() {
         r#"
         struct Pair<T, U> { left: T; right: U; };
         struct Box<T> { value: T; };
-        struct PairValue: Pair<int, str> { left = 1; right = "one"; };
-        struct NestedValue: Box<Pair<int, str>> { value = PairValue(); };
-        var nested: Box<Pair<int, str>> = NestedValue();
+        var nested: Box<Pair<int, str>> = Box<Pair<int, str>>(value: Pair<int, str>(left: 1, right: "one"));
         var left: int = nested.value.left;
         "#,
     );
@@ -581,11 +578,14 @@ fn typecheck_valid_type_binding_with_inferred_field_types_passes() {
             image: str;
             restart: Option<str> = none();
         };
-        struct Postgres: PostgresType {
-            image: "postgres:16";
-        };
+        var postgres: PostgresType = PostgresType(image: "postgres:16");
     "#;
-    check_ok(src);
+    // Goes through Engine (not the bare check_ok helper) because `none()`
+    // is a prelude function spliced in by inject_prelude, not visible to
+    // the bare `Resolver::new()` path.
+    crate::Engine::default()
+        .check_source(src)
+        .expect("type check failed unexpectedly");
 }
 
 #[test]
@@ -626,11 +626,7 @@ fn typecheck_type_binding_validates_named_nested_type_with_inferred_fields() {
         struct Decoration{
             border: Border;
         };
-        struct Style: Decoration {
-            border: {
-                width: 4;
-            };
-        };
+        var style: Decoration = Decoration(border: Border(width: 4));
     "#;
     check_ok(src);
 }
@@ -644,11 +640,7 @@ fn typecheck_type_binding_rejects_bad_named_nested_field() {
         struct Decoration{
             border: Border;
         };
-        struct Style: Decoration {
-            border: {
-                width: "not an int";
-            };
-        };
+        var style: Decoration = Decoration(border: Border(width: "not an int"));
     "#;
     let err = check_err(src);
     assert!(err.contains("expects `int`"), "got: {err}");
@@ -1088,7 +1080,11 @@ fn named_function_arguments_can_be_reordered() {
 
 #[test]
 fn named_function_call_rejects_duplicate_argument() {
-    let errors = check_err(
+    // This validation now runs during resolve, not typecheck (see
+    // struct_constructor_rejects_unknown_named_argument below for the same
+    // shift on struct constructors) — resolve_or_type_err reports whichever
+    // stage errors first.
+    let errors = resolve_or_type_err(
         r#"
         fn greet(name: str) -> str { return name; };
         var value: str = greet(name: "Mike", name: "Obi");
@@ -1099,24 +1095,27 @@ fn named_function_call_rejects_duplicate_argument() {
 
 #[test]
 fn named_function_call_rejects_unknown_argument() {
-    let errors = check_err(
+    let errors = resolve_or_type_err(
         r#"
         fn greet(name: str) -> str { return name; };
         var value: str = greet(value: "Mike");
         "#,
     );
-    assert!(errors.contains("no parameter named 'value'"), "got: {errors}");
+    assert!(errors.contains("has no param 'value'"), "got: {errors}");
 }
 
 #[test]
 fn named_function_call_rejects_missing_required_argument() {
-    let errors = check_err(
+    let errors = resolve_or_type_err(
         r#"
         fn greet(name: str, prefix: str) -> str { return name; };
         var value: str = greet(name: "Mike");
         "#,
     );
-    assert!(errors.contains("missing required argument 'prefix'"), "got: {errors}");
+    assert!(
+        errors.contains("missing arguments for function 'greet'") && errors.contains("prefix"),
+        "got: {errors}"
+    );
 }
 
 #[test]
@@ -1156,13 +1155,15 @@ fn function_valued_parameter_rejects_wrong_named_argument() {
 
 #[test]
 fn struct_constructor_rejects_unknown_named_argument() {
-    let errors = check_err(
+    // Struct-constructor argument validation now runs during resolve, not
+    // typecheck.
+    let errors = resolve_or_type_err(
         r#"
         struct User { name: str = ""; age: int = 0; };
         var user: User = User(name: "Mike", unknown: 1);
         "#,
     );
-    assert!(errors.contains("no field named 'unknown'") || errors.contains("no parameter named 'unknown'"), "got: {errors}");
+    assert!(errors.contains("has no field 'unknown'"), "got: {errors}");
 }
 
 #[test]

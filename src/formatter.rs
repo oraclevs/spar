@@ -2393,7 +2393,10 @@ mod tests {
 
         let formatted = fmt(source);
         assert_eq!(fmt(&formatted), formatted);
-        assert!(formatted.contains("                echo \"${file}:${other}\";"));
+        // No literal fragment here needs quoting (":" isn't one of the
+        // special/whitespace bytes format_shell_literal_fragment quotes
+        // for), so the canonical form is bare, not double-quoted.
+        assert!(formatted.contains("                echo ${file}:${other};"));
         assert!(!formatted.contains("            shell {"));
     }
 
@@ -2405,9 +2408,16 @@ mod tests {
 
     #[test]
     fn format_pipeline_redirect_and_quoted_word() {
+        // Canonical form now prefers single quotes for a literal word with
+        // no interpolation — double quotes are reserved for words that
+        // actually use `${...}` (see format_shell_literal_fragment).
         let source =
             "var x: shell = shell {\n    cat \"my file.txt\" | grep error > test.log;\n};\n";
-        assert_eq!(fmt(source).trim(), source.trim());
+        let expected =
+            "var x: shell = shell {\n    cat 'my file.txt' | grep error > test.log;\n};";
+        let formatted = fmt(source);
+        assert_eq!(formatted.trim(), expected);
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]
@@ -2685,10 +2695,13 @@ mod tests {
 
     #[test]
     fn section_field_nested_value_indented() {
-        let src = "struct A { b: Record = { c: int = 1; }; };";
+        // A single-field Record now stays compact (fits on one line) —
+        // give it enough fields to force vertical expansion so the
+        // indentation is actually exercised.
+        let src = "struct A { b: Record = { c: 1; d: 2; e: 3; f: 4; }; };";
         let out = fmt(src);
         assert!(out.contains("    b: Record = {"));
-        assert!(out.contains("        c: int = 1;"));
+        assert!(out.contains("        c: 1;"));
     }
 
     #[test]
@@ -2708,8 +2721,10 @@ mod tests {
 
     #[test]
     fn dynamic_var_optional_no_value() {
-        let src = "dynamic var meta?;";
-        assert_eq!(fmt(src).trim(), "dynamic var meta?;");
+        // `?` nullable declarations were removed in favor of `Option<T>`;
+        // a `dynamic var` with no value at all still round-trips bare.
+        let src = "dynamic var meta;";
+        assert_eq!(fmt(src).trim(), "dynamic var meta;");
     }
 
     #[test]
@@ -2889,9 +2904,9 @@ struct Server {
     host: str = "0.0.0.0";
     port: int = 8080;
     nested: Record = {
-        debug: bool = false;
+        debug: false;
+        ...a;
     };
-    ...a;
 };
 
 private struct Meta {
@@ -3164,7 +3179,7 @@ struct Config"#
         );
         assert!(
             formatted.contains(
-                r#"function startup() -> shell {
+                r#"fn startup() -> shell {
     return shell {
         nitch;
     };
@@ -3609,14 +3624,14 @@ struct Config"#
     #[test]
     fn comments_stay_inside_nested_section_fields() {
         assert_comments_stay_put(
-            "struct Container {\n    // above\n    padding: int = 5; // trailing\n    decoration: Record = {\n        // inside\n        color: str = \"red\"; // nested\n        // tail nested\n    };\n    // tail\n};\n",
+            "struct Container {\n    // above\n    padding: int = 5; // trailing\n    decoration: Record = {\n        // inside\n        color: \"red\"; // nested\n        // tail nested\n    };\n    // tail\n};\n",
         );
     }
 
     #[test]
     fn comments_stay_inside_function_bodies_and_blocks() {
         assert_comments_stay_put(
-            "function f(x: int) -> int {\n    // head\n    var y: int = x; // t1\n    if y > 1 {\n        // then\n        y = 2;\n        // then tail\n    } else {\n        y = 3; // t2\n        // else tail\n    }\n    for i in [1, 2] {\n        // loop\n        y = i;\n    }\n    try {\n        y = 4;\n    } catch e {\n        // catch\n        y = 5;\n    }\n    return y; // t3\n};\n",
+            "fn f(x: int) -> int {\n    // head\n    var y: int = x; // t1\n    if y > 1 {\n        // then\n        y = 2;\n        // then tail\n    } else {\n        y = 3; // t2\n        // else tail\n    }\n    for i in [1, 2] {\n        // loop\n        y = i;\n    }\n    try {\n        y = 4;\n    } catch e {\n        // catch\n        y = 5;\n    }\n    return y; // t3\n};\n",
         );
     }
 
@@ -3628,7 +3643,7 @@ struct Config"#
     #[test]
     fn comments_stay_inside_native_task_run_bodies() {
         assert_comments_stay_put(
-            "task Deploy {\n    run {\n        // head\n        var n: str = \"a\"; // t1\n        echo \"${n}\";\n        // tail\n    };\n};\n",
+            "task Deploy {\n    run {\n        // head\n        var n: str = \"a\"; // t1\n        echo ${n};\n        // tail\n    };\n};\n",
         );
         assert_comments_stay_put(
             "task Cmds {\n    run {\n        // first\n        echo a; // ta\n        // second\n        echo b && echo c; // tb\n        // last\n    };\n};\n",
@@ -3638,7 +3653,7 @@ struct Config"#
     #[test]
     fn comments_stay_inside_shell_values() {
         assert_comments_stay_put(
-            "function g() -> shell {\n    return shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
+            "fn g() -> shell {\n    return shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
         );
     }
 
@@ -3674,7 +3689,7 @@ struct Config"#
 
     #[test]
     fn else_if_chains_round_trip() {
-        let source = "function f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else if a == 2 {\n        // two\n        return 20;\n    } else {\n        return 30;\n    }\n};\n";
+        let source = "fn f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else if a == 2 {\n        // two\n        return 20;\n    } else {\n        return 30;\n    }\n};\n";
         assert_eq!(fmt(source), source);
     }
 
@@ -3701,13 +3716,13 @@ struct Config"#
             "function main() -> shell {\n",
             "    var useRaw: bool = true;\n",
             "    return shell {\n",
-            "        printf x | from scoc::ping-s(raw: useRaw, ignoreErrors: choose(\"a,b\"));\n",
+            "        printf x | from scoc::ping-s(raw: useRaw, err: choose(v: \"a,b\"));\n",
             "    };\n",
             "};\n",
         );
         let formatted = fmt(source);
         assert!(
-            formatted.contains("| from scoc::ping-s(raw: useRaw, ignoreErrors: choose(\"a,b\"))"),
+            formatted.contains("| from scoc::ping-s(raw: useRaw, err: choose(v: \"a,b\"))"),
             "{formatted}"
         );
         assert_eq!(fmt(&formatted), formatted);
@@ -3723,7 +3738,7 @@ struct Config"#
 
     #[test]
     fn an_if_nested_inside_else_stays_nested() {
-        let source = "function f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else {\n        if a == 2 {\n            return 20;\n        }\n    }\n    return 0;\n};\n";
+        let source = "fn f(a: int) -> int {\n    if a == 1 {\n        return 10;\n    } else {\n        if a == 2 {\n            return 20;\n        }\n    }\n    return 0;\n};\n";
         assert_eq!(fmt(source), source);
     }
 

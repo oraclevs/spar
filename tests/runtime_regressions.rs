@@ -499,3 +499,45 @@ fn dropping_a_nested_runtime_does_not_cancel_sibling_tasks() {
         .expect("sibling tasks should all run to completion");
     assert_eq!(outcome.exit_status, 0 + 1 + 2);
 }
+
+// Regression: std/process's run/wait/spawn are plain synchronous natives
+// (not async fn — confirmed by auditing stdlib/src/process.spar before this
+// phase started), so a blocking run() call inside one async task should
+// only block that one worker thread, not the whole scheduler. This is
+// composition the worker pool gives for free — no production code change
+// expected, this test only confirms it.
+#[test]
+fn blocking_process_wait_does_not_stall_concurrent_async_work() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { all } from "std/async";
+            import pkg { run } from "std/process";
+            import pkg { nowMillis, sleepMillis } from "std/time";
+            async fn slowProcess() -> int {
+                var result = run(program: "sleep", args: ["1"]);
+                return result.exitCode;
+            };
+            async fn slowDelay() -> int {
+                sleepMillis(millis: 200);
+                return 1;
+            };
+            async fn main() -> int {
+                var start = nowMillis();
+                var ps: [Promise<int>] = [slowProcess(), slowDelay()];
+                var rs = await all<int>(promises: ps);
+                var elapsed = nowMillis() - start;
+                // If the process wait (1000ms) blocked the delay task too,
+                // elapsed would be >= 1000ms serial-ish either way, so this
+                // alone can't prove overlap against a 1s process. Assert the
+                // weaker but still meaningful property: total time is close
+                // to the slower of the two (~1000ms), not their sum
+                // (~1200ms).
+                if elapsed < 1150 { return 0; }
+                return 1;
+            };
+            "#,
+        )
+        .expect("process wait and concurrent delay should both complete");
+    assert_eq!(outcome.exit_status, 0);
+}

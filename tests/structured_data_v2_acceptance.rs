@@ -55,14 +55,14 @@ fn v2_language_acceptance_composes_data_functions_and_value_methods() {
                 ] |> collectTable();
 
                 var active: Table<User> = users
-                    |> filter(predicate: |user: User| user.active);
+                    |> filter(predicate: |value: User| value.active);
                 var projected: Table<Record> = active |> select(fields: ["name", "team"]);
                 var groups: Map<str, Table<User>> = users
-                    |> groupBy(key: |user: User| user.team);
+                    |> groupBy(key: |value: User| value.team);
 
                 if projected.count() != 2 { return 1; }
                 if active.take(count: 1).count() != 1 { return 2; }
-                if get(source: groups, key: "red").count() != groups.get(key: "red").count() { return 3; }
+                if get(source: groups, key: "red").count() != groups.get(key: "red").unwrap().count() { return 3; }
                 if !"  spar  ".trim().upper().contains(needle: "SPAR") { return 4; }
                 return 0;
             };

@@ -81,7 +81,7 @@ fn run_explicit_task_runs_its_dependency_first() {
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     let build_pos = stderr
-        .find("build ${appName}")
+        .find("'build '${appName}")
         .expect("Build command echoed");
     let test_pos = stderr.find("echo \"test\"").unwrap_or_else(|| {
         stderr
@@ -1232,7 +1232,7 @@ fn env_prefix_values_interpolate_in_scripts_run_by_the_compiled_runtime() {
 
 #[test]
 fn env_prefix_values_survive_formatting() {
-    let source = "task Show {\n    run {\n        SPAR_A=\"${secret}\" printenv SPAR_A;\n        SPAR_B=plain printenv SPAR_B;\n    };\n};\n";
+    let source = "task Show {\n    run {\n        SPAR_A=${secret} printenv SPAR_A;\n        SPAR_B=plain printenv SPAR_B;\n    };\n};\n";
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path(), "f.spar", source);
     let output = spar_in(&["fmt", "--check", file.to_str().unwrap()], dir.path());

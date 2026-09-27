@@ -725,10 +725,32 @@ impl<'a> BodyParser<'a> {
                 token.span.line,
                 token.span.col + name.chars().count() as u32 + 1,
             );
-            let mut parts = parse_word_parts(value, &value_span)?;
+            // `SPAR_A="${secret}"` lexes `SPAR_A=` and `"${secret}"` as two
+            // separate tokens (`"` breaks bare-word scanning the same way
+            // whitespace does), so `value` here is empty whenever the real
+            // value starts with a quote or `${` — everything after `=` is
+            // still in the *next* token, picked up below by
+            // merge_adjacent_fragments. Seeding `parts` from
+            // parse_word_parts("", ...) in that case fabricates a spurious
+            // Literal("") the source never had (parse_word_parts falls back
+            // to treating a wholly-empty word as a real empty-string
+            // literal, which is correct when there's nothing left to merge,
+            // but wrong here) — canonicalized as a leading `''` that then
+            // grew by one more pair on every subsequent format pass, since
+            // re-parsing that `''` hit this same empty-`value` split. Only
+            // seed from `value` when it's actually non-empty; fall back to
+            // a real empty literal only if nothing adjacent merged in.
+            let mut parts = if value.is_empty() {
+                Vec::new()
+            } else {
+                parse_word_parts(value, &value_span)?
+            };
             let mut value_text = value.to_string();
             let mut end_span = token.span.clone();
             self.merge_adjacent_fragments(&mut parts, &mut value_text, &mut end_span)?;
+            if parts.is_empty() {
+                parts.push(ShellWordPart::Literal(String::new()));
+            }
             environment.push(ShellEnvironmentEntry {
                 name: name.to_string(),
                 value: ShellWord {

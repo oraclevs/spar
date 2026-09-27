@@ -370,3 +370,26 @@ fn await_on_an_async_impl_method_call_works_like_an_async_function() {
         .expect("await on an async impl-method call should typecheck and run");
     assert_eq!(outcome.exit_status, 0);
 }
+
+// Regression: an env-prefix assignment whose value starts with a quote or
+// `${` (e.g. `SPAR_A="${secret}"`) lexes the `SPAR_A=` and the value as two
+// separate tokens (`"` breaks bare-word scanning like whitespace does), so
+// the naive text.split_once('=') on just the first token saw an empty
+// value and fabricated a spurious empty-string literal fragment that was
+// never in the source. Formatting rendered it as a leading `''`, and
+// re-parsing that `''` hit the exact same empty-value case, adding
+// another `''` on every subsequent format pass -- non-idempotent, growing
+// output. Fixed in shell_lang.rs's parse_command by only seeding the
+// parts list from the split-off value when it's actually non-empty.
+#[test]
+fn env_prefix_value_starting_with_interpolation_formats_stably() {
+    let source =
+        "task Show {\n    run {\n        SPAR_A=${secret} printenv SPAR_A;\n    };\n};\n";
+    let once = spar::formatter::format_source(source).expect("format");
+    let twice = spar::formatter::format_source(&once).expect("format again");
+    assert_eq!(once, twice, "formatting must be idempotent");
+    assert!(
+        !once.contains("''"),
+        "must not fabricate an empty-literal fragment: {once}"
+    );
+}

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) mod context;
 pub(crate) mod native;
 pub(crate) mod resource;
+pub(crate) mod scheduler;
 pub(crate) mod schema;
 pub(crate) mod stream;
 pub(crate) mod table;

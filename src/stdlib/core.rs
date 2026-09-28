@@ -1412,7 +1412,7 @@ fn register_record_methods(registry: &mut NativeRegistry) {
         .register_method(NativeMethod::sync(
             "Record",
             "asBool",
-            record,
+            record.clone(),
             vec![],
             SparType::Bool,
             false,
@@ -1422,6 +1422,21 @@ fn register_record_methods(registry: &mut NativeRegistry) {
             },
         ))
         .expect("Record.asBool registration must be unique");
+
+    registry
+        .register_method(NativeMethod::sync(
+            "Record",
+            "asList",
+            record,
+            vec![],
+            SparType::List(Box::new(SparType::Named("Record".into()))),
+            false,
+            |_context, args| match args.first() {
+                Some(value @ Value::List(_)) => Ok(value.clone()),
+                other => Err(dynamic_mismatch("asList", "list", other)),
+            },
+        ))
+        .expect("Record.asList registration must be unique");
 }
 
 fn dynamic_mismatch(method: &str, expected: &str, found: Option<&Value>) -> crate::SparError {

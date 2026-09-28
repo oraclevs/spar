@@ -1058,3 +1058,52 @@ fn runtime_errors_without_their_own_span_point_at_the_failing_expression() {
     assert!(message.contains("maximum call depth"), "{message}");
     assert!(span.line >= 4, "span was {span:?}");
 }
+
+/// Regression: a JSON object whose value is itself a Record with a nested
+/// array field (e.g. `{"verses": [...]}`) has no clean way to pull that
+/// field back out as a `List<Record>` — `Record` only bridged scalars
+/// (`asStr`/`asInt`/`asFloat`/`asBool`). `Record.asList()` closes that gap.
+/// `parse`/method calls on a `Record` need the compiled runtime (they're
+/// rejected under plain `emit_source`), so this goes through
+/// `execute_self_contained_entry` the same way `runtime_tests.rs` does.
+#[test]
+fn record_as_list_bridges_a_nested_json_array_field() {
+    let program = crate::Engine::default()
+        .compile_source(
+            r#"
+            import pkg { parse } from "std/json";
+            async function main() -> int {
+                var raw: str = "{\"verses\":[{\"book\":\"John\"},{\"book\":\"Mark\"}]}";
+                var parsed: Record = parse<Record>(text: raw);
+                var verses: List<Record> = parsed.verses.asList();
+                return len(value: verses);
+            };
+            "#,
+        )
+        .unwrap();
+    let value = crate::runtime::execute_self_contained_entry(&program).unwrap();
+    assert_eq!(value, crate::Value::Int(2));
+}
+
+#[test]
+fn record_as_list_rejects_a_non_list_field() {
+    let program = crate::Engine::default()
+        .compile_source(
+            r#"
+            import pkg { parse } from "std/json";
+            async function main() -> int {
+                var raw: str = "{\"verses\":\"not a list\"}";
+                var parsed: Record = parse<Record>(text: raw);
+                var verses: List<Record> = parsed.verses.asList();
+                return len(value: verses);
+            };
+            "#,
+        )
+        .unwrap();
+    let error = crate::runtime::execute_self_contained_entry(&program).unwrap_err();
+    assert!(
+        error.iter().any(|e| e.to_string().contains("asList")),
+        "{:?}",
+        error
+    );
+}

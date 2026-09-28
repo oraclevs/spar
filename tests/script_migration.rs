@@ -79,8 +79,15 @@ fn http_get_wrapper_awaits_its_request() {
     assert_eq!(outcome.exit_status, 200);
 }
 
+// `@LoadEnv` takes precedence over everything else in `RuntimeContext`'s
+// environment map, including a value an embedding host explicitly set on
+// the context before running — one precedence rule everywhere, not a
+// special case for the embedding API. `get`/`has` still see the dotenv
+// value either way; the second `execute_compiled_with_context` call below
+// shows a context-set value losing to the file for the same reason a live
+// shell value would.
 #[test]
-fn dotenv_reaches_compiled_native_calls_without_overriding_context() {
+fn dotenv_wins_over_compiled_native_calls_context_value() {
     let directory = tempfile::tempdir().unwrap();
     let key = "SPAR_MIGRATION_DOTENV_PROBE";
     std::fs::write(directory.path().join(".env"), format!("{key}=from-file\n")).unwrap();
@@ -114,7 +121,7 @@ fn dotenv_reaches_compiled_native_calls_without_overriding_context() {
             .execute_compiled_with_context(&program, context)
             .unwrap()
             .exit_status,
-        3
+        2
     );
     assert!(std::env::var_os(key).is_none());
 }

@@ -4443,10 +4443,12 @@ impl Runtime<'_> {
         };
         if module == self.program.entry {
             if let Some(path) = &compiled.checked.program.load_env {
+                // `@LoadEnv` values take precedence over the live shell
+                // environment — a key the file declares wins; std/env's
+                // `get`/`has` only fall back to the shell for keys the file
+                // doesn't mention.
                 for (key, value) in crate::dotenv::load(&base_dir.join(path))? {
-                    if !self.context.env_contains(&key) {
-                        self.context.env_set(key, value);
-                    }
+                    self.context.env_set(key, value);
                 }
             }
         }

@@ -902,7 +902,7 @@ task ShowEnv {
 }
 
 #[test]
-fn host_environment_wins_over_load_env_in_stdlib_env() {
+fn load_env_wins_over_host_environment_in_stdlib_env() {
     let dir = tempfile::tempdir().unwrap();
     write_fixture(dir.path(), ".env", "SPAR_LOADENV_TEST_VALUE=from-dotenv\n");
     write_fixture(
@@ -926,7 +926,10 @@ task ShowEnv {
         .env("SPAR_LOADENV_TEST_VALUE", "from-host")
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "from-host");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "from-dotenv"
+    );
 }
 
 #[test]
@@ -1122,6 +1125,46 @@ task Show {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "set\ndot\ntask\n");
+}
+
+// Regression: a plain `run bash { }` task command spawns its subprocess via
+// `super::environment::apply(&mut child, &bound_task.task.environment)`
+// (executor.rs) directly — no compiled Runtime/RuntimeContext in between, so
+// unlike a native `run { }` block (which gets `@LoadEnv` reapplied when its
+// entry module's `ensure_module` runs) this path's precedence depends solely
+// on `task_lowering.rs`'s own environment map. That map used to filter out
+// any dotenv-loaded key the host process already had
+// (`.filter(|(key, _)| std::env::var_os(key).is_none())`), so the spawned
+// command inherited the host's value instead of the `@LoadEnv` file's.
+#[test]
+fn bash_run_block_children_see_load_env_values_over_host_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path(), ".env", "SPAR_BASH_LOADENV_PRECEDENCE=from-dotenv\n");
+    write_fixture(
+        dir.path(),
+        "tasks.spar",
+        r#"@LoadEnv
+
+task Show {
+    run bash { printenv SPAR_BASH_LOADENV_PRECEDENCE; };
+};
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_spar"))
+        .args(["run", "Show", "-f", "tasks.spar"])
+        .current_dir(dir.path())
+        .env("SPAR_BASH_LOADENV_PRECEDENCE", "from-host")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "from-dotenv"
+    );
 }
 
 #[test]

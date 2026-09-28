@@ -259,12 +259,12 @@ fn lower_one_task(
         .and_then(|e| eval_str(program, symbols, eval_result, e, &mut errors))
         .map(PathBuf::from);
 
+    // `@LoadEnv` values take precedence over the host environment a task
+    // command inherits — a key the file declares wins; the host environment
+    // only fills in keys the file doesn't mention.
     let mut environment = if let Some(path) = &program.load_env {
         match crate::dotenv::load(&base_dir.join(path)) {
-            Ok(values) => values
-                .into_iter()
-                .filter(|(key, _)| std::env::var_os(key).is_none())
-                .collect(),
+            Ok(values) => values.into_iter().collect(),
             Err(error) => {
                 errors.push(error);
                 BTreeMap::new()

@@ -563,7 +563,8 @@ impl Evaluator {
 
     /// Runtime context for the main program: starts from the host
     /// environment and overlays the file's `@LoadEnv` dotenv values. A
-    /// variable already set in the host environment is never overridden.
+    /// variable the dotenv file declares wins over the host environment;
+    /// the host environment only fills in keys the file doesn't mention.
     fn runtime_context_for_program(
         program: &Program,
         base_dir: &std::path::Path,
@@ -572,9 +573,7 @@ impl Evaluator {
         if let Some(path) = &program.load_env {
             let values = crate::dotenv::load(&base_dir.join(path)).map_err(|error| vec![error])?;
             for (key, value) in values {
-                if std::env::var_os(&key).is_none() {
-                    context.env_set(key, value);
-                }
+                context.env_set(key, value);
             }
         }
         Ok(context)

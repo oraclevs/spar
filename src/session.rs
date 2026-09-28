@@ -233,15 +233,33 @@ impl Session {
     /// methods, such as `_.json()`, resolve.
     fn previous_value_type(&self, value: &crate::runtime::Value) -> Option<crate::ast::SparType> {
         if let crate::runtime::Value::Object(fields) = value {
-            let http_shaped = fields.len() == 3
+            let http_shaped = fields.len() == 4
                 && matches!(fields.get("status"), Some(crate::runtime::Value::Int(_)))
                 && matches!(fields.get("body"), Some(crate::runtime::Value::String(_)))
+                && matches!(fields.get("headers"), Some(crate::runtime::Value::Map(_)))
                 && matches!(
                     fields.get("contentType"),
-                    Some(crate::runtime::Value::String(_))
+                    Some(crate::runtime::Value::Option(_))
                 );
-            if http_shaped && self.identifiers.contains("HttpResponse") {
-                return Some(crate::ast::SparType::Named("HttpResponse".into()));
+            // `HttpResponse` itself is rarely a *requested* import name (only
+            // `get`/`post`/... usually are) — it travels in as a transitive
+            // signature dependency and, per `loader::expand_imports_inner`'s
+            // `implicit_types` pass, keeps its `loader_scope::isolate`-mangled
+            // spelling (`SparModule<hash>HttpResponse`) internally even though
+            // the *user's own* `HttpResponse` references get silently aliased
+            // to it. There is nothing the user wrote here for that aliasing
+            // to rewrite — this type name is synthesized by the interactive
+            // shell itself — so look for whichever spelling (clean or
+            // mangled) this session's compiled symbols actually declared,
+            // rather than assuming the clean one exists.
+            if http_shaped {
+                if let Some(actual_name) = self
+                    .identifiers
+                    .iter()
+                    .find(|name| *name == "HttpResponse" || name.ends_with("HttpResponse"))
+                {
+                    return Some(crate::ast::SparType::Named(actual_name.clone()));
+                }
             }
         }
         interactive_value_type(value)
@@ -451,6 +469,17 @@ impl Session {
                 normalized.len(),
             )
         })?;
+        // A generic method/function call with nothing to unify its type
+        // parameter against (e.g. `_.json()` with no argument or expected
+        // type to pin `T`) infers to a bare, unresolved `SparType::TypeParameter`
+        // — not a real declared type, so building a synthetic wrapper function
+        // with it as the declared return type fails to resolve ("undefined
+        // type: `T` is not declared"). A REPL preview has no caller-supplied
+        // expected type to fall back on the way compiled code would, so it
+        // defaults any leftover type parameter to `Record`, the same dynamic
+        // bridge type `parse<T>`/`json<T>` callers reach for explicitly when
+        // they don't need (or don't yet know) a more specific shape.
+        let expression_type = default_unresolved_type_parameters(&expression_type);
         let return_type = crate::typechecker::display_type(&expression_type);
 
         let mut function_name = "sparshInteractivePreview".to_string();
@@ -516,6 +545,13 @@ impl Session {
         identifiers.extend(symbols.functions.keys().cloned());
         identifiers.extend(symbols.imported_functions.keys().cloned());
         identifiers.extend(symbols.types.keys().cloned());
+        identifiers.extend(
+            symbols
+                .structs
+                .keys()
+                .filter(|path| path.len() == 1)
+                .map(|path| path[0].clone()),
+        );
         identifiers.extend(symbols.enums.keys().cloned());
         identifiers.extend(symbols.function_groups.keys().cloned());
         identifiers.extend(symbols.imports.keys().cloned());
@@ -746,6 +782,13 @@ impl Session {
         identifiers.extend(symbols.functions.keys().cloned());
         identifiers.extend(symbols.imported_functions.keys().cloned());
         identifiers.extend(symbols.types.keys().cloned());
+        identifiers.extend(
+            symbols
+                .structs
+                .keys()
+                .filter(|path| path.len() == 1)
+                .map(|path| path[0].clone()),
+        );
         identifiers.extend(symbols.enums.keys().cloned());
         identifiers.extend(symbols.function_groups.keys().cloned());
         identifiers.extend(symbols.imports.keys().cloned());
@@ -881,6 +924,37 @@ impl Session {
     /// diagnostics/debugging a session, not for driving further logic.
     pub fn committed_source(&self) -> &str {
         &self.committed_source
+    }
+}
+
+/// Replaces any unresolved `SparType::TypeParameter` left over from a
+/// generic call the REPL had nothing to unify against (see the call site in
+/// `eval_interactive_preview_with_context`) with `Record`, recursing through
+/// the type's structure so a nested occurrence (`List<T>`, `Option<T>`, ...)
+/// is caught too.
+fn default_unresolved_type_parameters(ty: &crate::ast::SparType) -> crate::ast::SparType {
+    use crate::ast::SparType;
+    match ty {
+        SparType::TypeParameter(_) => SparType::Named("Record".into()),
+        SparType::List(inner) => SparType::List(Box::new(default_unresolved_type_parameters(inner))),
+        SparType::Applied { name, arguments } => SparType::Applied {
+            name: name.clone(),
+            arguments: arguments.iter().map(default_unresolved_type_parameters).collect(),
+        },
+        SparType::Function {
+            params,
+            return_type,
+        } => SparType::Function {
+            params: params
+                .iter()
+                .map(|param| crate::ast::CallableParamType {
+                    name: param.name.clone(),
+                    ty: default_unresolved_type_parameters(&param.ty),
+                })
+                .collect(),
+            return_type: Box::new(default_unresolved_type_parameters(return_type)),
+        },
+        other => other.clone(),
     }
 }
 
@@ -1120,6 +1194,36 @@ mod tests {
     use crate::engine::Engine;
     use crate::host::{HostFunction, HostRegistry};
     use crate::runtime::Value;
+
+    #[test]
+    fn default_unresolved_type_parameters_replaces_every_nested_occurrence() {
+        use crate::ast::SparType;
+        assert_eq!(
+            default_unresolved_type_parameters(&SparType::TypeParameter("T".into())),
+            SparType::Named("Record".into())
+        );
+        assert_eq!(
+            default_unresolved_type_parameters(&SparType::List(Box::new(
+                SparType::TypeParameter("T".into())
+            ))),
+            SparType::List(Box::new(SparType::Named("Record".into())))
+        );
+        assert_eq!(
+            default_unresolved_type_parameters(&SparType::Applied {
+                name: "Option".into(),
+                arguments: vec![SparType::TypeParameter("T".into())],
+            }),
+            SparType::Applied {
+                name: "Option".into(),
+                arguments: vec![SparType::Named("Record".into())],
+            }
+        );
+        // A resolved type is left untouched.
+        assert_eq!(
+            default_unresolved_type_parameters(&SparType::Int),
+            SparType::Int
+        );
+    }
 
     #[test]
     fn section_includes_nested_sections_as_values() {

@@ -300,6 +300,82 @@ fn shell_plus_int_is_a_clear_error() {
     assert!(errors.to_lowercase().contains("shell"), "got: {errors}");
 }
 
+/// Regression: a `var` statement inside a `shell { ... }` block calling a
+/// method that doesn't exist used to pass `spar check` with zero
+/// diagnostics — `check_mixed_shell_with_locals` only ever validated the
+/// block's `.steps` (mixed-pipeline decoders), never its ordinary
+/// `.statements` — and only crashed later, during lowering, with an opaque
+/// internal error. The identical code outside a shell block always produced
+/// this same clean error. See spar_shell_block_method_validation_gap.md.
+#[test]
+fn shell_block_statement_with_unknown_method_call_is_a_clear_type_error() {
+    let errors = check_err(
+        r#"
+        struct Widget { name: str; };
+        impl Widget {
+            fn label(self) -> str { return self.name; };
+        };
+        function main() -> shell {
+            return shell {
+                var w: Widget = Widget(name: "gauge");
+                var text: str = w.missingMethod();
+            };
+        };
+        "#,
+    );
+    assert!(
+        errors.contains("no method 'missingMethod'"),
+        "got: {errors}"
+    );
+}
+
+/// The fix must not regress ordinary, valid statements inside a shell block
+/// — a real method call, a field access, and a local var all still
+/// typecheck cleanly.
+#[test]
+fn shell_block_statement_with_valid_method_call_still_checks_ok() {
+    check_ok(
+        r#"
+        struct Widget { name: str; };
+        impl Widget {
+            fn label(self) -> str { return self.name; };
+        };
+        function main() -> shell {
+            return shell {
+                var w: Widget = Widget(name: "gauge");
+                var text: str = w.label();
+                echo ${text};
+            };
+        };
+        "#,
+    );
+}
+
+/// Regression: the shell-block validation fix above initially broke a bare
+/// `return;` inside a `shell { ... }` block's `if` — a real, live failure
+/// ("function declares return type 'Any' but this 'return;' provides no
+/// value") once a user's actual sparsh session hit it. `check_return_value`
+/// only accepts `ReturnValue::Void` against `SparType::Void`; the shell-block
+/// checker uses `SparType::Any` as a stand-in for the (unavailable) enclosing
+/// function's real return type, and `Any` alone still rejects a void return.
+/// Fixed via `TypeChecker::in_shell_statement_scope`.
+#[test]
+fn shell_block_bare_early_return_inside_if_does_not_false_positive() {
+    check_ok(
+        r#"
+        function main() -> shell {
+            return shell {
+                var x: int = 1;
+                if x == 1 {
+                    return;
+                }
+                echo done;
+            };
+        };
+        "#,
+    );
+}
+
 #[test]
 fn typecheck_function_arg_type_mismatch() {
     let src = r#"

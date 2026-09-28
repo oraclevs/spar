@@ -504,6 +504,7 @@ pub(crate) fn pipe_stage_parameters_with_locals(
         mutable_bindings: HashSet::new(),
         current_method_receiver_mutable: false,
         expectations: Default::default(),
+        in_shell_statement_scope: false,
     }
     .pipe_stage_parameter_types(input, stage, locals, &span)
     .ok()
@@ -529,6 +530,7 @@ pub(crate) fn infer_expression_with_locals(
         mutable_bindings: HashSet::new(),
         current_method_receiver_mutable: false,
         expectations: Default::default(),
+        in_shell_statement_scope: false,
     }
     .infer_type_with_locals(expr, locals)
 }
@@ -577,6 +579,17 @@ pub struct TypeChecker<'a> {
     /// from (`return err(...)` in a `-> Result<int, str>` function), keyed by the
     /// call's name span.
     expectations: std::cell::RefCell<HashMap<(usize, usize), SparType>>,
+    /// True while checking a `shell { ... }` block's own `.statements` (see
+    /// `check_mixed_shell_with_locals`). A bare `return;` there returns from
+    /// the *enclosing* function, whose real declared return type isn't
+    /// threaded down to this call — `SparType::Any` stands in for it so a
+    /// `return someValue;` can't false-positive, but `Any` alone still
+    /// rejects a bare `return;` (`is_assignable(Any, actual)` requires
+    /// `actual != Void`), which would false-positive on legitimate early
+    /// returns. This flag tells `check_return_value` to skip that specific
+    /// check instead, rather than threading a new parameter through every
+    /// `check_func_stmts`/`check_if_stmt` call site.
+    in_shell_statement_scope: bool,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -701,6 +714,7 @@ impl<'a> TypeChecker<'a> {
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
             expectations: Default::default(),
+            in_shell_statement_scope: false,
         }
         .infer_type(expr)
     }
@@ -715,6 +729,7 @@ impl<'a> TypeChecker<'a> {
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
             expectations: Default::default(),
+            in_shell_statement_scope: false,
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -751,6 +766,7 @@ impl<'a> TypeChecker<'a> {
             mutable_bindings: HashSet::new(),
             current_method_receiver_mutable: false,
             expectations: Default::default(),
+            in_shell_statement_scope: false,
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -4587,6 +4603,33 @@ impl<'a> TypeChecker<'a> {
                     })?;
             }
         }
+
+        // `shell.statements` (ordinary `var`/`if`/`for`/... statements inside
+        // the `shell { ... }` literal, as opposed to `.steps`, its pipeline
+        // commands) were never visited by any typechecking pass — only the
+        // resolver's `resolve_shell_statements` walked them, and it only
+        // checks scoping (undefined variables, illegal captured-binding
+        // mutation), not types. A call to a method/field that doesn't exist
+        // inside one of these statements passed `spar check` silently and
+        // only surfaced at evaluation time as an opaque "internal lowering
+        // error", instead of the normal, actionable type error the identical
+        // code gets outside a shell block. `FuncStmt` is `Statement` (see its
+        // type alias) so the ordinary function-body statement checker applies
+        // directly; `SparType::Any` stands in for the enclosing function's
+        // real return type since a `return` here returns from that function,
+        // not from this shell value, and threading the real one down here
+        // would need a broader signature change than this fix calls for.
+        // `in_shell_statement_scope` additionally tells `check_return_value`
+        // to accept a bare `return;` here regardless of `ret_ty` — `Any`
+        // alone still rejects `ReturnValue::Void` (`is_assignable` requires
+        // non-void), which would false-positive on a real, legitimate early
+        // `return;` inside a shell block (confirmed live: "function declares
+        // return type 'Any' but this 'return;' provides no value").
+        let mut shell_locals = locals.clone();
+        let was_in_shell_statement_scope = self.in_shell_statement_scope;
+        self.in_shell_statement_scope = true;
+        self.check_func_stmts(&shell.statements, &SparType::Any, &mut shell_locals, is_async);
+        self.in_shell_statement_scope = was_in_shell_statement_scope;
         Ok(())
     }
 
@@ -5279,6 +5322,7 @@ impl<'a> TypeChecker<'a> {
 
         match (ret_ty, ret_value) {
             (SparType::Void, ReturnValue::Void) => {}
+            (_, ReturnValue::Void) if self.in_shell_statement_scope => {}
             (SparType::Void, ReturnValue::Expr(_)) => {
                 self.errors.push(SparError::TypeError {
                     message: "function declares return type 'void' but this 'return' provides a value — use bare 'return;'"

@@ -656,3 +656,35 @@ fn spawning_a_subtask_after_shutdown_has_started_does_not_hang() {
          must not hang the process forever, took {elapsed:?}"
     );
 }
+
+// Regression: concurrent compound assignment to a module-level `var mut`
+// global used to lose updates. `hits = hits + 1` compiled to a separate
+// read_global call and a separate write_global call, each individually
+// locked but not atomic as a *unit* — two tasks could both read the same
+// value before either wrote back, dropping one increment per collision.
+// This spawns 8 real tasks (via `all`, so they run concurrently on the
+// worker pool, not one at a time) each incrementing the same global 2000
+// times; an earlier, insufficient version of this test awaited each spawn
+// before starting the next, which serializes them and never actually races.
+#[test]
+fn concurrent_global_increments_do_not_lose_updates() {
+    let outcome = Engine::new(CompileOptions::default())
+        .execute_source(
+            r#"
+            import pkg { all } from "std/async";
+            var mut hits: int = 0;
+            async fn bump() -> int {
+                for i in range(end: 2000) { hits = hits + 1; }
+                return 0;
+            };
+            async fn main() -> int {
+                var mut ps: [Promise<int>] = [];
+                for i in range(end: 8) { ps.append(value: bump()); }
+                var rs = await all<int>(promises: ps);
+                return hits;
+            };
+            "#,
+        )
+        .expect("concurrent global increments should execute");
+    assert_eq!(outcome.exit_status, 8 * 2000);
+}

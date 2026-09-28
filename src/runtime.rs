@@ -1156,8 +1156,7 @@ impl Runtime<'_> {
                     RuntimeFlow::Normal
                 }
                 CompiledStatement::StoreGlobal { name, value, span } => {
-                    let value = self.eval_expression(value, frame, module)?;
-                    self.write_global(module, name, value, span)?;
+                    self.eval_store_global(module, name, value, frame, span)?;
                     RuntimeFlow::Normal
                 }
                 CompiledStatement::StoreFieldLocal {
@@ -4573,6 +4572,113 @@ impl Runtime<'_> {
                 self.write_compiled_lvalue(frame, module, base, base_value, span)
             }
         }
+    }
+
+    /// Executes a global assignment. A compound self-referential form like
+    /// `hits = hits + 1` (`Global(name) OP operand`, either operand order)
+    /// takes a fetch-modify-store fast path that holds the module's globals
+    /// lock across the read and the write as a single critical section, so
+    /// concurrent tasks incrementing the same global can't interleave and
+    /// drop updates. `read_global` then `write_global` as two separate lock
+    /// acquisitions (the fallback below, and the only path before this fix)
+    /// left a window between them where another task's update could be lost.
+    /// Anything else — the operand referencing `name` on both sides, or a
+    /// non-arithmetic/short-circuiting operation — falls back to plain
+    /// evaluate-then-write, same as before; it isn't atomic, but it's also
+    /// not the counter-style pattern this fixes.
+    fn eval_store_global(
+        &mut self,
+        module: crate::compiled::ModuleId,
+        name: &str,
+        value: &CompiledExpression,
+        frame: &mut Frame,
+        span: &Span,
+    ) -> Result<(), RuntimeFault> {
+        if let CompiledExpression::Operation {
+            operation,
+            operands,
+            span: op_span,
+        } = value
+        {
+            if let [left, right] = operands.as_slice() {
+                let left_is_self = matches!(left, CompiledExpression::Global(g, _) if g == name);
+                let right_is_self = matches!(right, CompiledExpression::Global(g, _) if g == name);
+                let is_atomic_safe = !matches!(
+                    operation,
+                    TypedOperation::BoolAnd | TypedOperation::BoolOr | TypedOperation::Fallback
+                );
+                if is_atomic_safe && left_is_self != right_is_self {
+                    let (self_is_left, other) = if left_is_self {
+                        (true, right)
+                    } else {
+                        (false, left)
+                    };
+                    let operand_value = self.eval_expression(other, frame, module)?;
+                    return self.apply_compound_global_update(
+                        module,
+                        name,
+                        *operation,
+                        operand_value,
+                        self_is_left,
+                        op_span,
+                    );
+                }
+            }
+        }
+        let value = self.eval_expression(value, frame, module)?;
+        self.write_global(module, name, value, span)
+    }
+
+    /// Reads the current value of `name`, combines it with `operand_value`
+    /// via `operation`, and writes the result back — all under one
+    /// acquisition of the module's globals lock.
+    fn apply_compound_global_update(
+        &mut self,
+        module: crate::compiled::ModuleId,
+        name: &str,
+        operation: TypedOperation,
+        operand_value: Value,
+        self_is_left: bool,
+        span: &Span,
+    ) -> Result<(), RuntimeFault> {
+        self.ensure_module(module)?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| module_state_error(span))?;
+        let symbols = &self
+            .program
+            .modules
+            .get(module.0 as usize)
+            .ok_or_else(|| runtime_error("compiled module is unavailable", span))?
+            .checked
+            .symbols;
+        let mut guard = state.results.lock().unwrap();
+        let result = guard
+            .get_mut(&module)
+            .ok_or_else(|| module_state_error(span))?;
+        let current_config = result
+            .globals
+            .get(name)
+            .cloned()
+            .ok_or_else(|| runtime_error(&format!("global '{name}' is unavailable"), span))?;
+        let expected = symbols.globals.get(name).and_then(|entry| match entry {
+            crate::resolver::GlobalEntry::Var { ty, .. } => Some(ty),
+            crate::resolver::GlobalEntry::Dynamic { .. } => None,
+        });
+        let current = match expected {
+            Some(expected) => value_from_config_typed(current_config, expected, symbols),
+            None => Value::from_config(current_config),
+        };
+        let values = if self_is_left {
+            [current, operand_value]
+        } else {
+            [operand_value, current]
+        };
+        let new_value = eval_operation(operation, &values, span)?;
+        let new_config = new_value.try_into_config(span)?;
+        result.globals.insert(name.to_string(), new_config);
+        Ok(())
     }
 
     fn read_global(

@@ -1107,3 +1107,10 @@ fn record_as_list_rejects_a_non_list_field() {
         error
     );
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn eval_recursion_supports_one_thousand_calls() {
+    let result = eval_src("function count(n: int) -> int { if n == 0 { return 0; } return 1 + count(n: n - 1); }; var result: int = count(n: 999);");
+    assert_eq!(result.globals["result"], crate::evaluator::ConfigValue::Int(999));
+}

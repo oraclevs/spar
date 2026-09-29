@@ -156,7 +156,7 @@ pub fn schema_type_of(value: &Value) -> SchemaType {
         Value::Option(_) | Value::Result(_) => SchemaType::Dynamic,
         Value::Table(_) => SchemaType::Table,
         Value::Schema(_) => SchemaType::Schema,
-        Value::Error { .. } => SchemaType::Error,
+        Value::Error(_) => SchemaType::Error,
         Value::Shell(_) | Value::MixedShell(_) | Value::ShellProgram(_) => SchemaType::Shell,
         Value::Promise(_) => SchemaType::Promise,
         Value::Resource(_) => SchemaType::Resource,
@@ -178,20 +178,21 @@ fn merge_types(left: &SchemaType, right: &SchemaType) -> SchemaType {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::value::Shared;
 
     use super::*;
 
     #[test]
     fn heterogeneous_records_infer_optional_fields_in_deterministic_order() {
         let rows = vec![
-            Value::Object(indexmap::IndexMap::from([
+            Value::Object(Shared::from(indexmap::IndexMap::from([
                 ("name".into(), Value::String("Obi".into())),
                 ("age".into(), Value::Int(24)),
-            ])),
-            Value::Object(indexmap::IndexMap::from([
+            ]))),
+            Value::Object(Shared::from(indexmap::IndexMap::from([
                 ("name".into(), Value::String("Ada".into())),
                 ("active".into(), Value::Bool(true)),
-            ])),
+            ]))),
         ];
 
         let schema = Schema::infer_records(&rows).unwrap();
@@ -220,11 +221,11 @@ mod tests {
     #[test]
     fn conflicting_field_types_become_dynamic() {
         let rows = vec![
-            Value::Object(indexmap::IndexMap::from([("value".into(), Value::Int(1))])),
-            Value::Object(indexmap::IndexMap::from([(
+            Value::Object(Shared::from(indexmap::IndexMap::from([("value".into(), Value::Int(1))]))),
+            Value::Object(Shared::from(indexmap::IndexMap::from([(
                 "value".into(),
                 Value::String("one".into()),
-            )])),
+            )]))),
         ];
         let schema = Schema::infer_records(&rows).unwrap();
         assert_eq!(schema.fields[0].ty, SchemaType::Dynamic);

@@ -1004,7 +1004,7 @@ fn interactive_value_type(value: &crate::runtime::Value) -> Option<crate::ast::S
             arguments: vec![SparType::Named("Record".into())],
         }),
         Value::Schema(_) => Some(SparType::Named("Schema".into())),
-        Value::Error { .. } => Some(SparType::Error),
+        Value::Error(_) => Some(SparType::Error),
         Value::Shell(_) | Value::MixedShell(_) | Value::ShellProgram(_) => Some(SparType::Shell),
         Value::Option(None)
         | Value::Promise(_)
@@ -1190,6 +1190,7 @@ fn runtime_context(
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::value::Shared;
     use super::*;
     use crate::engine::Engine;
     use crate::host::{HostFunction, HostRegistry};
@@ -2082,7 +2083,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
                 assert_eq!(values, vec![ConfigValue::Int(1), ConfigValue::Int(2)]);
             }
             InteractivePreviewResult::RuntimeValue(value) => {
-                assert_eq!(value.value, Value::List(vec![Value::Int(1), Value::Int(2)]));
+                assert_eq!(value.value, Value::List(Shared::from(vec![Value::Int(1), Value::Int(2)])));
             }
             other => panic!("expected piped previous value, found {other:?}"),
         }

@@ -1,3 +1,4 @@
+use spar::Shared;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -9,14 +10,14 @@ use spar::{CompileOptions, Engine, SchemaType, StreamResource, TableValue, Value
 #[test]
 fn v2_runtime_acceptance_covers_record_schema_table_and_lazy_stream() {
     let rows = vec![
-        Value::Object(indexmap::IndexMap::from([
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Obi".into())),
             ("age".into(), Value::Int(24)),
-        ])),
-        Value::Object(indexmap::IndexMap::from([
+        ]))),
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Ada".into())),
             ("age".into(), Value::Int(31)),
-        ])),
+        ]))),
     ];
 
     let table = TableValue::from_records(rows).expect("record rows should infer a table schema");

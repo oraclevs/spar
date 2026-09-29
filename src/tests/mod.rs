@@ -6,3 +6,4 @@ mod parser_tests;
 mod resolver_tests;
 mod runtime_tests;
 mod typechecker_tests;
+mod vm_tests;

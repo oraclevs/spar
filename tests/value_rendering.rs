@@ -1,14 +1,14 @@
 use indexmap::IndexMap;
-use spar::Value;
+use spar::{Shared, Value};
 
 #[test]
 fn display_renderer_is_recursive_and_structural() {
-    let value = Value::List(vec![
+    let value = Value::List(Shared::from(vec![
         Value::String("spar".into()),
         Value::Map(vec![(Value::String("answer".into()), Value::Int(42))].into()),
         Value::Option(Some(Box::new(Value::Bool(true)))),
         Value::Result(Err(Box::new(Value::String("boom".into())))),
-    ]);
+    ]));
 
     assert_eq!(
         value.render_display(),
@@ -20,10 +20,10 @@ fn display_renderer_is_recursive_and_structural() {
 fn display_renderer_uses_safe_summaries_for_bytes_and_records() {
     assert_eq!(Value::Bytes(vec![0, 1, 2]).render_display(), "Bytes(3)");
 
-    let record = Value::Object(IndexMap::from([
+    let record = Value::Object(Shared::from(IndexMap::from([
         ("name".into(), Value::String("OCC".into())),
         ("active".into(), Value::Bool(true)),
-    ]));
+    ])));
     assert_eq!(record.render_display(), "{name: \"OCC\", active: true}");
 }
 

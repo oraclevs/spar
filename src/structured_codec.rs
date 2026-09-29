@@ -1,3 +1,4 @@
+use crate::runtime::value::Shared;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{Span, SparError};
@@ -424,9 +425,9 @@ fn parse_document(format: StructuredFormat, bytes: &[u8]) -> Result<Vec<Value>, 
 
 fn serialize_document(format: StructuredFormat, values: Vec<Value>) -> Result<Vec<u8>, SparError> {
     let value = match values.len() {
-        0 => Value::List(Vec::new()),
+        0 => Value::List(Shared::from(Vec::new())),
         1 => values.into_iter().next().expect("single buffered value"),
-        _ => Value::List(values),
+        _ => Value::List(Shared::from(values)),
     };
     let json = runtime_value_to_json(&value)?;
     match format {
@@ -906,12 +907,12 @@ pub(crate) fn json_value_to_runtime(value: serde_json::Value) -> Result<Value, S
             .into_iter()
             .map(json_value_to_runtime)
             .collect::<Result<Vec<_>, _>>()
-            .map(Value::List),
+            .map(|items| Value::List(Shared::from(items))),
         serde_json::Value::Object(values) => values
             .into_iter()
             .map(|(key, value)| json_value_to_runtime(value).map(|value| (key, value)))
             .collect::<Result<indexmap::IndexMap<_, _>, _>>()
-            .map(Value::Object),
+            .map(|fields| Value::Object(Shared::from(fields))),
     }
 }
 
@@ -966,12 +967,8 @@ pub(crate) fn runtime_value_to_json(value: &Value) -> Result<serde_json::Value, 
         )),
         Value::Option(None) => Ok(serde_json::Value::Null),
         Value::Option(Some(value)) => runtime_value_to_json(value),
-        Value::Error {
-            message,
-            kind,
-            code,
-            cause,
-        } => {
+        Value::Error(error) => {
+            let crate::runtime::value::ErrorValue { message, kind, code, cause } = &**error;
             let mut object = serde_json::Map::new();
             object.insert("message".into(), serde_json::Value::String(message.clone()));
             object.insert("kind".into(), serde_json::Value::String(kind.clone()));

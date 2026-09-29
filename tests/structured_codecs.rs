@@ -1,11 +1,12 @@
+use spar::Shared;
 use spar::{CodecMode, StructuredFormatRegistry, Value};
 
 fn record(fields: &[(&str, Value)]) -> Value {
     Value::Object(
-        fields
+        Shared::from(fields
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
-            .collect::<indexmap::IndexMap<_, _>>(),
+            .collect::<indexmap::IndexMap<_, _>>()),
     )
 }
 

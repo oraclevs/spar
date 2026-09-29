@@ -410,6 +410,11 @@ pub struct CompiledProgram {
     #[allow(dead_code)] // Used by entry dispatch once Runtime is installed.
     pub(crate) entry: ModuleId,
     pub(crate) modules: Vec<CompiledModule>,
+    function_locations: Vec<(ModuleId, usize)>,
+    /// Register bytecode for the primitive-typed subset of functions.
+    pub(crate) vm: crate::vm::VmProgram,
+    /// Universal bytecode for every function (tree-walker fallback nodes).
+    pub(crate) bc: crate::runtime::bytecode::BcProgram,
     #[allow(dead_code)] // Used by entry dispatch once Runtime is installed.
     pub(crate) entry_main: Option<FunctionId>,
     pub(crate) options: CompileOptions,
@@ -441,12 +446,42 @@ impl CompiledProgram {
             .find(|function| function.key.group.is_none() && function.name == "main")
             .map(|function| function.id);
 
+        let mut function_locations = vec![(ModuleId(0), 0); builder.next_function as usize];
+        for module in &builder.modules {
+            for (index, function) in module.functions.iter().enumerate() {
+                function_locations[function.id.0 as usize] = (module.id, index);
+            }
+        }
+
+        let vm = crate::vm::VmProgram::build(
+            builder.modules.iter().flat_map(|module| module.functions.iter()),
+            function_locations.len(),
+        );
+
+        let bc = crate::runtime::bytecode::BcProgram::build(
+            builder.modules.iter().flat_map(|module| module.functions.iter()),
+            function_locations.len(),
+        );
+
         Ok(Self {
             entry: ModuleId(0),
+            function_locations,
+            vm,
+            bc,
             modules: builder.modules,
             entry_main,
             options,
         })
+    }
+
+    /// Bytecode listing of the functions lowered to the register VM.
+    pub fn disassemble(&self) -> String {
+        self.vm.disassemble()
+    }
+
+    pub(crate) fn function(&self, id: FunctionId) -> Option<&CompiledFunction> {
+        let (module, index) = *self.function_locations.get(id.0 as usize)?;
+        self.modules.get(module.0 as usize)?.functions.get(index)
     }
 
     /// Base directory captured when this program was compiled.

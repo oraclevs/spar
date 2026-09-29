@@ -1,0 +1,11 @@
+fn sumTo(n: int) -> int {
+    var mut total: int = 0;
+    for i in range(end: n) {
+        total = total + i * 3 - (i / 7);
+    }
+    return total;
+};
+
+fn main() -> void {
+    println(value: sumTo(n: 100000000));
+};

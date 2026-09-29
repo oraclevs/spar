@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+pub(crate) mod bytecode;
 pub(crate) mod context;
 pub(crate) mod native;
 pub(crate) mod resource;
@@ -20,7 +21,7 @@ pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
 pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
-pub use value::Value;
+pub use value::{ErrorValue, Shared, Value};
 
 use crate::ast::SparType;
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus};
@@ -298,7 +299,7 @@ fn internal_slot_error(slot: LocalSlot, detail: &str, span: &Span) -> SparError 
     }
 }
 
-const MAX_CALL_DEPTH: usize = 20;
+use crate::recursion::MAX_CALL_DEPTH;
 
 #[cfg(test)]
 pub(crate) fn execute_self_contained_entry(
@@ -334,6 +335,7 @@ enum DataSequenceShape {
 pub(crate) struct Runtime<'a> {
     program: Arc<CompiledProgram>,
     call_depth: usize,
+    vm_state: crate::vm::VmState,
     state: Option<ModuleState>,
     scheduler: Arc<scheduler::Scheduler>,
     is_entry: bool,
@@ -398,6 +400,7 @@ impl<'a> Runtime<'a> {
                 let mut worker_runtime = Runtime {
                     program: Arc::clone(&run_program),
                     call_depth: invocation.call_depth,
+                    vm_state: Default::default(),
                     state: Some(run_module_state.share()),
                     scheduler,
                     is_entry: false,
@@ -436,6 +439,7 @@ impl<'a> Runtime<'a> {
         Runtime {
             program,
             call_depth: 0,
+            vm_state: Default::default(),
             state: Some(module_state),
             scheduler: pool_scheduler,
             is_entry: true,
@@ -757,7 +761,7 @@ pub(crate) fn call_function_with_context(
         runtime.ensure_module(entry_module)?;
         let result = if runtime.function_is_async(function)? {
             let spawn_context = runtime.context.spawn_child();
-            let spawn_depth = runtime.call_depth + 1;
+            let spawn_depth = runtime.call_depth;
             let handle = runtime
                 .scheduler
                 .spawn(function, arguments, spawn_context, spawn_depth);
@@ -907,7 +911,7 @@ impl Runtime<'_> {
     fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
             let spawn_context = self.context.spawn_child();
-            let spawn_depth = self.call_depth + 1;
+            let spawn_depth = self.call_depth;
             let handle = self
                 .scheduler
                 .spawn(entry, Vec::new(), spawn_context, spawn_depth);
@@ -928,11 +932,7 @@ impl Runtime<'_> {
     }
 
     fn function_is_async(&self, id: FunctionId) -> Result<bool, RuntimeFault> {
-        self.program
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.iter())
-            .find(|function| function.id == id)
+        self.program.function(id)
             .map(|function| function.is_async)
             .ok_or_else(|| {
                 RuntimeFault::Fatal(runtime_error(
@@ -943,11 +943,7 @@ impl Runtime<'_> {
     }
 
     fn entry_function_span(&self, id: FunctionId) -> Option<Span> {
-        self.program
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.iter())
-            .find(|function| function.id == id)
+        self.program.function(id)
             .map(|function| function.span.clone())
     }
 
@@ -987,8 +983,21 @@ impl Runtime<'_> {
         arguments: Vec<Value>,
         call_span: &Span,
     ) -> Result<Value, RuntimeFault> {
+        crate::recursion::with_stack(|| self.call_closure_inner(closure, arguments, call_span))
+    }
+
+    #[inline(never)]
+    fn call_closure_inner(
+        &mut self,
+        closure: ClosureValue,
+        arguments: Vec<Value>,
+        call_span: &Span,
+    ) -> Result<Value, RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(runtime_error("maximum function call depth exceeded", call_span).into());
+            return Err(runtime_error(
+                &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
+                call_span,
+            ).into());
         }
         if arguments.len() != closure.parameter_slots.len() {
             return Err(runtime_error(
@@ -1046,7 +1055,7 @@ impl Runtime<'_> {
         &mut self,
         id: FunctionId,
         arguments: Vec<Value>,
-    ) -> Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> {
+    ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
         self.call_function_with_frame_typed(id, arguments, None)
     }
 
@@ -1055,37 +1064,48 @@ impl Runtime<'_> {
         id: FunctionId,
         arguments: Vec<Value>,
         return_type: Option<RuntimeTypeBinding>,
-    ) -> Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> {
+    ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
+        crate::recursion::with_stack(|| {
+            self.call_function_with_frame_typed_inner(id, arguments, return_type)
+        })
+    }
+
+    #[inline(never)]
+    fn call_function_with_frame_typed_inner(
+        &mut self,
+        id: FunctionId,
+        arguments: Vec<Value>,
+        return_type: Option<RuntimeTypeBinding>,
+    ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(
-                runtime_error("maximum function call depth exceeded", &Span::dummy()).into(),
+                runtime_error(
+                    &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
+                    &Span::dummy(),
+                ).into(),
             );
         }
-        let function = self
-            .program
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.iter())
-            .find(|function| function.id == id)
+        let program = Arc::clone(&self.program);
+        let function = program.function(id)
             .ok_or_else(|| {
                 runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy())
             })?;
-        let parameter_slots = function.parameter_slots.clone();
+        let parameter_slots = &function.parameter_slots;
         let module = function.key.module;
-        let default_values = function.default_values.clone();
+        let default_values = &function.default_values;
         let slot_count = function.slot_count;
-        let body = function.body.clone();
-        let declared_return_type = function.return_type.clone();
-        let function_span = function.span.clone();
+        let body = &function.body;
+        let declared_return_type = &function.return_type;
+        let function_span = &function.span;
         if arguments.len() > parameter_slots.len() {
-            return Err(runtime_error("too many direct-call arguments", &function_span).into());
+            return Err(runtime_error("too many direct-call arguments", function_span).into());
         }
         self.call_depth += 1;
-        let result: Result<(Value, Frame, Vec<LocalSlot>), RuntimeFault> = (|| {
+        let result: Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> = (|| {
             let mut frame = Frame::new(slot_count);
             if let Some(actual_return) = return_type.as_ref() {
                 bind_runtime_type_parameters(
-                    &declared_return_type,
+                    declared_return_type,
                     &actual_return.ty,
                     actual_return.module,
                     &mut frame.type_bindings,
@@ -1101,14 +1121,14 @@ impl Runtime<'_> {
                             .ok_or_else(|| {
                                 runtime_error(
                                     "missing required direct-call argument",
-                                    &function_span,
+                                    function_span,
                                 )
                             })?;
                         let value = self.eval_expression(default, &mut frame, module)?;
-                        frame.write(slot, value, &function_span)?;
+                        frame.write(slot, value, function_span)?;
                     }
                     Some(value) => {
-                        frame.write(slot, value, &function_span)?;
+                        frame.write(slot, value, function_span)?;
                     }
                     None => {
                         let default = default_values
@@ -1117,26 +1137,181 @@ impl Runtime<'_> {
                             .ok_or_else(|| {
                                 runtime_error(
                                     "missing required direct-call argument",
-                                    &function_span,
+                                    function_span,
                                 )
                             })?;
                         let value = self.eval_expression(default, &mut frame, module)?;
-                        frame.write(slot, value, &function_span)?;
+                        frame.write(slot, value, function_span)?;
                     }
                 }
             }
-            let value = match self.execute_statements(&body, &mut frame, module)? {
+            let value = match self.run_body(&program, id, body, &mut frame, module)? {
                 RuntimeFlow::Return(value) => value,
                 RuntimeFlow::Normal => Value::Void,
                 RuntimeFlow::Break | RuntimeFlow::Continue => {
                     return Err(runtime_error(
                         "loop control escaped a compiled function",
-                        &function_span,
+                        function_span,
                     )
                     .into())
                 }
             };
-            Ok((value, frame, parameter_slots))
+            Ok((value, frame, parameter_slots.first().copied()))
+        })();
+        self.call_depth -= 1;
+        result
+    }
+
+    /// Runs a bytecode-lowered function. Arguments are evaluated in the
+    /// caller's frame, converted to register bits, and the result converted
+    /// back according to the function's declared primitive return type.
+    fn call_vm(
+        &mut self,
+        program: &CompiledProgram,
+        id: FunctionId,
+        vm_function: &crate::vm::VmFunction,
+        arguments: &[CompiledExpression],
+        caller: &mut Frame,
+        caller_module: ModuleId,
+    ) -> Result<Value, RuntimeFault> {
+        use crate::vm::Prim;
+        let mut bits = [0u64; 8];
+        for (index, (argument, prim)) in arguments.iter().zip(&vm_function.params).enumerate() {
+            let value = self.eval_expression(argument, caller, caller_module)?;
+            bits[index] = match (prim, value) {
+                (Prim::Int, Value::Int(v)) => v as u64,
+                (Prim::Float, Value::Float(v)) => v.to_bits(),
+                (Prim::Bool, Value::Bool(v)) => v as u64,
+                _ => {
+                    return Err(runtime_error(
+                        "bytecode call received an argument of the wrong primitive type",
+                        &Span::dummy(),
+                    )
+                    .into())
+                }
+            };
+        }
+        let result = program.vm.run(
+            &mut self.vm_state,
+            id,
+            &bits[..arguments.len()],
+            self.call_depth,
+        )?;
+        Ok(match vm_function.ret {
+            Prim::Int => Value::Int(result as i64),
+            Prim::Float => Value::Float(f64::from_bits(result)),
+            Prim::Bool => Value::Bool(result != 0),
+            Prim::Void => Value::Void,
+        })
+    }
+
+    /// Calls a statically known, non-async function, evaluating the call's
+    /// argument expressions straight into the callee frame's parameter slots.
+    /// Equivalent to `call_function_typed` on pre-evaluated arguments, minus
+    /// the intermediate `Vec<Value>`.
+    fn call_direct_inline(
+        &mut self,
+        id: FunctionId,
+        arguments: &[CompiledExpression],
+        caller: &mut Frame,
+        caller_module: ModuleId,
+        return_type: Option<&SparType>,
+    ) -> Result<Value, RuntimeFault> {
+        crate::recursion::with_stack(|| {
+            self.call_direct_inline_inner(id, arguments, caller, caller_module, return_type)
+        })
+    }
+
+    #[inline(never)]
+    fn call_direct_inline_inner(
+        &mut self,
+        id: FunctionId,
+        arguments: &[CompiledExpression],
+        caller: &mut Frame,
+        caller_module: ModuleId,
+        return_type: Option<&SparType>,
+    ) -> Result<Value, RuntimeFault> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(runtime_error(
+                &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
+                &Span::dummy(),
+            )
+            .into());
+        }
+        // SAFETY: `self.program` is an `Arc` that is never reassigned or dropped
+        // while this `Runtime` is alive, and the reference below is only used
+        // inside this call, so the pointee outlives it. Detaching the borrow
+        // from `&self` lets `self` be borrowed mutably for the body without an
+        // atomic refcount increment/decrement on every call.
+        let program: &CompiledProgram = unsafe { &*Arc::as_ptr(&self.program) };
+        let function = program
+            .function(id)
+            .ok_or_else(|| runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy()))?;
+        let parameter_slots = &function.parameter_slots;
+        let function_span = &function.span;
+        if arguments.len() > parameter_slots.len() {
+            return Err(runtime_error("too many direct-call arguments", function_span).into());
+        }
+        if let Some(vm_function) = program.vm.get(id) {
+            if arguments.len() == vm_function.params.len()
+                && arguments.len() <= 8
+                && !arguments
+                    .iter()
+                    .any(|a| matches!(a, CompiledExpression::DefaultArgument(_)))
+            {
+                return self.call_vm(program, id, vm_function, arguments, caller, caller_module);
+            }
+        }
+        let module = function.key.module;
+        let mut frame = Frame::new(function.slot_count);
+        // Generic reification only matters when the callee's declared return
+        // type mentions a type parameter; skip the per-call type clone otherwise.
+        if let Some(site_type) = return_type {
+            if crate::typechecker::mentions_type_parameter(&function.return_type) {
+                let actual_return = resolve_runtime_type(site_type, caller, caller_module);
+                bind_runtime_type_parameters(
+                    &function.return_type,
+                    &actual_return.ty,
+                    actual_return.module,
+                    &mut frame.type_bindings,
+                );
+            }
+        }
+        // Pass 1: supplied arguments, evaluated in the caller's frame. A
+        // `Void` placeholder (skipped named parameter) falls through to the
+        // default in pass 2, exactly as with a pre-evaluated argument list.
+        for (argument, slot) in arguments.iter().zip(parameter_slots.iter().copied()) {
+            match self.eval_expression(argument, caller, caller_module)? {
+                Value::Void => {}
+                value => frame.write(slot, value, function_span)?,
+            }
+        }
+        self.call_depth += 1;
+        let result = (|| {
+            // Pass 2: defaults for every parameter left unset.
+            for (index, slot) in parameter_slots.iter().copied().enumerate() {
+                if frame.slots[slot.0 as usize].is_some() {
+                    continue;
+                }
+                let default = function
+                    .default_values
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        runtime_error("missing required direct-call argument", function_span)
+                    })?;
+                let value = self.eval_expression(default, &mut frame, module)?;
+                frame.write(slot, value, function_span)?;
+            }
+            match self.run_body(program, id, &function.body, &mut frame, module)? {
+                RuntimeFlow::Return(value) => Ok(value),
+                RuntimeFlow::Normal => Ok(Value::Void),
+                RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(
+                    "loop control escaped a compiled function",
+                    function_span,
+                )
+                .into()),
+            }
         })();
         self.call_depth -= 1;
         result
@@ -1253,12 +1428,12 @@ impl Runtime<'_> {
                 } => match self.execute_statements(body, frame, module) {
                     Ok(flow) => flow,
                     Err(RuntimeFault::Raised(error)) => {
-                        let caught = Value::Error {
+                        let caught = Value::Error(Box::new(value::ErrorValue {
                             message: error.to_string(),
                             kind: "runtime".into(),
                             code: 1,
                             cause: None,
-                        };
+                        }));
                         if let Some(catch_slot) = catch_slot {
                             frame.write(*catch_slot, caught, span)?;
                         }
@@ -1294,7 +1469,13 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
     ) -> Result<Value, RuntimeFault> {
         match expression {
-            CompiledExpression::Constant(value, _) => Ok(Value::from_config(value.clone())),
+            CompiledExpression::Constant(value, _) => Ok(match value {
+                // Scalars are the hot case; skip the 160-byte ConfigValue clone.
+                ConfigValue::Int(value) => Value::Int(*value),
+                ConfigValue::Float(value) => Value::Float(*value),
+                ConfigValue::Bool(value) => Value::Bool(*value),
+                other => Value::from_config(other.clone()),
+            }),
             CompiledExpression::Local(slot, span) => Ok(frame.read(*slot, span)?.clone()),
             CompiledExpression::Global(name, span) => self.read_global(module, name, span),
             CompiledExpression::DefaultArgument(_) => Ok(Value::Void),
@@ -1316,13 +1497,13 @@ impl Runtime<'_> {
                     let value = self.eval_expression(expression, frame, module)?;
                     captured.write(*slot, value, span)?;
                 }
-                Ok(Value::Closure(ClosureValue {
+                Ok(Value::Closure(Shared::from(ClosureValue {
                     captured,
                     parameter_slots: parameter_slots.clone(),
                     body: body.clone(),
                     module: *closure_module,
                     span: span.clone(),
-                }))
+                })))
             }
             CompiledExpression::Invoke {
                 callee,
@@ -1335,14 +1516,14 @@ impl Runtime<'_> {
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 match callee {
-                    Value::Closure(closure) => self.call_closure(closure, values, span),
+                    Value::Closure(closure) => self.call_closure((closure).into_inner(), values, span),
                     Value::Function(function) => {
                         if self.function_is_async(function)? {
                             Ok(Value::Promise(self.scheduler.spawn(
                                 function,
                                 values,
                                 self.context.spawn_child(),
-                                self.call_depth + 1,
+                                self.call_depth,
                             )))
                         } else {
                             self.call_function(function, values)
@@ -1549,13 +1730,13 @@ impl Runtime<'_> {
                                 *function,
                                 values,
                                 self.context.spawn_child(),
-                                self.call_depth + 1,
+                                self.call_depth,
                             )));
                         }
                         let (result, method_frame, parameter_slots) =
                             self.call_function_with_frame(*function, values)?;
                         let updated = if *mutates_receiver {
-                            let self_slot = parameter_slots.first().copied().ok_or_else(|| {
+                            let self_slot = parameter_slots.ok_or_else(|| {
                                 runtime_error("mutable method is missing self parameter", span)
                             })?;
                             Some(method_frame.read(self_slot, span)?.clone())
@@ -1610,32 +1791,34 @@ impl Runtime<'_> {
                 return_type,
                 span: _,
             } => {
+                if !self.function_is_async(*function)? {
+                    return self.call_direct_inline(
+                        *function,
+                        arguments,
+                        frame,
+                        module,
+                        return_type.as_ref(),
+                    );
+                }
                 let values = arguments
                     .iter()
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
-                let requested_type = return_type
-                    .as_ref()
-                    .map(|ty| resolve_runtime_type(ty, frame, module));
-                if self.function_is_async(*function)? {
-                    // Async generic reification is not currently consumed by a
-                    // native reflection API. Ordinary promise execution remains
-                    // type-erased; sync generic wrappers preserve their target.
-                    Ok(Value::Promise(self.scheduler.spawn(
-                        *function,
-                        values,
-                        self.context.spawn_child(),
-                        self.call_depth + 1,
-                    )))
-                } else {
-                    self.call_function_typed(*function, values, requested_type)
-                }
+                // Async generic reification is not currently consumed by a
+                // native reflection API. Ordinary promise execution remains
+                // type-erased; sync generic wrappers preserve their target.
+                Ok(Value::Promise(self.scheduler.spawn(
+                    *function,
+                    values,
+                    self.context.spawn_child(),
+                    self.call_depth,
+                )))
             }
             CompiledExpression::List(items, _) => Ok(Value::List(
-                items
+                Shared::from(items
                     .iter()
                     .map(|item| self.eval_expression(item, frame, module))
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?),
             )),
             CompiledExpression::Object(items, span) => {
                 let mut object = indexmap::IndexMap::new();
@@ -1659,7 +1842,7 @@ impl Runtime<'_> {
                         }
                     }
                 }
-                Ok(Value::Object(object))
+                Ok(Value::Object(Shared::from(object)))
             }
             CompiledExpression::Map(items, span) => {
                 let mut entries = crate::runtime::value::MapValue::new();
@@ -1684,7 +1867,7 @@ impl Runtime<'_> {
                         }
                     }
                 }
-                Ok(Value::Map(entries))
+                Ok(Value::Map((Shared::from(entries)).into_inner()))
             }
             CompiledExpression::Operation {
                 operation,
@@ -1731,11 +1914,30 @@ impl Runtime<'_> {
                     }
                     return self.eval_expression(right, frame, module);
                 }
-                let values = operands
-                    .iter()
-                    .map(|operand| self.eval_expression(operand, frame, module))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(eval_operation(*operation, &values, span)?)
+                match operands.as_slice() {
+                    [operand] => {
+                        let values = [self.eval_expression(operand, frame, module)?];
+                        Ok(eval_operation(*operation, &values, span)?)
+                    }
+                    [left, right] => {
+                        let left = self.eval_expression(left, frame, module)?;
+                        let right = self.eval_expression(right, frame, module)?;
+                        if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
+                            if let Some(fast) = eval_int_binary(*operation, *a, *b) {
+                                return Ok(fast);
+                            }
+                        }
+                        let values = [left, right];
+                        Ok(eval_operation(*operation, &values, span)?)
+                    }
+                    _ => {
+                        let values = operands
+                            .iter()
+                            .map(|operand| self.eval_expression(operand, frame, module))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(eval_operation(*operation, &values, span)?)
+                    }
+                }
             }
             CompiledExpression::Index {
                 source,
@@ -1792,22 +1994,20 @@ impl Runtime<'_> {
                             .map(|value| Value::Int(i64::from(value)))
                             .collect(),
                     )),
-                    Value::Error {
-                        message,
-                        kind,
-                        code,
-                        cause,
-                    } => match field.as_str() {
-                        "message" => Ok(Value::String(message)),
-                        "kind" => Ok(Value::String(kind)),
-                        "code" => Ok(Value::Int(code)),
-                        "cause" => Ok(cause
-                            .map(|value| *value)
-                            .ok_or_else(|| runtime_error("error has no cause", span))?),
-                        _ => Err(
-                            runtime_error(&format!("error has no field '{field}'"), span).into(),
-                        ),
-                    },
+                    Value::Error(error) => {
+                        let value::ErrorValue { message, kind, code, cause } = *error;
+                        match field.as_str() {
+                            "message" => Ok(Value::String(message)),
+                            "kind" => Ok(Value::String(kind)),
+                            "code" => Ok(Value::Int(code)),
+                            "cause" => Ok(cause
+                                .map(|value| *value)
+                                .ok_or_else(|| runtime_error("error has no cause", span))?),
+                            _ => Err(
+                                runtime_error(&format!("error has no field '{field}'"), span).into(),
+                            ),
+                        }
+                    }
                     value => Err(type_error("object", &value, span).into()),
                 }
             }
@@ -1846,27 +2046,27 @@ impl Runtime<'_> {
                     frame.write(*binding, item, span)?;
                     output.push(self.eval_expression(body, frame, module)?);
                 }
-                Ok(Value::List(output))
+                Ok(Value::List(Shared::from(output)))
             }
             CompiledExpression::Shell(shell) => {
-                Ok(Value::Shell(self.eval_shell_plan(shell, frame, module)?))
+                Ok(Value::Shell(Shared::from(self.eval_shell_plan(shell, frame, module)?)))
             }
-            CompiledExpression::MixedShell(shell) => Ok(Value::MixedShell(MixedShellValue {
+            CompiledExpression::MixedShell(shell) => Ok(Value::MixedShell(Shared::from(MixedShellValue {
                 plan: shell.clone(),
                 captured: frame.clone(),
                 module,
                 span: shell.span.clone(),
-            })),
+            }))),
             CompiledExpression::CommandSubstitution(shell) => Ok(Value::String(
                 self.execute_command_substitution(shell, frame, module)?,
             )),
             CompiledExpression::ShellProgram { body, span } => {
-                Ok(Value::ShellProgram(ShellProgramValue {
+                Ok(Value::ShellProgram(Shared::from(ShellProgramValue {
                     body: body.clone(),
                     captured: frame.clone(),
                     module,
                     span: span.clone(),
-                }))
+                })))
             }
         }
     }
@@ -2188,7 +2388,7 @@ impl Runtime<'_> {
                         .cloned()
                         .map(|value| self.invoke_data_callable(&callable, vec![value], span))
                         .collect::<Result<Vec<_>, _>>()
-                        .map(Value::List),
+                        .map(|items| Value::List(Shared::from(items))),
                     Value::Table(table) => {
                         let rows = table
                             .rows()
@@ -2199,7 +2399,7 @@ impl Runtime<'_> {
                         // Rows that are not Records (a scalar projection) leave the
                         // table and come back as a plain list.
                         if !rows.iter().all(|row| matches!(row, Value::Object(_))) {
-                            return Ok(Value::List(rows));
+                            return Ok(Value::List(Shared::from(rows)));
                         }
                         let table = TableValue::from_records(rows).map_err(|error| {
                             runtime_error(
@@ -2207,7 +2407,7 @@ impl Runtime<'_> {
                                 span,
                             )
                         })?;
-                        Ok(Value::Table(table))
+                        Ok(Value::Table(Shared::from(table)))
                     }
                     Value::Resource(_) => {
                         let stream = self.take_stream_resource(source, span)?;
@@ -2238,7 +2438,7 @@ impl Runtime<'_> {
                                 output.push(value);
                             }
                         }
-                        Ok(Value::List(output))
+                        Ok(Value::List(Shared::from(output)))
                     }
                     Value::Table(table) => {
                         let mut rows = Vec::new();
@@ -2247,10 +2447,10 @@ impl Runtime<'_> {
                                 rows.push(value);
                             }
                         }
-                        Ok(Value::Table(TableValue::with_schema(
+                        Ok(Value::Table(Shared::from(TableValue::with_schema(
                             rows,
                             table.schema().clone(),
-                        )))
+                        ))))
                     }
                     Value::Resource(_) => {
                         let stream = self.take_stream_resource(source, span)?;
@@ -2273,7 +2473,7 @@ impl Runtime<'_> {
                     Value::List(values) => {
                         Ok(Value::List(values.iter().take(count).cloned().collect()))
                     }
-                    Value::Table(table) => Ok(Value::Table(table.take(count))),
+                    Value::Table(table) => Ok(Value::Table(Shared::from(table.take(count)))),
                     Value::Resource(_) => {
                         let stream = self.take_stream_resource(source, span)?.take_lazy(count);
                         Ok(Value::Resource(self.context.insert_stream(stream)))
@@ -2294,7 +2494,7 @@ impl Runtime<'_> {
                     Value::List(values) => {
                         Ok(Value::List(values.iter().skip(count).cloned().collect()))
                     }
-                    Value::Table(table) => Ok(Value::Table(table.skip(count))),
+                    Value::Table(table) => Ok(Value::Table(Shared::from(table.skip(count)))),
                     Value::Resource(_) => {
                         let stream = self.take_stream_resource(source, span)?.skip_lazy(count);
                         Ok(Value::Resource(self.context.insert_stream(stream)))
@@ -2361,7 +2561,7 @@ impl Runtime<'_> {
             },
             NativeIntrinsic::DataCollect => {
                 let (_, values) = self.materialize_data_sequence(source, span)?;
-                Ok(Value::List(values))
+                Ok(Value::List(Shared::from(values)))
             }
             NativeIntrinsic::DataCollectTable => match source {
                 Value::Table(table) => Ok(Value::Table(table.clone())),
@@ -2370,7 +2570,7 @@ impl Runtime<'_> {
                     let table = TableValue::from_records(rows).map_err(|error| {
                         runtime_error(&format!("collectTable requires Record rows: {error}"), span)
                     })?;
-                    Ok(Value::Table(table))
+                    Ok(Value::Table(Shared::from(table)))
                 }
             },
             NativeIntrinsic::DataCount => match source {
@@ -2456,7 +2656,7 @@ impl Runtime<'_> {
                     let table = TableValue::from_records(rows).map_err(|error| {
                         runtime_error(&format!("groupBy requires Record rows: {error}"), span)
                     })?;
-                    output.push((key, Value::Table(table)));
+                    output.push((key, Value::Table(Shared::from(table))));
                 }
                 Ok(Value::Map(output.into()))
             }
@@ -2518,7 +2718,7 @@ impl Runtime<'_> {
                         };
                         output.extend(items.iter().cloned());
                     }
-                    Ok(Value::List(output))
+                    Ok(Value::List(Shared::from(output)))
                 }
                 Value::Resource(_) => {
                     let stream = self
@@ -2600,7 +2800,7 @@ impl Runtime<'_> {
                         .cloned()
                         .map(|value| self.project_data_record(value, &fields, span))
                         .collect::<Result<Vec<_>, _>>()
-                        .map(Value::List),
+                        .map(|items| Value::List(Shared::from(items))),
                     Value::Table(table) => {
                         let rows = table
                             .rows()
@@ -2614,7 +2814,7 @@ impl Runtime<'_> {
                                 span,
                             )
                         })?;
-                        Ok(Value::Table(table))
+                        Ok(Value::Table(Shared::from(table)))
                     }
                     Value::Resource(_) => {
                         let stream = self.take_stream_resource(source, span)?.select_lazy(fields);
@@ -2631,10 +2831,10 @@ impl Runtime<'_> {
                 }
             }
             NativeIntrinsic::DataSchema => match source {
-                Value::Table(table) => Ok(Value::Schema(table.schema().clone())),
+                Value::Table(table) => Ok(Value::Schema(Shared::from(table.schema().clone()))),
                 Value::List(values) => {
                     Schema::infer_records(values)
-                        .map(Value::Schema)
+                        .map(|schema| Value::Schema(Shared::from(schema)))
                         .map_err(|error| {
                             runtime_error(&format!("schema requires Record rows: {error}"), span)
                                 .into()
@@ -2643,7 +2843,7 @@ impl Runtime<'_> {
                 Value::Resource(_) => {
                     let (_, rows) = self.materialize_data_sequence(source, span)?;
                     Schema::infer_records(&rows)
-                        .map(Value::Schema)
+                        .map(|schema| Value::Schema(Shared::from(schema)))
                         .map_err(|error| {
                             runtime_error(&format!("schema requires Record rows: {error}"), span)
                                 .into()
@@ -2935,7 +3135,7 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
         match callable.clone() {
-            Value::Closure(closure) => self.call_closure(closure, arguments, span),
+            Value::Closure(closure) => self.call_closure((closure).into_inner(), arguments, span),
             Value::Function(function) => {
                 if self.function_is_async(function)? {
                     return Err(runtime_error(
@@ -3028,11 +3228,11 @@ impl Runtime<'_> {
 
         let materialized = if values.iter().all(|value| matches!(value, Value::Object(_))) {
             match TableValue::from_records(values.clone()) {
-                Ok(table) => Value::Table(table),
-                Err(_) => Value::List(values),
+                Ok(table) => Value::Table(Shared::from(table)),
+                Err(_) => Value::List(Shared::from(values)),
             }
         } else {
-            Value::List(values)
+            Value::List(Shared::from(values))
         };
         Ok(crate::session::InteractiveRuntimeValue {
             value: materialized,
@@ -3060,7 +3260,7 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<(DataSequenceShape, Vec<Value>), RuntimeFault> {
         match source {
-            Value::List(values) => Ok((DataSequenceShape::List, values.clone())),
+            Value::List(values) => Ok((DataSequenceShape::List, (values.clone()).into_inner())),
             Value::Table(table) => Ok((
                 DataSequenceShape::Table(table.schema().clone()),
                 table.rows().to_vec(),
@@ -3092,9 +3292,9 @@ impl Runtime<'_> {
         _span: &Span,
     ) -> Result<Value, RuntimeFault> {
         match shape {
-            DataSequenceShape::List => Ok(Value::List(values)),
+            DataSequenceShape::List => Ok(Value::List(Shared::from(values))),
             DataSequenceShape::Table(schema) => {
-                Ok(Value::Table(TableValue::with_schema(values, schema)))
+                Ok(Value::Table(Shared::from(TableValue::with_schema(values, schema))))
             }
             DataSequenceShape::Stream(element_type) => Ok(Value::Resource(
                 self.context
@@ -3175,7 +3375,7 @@ impl Runtime<'_> {
                 .ok_or_else(|| runtime_error(&format!("record has no field '{field}'"), span))?;
             selected.insert(field.clone(), value.clone());
         }
-        Ok(Value::Object(selected))
+        Ok(Value::Object(Shared::from(selected)))
     }
 
     fn execute_command_substitution(
@@ -3531,12 +3731,12 @@ impl Runtime<'_> {
                         })?;
                     let pid = job.pid();
                     let id = self.jobs.len() + 1;
-                    self.last_job = Some(Value::Object(indexmap::IndexMap::from([
+                    self.last_job = Some(Value::Object(Shared::from(indexmap::IndexMap::from([
                         ("id".into(), Value::Int(id as i64)),
                         ("pid".into(), Value::Int(i64::from(pid))),
                         ("processGroup".into(), Value::Int(i64::from(pid))),
                         ("state".into(), Value::String("running".into())),
-                    ])));
+                    ]))));
                     self.jobs.push(job);
                     outcome = crate::evaluator::ShellPlanOutcome {
                         success: true,
@@ -3564,12 +3764,12 @@ impl Runtime<'_> {
                             })?;
                     let pid = job.pid();
                     let id = self.jobs.len() + 1;
-                    self.last_job = Some(Value::Object(indexmap::IndexMap::from([
+                    self.last_job = Some(Value::Object(Shared::from(indexmap::IndexMap::from([
                         ("id".into(), Value::Int(id as i64)),
                         ("pid".into(), Value::Int(i64::from(pid))),
                         ("processGroup".into(), Value::Int(i64::from(pid))),
                         ("state".into(), Value::String("running".into())),
-                    ])));
+                    ]))));
                     self.jobs.push(job);
                     outcome = crate::evaluator::ShellPlanOutcome {
                         success: true,
@@ -4503,7 +4703,7 @@ impl Runtime<'_> {
                     .map(Value::from_config)
                     .collect(),
                 self.context.spawn_child(),
-                self.call_depth + 1,
+                self.call_depth,
             );
             replacements.insert(pending.handle, handle);
         }
@@ -4720,7 +4920,7 @@ impl Runtime<'_> {
                     ("signal".into(), signal_value(process.signal)),
                     ("pid".into(), Value::Int(i64::from(process.pid))),
                 ]);
-                Value::Object(fields)
+                Value::Object(Shared::from(fields))
             };
             let pipeline = outcome.pipeline.into_iter().map(process_value).collect();
             let fields = indexmap::IndexMap::from([
@@ -4730,7 +4930,7 @@ impl Runtime<'_> {
                 ("pid".into(), Value::Int(i64::from(outcome.pid))),
                 ("pipeline".into(), Value::List(pipeline)),
             ]);
-            return Ok(Value::Object(fields));
+            return Ok(Value::Object(Shared::from(fields)));
         }
         if name == "lastJob" && self.shell_depth > 0 {
             return self
@@ -5123,6 +5323,44 @@ fn remap_promises(
     }
 }
 
+/// Fast path for two already-evaluated operands; `None` means "use the
+/// general `eval_operation`".
+#[inline(always)]
+fn eval_int_binary_value(operation: TypedOperation, left: &Value, right: &Value) -> Option<Value> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => eval_int_binary(operation, *a, *b),
+        (Value::Float(a), Value::Float(b)) => Some(match operation {
+            TypedOperation::FloatAdd => Value::Float(a + b),
+            TypedOperation::FloatSub => Value::Float(a - b),
+            TypedOperation::FloatMul => Value::Float(a * b),
+            TypedOperation::FloatLt => Value::Bool(a < b),
+            TypedOperation::FloatGt => Value::Bool(a > b),
+            TypedOperation::FloatLtEq => Value::Bool(a <= b),
+            TypedOperation::FloatGtEq => Value::Bool(a >= b),
+            _ => return None,
+        }),
+        _ => None,
+    }
+}
+
+/// Hot-path int/int arithmetic and comparison. Mirrors the corresponding arms
+/// of `eval_operation` exactly (including plain `+`/`-`/`*` overflow behaviour);
+/// returns `None` for anything that needs the general path (division, errors).
+#[inline(always)]
+fn eval_int_binary(operation: TypedOperation, a: i64, b: i64) -> Option<Value> {
+    Some(match operation {
+        TypedOperation::IntAdd => Value::Int(a + b),
+        TypedOperation::IntSub => Value::Int(a - b),
+        TypedOperation::IntMul => Value::Int(a * b),
+        TypedOperation::IntEq => Value::Bool(a == b),
+        TypedOperation::IntLt => Value::Bool(a < b),
+        TypedOperation::IntGt => Value::Bool(a > b),
+        TypedOperation::IntLtEq => Value::Bool(a <= b),
+        TypedOperation::IntGtEq => Value::Bool(a >= b),
+        _ => return None,
+    })
+}
+
 fn eval_operation(
     operation: TypedOperation,
     values: &[Value],
@@ -5147,7 +5385,7 @@ fn eval_operation(
             binary!(Value::String(a), Value::String(b) => Value::String(format!("{a}{b}")))
         }
         TypedOperation::ShellConcat => {
-            binary!(Value::Shell(a), Value::Shell(b) => Value::Shell(a.clone().then(b.clone())))
+            binary!(Value::Shell(a), Value::Shell(b) => Value::Shell(Shared::from((**a).clone().then((**b).clone()))))
         }
         TypedOperation::IntSub => {
             binary!(Value::Int(a), Value::Int(b) => Value::Int(a - b))
@@ -5455,7 +5693,7 @@ mod tests {
 
         assert_eq!(
             preview.value,
-            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+            Value::List(Shared::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
         );
         assert!(preview.stream_preview);
         assert!(preview.truncated);

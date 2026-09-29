@@ -20,6 +20,7 @@ pub mod package;
 pub mod parser;
 pub mod renderer;
 pub mod resolver;
+mod recursion;
 pub mod runner;
 pub mod semantics;
 pub(crate) mod runtime;
@@ -33,6 +34,7 @@ pub mod task_lowering;
 pub mod tests;
 pub mod token;
 pub mod typechecker;
+pub(crate) mod vm;
 
 pub use ast::Program;
 pub use command::parse_shell_plan;
@@ -57,6 +59,8 @@ pub use runtime::{
     NativeMethodSignature, NativeRegistry, ReceiverMode, ResourceId, RuntimeContext, RuntimeInput, RuntimeOutput,
     Schema, SchemaField, SchemaInferenceError, SchemaType, StreamResource, StreamState, TableValue,
     Value,
+    Shared,
+    ErrorValue,
 };
 pub use session::{
     input_completeness, InputCompleteness, InteractiveEvalResult, InteractivePresentation,

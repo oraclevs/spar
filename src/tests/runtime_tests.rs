@@ -261,3 +261,58 @@ fn compiled_generic_calls_specialize_callers_and_recurse_erased() {
     .unwrap();
     assert_eq!(value, Value::Int(9));
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn compiled_recursion_supports_one_thousand_calls() {
+    let value = execute("function count(n: int) -> int { if n == 0 { return 0; } return 1 + count(n: n - 1); }; function main() -> int { return count(n: 998); };").unwrap();
+    assert_eq!(value, Value::Int(998));
+}
+
+#[test]
+fn compiled_recursion_limit_is_a_catchable_error() {
+    let value = execute("function forever() -> int { return forever(); }; function main() -> int { try { return forever(); } catch error { return 7; } };").unwrap();
+    assert_eq!(value, Value::Int(7));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn compiled_fibonacci_exceeds_the_old_depth_limit() {
+    let value = execute("function fib(n: int) -> int { if n <= 1 { return n; } return fib(n: n - 1) + fib(n: n - 2); }; function main() -> int { return fib(n: 21); };").unwrap();
+    assert_eq!(value, Value::Int(10946));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn compiled_closure_recursion_supports_one_thousand_calls() {
+    let value = execute("function count(n: int) -> int { if n == 0 { return 0; } var next: fn() -> int = || count(n: n - 1); return 1 + next(); }; function main() -> int { return count(n: 499); };").unwrap();
+    assert_eq!(value, Value::Int(499));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn compiled_async_recursion_supports_one_thousand_calls() {
+    let value = execute("async function count(n: int) -> int { if n == 0 { return 0; } return 1 + await count(n: n - 1); }; async function main() -> int { return await count(n: 998); };").unwrap();
+    assert_eq!(value, Value::Int(998));
+}
+
+#[test]
+fn compiled_async_recursion_limit_returns_an_error() {
+    let errors = execute("async function forever() -> int { return await forever(); }; async function main() -> int { return await forever(); };").unwrap_err();
+    assert!(errors.iter().any(|error| error.to_string().contains("maximum function call depth")));
+}
+
+#[test]
+fn compiled_arithmetic_stops_after_the_left_operand_fails() {
+    let value = execute(
+        r#"
+        function left() -> int { return 1 / 0; };
+        function right() -> int { panic(message: "right operand must not run"); };
+        function main() -> int {
+            try { return left() + right(); }
+            catch error { return 7; }
+        };
+        "#,
+    ).unwrap();
+    assert_eq!(value, Value::Int(7));
+}

@@ -1,3 +1,4 @@
+use crate::runtime::value::Shared;
 use crate::ast::{CallableParamType, SparType};
 use crate::runtime::{NativeFunction, NativeMethod, NativeRegistry, Value};
 
@@ -321,7 +322,7 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
             |_context, args| {
                 let mut values = list_receiver(args)?.to_vec();
                 values.reverse();
-                Ok(Value::List(values))
+                Ok(Value::List(Shared::from(values)))
             },
         ),
     ] {
@@ -608,12 +609,12 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
                 };
                 match String::from_utf8(values.clone()) {
                     Ok(value) => Ok(Value::Result(Ok(Box::new(Value::String(value))))),
-                    Err(err) => Ok(Value::Result(Err(Box::new(Value::Error {
+                    Err(err) => Ok(Value::Result(Err(Box::new(Value::Error(Box::new(crate::runtime::value::ErrorValue {
                         message: err.to_string(),
                         kind: "Utf8Error".into(),
                         code: 0,
                         cause: None,
-                    })))),
+                    })))))),
                 }
             },
         ))
@@ -707,10 +708,10 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
                     map_receiver(args)?
                         .iter()
                         .map(|(key, value)| {
-                            Value::Object(indexmap::IndexMap::from([
+                            Value::Object(Shared::from(indexmap::IndexMap::from([
                                 ("key".into(), key),
                                 ("value".into(), value.clone()),
-                            ]))
+                            ])))
                         })
                         .collect(),
                 ))
@@ -1297,7 +1298,7 @@ fn table_is_empty(args: &[Value]) -> Result<Value, crate::SparError> {
 }
 
 fn table_rows(args: &[Value]) -> Result<Value, crate::SparError> {
-    Ok(Value::List(table_receiver(args)?.rows().to_vec()))
+    Ok(Value::List(Shared::from(table_receiver(args)?.rows().to_vec())))
 }
 
 fn table_columns(args: &[Value]) -> Result<Value, crate::SparError> {

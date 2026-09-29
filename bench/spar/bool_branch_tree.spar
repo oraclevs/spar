@@ -1,0 +1,13 @@
+fn walk(n: int, flag: bool) -> int {
+    if n <= 0 {
+        return 1;
+    }
+    if flag && n - (n / 2) * 2 == 0 || !flag && n - (n / 3) * 3 == 0 {
+        return walk(n: n - 1, flag: !flag) + walk(n: n - 2, flag: flag);
+    }
+    return walk(n: n - 1, flag: flag) + 1;
+};
+
+fn main() -> void {
+    println(value: walk(n: 32, flag: true));
+};

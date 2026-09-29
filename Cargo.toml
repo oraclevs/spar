@@ -32,3 +32,15 @@ indexmap = "2"
 regex = "1"
 ureq = "2"
 getrandom = "0.2"
+
+[features]
+# Developer-only allocation counters printed by `spar exec`.
+runtime-stats = []
+# Developer-only sampling profiler: SPAR_PROFILE=1 spar exec ... prints hot symbols.
+profile = ["dep:pprof"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+stacker = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pprof = { version = "0.14", optional = true }

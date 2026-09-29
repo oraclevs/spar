@@ -1,0 +1,12 @@
+fn mix(n: int, k: int) -> int {
+    if n <= 0 {
+        return k;
+    }
+    var a: int = mix(n: n - 1, k: k + 1);
+    var b: int = mix(n: n - 2, k: k * 3 - 1);
+    return (a + b) - (a / 7) * 3 + (n - (n / 5) * 5);
+};
+
+fn main() -> void {
+    println(value: mix(n: 27, k: 1));
+};

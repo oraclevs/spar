@@ -1,3 +1,4 @@
+use crate::runtime::value::Shared;
 use std::path::{Path, PathBuf};
 
 use crate::ast::SparType;
@@ -569,12 +570,12 @@ fn process_status_value(status: spar_process::ProcessStatus) -> Value {
         ("code".to_string(), Value::Int(i64::from(status.code))),
         ("success".to_string(), Value::Bool(status.success)),
         ("pid".to_string(), Value::Int(i64::from(status.pid))),
-        ("pipeline".to_string(), Value::List(Vec::new())),
+        ("pipeline".to_string(), Value::List(Shared::from(Vec::new()))),
     ]);
     if let Some(signal) = status.signal {
         fields.insert("signal".into(), Value::Int(i64::from(signal)));
     }
-    Value::Object(fields)
+    Value::Object(Shared::from(fields))
 }
 
 fn which(context: &crate::runtime::RuntimeContext, program: &str) -> Option<PathBuf> {

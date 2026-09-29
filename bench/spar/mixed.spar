@@ -1,0 +1,28 @@
+struct Point {
+    x: int;
+    y: int;
+};
+
+fn norm2(p: Point) -> int {
+    return p.x * p.x + p.y * p.y;
+};
+
+fn label(i: int) -> str {
+    return "item-" + i.toString();
+};
+
+fn work(n: int) -> int {
+    var mut total: int = 0;
+    var mut chars: int = 0;
+    for i in range(end: n) {
+        var p: Point = Point(x: i, y: i + 1);
+        total = total + norm2(p: p);
+        var s: str = label(i: i);
+        chars = chars + s.length();
+    }
+    return total + chars;
+};
+
+fn main() -> void {
+    println(value: work(n: 300000));
+};

@@ -5,7 +5,7 @@ use crate::depgraph::DeclId;
 use crate::error::{Span, SparError};
 use crate::resolver::SymbolTable;
 
-const MAX_CALL_DEPTH: usize = 20;
+use crate::recursion::MAX_CALL_DEPTH;
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
@@ -2997,6 +2997,17 @@ impl Evaluator {
     }
 
     fn eval_call(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        call_span: &Span,
+        caller_scope: &HashMap<String, ConfigValue>,
+    ) -> EvalResult_ {
+        crate::recursion::with_stack(|| self.eval_call_inner(name, args, call_span, caller_scope))
+    }
+
+    #[inline(never)]
+    fn eval_call_inner(
         &mut self,
         name: &str,
         args: &[CallArg],

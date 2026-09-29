@@ -1,0 +1,10 @@
+fn ft(n: int) -> float {
+    if n <= 1 {
+        return 1.5;
+    }
+    return ft(n: n - 1) * 1.0000001 + ft(n: n - 2) / 2.0;
+};
+
+fn main() -> void {
+    println(value: ft(n: 30));
+};

@@ -1,3 +1,4 @@
+use crate::runtime::value::Shared;
 use crate::error::{Span, SparError};
 use crate::runtime::Value;
 
@@ -120,10 +121,10 @@ where
     I: IntoIterator<Item = (K, Value)>,
 {
     Value::Object(
-        fields
+        Shared::from(fields
             .into_iter()
             .map(|(key, value)| (key.into(), value))
-            .collect::<indexmap::IndexMap<_, _>>(),
+            .collect::<indexmap::IndexMap<_, _>>()),
     )
 }
 
@@ -263,7 +264,7 @@ fn decode_json_list(
             decode_json_at(value, element, environment, &format!("{path}[{index}]"))
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(Value::List)
+        .map(|items| Value::List(Shared::from(items)))
 }
 
 fn decode_json_map(
@@ -347,7 +348,7 @@ fn decode_named_json(
     }
     // Unknown fields are intentionally ignored. Remote APIs can add fields
     // without breaking a typed consumer that only declares what it uses.
-    Ok(Value::Object(output))
+    Ok(Value::Object(Shared::from(output)))
 }
 
 fn named_json_fields(

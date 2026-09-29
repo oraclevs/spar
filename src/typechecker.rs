@@ -236,7 +236,7 @@ pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) ->
     }
 }
 
-fn mentions_type_parameter(ty: &SparType) -> bool {
+pub(crate) fn mentions_type_parameter(ty: &SparType) -> bool {
     match ty {
         SparType::TypeParameter(_) => true,
         SparType::List(inner) => mentions_type_parameter(inner),

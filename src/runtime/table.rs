@@ -53,14 +53,15 @@ impl TableValue {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::value::Shared;
 
     use super::*;
 
     fn row(name: &str, age: i64) -> Value {
-        Value::Object(indexmap::IndexMap::from([
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String(name.into())),
             ("age".into(), Value::Int(age)),
-        ]))
+        ])))
     }
 
     #[test]

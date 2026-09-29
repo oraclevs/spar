@@ -1,3 +1,4 @@
+use spar::Shared;
 use std::fs;
 
 use spar::Engine;
@@ -448,14 +449,14 @@ fn schema_inference_over_records_is_public_and_deterministic() {
     use spar::{Schema, SchemaField, SchemaType, Value};
 
     let rows = vec![
-        Value::Object(indexmap::IndexMap::from([
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Obi".into())),
             ("age".into(), Value::Int(24)),
-        ])),
-        Value::Object(indexmap::IndexMap::from([
+        ]))),
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Ada".into())),
             ("active".into(), Value::Bool(true)),
-        ])),
+        ]))),
     ];
 
     let schema = Schema::infer_records(&rows).unwrap();
@@ -495,14 +496,14 @@ fn materialized_table_preserves_rows_schema_and_slice_operations() {
     use spar::{SchemaType, TableValue, Value};
 
     let rows = vec![
-        Value::Object(indexmap::IndexMap::from([
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Obi".into())),
             ("age".into(), Value::Int(24)),
-        ])),
-        Value::Object(indexmap::IndexMap::from([
+        ]))),
+        Value::Object(Shared::from(indexmap::IndexMap::from([
             ("name".into(), Value::String("Ada".into())),
             ("age".into(), Value::Int(31)),
-        ])),
+        ]))),
     ];
     let table = TableValue::from_records(rows.clone()).unwrap();
 

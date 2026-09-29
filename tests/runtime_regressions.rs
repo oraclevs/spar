@@ -1,3 +1,4 @@
+use spar::Shared;
 use spar::{CompileOptions, Engine, Value};
 use std::time::Instant;
 
@@ -167,11 +168,11 @@ fn map_value_supports_non_string_keys_including_bool_and_float() {
     let Value::Map(map) = &mut by_list else {
         unreachable!()
     };
-    let list_key = Value::List(vec![Value::Int(1), Value::Int(2)]);
+    let list_key = Value::List(Shared::from(vec![Value::Int(1), Value::Int(2)]));
     map.insert(list_key.clone(), Value::String("listy".into()));
     assert_eq!(map.get(&list_key), Some(&Value::String("listy".into())));
     assert_eq!(
-        map.get(&Value::List(vec![Value::Int(9)])),
+        map.get(&Value::List(Shared::from(vec![Value::Int(9)]))),
         None,
         "a different Other key must not collide despite sharing a hash bucket"
     );

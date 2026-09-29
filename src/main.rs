@@ -9,6 +9,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(feature = "runtime-stats", feature = "profile"))]
+mod stats;
+#[cfg(feature = "runtime-stats")]
+#[global_allocator]
+static ALLOC: stats::CountingAlloc = stats::CountingAlloc;
+
 /// Builds the `ExprEval` callback `runner::execute`/`CommandTemplate::render`
 /// use to resolve a `TemplatePart::Expr` (a `${...}` interpolation that
 /// mixes a task parameter with other values) at task-run time, once
@@ -169,6 +175,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match parse_args(&args) {
         Cmd::Check(path) => cmd_check(&path),
+        Cmd::Dis(path) => cmd_dis(&path),
         Cmd::Emit { path, format } => cmd_emit(&path, format),
         Cmd::Fmt { path, check } => cmd_fmt(&path, check),
         Cmd::Tasks { path, global, all } => cmd_tasks(path, global, all),
@@ -210,6 +217,7 @@ fn main() {
 #[derive(Debug)]
 enum Cmd {
     Check(String),
+    Dis(String),
     Emit {
         path: String,
         format: EmitFormat,
@@ -278,6 +286,10 @@ fn parse_args(args: &[String]) -> Cmd {
         Some("check") => match args.get(2) {
             Some(p) => Cmd::Check(p.clone()),
             None => Cmd::BadArgs("`check` requires a file path".into()),
+        },
+        Some("dis") => match args.get(2) {
+            Some(p) => Cmd::Dis(p.clone()),
+            None => Cmd::BadArgs("`dis` requires a file path".into()),
         },
         Some("emit") => parse_emit_args(&args[2..]),
         Some("fmt") => match (args.get(2).map(String::as_str), args.get(3)) {
@@ -771,6 +783,20 @@ fn compile_options_for_path_or_exit(path: &Path) -> CompileOptions {
 
 // ── `check` command ───────────────────────────────────────────────────────────
 
+/// Developer command: print the register bytecode of every function the VM
+/// tier lowered (functions not listed run on the tree-walking runtime).
+fn cmd_dis(path: &str) {
+    match Engine::new(compile_options_for_path_or_exit(Path::new(path))).compile_path(Path::new(path)) {
+        Ok(program) => print!("{}", program.disassemble()),
+        Err(errors) => {
+            let src = read_file(path);
+            let renderer = make_renderer(&src, path);
+            eprintln!("{}", renderer.render_all(&errors));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_check(path: &str) {
     let src = read_file(path);
     let renderer = make_renderer(&src, path);
@@ -1198,10 +1224,18 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
 // ── `exec` command ────────────────────────────────────────────────────────────
 
 fn cmd_exec(path: &str, program_args: Vec<String>) {
+    #[cfg(feature = "profile")]
+    let profiler = stats::start_profiler();
     match Engine::new(compile_options_for_path_or_exit(Path::new(path)))
         .execute_path_with_args(Path::new(path), program_args)
     {
-        Ok(outcome) => std::process::exit(outcome.exit_status),
+        Ok(outcome) => {
+            #[cfg(feature = "runtime-stats")]
+            stats::report();
+            #[cfg(feature = "profile")]
+            stats::report_profile(profiler);
+            std::process::exit(outcome.exit_status)
+        }
         Err(errors) => {
             let src = read_file(path);
             let renderer = make_renderer(&src, path);

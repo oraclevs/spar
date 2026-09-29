@@ -1,10 +1,130 @@
 use indexmap::IndexMap;
+use std::sync::Arc;
 
 use crate::error::{Span, SparError};
 use crate::evaluator::{ConfigValue, PromiseHandle};
 
 use super::resource::ResourceId;
 use super::{ClosureValue, MixedShellValue, Schema, ShellProgramValue, TableValue};
+
+/// Payload of `Value::Error`, boxed to keep `Value` small.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrorValue {
+    pub message: String,
+    pub kind: String,
+    pub code: i64,
+    pub cause: Option<Box<Value>>,
+}
+
+/// Copy-on-write shared payload for the large `Value` variants.
+///
+/// Cloning is a reference-count bump; any mutation goes through `DerefMut`,
+/// which clones the payload first if it is shared (`Arc::make_mut`). This
+/// preserves Spar's value semantics while making reads of records and lists
+/// O(1) instead of a deep copy, and keeps `Value` small.
+pub struct Shared<T>(Arc<T>);
+
+impl<T> Clone for Shared<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Shared(Arc::clone(&self.0))
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Shared<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
+    }
+}
+
+impl<T> From<T> for Shared<T> {
+    #[inline]
+    fn from(value: T) -> Self {
+        Shared(Arc::new(value))
+    }
+}
+
+impl<T: Default> Default for Shared<T> {
+    fn default() -> Self {
+        Shared(Arc::new(T::default()))
+    }
+}
+
+impl<T: Clone> Shared<T> {
+    /// Takes the payload out, cloning only if it is still shared.
+    #[inline]
+    pub fn into_inner(self) -> T {
+        Arc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone())
+    }
+}
+
+impl IntoIterator for Shared<Vec<Value>> {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_inner().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Shared<Vec<Value>> {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl FromIterator<Value> for Shared<Vec<Value>> {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        Shared::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl IntoIterator for Shared<IndexMap<String, Value>> {
+    type Item = (String, Value);
+    type IntoIter = indexmap::map::IntoIter<String, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_inner().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Shared<IndexMap<String, Value>> {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = indexmap::map::Iter<'a, String, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl FromIterator<(String, Value)> for Shared<IndexMap<String, Value>> {
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
+        Shared::from(iter.into_iter().collect::<IndexMap<_, _>>())
+    }
+}
+
+pub type ObjectMap = Shared<IndexMap<String, Value>>;
+pub type ListVec = Shared<Vec<Value>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -18,25 +138,20 @@ pub enum Value {
     /// Each element is already one argv entry; the shell runtime must never
     /// join or re-tokenize these strings.
     Args(Vec<String>),
-    List(Vec<Value>),
-    Object(IndexMap<String, Value>),
+    List(ListVec),
+    Object(ObjectMap),
     Map(MapValue),
     Option(std::option::Option<Box<Value>>),
     Result(std::result::Result<Box<Value>, Box<Value>>),
-    Table(TableValue),
-    Schema(Schema),
-    Error {
-        message: String,
-        kind: String,
-        code: i64,
-        cause: Option<Box<Value>>,
-    },
-    Shell(spar_command::ShellPlan),
-    MixedShell(MixedShellValue),
-    ShellProgram(ShellProgramValue),
+    Table(Shared<TableValue>),
+    Schema(Shared<Schema>),
+    Error(Box<ErrorValue>),
+    Shell(Shared<spar_command::ShellPlan>),
+    MixedShell(Shared<MixedShellValue>),
+    ShellProgram(Shared<ShellProgramValue>),
     Promise(PromiseHandle),
     Resource(ResourceId),
-    Closure(ClosureValue),
+    Closure(Shared<ClosureValue>),
     Function(crate::compiled::FunctionId),
 }
 
@@ -53,7 +168,7 @@ pub enum Value {
 /// Finding 17 in that project.
 #[derive(Clone, Debug, Default)]
 pub struct MapValue {
-    entries: IndexMap<MapKey, Value>,
+    entries: Shared<IndexMap<MapKey, Value>>,
 }
 
 /// A hashable, `Eq` projection of a map key. Spar's `Map<K,V>` keys are
@@ -139,7 +254,7 @@ impl std::hash::Hash for MapKey {
 impl MapValue {
     pub fn new() -> Self {
         Self {
-            entries: IndexMap::new(),
+            entries: IndexMap::new().into(),
         }
     }
 
@@ -225,6 +340,7 @@ impl IntoIterator for MapValue {
 
     fn into_iter(self) -> Self::IntoIter {
         self.entries
+            .into_inner()
             .into_iter()
             .map(|(key, value)| (key.to_value(), value))
             .collect::<Vec<_>>()
@@ -256,7 +372,7 @@ impl Value {
             Value::Result(_) => "Result",
             Value::Table(_) => "Table",
             Value::Schema(_) => "Schema",
-            Value::Error { .. } => "error",
+            Value::Error(_) => "error",
             Value::Shell(_) | Value::MixedShell(_) | Value::ShellProgram(_) => "shell",
             Value::Promise(_) => "Promise",
             Value::Resource(_) => "resource",
@@ -314,12 +430,8 @@ impl Value {
             Value::Result(Err(value)) => format!("Err({})", value.render_with_context(true)),
             Value::Table(table) => format!("<table rows={}>", table.len()),
             Value::Schema(schema) => format!("<schema fields={}>", schema.fields.len()),
-            Value::Error {
-                message,
-                kind,
-                code,
-                cause,
-            } => {
+            Value::Error(error) => {
+                let ErrorValue { message, kind, code, cause } = &**error;
                 let mut rendered = format!(
                     "error(kind: {kind:?}, message: {message:?}, code: {code}"
                 );
@@ -366,20 +478,20 @@ impl Value {
                 Ok(value) => Ok(Box::new(Value::from_config(*value))),
                 Err(value) => Err(Box::new(Value::from_config(*value))),
             }),
-            ConfigValue::Shell(plan) => Value::Shell(plan),
-            ConfigValue::ShellProgram(program) => Value::ShellProgram(program),
+            ConfigValue::Shell(plan) => Value::Shell(Shared::from(plan)),
+            ConfigValue::ShellProgram(program) => Value::ShellProgram(Shared::from(program)),
             ConfigValue::Promise(handle) => Value::Promise(handle),
             ConfigValue::Error {
                 message,
                 kind,
                 code,
                 cause,
-            } => Value::Error {
+            } => Value::Error(Box::new(ErrorValue {
                 message,
                 kind,
                 code,
                 cause: cause.map(|cause| Box::new(Value::from_config(*cause))),
-            },
+            })),
         }
     }
 
@@ -405,7 +517,7 @@ impl Value {
                 Ok(value) | Err(value) => value.is_data_comparable(),
             },
             Value::Table(table) => table.rows().iter().all(Value::is_data_comparable),
-            Value::Schema(_) | Value::Error { .. } => true,
+            Value::Schema(_) | Value::Error(_) => true,
             Value::Shell(_)
             | Value::MixedShell(_)
             | Value::ShellProgram(_)
@@ -482,12 +594,9 @@ impl Value {
                 message: "schema values cannot be converted to configuration values directly".into(),
                 span: span.clone(),
             }),
-            Value::Error {
-                message,
-                kind,
-                code,
-                cause,
-            } => Ok(ConfigValue::Error {
+            Value::Error(error) => {
+                let ErrorValue { message, kind, code, cause } = *error;
+                Ok(ConfigValue::Error {
                 message,
                 kind,
                 code,
@@ -495,13 +604,14 @@ impl Value {
                     Some(cause) => Some(Box::new(cause.try_into_config(span)?)),
                     None => None,
                 },
-            }),
-            Value::Shell(plan) => Ok(ConfigValue::Shell(plan)),
+            })
+            }
+            Value::Shell(plan) => Ok(ConfigValue::Shell((plan).into_inner())),
             Value::MixedShell(_) => Err(SparError::EvalError {
                 message: "mixed shell values are runtime-only and cannot be converted to configuration values".into(),
                 span: span.clone(),
             }),
-            Value::ShellProgram(program) => Ok(ConfigValue::ShellProgram(program)),
+            Value::ShellProgram(program) => Ok(ConfigValue::ShellProgram((program).into_inner())),
             Value::Promise(handle) => Ok(ConfigValue::Promise(handle)),
             Value::Resource(_) => Err(SparError::EvalError {
                 message: "runtime resource values cannot be converted to configuration values"
@@ -548,18 +658,18 @@ mod tests {
             Value::Bool(true),
             Value::String("x".into()),
             Value::Bytes(vec![1, 2]),
-            Value::List(vec![Value::String("x".into())]),
+            Value::List(Shared::from(vec![Value::String("x".into())])),
             Value::Map(vec![(Value::String("k".into()), Value::Int(1))].into()),
             Value::Option(None),
             Value::Option(Some(Box::new(Value::Int(1)))),
             Value::Result(Ok(Box::new(Value::Int(1)))),
             Value::Result(Err(Box::new(Value::String("bad".into())))),
-            Value::Error {
+            Value::Error(Box::new(ErrorValue {
                 message: "broken".into(),
                 kind: "test".into(),
                 code: 7,
                 cause: None,
-            },
+            })),
         ];
         for sample in samples {
             let rendered = sample.render_display();
@@ -595,7 +705,7 @@ mod tests {
             module: crate::compiled::ModuleId(0),
             span: Span::dummy(),
         };
-        let error = Value::Closure(closure)
+        let error = Value::Closure(Shared::from(closure))
             .try_into_config(&Span::dummy())
             .unwrap_err();
         assert!(error.to_string().contains("function values"));

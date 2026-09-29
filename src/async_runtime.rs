@@ -58,7 +58,8 @@ pub(crate) struct TaskInvocation {
     pub(crate) function: FunctionId,
     pub(crate) arguments: Vec<Value>,
     pub(crate) context: crate::runtime::context::RuntimeContext,
-    /// The spawning `Runtime`'s own `call_depth` at spawn time, plus one.
+    /// The spawning `Runtime`'s `call_depth`. Entering the task function
+    /// increments it once, just as a synchronous function call does.
     /// Each worker-side `Runtime` built to run this task starts its
     /// `call_depth` from here instead of 0 — otherwise `MAX_CALL_DEPTH`
     /// never trips for recursion that goes through `async fn`/`await`

@@ -1,3 +1,4 @@
+use crate::runtime::value::Shared;
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -442,7 +443,7 @@ fn project_record(value: Value, fields: &[String]) -> Result<Value, SparError> {
         })?;
         selected.insert(field.clone(), value.clone());
     }
-    Ok(Value::Object(selected))
+    Ok(Value::Object(Shared::from(selected)))
 }
 
 #[cfg(test)]

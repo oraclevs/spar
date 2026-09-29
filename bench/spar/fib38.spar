@@ -1,0 +1,12 @@
+fn fib(n: int) -> int {
+    if n <= 1 {
+        return n;
+    }
+
+    return fib(n: n - 1) + fib(n: n - 2);
+};
+
+fn main() -> void {
+    var result: int = fib(n: 38);
+    println(value: result);
+};

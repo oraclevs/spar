@@ -65,10 +65,9 @@ impl JitProgram {
             .ok()?
             .finish(settings::Flags::new(flags))
             .ok()?;
-        let mut module = JITModule::new(JITBuilder::with_isa(
-            isa,
-            cranelift_module::default_libcall_names(),
-        ));
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol("spar_fmod", spar_fmod as *const u8);
+        let mut module = JITModule::new(builder);
 
         let count = vm.function_count();
         let mut ids: Vec<Option<FuncId>> = vec![None; count];
@@ -204,6 +203,11 @@ impl JitProgram {
         };
         Some(result as u64)
     }
+}
+
+/// Host `fmod` for float `%`: sign of the dividend, exactly Rust's `f64 % f64`.
+extern "C" fn spar_fmod(a: f64, b: f64) -> f64 {
+    a % b
 }
 
 /// Basic-block leaders: the entry, every jump target, and every op that
@@ -453,6 +457,30 @@ fn lower_function(
                 let r = b.ins().sdiv(x, y);
                 set(&mut b, dst, r);
             }
+            Op::RemI { dst, a, b: rb, at } => {
+                let x = get(&mut b, a);
+                let y = get(&mut b, rb);
+                let ok = b.create_block();
+                let fail_block = b.create_block();
+                b.set_cold_block(fail_block);
+                b.ins().brif(y, ok, &[], fail_block, &[]);
+                b.switch_to_block(fail_block);
+                fail!(1, at);
+                b.switch_to_block(ok);
+                // i64::MIN % -1 overflows (and srem would trap): report it.
+                let is_min = b.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                let is_neg1 = b.ins().icmp_imm_s(IntCC::Equal, y, -1);
+                let both = b.ins().band(is_min, is_neg1);
+                let safe = b.create_block();
+                let overflow_block = b.create_block();
+                b.set_cold_block(overflow_block);
+                b.ins().brif(both, overflow_block, &[], safe, &[]);
+                b.switch_to_block(overflow_block);
+                fail!(3, ip);
+                b.switch_to_block(safe);
+                let r = b.ins().srem(x, y);
+                set(&mut b, dst, r);
+            }
             Op::AddII { dst, a, imm } => {
                 let x = get(&mut b, a);
                 let y = b.ins().iconst(types::I64, imm);
@@ -501,6 +529,33 @@ fn lower_function(
                 fail!(1, at);
                 b.switch_to_block(ok);
                 let r = b.ins().fdiv(fx, fy);
+                let r = from_f(&mut b, r);
+                set(&mut b, dst, r);
+            }
+            Op::RemF { dst, a, b: rb, at } => {
+                let x = get(&mut b, a);
+                let y = get(&mut b, rb);
+                let (fx, fy) = (as_f(&mut b, x), as_f(&mut b, y));
+                let zero_f = b.ins().f64const(0.0);
+                let is_zero = b.ins().fcmp(FloatCC::Equal, fy, zero_f);
+                let ok = b.create_block();
+                let fail_block = b.create_block();
+                b.set_cold_block(fail_block);
+                b.ins().brif(is_zero, fail_block, &[], ok, &[]);
+                b.switch_to_block(fail_block);
+                fail!(1, at);
+                b.switch_to_block(ok);
+                // Cranelift has no frem; call the host `fmod` (same result as Rust's `%`).
+                let mut sig = module.make_signature();
+                sig.params.push(AbiParam::new(types::F64));
+                sig.params.push(AbiParam::new(types::F64));
+                sig.returns.push(AbiParam::new(types::F64));
+                let callee = module
+                    .declare_function("spar_fmod", Linkage::Import, &sig)
+                    .ok()?;
+                let callee = module.declare_func_in_func(callee, b.func);
+                let call = b.ins().call(callee, &[fx, fy]);
+                let r = b.inst_results(call)[0];
                 let r = from_f(&mut b, r);
                 set(&mut b, dst, r);
             }

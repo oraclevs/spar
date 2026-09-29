@@ -543,3 +543,51 @@ fn while_bodies_run_the_tree_walker_when_forced_off_every_tier() {
     let outcome = engine.execute_compiled(&program).expect("runs");
     assert_eq!(outcome.exit_status, 9 * 1_000_000 + 8 * 10_000 + 111 + 20 + 7);
 }
+
+// ── % modulo ────────────────────────────────────────────────────────────────
+
+const REM_PROGRAM: &str = r#"
+    fn rem(a: int, b: int) -> int { return a % b; };
+    fn remf(a: float, b: float) -> float { return a % b; };
+    fn main() -> int {
+        var mut score: int = 0;
+        // Rust semantics: the result takes the sign of the dividend.
+        if rem(a: 7, b: 3) == 1 { score = score + 1; }
+        if rem(a: -7, b: 3) == -1 { score = score + 2; }
+        if rem(a: 7, b: -3) == 1 { score = score + 4; }
+        if rem(a: -7, b: -3) == -1 { score = score + 8; }
+        if rem(a: 6, b: 3) == 0 { score = score + 16; }
+        if remf(a: 7.5, b: 2.0) == 1.5 { score = score + 32; }
+        if remf(a: -7.5, b: 2.0) == -1.5 { score = score + 64; }
+        var mut i: int = 0;
+        var mut evens: int = 0;
+        while i < 100 {
+            if i % 2 == 0 { evens = evens + 1; }
+            i = i + 1;
+        }
+        return score * 1000 + evens;
+    };
+"#;
+
+#[test]
+fn modulo_follows_the_dividend_sign_on_every_tier() {
+    let expected = 127 * 1000 + 50;
+    assert_eq!(differential_engine(REM_PROGRAM), Ok(expected));
+    assert_eq!(tier2_differential(REM_PROGRAM), Ok(expected));
+}
+
+#[test]
+fn modulo_by_zero_and_overflow_are_runtime_errors_on_every_tier() {
+    for (body, needle) in [
+        ("fn f(a: int, b: int) -> int { return a % b; }; fn main() -> int { return f(a: 5, b: 0); };", "division by zero"),
+        ("fn f(a: float, b: float) -> float { return a % b; }; fn main() -> int { var x: float = f(a: 5.0, b: 0.0); return 0; };", "division by zero"),
+        ("fn f(a: int, b: int) -> int { return a % b; }; fn main() -> int { return f(a: -9223372036854775807 - 1, b: -1); };", "overflow"),
+    ] {
+        let vm = run_engine(body, true).unwrap_err();
+        let tree = run_engine(body, false).unwrap_err();
+        let bytecode = run_engine_tier2(body, true).unwrap_err();
+        for message in [&vm, &tree, &bytecode] {
+            assert!(message.contains(needle), "{needle}: {message}");
+        }
+    }
+}

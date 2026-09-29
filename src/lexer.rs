@@ -1208,6 +1208,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Token::Star
             }
+            b'%' => {
+                self.advance();
+                Token::Percent
+            }
             b'=' => {
                 if self.peek_at(1) == Some(b'=') {
                     self.advance();

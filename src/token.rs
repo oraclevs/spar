@@ -46,6 +46,7 @@ pub enum Token {
     Minus,
     Star,
     Slash,
+    Percent,
 
     // Assignment and fallback
     Eq,
@@ -184,6 +185,7 @@ impl Token {
             Token::Minus => "'-'",
             Token::Star => "'*'",
             Token::Slash => "'/'",
+            Token::Percent => "'%'",
             Token::Var => "'var'",
             Token::KwMut => "'mut'",
             Token::Export => "'export'",

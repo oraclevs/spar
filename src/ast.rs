@@ -702,6 +702,8 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `%` — remainder with the sign of the dividend (Rust semantics).
+    Rem,
     Fallback,
     Eq,
     NotEq,

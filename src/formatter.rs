@@ -870,6 +870,7 @@ fn binop_symbol(op: &BinOp) -> &'static str {
         BinOp::Sub => "-",
         BinOp::Mul => "*",
         BinOp::Div => "/",
+        BinOp::Rem => "%",
         BinOp::Fallback => "??",
         BinOp::Eq => "==",
         BinOp::NotEq => "!=",
@@ -890,7 +891,7 @@ fn binop_prec(op: &BinOp) -> u8 {
         BinOp::And => 3,
         BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 4,
         BinOp::Add | BinOp::Sub => 5,
-        BinOp::Mul | BinOp::Div => 6,
+        BinOp::Mul | BinOp::Div | BinOp::Rem => 6,
     }
 }
 

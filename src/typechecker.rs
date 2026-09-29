@@ -3061,7 +3061,7 @@ impl<'a> TypeChecker<'a> {
                 (SparType::Shell, SparType::Shell) => Some(SparType::Shell),
                 _ => None,
             },
-            BinOp::Sub | BinOp::Mul | BinOp::Div => match (lhs, rhs) {
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => match (lhs, rhs) {
                 (SparType::Int, SparType::Int) => Some(SparType::Int),
                 (SparType::Float, SparType::Float) => Some(SparType::Float),
                 _ => None,
@@ -3361,7 +3361,7 @@ impl<'a> TypeChecker<'a> {
                                 | (SparType::Float, SparType::Float)
                                 | (SparType::Shell, SparType::Shell)
                         ),
-                        BinOp::Sub | BinOp::Mul | BinOp::Div => matches!(
+                        BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => matches!(
                             (l, r),
                             (SparType::Int, SparType::Int) | (SparType::Float, SparType::Float)
                         ),
@@ -3389,6 +3389,7 @@ impl<'a> TypeChecker<'a> {
                             BinOp::Sub => "-",
                             BinOp::Mul => "*",
                             BinOp::Div => "/",
+                            BinOp::Rem => "%",
                             BinOp::Fallback => "??",
                             BinOp::Eq => "==",
                             BinOp::NotEq => "!=",
@@ -5885,7 +5886,7 @@ impl<'a> TypeChecker<'a> {
                     None
                 }
             }
-            BinOp::Sub | BinOp::Mul | BinOp::Div => {
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 if lty == rty && matches!(lty, SparType::Int | SparType::Float) {
                     Some(lty)
                 } else {

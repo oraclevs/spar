@@ -92,6 +92,12 @@ pub(crate) enum Op {
         b: Reg,
         at: u32,
     },
+    RemI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        at: u32,
+    },
     AddII {
         dst: Reg,
         a: Reg,
@@ -187,6 +193,12 @@ pub(crate) enum Op {
         b: Reg,
     },
     DivF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        at: u32,
+    },
+    RemF {
         dst: Reg,
         a: Reg,
         b: Reg,
@@ -1059,6 +1071,7 @@ impl<'a> Lowerer<'a> {
                     T::IntSub => Op::SubI { dst, a, b },
                     T::IntMul => Op::MulI { dst, a, b },
                     T::IntDiv => Op::DivI { dst, a, b, at },
+                    T::IntRem => Op::RemI { dst, a, b, at },
                     T::IntEq => Op::EqI { dst, a, b },
                     T::IntNotEq => Op::NeI { dst, a, b },
                     T::IntLt => Op::LtI { dst, a, b },
@@ -1069,6 +1082,7 @@ impl<'a> Lowerer<'a> {
                     T::FloatSub => Op::SubF { dst, a, b },
                     T::FloatMul => Op::MulF { dst, a, b },
                     T::FloatDiv => Op::DivF { dst, a, b, at },
+                    T::FloatRem => Op::RemF { dst, a, b, at },
                     T::FloatEq => Op::EqF { dst, a, b },
                     T::FloatNotEq => Op::NeF { dst, a, b },
                     T::FloatLt => Op::LtF { dst, a, b },
@@ -1293,6 +1307,16 @@ impl VmProgram {
                         None => return Err(overflow(&current.spans[ip], "division")),
                     }
                 }
+                Op::RemI { dst, a, b, at } => {
+                    let divisor = i!(b);
+                    if divisor == 0 {
+                        return Err(division_by_zero(&current.spans[at as usize]));
+                    }
+                    match i!(a).checked_rem(divisor) {
+                        Some(v) => set!(dst, v as u64),
+                        None => return Err(overflow(&current.spans[ip], "remainder")),
+                    }
+                }
                 Op::AddII { dst, a, imm } => match i!(a).checked_add(imm) {
                     Some(v) => set!(dst, v as u64),
                     None => return Err(overflow(&current.spans[ip], "addition")),
@@ -1327,6 +1351,13 @@ impl VmProgram {
                         return Err(division_by_zero(&current.spans[at as usize]));
                     }
                     set!(dst, (f!(a) / divisor).to_bits())
+                }
+                Op::RemF { dst, a, b, at } => {
+                    let divisor = f!(b);
+                    if divisor == 0.0 {
+                        return Err(division_by_zero(&current.spans[at as usize]));
+                    }
+                    set!(dst, (f!(a) % divisor).to_bits())
                 }
                 Op::NegF { dst, a } => set!(dst, (-f!(a)).to_bits()),
                 Op::EqF { dst, a, b } => set!(dst, (f!(a) == f!(b)) as u64),
@@ -1506,6 +1537,7 @@ fn overflow_what(op: &Op) -> &'static str {
         Op::MulI { .. } => "multiplication",
         Op::NegI { .. } => "negation",
         Op::DivI { .. } => "division",
+        Op::RemI { .. } => "remainder",
         _ => "arithmetic",
     }
 }

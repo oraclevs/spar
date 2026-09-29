@@ -37,6 +37,8 @@ pub(crate) enum TypedOperation {
     FloatMul,
     IntDiv,
     FloatDiv,
+    IntRem,
+    FloatRem,
     IntEq,
     FloatEq,
     StringEq,

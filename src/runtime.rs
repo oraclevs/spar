@@ -5465,6 +5465,25 @@ fn eval_operation(
             [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a / b)),
             _ => Err(operation_type_error(operation, values, span)),
         },
+        TypedOperation::IntRem => match values {
+            [Value::Int(_), Value::Int(0)] => Err(SparError::EvalError {
+                message: "division by zero".into(),
+                span: span.clone(),
+            }),
+            [Value::Int(a), Value::Int(b)] => a
+                .checked_rem(*b)
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("remainder", span)),
+            _ => Err(operation_type_error(operation, values, span)),
+        },
+        TypedOperation::FloatRem => match values {
+            [Value::Float(_), Value::Float(b)] if *b == 0.0 => Err(SparError::EvalError {
+                message: "division by zero".into(),
+                span: span.clone(),
+            }),
+            [Value::Float(a), Value::Float(b)] => Ok(Value::Float(a % b)),
+            _ => Err(operation_type_error(operation, values, span)),
+        },
         TypedOperation::IntEq => {
             binary!(Value::Int(a), Value::Int(b) => Value::Bool(a == b))
         }

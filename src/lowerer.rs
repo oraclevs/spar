@@ -1695,6 +1695,8 @@ fn typed_binary(operation: &BinOp, operand: &SparType) -> Option<TypedOperation>
         (BinOp::Mul, SparType::Float) => TypedOperation::FloatMul,
         (BinOp::Div, SparType::Int) => TypedOperation::IntDiv,
         (BinOp::Div, SparType::Float) => TypedOperation::FloatDiv,
+        (BinOp::Rem, SparType::Int) => TypedOperation::IntRem,
+        (BinOp::Rem, SparType::Float) => TypedOperation::FloatRem,
         (BinOp::Eq, SparType::Int) => TypedOperation::IntEq,
         (BinOp::Eq, SparType::Float) => TypedOperation::FloatEq,
         (BinOp::Eq, SparType::Str) => TypedOperation::StringEq,

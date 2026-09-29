@@ -2625,6 +2625,23 @@ impl Evaluator {
                     Ok(ConfigValue::Float(a / b))
                 }
             }
+            (BinOp::Rem, ConfigValue::Int(_), ConfigValue::Int(0)) => {
+                Err(EvalErr::DivisionByZero(op.span.clone()))
+            }
+            (BinOp::Rem, ConfigValue::Int(a), ConfigValue::Int(b)) => a
+                .checked_rem(*b)
+                .map(ConfigValue::Int)
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "integer overflow in remainder".into(),
+                    span: op.span.clone(),
+                }),
+            (BinOp::Rem, ConfigValue::Float(a), ConfigValue::Float(b)) => {
+                if *b == 0.0 {
+                    Err(EvalErr::DivisionByZero(op.span.clone()))
+                } else {
+                    Ok(ConfigValue::Float(a % b))
+                }
+            }
             (op_kind, l, r) => unreachable!(
                 "evaluator reached invalid binop {:?} on {} and {} — \
                  type checker should have caught this",

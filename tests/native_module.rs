@@ -195,3 +195,56 @@ fn mutable_borrow_of_list_is_rejected() {
     let err = run_rust("function main() -> int { var xs: [float] = [1.0, 2.0]; fastArray::scale(buf: xs, k: 2.0); return 0; };");
     assert!(err.is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// C++ module (spar_native.hpp): strings, RAII borrows, exception conversion.
+// ---------------------------------------------------------------------------------------------
+
+fn cpp_textkit() -> &'static Path {
+    static LIB: OnceLock<PathBuf> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let dir = sys_dir().join("examples/native/cpp-textkit");
+        let out = Command::new(dir.join("build.sh")).output().expect("c++");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        dir.join("libtextkit.so")
+    })
+}
+
+fn run_cpp(source: &str) -> Result<i32, String> {
+    let mut natives = CompileOptions::default().natives;
+    native_module::load_into_registry(cpp_textkit(), &mut natives).expect("load cpp module");
+    Engine::new(CompileOptions { natives, ..CompileOptions::default() })
+        .execute_source(source)
+        .map(|o| o.exit_status)
+        .map_err(|e| e.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("\n"))
+}
+
+#[test]
+fn cpp_module_strings_buffers_and_exceptions() {
+    assert_eq!(
+        run_cpp(r#"function main() -> int { if textKit::upper(text: "abc") != "ABC" { return 1; } if textKit::mean(values: [1.0, 2.0, 6.0]) != 3.0 { return 2; } return 0; };"#),
+        Ok(0)
+    );
+    let err = run_cpp("function main() -> int { return textKit::throws(); };").unwrap_err();
+    assert!(err.contains("C++ exception"), "{err}");
+    let err = run_cpp("function main() -> int { var e: [float] = []; textKit::mean(values: e); return 0; };").unwrap_err();
+    assert!(err.contains("mean of empty input"), "{err}");
+}
+
+#[test]
+fn cpp_module_zero_copy_bytes_from_a_file() {
+    let file = std::env::temp_dir().join(format!("spar-bytes-{}.bin", std::process::id()));
+    std::fs::write(&file, [1u8, 2, 3, 250]).unwrap();
+    let src = format!(
+        r#"import pkg {{ readBytes }} from "std/fs";
+        function main() -> int {{ var b: Bytes = readBytes(path: "{}"); return textKit::checksum(data: b); }};"#,
+        file.display()
+    );
+    // FNV-1a over [1,2,3,250]
+    let mut h: u32 = 2166136261;
+    for c in [1u8, 2, 3, 250] {
+        h = (h ^ c as u32).wrapping_mul(16777619);
+    }
+    let expected = (h & 0x7fff) as i32;
+    assert_eq!(run_cpp(&src), Ok(expected));
+}

@@ -409,3 +409,18 @@ fn declared_native_types_are_distinct_and_typechecked() {
         .expect_err("Buffer must not be accepted as Counter");
     assert!(errors.iter().map(|e| e.to_string()).collect::<String>().contains("Counter"));
 }
+
+#[test]
+fn rust_sdk_resources_are_typed_and_finalized() {
+    let src = r#"
+        function main() -> int {
+            var t: Tally = fastArray::tallyNew(start: 10);
+            fastArray::tallyAdd(tally: t, n: 5);
+            return fastArray::tallyAdd(tally: t, n: 7);
+        };
+    "#;
+    assert_eq!(run_rust(src), Ok(22));
+    // resource of the wrong Spar type is rejected at compile time
+    let err = run_rust("function main() -> int { var b: Buffer = fastArray::linspace(n: 3); return fastArray::tallyAdd(tally: b, n: 1); };").unwrap_err();
+    assert!(err.contains("Tally"), "{err}");
+}

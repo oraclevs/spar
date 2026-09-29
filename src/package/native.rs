@@ -127,7 +127,7 @@ pub fn load_package_native(
     let Some(spec) = manifest.native else {
         return Ok(None);
     };
-    if std::env::var_os("SPAR_NO_NATIVE").is_some_and(|v| v != "0") {
+    if !crate::runtime_config::native_enabled() {
         return Err(err(format!(
             "package '{}' contains native code but native extensions are disabled (SPAR_NO_NATIVE)",
             manifest.name

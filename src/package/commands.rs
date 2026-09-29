@@ -72,6 +72,7 @@ pub fn init(dir: &Path, name: &str, kind: PackageKind) -> Result<PackageManifest
         dependencies: BTreeMap::new(),
         overrides: BTreeMap::new(),
         native: None,
+        runtime: Default::default(),
     };
     manifest.write(&path)?;
 

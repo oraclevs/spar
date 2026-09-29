@@ -155,3 +155,62 @@ fn missing_target_artifact_is_a_clear_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ── runtime settings precedence: CLI flag > env var > manifest > default ──────
+
+fn set_runtime(dir: &Path, body: &str) {
+    let path = dir.join("spar.package.spar");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("\nstruct Runtime {{\n{body}}};\n"));
+    std::fs::write(path, text).unwrap();
+}
+
+fn disabled(out: &std::process::Output) -> bool {
+    String::from_utf8_lossy(&out.stderr).contains("native extensions are disabled")
+}
+
+#[test]
+fn manifest_can_disable_native_and_default_is_enabled() {
+    let dir = project(Some("real"), "native/libfastmath.so");
+    assert!(spar(dir.path(), &["exec", "src/main.spar"], &[]).status.success());
+    set_runtime(dir.path(), "    native: bool = false;\n");
+    let out = spar(dir.path(), &["exec", "src/main.spar"], &[]);
+    assert!(disabled(&out), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn env_var_beats_manifest() {
+    let dir = project(Some("real"), "native/libfastmath.so");
+    set_runtime(dir.path(), "    native: bool = true;\n");
+    let out = spar(dir.path(), &["exec", "src/main.spar"], &[("SPAR_NO_NATIVE", "1")]);
+    assert!(disabled(&out), "env must override manifest");
+}
+
+#[test]
+fn cli_flag_beats_env_var_and_manifest() {
+    let dir = project(Some("real"), "native/libfastmath.so");
+    set_runtime(dir.path(), "    native: bool = false;\n");
+    let out = spar(
+        dir.path(),
+        &["exec", "--runtime", "native=true", "src/main.spar"],
+        &[("SPAR_NO_NATIVE", "1")],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("answer = 42"));
+    let out = spar(
+        dir.path(),
+        &["exec", "--runtime", "native=false", "src/main.spar"],
+        &[],
+    );
+    assert!(disabled(&out));
+}
+
+#[test]
+fn run_app_applies_manifest_runtime_and_cli_flag() {
+    let dir = project(Some("real"), "native/libfastmath.so");
+    set_runtime(dir.path(), "    native: bool = false;\n");
+    let out = spar(dir.path(), &["run", "--app", "app"], &[]);
+    assert!(disabled(&out), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = spar(dir.path(), &["run", "--runtime", "native=true", "--app", "app"], &[]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}

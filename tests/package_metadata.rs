@@ -13,6 +13,7 @@ fn manifest() -> PackageManifest {
         dependencies: BTreeMap::new(),
         overrides: BTreeMap::new(),
         native: None,
+        runtime: Default::default(),
     }
 }
 

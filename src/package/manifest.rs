@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::{Expr, FieldValue, Program, StructDecl, ObjectItem, StringPart, TopLevelItem};
 use crate::package::error::PackageError;
+use crate::runtime_config::RuntimeSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageKind {
@@ -75,6 +76,8 @@ pub struct PackageManifest {
     /// alias → raw local-development override request, e.g. `"path:../http"`.
     pub overrides: BTreeMap<String, String>,
     pub native: Option<NativeSpec>,
+    /// `struct Runtime` — settings that replace the `SPAR_*` environment switches.
+    pub runtime: RuntimeSettings,
 }
 
 impl PackageManifest {
@@ -95,6 +98,7 @@ impl PackageManifest {
         let mut saw_dependencies = false;
         let mut saw_overrides = false;
         let mut native = None;
+        let mut runtime: Option<RuntimeSettings> = None;
 
         for item in &program.items {
             let TopLevelItem::Struct(structure) = item else {
@@ -127,9 +131,16 @@ impl PackageManifest {
                     }
                     native = Some(native_spec(literal_fields(structure, path)?, path)?);
                 }
+                "Runtime" => {
+                    if runtime.is_some() {
+                        return Err(manifest_err(path, "duplicate `struct Runtime` declaration"));
+                    }
+                    runtime = Some(runtime_settings(structure, path)?);
+                }
                 _ => return Err(unsupported(path)),
             }
         }
+        let runtime = runtime.unwrap_or_default();
 
         let fields =
             package_fields.ok_or_else(|| manifest_err(path, "missing Package declaration"))?;
@@ -241,6 +252,7 @@ impl PackageManifest {
             dependencies,
             overrides,
             native,
+            runtime,
         })
     }
 
@@ -295,6 +307,13 @@ impl PackageManifest {
             out.push_str("};\n");
         }
 
+        let runtime = render_runtime(&self.runtime);
+        if !runtime.is_empty() {
+            out.push_str("\nstruct Runtime {\n");
+            out.push_str(&runtime);
+            out.push_str("};\n");
+        }
+
         out
     }
 
@@ -342,6 +361,86 @@ fn native_spec(mut fields: BTreeMap<String, String>, path: &Path) -> Result<Nati
         return Err(manifest_err(path, &format!("`struct Native` field '{stray}' has no matching artifact path")));
     }
     Ok(NativeSpec { module, abi, capabilities, artifacts })
+}
+
+/// `struct Runtime`: typed literal fields, each key's type fixed by `runtime_config::KEYS`.
+fn runtime_settings(structure: &StructDecl, path: &Path) -> Result<RuntimeSettings, PackageError> {
+    use crate::ast::{Literal, SparType};
+    if !structure.type_parameters.is_empty() {
+        return Err(manifest_err(path, "manifest declarations cannot be generic"));
+    }
+    let mut settings = RuntimeSettings::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &structure.items {
+        let ObjectItem::Field(field) = item else {
+            return Err(unsupported(path));
+        };
+        let Some((_, expected, _, _)) = crate::runtime_config::KEYS
+            .iter()
+            .find(|(key, ..)| *key == field.name)
+        else {
+            return Err(manifest_err(
+                path,
+                &format!("`struct Runtime`: {}", crate::runtime_config::unknown_key(&field.name)),
+            ));
+        };
+        if !seen.insert(field.name.clone()) {
+            return Err(manifest_err(path, &format!("duplicate field '{}'", field.name)));
+        }
+        let declared = match &field.ty {
+            Some(SparType::Bool) => "bool",
+            Some(SparType::Int) => "int",
+            Some(SparType::Str) => "str",
+            _ => "",
+        };
+        if declared != *expected {
+            return Err(manifest_err(
+                path,
+                &format!("`struct Runtime` field '{}' must be typed `{expected}`", field.name),
+            ));
+        }
+        let Some(FieldValue::Expr(expr)) = &field.value else {
+            return Err(unsupported(path));
+        };
+        let value = match expr {
+            Expr::Literal(Literal::Bool(b)) => b.to_string(),
+            Expr::Literal(Literal::Int(n)) => n.to_string(),
+            other => match literal_str(other) {
+                Some(text) => text.to_string(),
+                None => {
+                    return Err(manifest_err(
+                        path,
+                        &format!("`struct Runtime` field '{}' must be a plain literal", field.name),
+                    ))
+                }
+            },
+        };
+        settings
+            .set(&field.name, &value)
+            .map_err(|message| manifest_err(path, &format!("`struct Runtime`: {message}")))?;
+    }
+    Ok(settings)
+}
+
+fn render_runtime(runtime: &RuntimeSettings) -> String {
+    let mut out = String::new();
+    let mut bool_field = |name: &str, value: Option<bool>| {
+        if let Some(v) = value {
+            out.push_str(&format!("    {name}: bool = {v};\n"));
+        }
+    };
+    bool_field("vm", runtime.vm);
+    bool_field("bytecode", runtime.bytecode);
+    bool_field("jit", runtime.jit);
+    bool_field("native", runtime.native);
+    bool_field("nativeDebug", runtime.native_debug);
+    if let Some(n) = runtime.async_workers {
+        out.push_str(&format!("    asyncWorkers: int = {n};\n"));
+    }
+    if let Some(modules) = &runtime.native_modules {
+        out.push_str(&format!("    nativeModules: str = \"{}\";\n", escape(modules)));
+    }
+    out
 }
 
 fn escape(text: &str) -> String {

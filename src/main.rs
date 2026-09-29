@@ -194,8 +194,16 @@ fn main() {
             args,
         } => cmd_show(path, global, task, args),
         Cmd::Dump { path, global } => cmd_dump(path, global),
-        Cmd::Exec { path, program_args } => cmd_exec(&path, program_args),
-        Cmd::RunApp { name, program_args } => cmd_run_app(&name, program_args),
+        Cmd::Exec {
+            path,
+            program_args,
+            runtime,
+        } => cmd_exec(&path, program_args, runtime),
+        Cmd::RunApp {
+            name,
+            program_args,
+            runtime,
+        } => cmd_run_app(&name, program_args, runtime),
         Cmd::Repl => cmd_repl(),
         Cmd::PackageInit { name, kind } => cmd_package_init(name, kind),
         Cmd::New { name, kind } => cmd_new(name, kind),
@@ -253,10 +261,12 @@ enum Cmd {
     Exec {
         path: String,
         program_args: Vec<String>,
+        runtime: spar::runtime_config::RuntimeSettings,
     },
     RunApp {
         name: String,
         program_args: Vec<String>,
+        runtime: spar::runtime_config::RuntimeSettings,
     },
     Repl,
     PackageInit {
@@ -336,6 +346,7 @@ fn parse_args(args: &[String]) -> Cmd {
             Cmd::Exec {
                 path: name.to_string(),
                 program_args: args[2..].to_vec(),
+                runtime: Default::default(),
             }
         }
         // Anything else is treated as a task-runner shorthand: `spar <name> [args...]`
@@ -346,7 +357,30 @@ fn parse_args(args: &[String]) -> Cmd {
     }
 }
 
+/// Leading `--runtime key=value` / `-R key=value` flags. Returns the settings and the
+/// index of the first argument that is not one of them.
+fn parse_runtime_flags(args: &[String]) -> Result<(spar::runtime_config::RuntimeSettings, usize), String> {
+    let mut settings = spar::runtime_config::RuntimeSettings::default();
+    let mut index = 0;
+    while matches!(args.get(index).map(String::as_str), Some("--runtime" | "-R")) {
+        let Some(pair) = args.get(index + 1) else {
+            return Err("`--runtime` requires key=value".into());
+        };
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!("`--runtime {pair}` must look like key=value"));
+        };
+        settings.set(key, value)?;
+        index += 2;
+    }
+    Ok((settings, index))
+}
+
 fn parse_exec_args(args: &[String]) -> Cmd {
+    let (runtime, skip) = match parse_runtime_flags(args) {
+        Ok(parsed) => parsed,
+        Err(message) => return Cmd::BadArgs(message),
+    };
+    let args = &args[skip..];
     let Some(path) = args.first() else {
         return Cmd::BadArgs("`exec` requires a file path".into());
     };
@@ -361,6 +395,7 @@ fn parse_exec_args(args: &[String]) -> Cmd {
     Cmd::Exec {
         path: path.clone(),
         program_args,
+        runtime,
     }
 }
 
@@ -521,11 +556,15 @@ fn parse_tasks_args(args: &[String]) -> Cmd {
 fn parse_run_args(args: &[String]) -> Cmd {
     // `spar run --app <name> [args...]`: run a package's `main` by name. Everything
     // after the name goes to the program; a leading `--` is optional and dropped.
-    if args.first().map(String::as_str) == Some("--app") {
-        let Some(name) = args.get(1) else {
+    let (runtime, skip) = match parse_runtime_flags(args) {
+        Ok(parsed) => parsed,
+        Err(message) => return Cmd::BadArgs(message),
+    };
+    if args.get(skip).map(String::as_str) == Some("--app") {
+        let Some(name) = args.get(skip + 1) else {
             return Cmd::BadArgs("`--app` requires a package name: `spar run --app <name>`".into());
         };
-        let rest = &args[2..];
+        let rest = &args[skip + 2..];
         let program_args = match rest.first().map(String::as_str) {
             Some("--") => rest[1..].to_vec(),
             _ => rest.to_vec(),
@@ -533,7 +572,11 @@ fn parse_run_args(args: &[String]) -> Cmd {
         return Cmd::RunApp {
             name: name.clone(),
             program_args,
+            runtime,
         };
+    }
+    if skip > 0 {
+        return Cmd::BadArgs("`--runtime` is only valid with `run --app` and `exec`".into());
     }
     let mut path = None;
     let mut global = false;
@@ -706,7 +749,8 @@ COMMANDS:
                                         List declared tasks
     run           [task] [args...] [-f FILE | -G] [--dry-run] [--choose]
                                         Run a task (default task if omitted); same as bare `spar <task>`
-    run --app     <name> [args...]      Run the application package <name>'s `main` (entry from its manifest)
+    run [--runtime K=V]... --app <name> [args...]
+                                        Run the application package <name>'s `main` (entry from its manifest)
     show          <task> [args...] [-f FILE | -G]
                                         Show one task's resolved commands
     dump          [-f FILE | -G]        Dump the lowered task catalog as JSON
@@ -741,6 +785,7 @@ EXAMPLES:
     spar fmt --check server.spar
     spar tasks -f server.spar
     spar run -f server.spar
+    spar run --runtime jit=false --app omatarasu   (override a `struct Runtime` setting)
     spar run --app omatarasu arg1 arg2      (run package `omatarasu`'s main with args)
     spar run deploy production -f server.spar
     spar run test --dry-run -f server.spar
@@ -1255,7 +1300,34 @@ fn cmd_dump(path: Option<PathBuf>, global: bool) {
 
 // ── `exec` command ────────────────────────────────────────────────────────────
 
-fn cmd_exec(path: &str, program_args: Vec<String>) {
+fn cmd_exec(path: &str, program_args: Vec<String>, runtime: spar::runtime_config::RuntimeSettings) {
+    // A script inside a package project picks up that project's `struct Runtime`.
+    let manifest_runtime = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join(path))
+        .and_then(|absolute| {
+            absolute.parent().and_then(|parent| {
+                parent
+                    .ancestors()
+                    .map(|dir| dir.join("spar.package.spar"))
+                    .find(|manifest| manifest.is_file())
+            })
+        })
+        .map(|manifest| {
+            let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+            spar::package::PackageManifest::parse(&text, &manifest)
+                .map(|parsed| parsed.runtime)
+                .unwrap_or_else(|error| {
+                    eprintln!("error: {error}");
+                    std::process::exit(1);
+                })
+        })
+        .unwrap_or_default();
+    spar::runtime_config::install_layers(runtime, manifest_runtime);
+    cmd_exec_installed(path, program_args);
+}
+
+fn cmd_exec_installed(path: &str, program_args: Vec<String>) {
     #[cfg(feature = "profile")]
     let profiler = stats::start_profiler();
     match Engine::new(compile_options_for_path_or_exit(Path::new(path)))
@@ -1277,7 +1349,7 @@ fn cmd_exec(path: &str, program_args: Vec<String>) {
     }
 }
 
-fn cmd_run_app(name: &str, program_args: Vec<String>) {
+fn cmd_run_app(name: &str, program_args: Vec<String>, runtime: spar::runtime_config::RuntimeSettings) {
     let cwd = std::env::current_dir().unwrap_or_else(|error| {
         eprintln!("error: cannot determine current directory: {error}");
         std::process::exit(1);
@@ -1287,7 +1359,8 @@ fn cmd_run_app(name: &str, program_args: Vec<String>) {
         eprintln!("error: {error}");
         std::process::exit(1);
     });
-    cmd_exec(&target.entry.to_string_lossy(), program_args);
+    spar::runtime_config::install_layers(runtime, target.manifest.runtime.clone());
+    cmd_exec_installed(&target.entry.to_string_lossy(), program_args);
 }
 
 // ── `repl` command ────────────────────────────────────────────────────────────
@@ -2060,7 +2133,7 @@ task Deploy { group: "release"; description: "Ship it"; run { true; }; };
     fn parse_args_exec_preserves_arguments_after_double_dash() {
         let args = ["spar", "exec", "app.spar", "--", "one", "two", "--flag"].map(str::to_owned);
         match parse_args(&args) {
-            Cmd::Exec { path, program_args } => {
+            Cmd::Exec { path, program_args, .. } => {
                 assert_eq!(path, "app.spar");
                 assert_eq!(program_args, vec!["one", "two", "--flag"]);
             }
@@ -2072,7 +2145,7 @@ task Deploy { group: "release"; description: "Ship it"; run { true; }; };
     fn parse_args_exec_without_double_dash_still_collects_trailing_args() {
         let args = ["spar", "exec", "app.spar", "one"].map(str::to_owned);
         match parse_args(&args) {
-            Cmd::Exec { path, program_args } => {
+            Cmd::Exec { path, program_args, .. } => {
                 assert_eq!(path, "app.spar");
                 assert_eq!(program_args, vec!["one"]);
             }

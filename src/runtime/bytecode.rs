@@ -132,7 +132,7 @@ impl BcProgram {
         functions: impl Iterator<Item = &'a CompiledFunction>,
         function_count: usize,
     ) -> Self {
-        if std::env::var_os("SPAR_DISABLE_BYTECODE").is_some() {
+        if !crate::runtime_config::bytecode_enabled() {
             return Self::empty();
         }
         let all: Vec<&CompiledFunction> = functions.collect();

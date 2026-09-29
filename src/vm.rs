@@ -381,7 +381,7 @@ impl VmProgram {
         function_count: usize,
     ) -> Self {
         // Developer escape hatch for A/B benchmarking and differential runs.
-        if std::env::var_os("SPAR_DISABLE_VM").is_some() {
+        if !crate::runtime_config::vm_enabled() {
             return Self::empty();
         }
         let all: Vec<&CompiledFunction> = functions.collect();
@@ -1126,12 +1126,12 @@ struct SavedFrame {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl VmProgram {
-    /// Native code, compiled once on first use. `SPAR_NO_JIT=1` keeps the
+    /// Native code, compiled once on first use. `jit = false` (`SPAR_NO_JIT`) keeps the
     /// bytecode interpreter; any compile failure does the same.
     fn native(&self) -> Option<&crate::jit::JitProgram> {
         self.jit
             .get_or_init(|| {
-                if std::env::var_os("SPAR_NO_JIT").is_some() {
+                if !crate::runtime_config::jit_enabled() {
                     return None;
                 }
                 crate::jit::JitProgram::compile(self)

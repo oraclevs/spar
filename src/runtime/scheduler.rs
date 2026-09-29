@@ -75,10 +75,7 @@ impl Scheduler {
         let cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        std::env::var("SPAR_ASYNC_WORKERS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
+        crate::runtime_config::async_workers()
             .unwrap_or_else(|| (cpus * 4).min(64))
     }
 

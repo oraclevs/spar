@@ -192,7 +192,7 @@ static EXTERNALS: Mutex<Vec<Option<Arc<FnInfo>>>> = Mutex::new(Vec::new());
 static LOADED: Mutex<Vec<(PathBuf, Arc<LoadedModule>)>> = Mutex::new(Vec::new());
 
 fn debug_enabled() -> bool {
-    std::env::var_os("SPAR_NATIVE_DEBUG").is_some()
+    crate::runtime_config::native_debug()
 }
 
 fn is_identifier(s: &str) -> bool {

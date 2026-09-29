@@ -132,3 +132,74 @@ fn tasks_still_run_after_the_app_mode_exists() {
     let out = spar(dir.path(), &["run", "hello"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+// ── `struct Runtime` ──────────────────────────────────────────────────────────
+
+fn with_runtime(dir: &Path, runtime: &str) {
+    let mut text = manifest("app", "application");
+    text.push_str(&format!("\nstruct Runtime {{\n{runtime}}};\n"));
+    std::fs::write(dir.join("spar.package.spar"), text).unwrap();
+}
+
+/// Counts async workers via a script that reports nothing directly; instead we use the native
+/// switch: a manifest with `native = false` and a package that declares none still runs, while
+/// invalid values are rejected before anything executes.
+#[test]
+fn manifest_runtime_struct_is_accepted_and_the_app_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), "app", "application", "function main() -> int { return 4; };\n");
+    with_runtime(
+        dir.path(),
+        "    vm: bool = true;\n    bytecode: bool = true;\n    jit: bool = false;\n    asyncWorkers: int = 2;\n    native: bool = true;\n    nativeDebug: bool = false;\n    nativeModules: str = \"\";\n",
+    );
+    let out = spar(dir.path(), &["run", "--app", "app"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+}
+
+#[test]
+fn unknown_runtime_key_lists_the_valid_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), "app", "application", "function main() -> int { return 0; };\n");
+    with_runtime(dir.path(), "    turbo: bool = true;\n");
+    let out = spar(dir.path(), &["run", "--app", "app"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("unknown runtime setting 'turbo'") && err.contains("asyncWorkers"), "{err}");
+}
+
+#[test]
+fn wrong_runtime_type_or_value_is_a_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), "app", "application", "function main() -> int { return 0; };\n");
+    with_runtime(dir.path(), "    jit: str = \"no\";\n");
+    let out = spar(dir.path(), &["run", "--app", "app"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("field 'jit' must be typed `bool`"), "{}", stderr(&out));
+    with_runtime(dir.path(), "    asyncWorkers: int = 0;\n");
+    let out = spar(dir.path(), &["run", "--app", "app"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("positive integer"), "{}", stderr(&out));
+}
+
+#[test]
+fn cli_flag_rejects_bad_settings_before_running() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), "app", "application", "function main() -> int { return 0; };\n");
+    let out = spar(dir.path(), &["run", "--runtime", "jit=maybe", "--app", "app"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("expects true/false"), "{}", stderr(&out));
+    let out = spar(dir.path(), &["run", "--runtime", "nope=1", "--app", "app"]);
+    assert!(stderr(&out).contains("unknown runtime setting 'nope'"), "{}", stderr(&out));
+}
+
+#[test]
+fn manifest_runtime_round_trips_through_render() {
+    let path = Path::new("spar.package.spar");
+    let mut text = manifest("app", "application");
+    text.push_str("\nstruct Runtime {\n    jit: bool = false;\n    asyncWorkers: int = 3;\n    nativeModules: str = \"/a.so:/b.so\";\n};\n");
+    let parsed = spar::package::PackageManifest::parse(&text, path).unwrap();
+    assert_eq!(parsed.runtime.jit, Some(false));
+    assert_eq!(parsed.runtime.async_workers, Some(3));
+    let again = spar::package::PackageManifest::parse(&parsed.render(), path).unwrap();
+    assert_eq!(again.runtime, parsed.runtime);
+}

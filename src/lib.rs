@@ -24,6 +24,7 @@ pub mod renderer;
 pub mod resolver;
 mod recursion;
 pub mod runner;
+pub mod runtime_config;
 pub mod semantics;
 pub(crate) mod runtime;
 pub mod session;

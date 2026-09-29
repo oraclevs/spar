@@ -177,7 +177,7 @@ pub fn native_registry() -> crate::runtime::NativeRegistry {
 /// reported once on stderr and the module's functions stay unresolved.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_env_native_modules(registry: &mut crate::runtime::NativeRegistry) {
-    let Some(list) = std::env::var_os("SPAR_NATIVE_MODULES") else {
+    let Some(list) = crate::runtime_config::native_modules() else {
         return;
     };
     for path in std::env::split_paths(&list).filter(|p| !p.as_os_str().is_empty()) {

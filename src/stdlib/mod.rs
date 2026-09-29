@@ -166,7 +166,25 @@ pub fn native_registry() -> crate::runtime::NativeRegistry {
     regex::register(&mut registry);
     process::register(&mut registry);
     http::register(&mut registry);
+    #[cfg(not(target_arch = "wasm32"))]
+    load_env_native_modules(&mut registry);
     registry
+}
+
+/// Developer hook: `SPAR_NATIVE_MODULES=/path/a.so:/path/b.so` loads native modules into every
+/// registry this process builds. Package manifests are the supported way to declare native
+/// dependencies; this exists for tests, benchmarks and quick experiments. Load failures are
+/// reported once on stderr and the module's functions stay unresolved.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_env_native_modules(registry: &mut crate::runtime::NativeRegistry) {
+    let Some(list) = std::env::var_os("SPAR_NATIVE_MODULES") else {
+        return;
+    };
+    for path in std::env::split_paths(&list).filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(error) = crate::native_module::load_into_registry(&path, registry) {
+            eprintln!("spar: native module error: {error}");
+        }
+    }
 }
 
 /// Read a compiler-owned stdlib snapshot or an ordinary filesystem module.

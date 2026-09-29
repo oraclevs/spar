@@ -501,7 +501,11 @@ pub(super) unsafe extern "C" fn list_push(env: *mut SparEnv, list: SparValue, it
 
 pub(super) unsafe extern "C" fn symbol_intern(env: *mut SparEnv, name: *const u8, len: u64, out: *mut SparSymbol) -> spar_status_t {
     ffi(|| {
-        CallEnv::from_ptr(env)?;
+        // Interning is process-global and thread-safe: a NULL env is allowed so modules can
+        // intern field names during init.
+        if !env.is_null() {
+            CallEnv::from_ptr(env)?;
+        }
         let s = std::str::from_utf8(bytes(name, len)?).map_err(|_| SPAR_E_UTF8)?;
         put(out, intern(s))
     })

@@ -549,6 +549,8 @@ pub(crate) fn inject_exec_result_type(program: &mut Program) {
             ],
         ),
         ("ProcessStream", vec![]),
+        // Opaque native-owned typed array (see native_module::NativeBuffer).
+        ("Buffer", vec![]),
         (
             "ProcessResult",
             vec![

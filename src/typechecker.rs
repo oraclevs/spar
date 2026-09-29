@@ -84,6 +84,13 @@ pub(crate) fn is_assignable(expected: &SparType, actual: &SparType) -> bool {
         return true;
     }
     match (expected, actual) {
+        // `Slice<T>` is the native-module spelling for "a list of T or a native Buffer": both
+        // can be borrowed as contiguous memory (a list costs one copy, a Buffer none).
+        (SparType::Applied { name, arguments }, actual) if name == "Slice" && arguments.len() == 1 => match actual {
+            SparType::Named(buffer) => buffer == "Buffer",
+            SparType::List(inner) => **inner == arguments[0],
+            _ => false,
+        },
         (
             SparType::Function {
                 params: expected_params,

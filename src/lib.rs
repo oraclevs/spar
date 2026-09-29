@@ -16,6 +16,8 @@ pub mod lexer;
 pub mod loader;
 pub(crate) mod lowerer;
 pub mod naming;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_module;
 pub mod package;
 pub mod parser;
 pub mod renderer;

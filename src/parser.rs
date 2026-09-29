@@ -1355,6 +1355,18 @@ impl Parser {
         }
     }
 
+    /// Parses a complete type spelling such as `[float]` or `Option<int>`.
+    /// Used by the native module loader for descriptor signatures.
+    pub(crate) fn parse_type_text(text: &str) -> Result<SparType, SparError> {
+        let tokens = crate::Lexer::new(text).tokenize()?;
+        let mut parser = Parser::new(tokens);
+        let ty = parser.parse_type()?;
+        if !parser.at(&Token::Eof) {
+            return Err(parser.error(format!("unexpected {} after type", parser.peek().human_name())));
+        }
+        Ok(ty)
+    }
+
     fn parse_type(&mut self) -> Result<SparType, SparError> {
         if self.at(&Token::KwFn) {
             return self.parse_callable_type();

@@ -27,6 +27,7 @@ sha2 = "0.10"
 spar-command = { path = "../spar-command", version = "0.1.0" }
 spar-process = { path = "../spar-process", version = "0.1.0" }
 scoc = { path = "../scoc", version = "0.1.0" }
+spar-native-sys = { path = "../spar-native-sys", version = "0.0.1" }
 
 indexmap = "2"
 regex = "1"
@@ -41,6 +42,7 @@ profile = ["dep:pprof"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 stacker = "0.1"
+libloading = "0.9"
 cranelift-codegen = "0.136"
 cranelift-frontend = "0.136"
 cranelift-jit = "0.136"

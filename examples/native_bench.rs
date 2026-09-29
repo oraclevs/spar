@@ -202,7 +202,7 @@ fn main() {
         ("6  Spar->native addF(float,float)", "", "facc = benchkit::addF(x: facc, y: 1.0);"),
         ("7  string length via borrowed view", "var s: str = \"hello native world\";", "acc = acc + benchkit::strLen(text: s);"),
         ("8  string copy (view + string_new)", "var s: str = \"hello native world\";", "acc = acc + 1; var t: str = benchkit::strCopy(text: s);"),
-        ("16 native resource call", "var c: Buffer = benchkit::counterNew();", "acc = benchkit::counterBump(buf: c);"),
+        ("16 native resource call", "var c: Counter = benchkit::counterNew();", "acc = benchkit::counterBump(counter: c);"),
         ("15 record field access (2 fields)", "var r: Record = { x: 1; y: 2; };", "acc = acc + benchkit::fieldSum(rec: r);"),
     ];
     println!("\nloop body baseline (acc = acc + 1): {}", ns(empty));

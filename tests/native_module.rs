@@ -335,3 +335,77 @@ fn async_double_completion_is_rejected() {
     assert_eq!(run_int("function main() -> int { return fastMath::secondStatus(); };"), 13);
     assert_eq!(native_module::live_async_ops(), 0, "async operation leaked");
 }
+
+// ---------------------------------------------------------------------------------------------
+// ABI compatibility: a module compiled against the frozen 0.1 header keeps loading on the newer
+// runtime, and incompatible descriptors are rejected with a diagnostic before `init` runs.
+// ---------------------------------------------------------------------------------------------
+
+fn build_fixture(tag: &str, defines: &[&str]) -> PathBuf {
+    let dir = sys_dir().join("tests/fixtures/abi-0.1");
+    let out_dir = std::env::temp_dir().join(format!("spar-fixture-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let lib = out_dir.join("libfixture.so");
+    let out = Command::new("cc")
+        .args(["-std=c11", "-fPIC", "-fvisibility=hidden", "-shared"])
+        .args(defines)
+        .arg(format!("-I{}", dir.display()))
+        .arg(dir.join("fixture.c"))
+        .arg("-o")
+        .arg(&lib)
+        .output()
+        .expect("cc");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    lib
+}
+
+#[test]
+fn module_built_against_old_header_still_loads_and_runs() {
+    let lib = build_fixture("ok", &[]);
+    assert!(SPAR_NATIVE_MINOR_NEWER());
+    let mut natives = CompileOptions::default().natives;
+    native_module::load_into_registry(&lib, &mut natives).expect("old module loads on newer runtime");
+    let out = Engine::new(CompileOptions { natives, ..CompileOptions::default() })
+        .execute_source("function main() -> int { return oldMod::twice(x: 21); };")
+        .unwrap();
+    assert_eq!(out.exit_status, 42);
+}
+
+#[allow(non_snake_case)]
+fn SPAR_NATIVE_MINOR_NEWER() -> bool {
+    spar_native_sys::SPAR_NATIVE_ABI_MINOR > 1
+}
+
+#[test]
+fn incompatible_modules_are_rejected_with_clear_diagnostics() {
+    let cases: Vec<(&str, Vec<&str>, &str)> = vec![
+        ("major", vec!["-DFX_MAJOR=7", "-DFX_NAME=\"badMajor\""], "ABI major 7"),
+        ("minor", vec!["-DFX_MIN_MINOR=99", "-DFX_NAME=\"badMinor\""], "needs ABI 0.99"),
+        ("caps", vec!["-DFX_CAPS=(1ull<<40)", "-DFX_NAME=\"badCaps\""], "capabilities"),
+        ("target", vec!["-DFX_TARGET=\"riscv64-unknown-plan9\"", "-DFX_NAME=\"badTarget\""], "built for target"),
+        ("name", vec!["-DFX_NAME=\"1bad\""], "not a valid identifier"),
+    ];
+    for (tag, defs, expect) in cases {
+        let lib = build_fixture(tag, &defs);
+        let err = native_module::load_module(&lib).unwrap_err().to_string();
+        assert!(err.contains(expect), "{tag}: {err}");
+    }
+}
+
+#[test]
+fn declared_native_types_are_distinct_and_typechecked() {
+    let dir = sys_dir().join("examples/native/bench-kernels");
+    assert!(Command::new(dir.join("build.sh")).status().unwrap().success());
+    let mut natives = CompileOptions::default().natives;
+    native_module::load_into_registry(&dir.join("libbenchkit.so"), &mut natives).unwrap();
+    let engine = Engine::new(CompileOptions { natives, ..CompileOptions::default() });
+    let ok = engine
+        .execute_source("function main() -> int { var c: Counter = benchkit::counterNew(); benchkit::counterBump(counter: c); return benchkit::counterBump(counter: c); };")
+        .unwrap();
+    assert_eq!(ok.exit_status, 2);
+    // a Buffer is not a Counter
+    let errors = engine
+        .check_source("function main() -> int { var b: Buffer = benchkit::makeBuf(n: 4); return benchkit::counterBump(counter: b); };")
+        .expect_err("Buffer must not be accepted as Counter");
+    assert!(errors.iter().map(|e| e.to_string()).collect::<String>().contains("Counter"));
+}

@@ -291,11 +291,25 @@ pub struct NativeRegistry {
     by_name: HashMap<(String, String), NativeFunctionId>,
     methods: Vec<NativeMethod>,
     methods_by_name: HashMap<(String, String), NativeMethodId>,
+    /// Opaque named types declared by native modules (resource handles).
+    types: Vec<String>,
 }
 
 impl NativeRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Declares an opaque named type (e.g. a native resource) so signatures can mention it.
+    pub fn declare_type(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !self.types.contains(&name) {
+            self.types.push(name);
+        }
+    }
+
+    pub fn declared_types(&self) -> &[String] {
+        &self.types
     }
 
     pub fn register(&mut self, function: NativeFunction) -> Result<NativeFunctionId, SparError> {
@@ -333,6 +347,9 @@ impl NativeRegistry {
     /// Existing entries (and their ids) win, so an embedder's own natives
     /// are never shadowed by the ones merged in behind them.
     pub fn extend_missing(&mut self, other: &NativeRegistry) {
+        for t in &other.types {
+            self.declare_type(t.clone());
+        }
         for function in &other.functions {
             let key = (function.module.clone(), function.name.clone());
             if !self.by_name.contains_key(&key) {

@@ -285,6 +285,7 @@ impl Compiler {
         }
 
         inject_exec_result_type(&mut program);
+        inject_native_types(&mut program, &self.options.natives);
 
         if let Some((path, kind)) = self
             .options
@@ -391,6 +392,26 @@ impl Compiler {
         compilation.program = Some(program);
         compilation.symbols = Some(symbols);
         compilation
+    }
+}
+
+/// Declares the opaque types native modules registered (`module_add_type`) as empty structs.
+fn inject_native_types(program: &mut Program, natives: &crate::runtime::NativeRegistry) {
+    use crate::ast::{TopLevelItem, TypeDecl};
+    let span = crate::Span::new(0, 0, 1, 1);
+    for name in natives.declared_types() {
+        if program.items.iter().any(|i| matches!(i, TopLevelItem::Type(t) if &t.name == name)) {
+            continue;
+        }
+        program.items.push(TopLevelItem::Type(TypeDecl {
+            name: name.clone(),
+            name_span: span.clone(),
+            type_parameters: Vec::new(),
+            exported: false,
+            fields: Vec::new(),
+            span: span.clone(),
+            end_line: 0,
+        }));
     }
 }
 

@@ -127,12 +127,14 @@ struct FunctionDef {
 pub(super) struct ModuleBuilder {
     name: String,
     functions: Vec<FunctionDef>,
+    types: Vec<String>,
     error: Option<String>,
 }
 
 pub struct LoadedModule {
     info: ModuleInfo,
     functions: Vec<FunctionDef>,
+    types: Vec<String>,
     state: *mut c_void,
     quiesce: Option<SparModuleQuiesceFn>,
     destroy: Option<SparModuleDestroyFn>,
@@ -291,6 +293,29 @@ unsafe extern "C" fn unreachable_invoke(_e: *mut SparEnv, _u: *mut c_void, _a: *
     SPAR_E_UNSUPPORTED
 }
 
+pub(super) unsafe extern "C" fn module_add_type(module: *mut SparModule, name: *const u8, len: u64) -> spar_status_t {
+    if module.is_null() {
+        return SPAR_E_INVALID_ARGUMENT;
+    }
+    let builder = &mut *(module as *mut ModuleBuilder);
+    match text(name, len) {
+        Ok(n) if is_identifier(&n) && n.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
+            if !builder.types.contains(&n) {
+                builder.types.push(n);
+            }
+            SPAR_OK
+        }
+        Ok(n) => {
+            builder.error.get_or_insert(format!("type name '{n}' must be a capitalised identifier"));
+            SPAR_E_INVALID_ARGUMENT
+        }
+        Err(m) => {
+            builder.error.get_or_insert(m);
+            SPAR_E_INVALID_ARGUMENT
+        }
+    }
+}
+
 static API: SparApiV0 = SparApiV0 {
     struct_size: std::mem::size_of::<SparApiV0>() as u32,
     abi_major: SPAR_NATIVE_ABI_MAJOR,
@@ -333,6 +358,7 @@ static API: SparApiV0 = SparApiV0 {
     async_fail: Some(super::async_op::async_fail),
     async_is_cancelled: Some(super::async_op::async_is_cancelled),
     async_release: Some(super::async_op::async_release),
+    module_add_type: Some(module_add_type),
 };
 
 /// The API table given to modules (also used by tests that load modules built in-process).
@@ -378,6 +404,10 @@ fn target_matches(target: &str) -> bool {
 
 /// Loads (once per canonical path) and initialises a native module.
 pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
+    // One load at a time: `init` must run exactly once per module even if two threads race on the
+    // same path (module statics are not required to be thread-safe during init).
+    static LOAD_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let canonical = path
         .canonicalize()
         .map_err(|e| NativeLoadError::Open { path: path.to_path_buf(), message: e.to_string() })?;
@@ -436,7 +466,7 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
         return Err(NativeLoadError::Descriptor { path: canonical, message: format!("a native module named '{name}' is already loaded") });
     }
 
-    let mut builder = ModuleBuilder { name: name.clone(), functions: Vec::new(), error: None };
+    let mut builder = ModuleBuilder { name: name.clone(), functions: Vec::new(), types: Vec::new(), error: None };
     let mut state: *mut c_void = std::ptr::null_mut();
     let init = desc.init.unwrap();
     // SAFETY: module init receives the API table and builder; a panic/unwind here is a module bug.
@@ -481,6 +511,7 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
     let module = Arc::new(LoadedModule {
         info,
         functions: builder.functions,
+        types: builder.types,
         state,
         quiesce: desc.quiesce,
         destroy: desc.destroy,
@@ -498,6 +529,9 @@ impl LoadedModule {
 
     /// Registers this module's functions into `registry` under `module::name`.
     pub fn register(&self, registry: &mut NativeRegistry) -> Result<(), SparError> {
+        for t in &self.types {
+            registry.declare_type(t.clone());
+        }
         for f in &self.functions {
             let info = f.info.clone();
             if let Some(index) = info.external {

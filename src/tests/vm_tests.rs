@@ -347,6 +347,12 @@ fn native_backend_matches_interpreter_on_integer_code() {
             return -a;
         };
         fn down(n: int) -> int { return down(n: n + 1); };
+        fn add(a: int, b: int) -> int { return a + b; };
+        fn sub(a: int, b: int) -> int { return a - b; };
+        fn mul(a: int, b: int) -> int { return a * b; };
+        fn neg(a: int) -> int { return -a; };
+        fn add1(a: int) -> int { return a + 1; };
+        fn sub1(a: int) -> int { return a - 1; };
         fn main() -> int { return 0; };
         "#,
         &[
@@ -362,6 +368,14 @@ fn native_backend_matches_interpreter_on_integer_code() {
             &[3, 9],
             &[9, 3],
             &[(-4i64) as u64, 0],
+            &[i64::MAX as u64, 1],
+            &[i64::MIN as u64, 1],
+            &[i64::MAX as u64, 2],
+            &[i64::MIN as u64, 2],
+            &[i64::MAX as u64, (-1i64) as u64],
+            &[3_037_000_500, 3_037_000_500],
+            &[i64::MAX as u64],
+            &[i64::MIN as u64],
         ],
     );
 }
@@ -389,4 +403,43 @@ fn native_backend_matches_interpreter_on_float_and_bool_code() {
             &[2.0f64.to_bits(), 2.0f64.to_bits()],
         ],
     );
+}
+
+#[test]
+fn integer_overflow_is_an_error_on_every_tier() {
+    let source = r#"
+        fn add(a: int, b: int) -> int { return a + b; };
+        fn main() -> int {
+            var big: int = 9223372036854775807;
+            return add(a: big, b: 1);
+        };
+    "#;
+    for bytecode in [true, false] {
+        let result = run_engine_tier2(source, bytecode);
+        let error = result.expect_err("overflow must not wrap");
+        assert!(error.contains("integer overflow in addition"), "{error}");
+    }
+    // The primitive tiers (interpreter and native) agree with the tree walker.
+    let with_vm = run_engine(source, true).expect_err("vm overflow");
+    let without = run_engine(source, false).expect_err("tree overflow");
+    assert_eq!(with_vm, without);
+}
+
+#[test]
+fn explicit_wrapping_saturating_and_checked_methods_behave() {
+    let v = differential_engine(
+        r#"
+        fn main() -> int {
+            var big: int = 9223372036854775807;
+            var small: int = 0 - 9223372036854775807 - 1;
+            if big.wrappingAdd(other: 1) != small { return 1; }
+            if big.saturatingAdd(other: 10) != big { return 2; }
+            if !big.checkedAdd(other: 1).isNone() { return 3; }
+            if big.checkedSub(other: 1).isNone() { return 4; }
+            if small.wrappingNeg() != small { return 5; }
+            return 0;
+        };
+        "#,
+    );
+    assert_eq!(v, Ok(0));
 }

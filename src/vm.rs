@@ -21,8 +21,8 @@
 //!   so its parameters are already in place (Lua-style register windows, no
 //!   copying). Everything at/above `first` in the caller is dead at the call.
 //! * Calling convention: result is written to `caller_base + dst`.
-//! * Integer `+ - *` and `/` wrap on overflow (matches the tree walker's
-//!   release-build behaviour; the language does not yet define overflow).
+//! * Integer `+ - *`, unary `-` and `/` are checked: overflow (including
+//!   `i64::MIN / -1`) is a runtime error, exactly like the tree walker.
 //! * Call depth accounting mirrors the tree walker: a call made at depth `d`
 //!   fails with the same "maximum function call depth" error when
 //!   `d >= MAX_CALL_DEPTH`.
@@ -59,60 +59,267 @@ type Reg = u32;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Op {
-    ConstI { dst: Reg, value: i64 },
-    ConstF { dst: Reg, bits: u64 },
-    Move { dst: Reg, src: Reg },
-    AddI { dst: Reg, a: Reg, b: Reg },
-    SubI { dst: Reg, a: Reg, b: Reg },
-    MulI { dst: Reg, a: Reg, b: Reg },
-    DivI { dst: Reg, a: Reg, b: Reg, at: u32 },
-    AddII { dst: Reg, a: Reg, imm: i64 },
-    SubII { dst: Reg, a: Reg, imm: i64 },
-    NegI { dst: Reg, a: Reg },
-    EqI { dst: Reg, a: Reg, b: Reg },
-    NeI { dst: Reg, a: Reg, b: Reg },
-    LtI { dst: Reg, a: Reg, b: Reg },
-    GtI { dst: Reg, a: Reg, b: Reg },
-    LeI { dst: Reg, a: Reg, b: Reg },
-    GeI { dst: Reg, a: Reg, b: Reg },
-    EqII { dst: Reg, a: Reg, imm: i64 },
-    NeII { dst: Reg, a: Reg, imm: i64 },
-    LtII { dst: Reg, a: Reg, imm: i64 },
-    GtII { dst: Reg, a: Reg, imm: i64 },
-    LeII { dst: Reg, a: Reg, imm: i64 },
-    GeII { dst: Reg, a: Reg, imm: i64 },
-    AddF { dst: Reg, a: Reg, b: Reg },
-    SubF { dst: Reg, a: Reg, b: Reg },
-    MulF { dst: Reg, a: Reg, b: Reg },
-    DivF { dst: Reg, a: Reg, b: Reg, at: u32 },
-    NegF { dst: Reg, a: Reg },
-    EqF { dst: Reg, a: Reg, b: Reg },
-    NeF { dst: Reg, a: Reg, b: Reg },
-    LtF { dst: Reg, a: Reg, b: Reg },
-    GtF { dst: Reg, a: Reg, b: Reg },
-    LeF { dst: Reg, a: Reg, b: Reg },
-    GeF { dst: Reg, a: Reg, b: Reg },
-    EqB { dst: Reg, a: Reg, b: Reg },
-    NeB { dst: Reg, a: Reg, b: Reg },
-    NotB { dst: Reg, a: Reg },
+    ConstI {
+        dst: Reg,
+        value: i64,
+    },
+    ConstF {
+        dst: Reg,
+        bits: u64,
+    },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
+    AddI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    SubI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    MulI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    DivI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        at: u32,
+    },
+    AddII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    SubII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    NegI {
+        dst: Reg,
+        a: Reg,
+    },
+    /// `reg += 1` without an overflow check. Emitted only for range-loop
+    /// counters, which are bounded by the loop's `i64` end value.
+    IncI {
+        reg: Reg,
+    },
+    EqI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NeI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LtI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    GtI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LeI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    GeI {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    NeII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    LtII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    GtII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    LeII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    GeII {
+        dst: Reg,
+        a: Reg,
+        imm: i64,
+    },
+    AddF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    SubF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    MulF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    DivF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        at: u32,
+    },
+    NegF {
+        dst: Reg,
+        a: Reg,
+    },
+    EqF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NeF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LtF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    GtF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    LeF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    GeF {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    EqB {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NeB {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    NotB {
+        dst: Reg,
+        a: Reg,
+    },
     // Fused compare-and-branch: jump when `a OP b` (or `a OP imm`) holds.
-    JLtI { a: Reg, b: Reg, target: u32 },
-    JLeI { a: Reg, b: Reg, target: u32 },
-    JGtI { a: Reg, b: Reg, target: u32 },
-    JGeI { a: Reg, b: Reg, target: u32 },
-    JEqI { a: Reg, b: Reg, target: u32 },
-    JNeI { a: Reg, b: Reg, target: u32 },
-    JLtII { a: Reg, imm: i64, target: u32 },
-    JLeII { a: Reg, imm: i64, target: u32 },
-    JGtII { a: Reg, imm: i64, target: u32 },
-    JGeII { a: Reg, imm: i64, target: u32 },
-    JEqII { a: Reg, imm: i64, target: u32 },
-    JNeII { a: Reg, imm: i64, target: u32 },
-    Jmp { target: u32 },
-    JmpIfFalse { cond: Reg, target: u32 },
-    JmpIfTrue { cond: Reg, target: u32 },
-    Call { dst: Reg, function: u32, first: Reg },
-    Ret { src: Reg },
+    JLtI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JLeI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JGtI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JGeI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JEqI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JNeI {
+        a: Reg,
+        b: Reg,
+        target: u32,
+    },
+    JLtII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    JLeII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    JGtII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    JGeII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    JEqII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    JNeII {
+        a: Reg,
+        imm: i64,
+        target: u32,
+    },
+    Jmp {
+        target: u32,
+    },
+    JmpIfFalse {
+        cond: Reg,
+        target: u32,
+    },
+    JmpIfTrue {
+        cond: Reg,
+        target: u32,
+    },
+    Call {
+        dst: Reg,
+        function: u32,
+        first: Reg,
+    },
+    Ret {
+        src: Reg,
+    },
     RetVoid,
 }
 
@@ -574,22 +781,10 @@ impl<'a> Lowerer<'a> {
         for at in patches.continues {
             self.patch(at, cont);
         }
-        self.emit(
-            Op::AddII {
-                dst: cur,
-                a: cur,
-                imm: 1,
-            },
-            None,
-        );
-        self.emit(
-            Op::AddII {
-                dst: idx,
-                a: idx,
-                imm: 1,
-            },
-            None,
-        );
+        self.emit(Op::IncI { reg: cur }, None);
+        if index_slot.is_some() {
+            self.emit(Op::IncI { reg: idx }, None);
+        }
         self.emit(Op::Jmp { target: top }, None);
         let exit = self.code.len() as u32;
         self.patch(exit_jump, exit);
@@ -803,7 +998,7 @@ impl<'a> Lowerer<'a> {
                     T::FloatNeg => Op::NegF { dst, a },
                     _ => Op::NotB { dst, a },
                 };
-                self.emit(op, None);
+                self.emit(op, Some(span));
                 Some(dst)
             }
             (_, [left, right]) => {
@@ -824,7 +1019,7 @@ impl<'a> Lowerer<'a> {
                     if let Some(make) = make {
                         let a = self.expr(left, None)?;
                         let dst = want.unwrap_or_else(|| self.temp());
-                        self.emit(make(dst, a, imm), None);
+                        self.emit(make(dst, a, imm), Some(span));
                         return Some(dst);
                     }
                 }
@@ -963,6 +1158,19 @@ impl VmProgram {
                     .unwrap_or_else(Span::dummy);
                 Err(division_by_zero(&span))
             }
+            3 => {
+                let function = self.function_at(ctx.err_fn as usize);
+                let at = ctx.err_at as usize;
+                let span = function
+                    .and_then(|f| f.spans.get(at))
+                    .cloned()
+                    .unwrap_or_else(Span::dummy);
+                let what = function
+                    .and_then(|f| f.code.get(at))
+                    .map(overflow_what)
+                    .unwrap_or("arithmetic");
+                Err(overflow(&span, what))
+            }
             _ => Err(depth_error()),
         })
     }
@@ -1035,19 +1243,41 @@ impl VmProgram {
                 Op::ConstI { dst, value } => set!(dst, value as u64),
                 Op::ConstF { dst, bits } => set!(dst, bits),
                 Op::Move { dst, src } => set!(dst, r!(src)),
-                Op::AddI { dst, a, b } => set!(dst, i!(a).wrapping_add(i!(b)) as u64),
-                Op::SubI { dst, a, b } => set!(dst, i!(a).wrapping_sub(i!(b)) as u64),
-                Op::MulI { dst, a, b } => set!(dst, i!(a).wrapping_mul(i!(b)) as u64),
+                Op::AddI { dst, a, b } => match i!(a).checked_add(i!(b)) {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "addition")),
+                },
+                Op::SubI { dst, a, b } => match i!(a).checked_sub(i!(b)) {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "subtraction")),
+                },
+                Op::MulI { dst, a, b } => match i!(a).checked_mul(i!(b)) {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "multiplication")),
+                },
                 Op::DivI { dst, a, b, at } => {
                     let divisor = i!(b);
                     if divisor == 0 {
                         return Err(division_by_zero(&current.spans[at as usize]));
                     }
-                    set!(dst, i!(a).wrapping_div(divisor) as u64)
+                    match i!(a).checked_div(divisor) {
+                        Some(v) => set!(dst, v as u64),
+                        None => return Err(overflow(&current.spans[ip], "division")),
+                    }
                 }
-                Op::AddII { dst, a, imm } => set!(dst, i!(a).wrapping_add(imm) as u64),
-                Op::SubII { dst, a, imm } => set!(dst, i!(a).wrapping_sub(imm) as u64),
-                Op::NegI { dst, a } => set!(dst, i!(a).wrapping_neg() as u64),
+                Op::AddII { dst, a, imm } => match i!(a).checked_add(imm) {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "addition")),
+                },
+                Op::SubII { dst, a, imm } => match i!(a).checked_sub(imm) {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "subtraction")),
+                },
+                Op::IncI { reg } => set!(reg, (i!(reg).wrapping_add(1)) as u64),
+                Op::NegI { dst, a } => match i!(a).checked_neg() {
+                    Some(v) => set!(dst, v as u64),
+                    None => return Err(overflow(&current.spans[ip], "negation")),
+                },
                 Op::EqI { dst, a, b } => set!(dst, (i!(a) == i!(b)) as u64),
                 Op::NeI { dst, a, b } => set!(dst, (i!(a) != i!(b)) as u64),
                 Op::LtI { dst, a, b } => set!(dst, (i!(a) < i!(b)) as u64),
@@ -1238,6 +1468,22 @@ fn depth_error() -> SparError {
         ),
         span: Span::dummy(),
     }
+}
+
+/// Operation name for an overflow reported by the native backend.
+fn overflow_what(op: &Op) -> &'static str {
+    match op {
+        Op::AddI { .. } | Op::AddII { .. } => "addition",
+        Op::SubI { .. } | Op::SubII { .. } => "subtraction",
+        Op::MulI { .. } => "multiplication",
+        Op::NegI { .. } => "negation",
+        Op::DivI { .. } => "division",
+        _ => "arithmetic",
+    }
+}
+
+fn overflow(span: &Span, what: &str) -> SparError {
+    crate::runtime::integer_overflow_error(what, span)
 }
 
 fn division_by_zero(span: &Span) -> SparError {

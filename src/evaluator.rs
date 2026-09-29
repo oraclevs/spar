@@ -1431,16 +1431,23 @@ impl Evaluator {
                 let span = span.clone();
                 self.eval_call(&name, &args, &span, local_scope)
             }
-            Expr::Unary { op, operand, .. } => {
+            Expr::Unary { op, operand, span, .. } => {
                 let operand = operand.clone();
                 let op = op.clone();
+                let unary_span = span.clone();
                 match (op, self.eval_expr(&operand, local_scope)?) {
                     (UnOp::Not, ConfigValue::Bool(b)) => Ok(ConfigValue::Bool(!b)),
                     (UnOp::Not, v) => Err(EvalErr::TypeMismatch {
                         expected: "bool",
                         got: v.type_name(),
                     }),
-                    (UnOp::Neg, ConfigValue::Int(n)) => Ok(ConfigValue::Int(-n)),
+                    (UnOp::Neg, ConfigValue::Int(n)) => n
+                        .checked_neg()
+                        .map(ConfigValue::Int)
+                        .ok_or_else(|| EvalErr::Fatal {
+                            message: "integer overflow in negation".into(),
+                            span: unary_span.clone(),
+                        }),
                     (UnOp::Neg, ConfigValue::Float(f)) => Ok(ConfigValue::Float(-f)),
                     (UnOp::Neg, v) => Err(EvalErr::TypeMismatch {
                         expected: "int or float",
@@ -2544,7 +2551,13 @@ impl Evaluator {
         let rhs = self.eval_expr(&op.rhs, local_scope)?;
 
         match (&op.op, &lhs, &rhs) {
-            (BinOp::Add, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a + b)),
+            (BinOp::Add, ConfigValue::Int(a), ConfigValue::Int(b)) => a
+                .checked_add(*b)
+                .map(ConfigValue::Int)
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "integer overflow in addition".into(),
+                    span: op.span.clone(),
+                }),
             (BinOp::Add, ConfigValue::Float(a), ConfigValue::Float(b)) => {
                 Ok(ConfigValue::Float(a + b))
             }
@@ -2554,18 +2567,36 @@ impl Evaluator {
             (BinOp::Add, ConfigValue::Shell(a), ConfigValue::Shell(b)) => {
                 Ok(ConfigValue::Shell(a.clone().then(b.clone())))
             }
-            (BinOp::Sub, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a - b)),
+            (BinOp::Sub, ConfigValue::Int(a), ConfigValue::Int(b)) => a
+                .checked_sub(*b)
+                .map(ConfigValue::Int)
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "integer overflow in subtraction".into(),
+                    span: op.span.clone(),
+                }),
             (BinOp::Sub, ConfigValue::Float(a), ConfigValue::Float(b)) => {
                 Ok(ConfigValue::Float(a - b))
             }
-            (BinOp::Mul, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a * b)),
+            (BinOp::Mul, ConfigValue::Int(a), ConfigValue::Int(b)) => a
+                .checked_mul(*b)
+                .map(ConfigValue::Int)
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "integer overflow in multiplication".into(),
+                    span: op.span.clone(),
+                }),
             (BinOp::Mul, ConfigValue::Float(a), ConfigValue::Float(b)) => {
                 Ok(ConfigValue::Float(a * b))
             }
             (BinOp::Div, ConfigValue::Int(_), ConfigValue::Int(0)) => {
                 Err(EvalErr::DivisionByZero(op.span.clone()))
             }
-            (BinOp::Div, ConfigValue::Int(a), ConfigValue::Int(b)) => Ok(ConfigValue::Int(a / b)),
+            (BinOp::Div, ConfigValue::Int(a), ConfigValue::Int(b)) => a
+                .checked_div(*b)
+                .map(ConfigValue::Int)
+                .ok_or_else(|| EvalErr::Fatal {
+                    message: "integer overflow in division".into(),
+                    span: op.span.clone(),
+                }),
             (BinOp::Div, ConfigValue::Float(a), ConfigValue::Float(b)) => {
                 if *b == 0.0 {
                     Err(EvalErr::DivisionByZero(op.span.clone()))

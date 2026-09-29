@@ -5321,15 +5321,25 @@ fn eval_int_binary_value(operation: TypedOperation, left: &Value, right: &Value)
     }
 }
 
+/// Error for an integer operation whose result does not fit in `i64`.
+/// Spar integers are checked: overflow is a runtime error, never a silent wrap
+/// (use the `wrapping*`/`checked*` int methods when wrapping is intended).
+pub(crate) fn integer_overflow_error(what: &str, span: &Span) -> SparError {
+    SparError::EvalError {
+        message: format!("integer overflow in {what}"),
+        span: span.clone(),
+    }
+}
+
 /// Hot-path int/int arithmetic and comparison. Mirrors the corresponding arms
-/// of `eval_operation` exactly (including plain `+`/`-`/`*` overflow behaviour);
-/// returns `None` for anything that needs the general path (division, errors).
+/// of `eval_operation`; returns `None` for anything that needs the general path
+/// (division, and overflow, which the general path reports as an error).
 #[inline(always)]
 fn eval_int_binary(operation: TypedOperation, a: i64, b: i64) -> Option<Value> {
     Some(match operation {
-        TypedOperation::IntAdd => Value::Int(a + b),
-        TypedOperation::IntSub => Value::Int(a - b),
-        TypedOperation::IntMul => Value::Int(a * b),
+        TypedOperation::IntAdd => Value::Int(a.checked_add(b)?),
+        TypedOperation::IntSub => Value::Int(a.checked_sub(b)?),
+        TypedOperation::IntMul => Value::Int(a.checked_mul(b)?),
         TypedOperation::IntEq => Value::Bool(a == b),
         TypedOperation::IntLt => Value::Bool(a < b),
         TypedOperation::IntGt => Value::Bool(a > b),
@@ -5353,9 +5363,13 @@ fn eval_operation(
         };
     }
     match operation {
-        TypedOperation::IntAdd => {
-            binary!(Value::Int(a), Value::Int(b) => Value::Int(a + b))
-        }
+        TypedOperation::IntAdd => match values {
+            [Value::Int(a), Value::Int(b)] => a
+                .checked_add(*b)
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("addition", span)),
+            _ => Err(operation_type_error(operation, values, span)),
+        },
         TypedOperation::FloatAdd => {
             binary!(Value::Float(a), Value::Float(b) => Value::Float(a + b))
         }
@@ -5365,15 +5379,23 @@ fn eval_operation(
         TypedOperation::ShellConcat => {
             binary!(Value::Shell(a), Value::Shell(b) => Value::Shell(Shared::from((**a).clone().then((**b).clone()))))
         }
-        TypedOperation::IntSub => {
-            binary!(Value::Int(a), Value::Int(b) => Value::Int(a - b))
-        }
+        TypedOperation::IntSub => match values {
+            [Value::Int(a), Value::Int(b)] => a
+                .checked_sub(*b)
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("subtraction", span)),
+            _ => Err(operation_type_error(operation, values, span)),
+        },
         TypedOperation::FloatSub => {
             binary!(Value::Float(a), Value::Float(b) => Value::Float(a - b))
         }
-        TypedOperation::IntMul => {
-            binary!(Value::Int(a), Value::Int(b) => Value::Int(a * b))
-        }
+        TypedOperation::IntMul => match values {
+            [Value::Int(a), Value::Int(b)] => a
+                .checked_mul(*b)
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("multiplication", span)),
+            _ => Err(operation_type_error(operation, values, span)),
+        },
         TypedOperation::FloatMul => {
             binary!(Value::Float(a), Value::Float(b) => Value::Float(a * b))
         }
@@ -5382,7 +5404,10 @@ fn eval_operation(
                 message: "division by zero".into(),
                 span: span.clone(),
             }),
-            [Value::Int(a), Value::Int(b)] => Ok(Value::Int(a / b)),
+            [Value::Int(a), Value::Int(b)] => a
+                .checked_div(*b)
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("division", span)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::FloatDiv => match values {
@@ -5494,7 +5519,10 @@ fn eval_operation(
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::IntNeg => match values {
-            [Value::Int(value)] => Ok(Value::Int(-value)),
+            [Value::Int(value)] => value
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or_else(|| integer_overflow_error("negation", span)),
             _ => Err(operation_type_error(operation, values, span)),
         },
         TypedOperation::FloatNeg => match values {

@@ -773,7 +773,55 @@ fn register_primitive_methods(registry: &mut NativeRegistry) {
     for method in [
         NativeMethod::sync(
             "int", "abs", SparType::Int, vec![], SparType::Int, false,
-            |_context, args| match args.first() { Some(Value::Int(value)) => Ok(Value::Int(value.saturating_abs())), _ => Err(error("int.abs receiver is not int")) },
+            |_context, args| match args.first() {
+                Some(Value::Int(value)) => value
+                    .checked_abs()
+                    .map(Value::Int)
+                    .ok_or_else(|| error("integer overflow in abs")),
+                _ => Err(error("int.abs receiver is not int")),
+            },
+        ),
+        // Explicit overflow behaviour. The `+ - * / -` operators are checked
+        // (overflow is a runtime error); these opt in to the other semantics.
+        NativeMethod::sync(
+            "int", "wrappingAdd", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.wrapping_add(*b))), _ => Err(error("int.wrappingAdd expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "wrappingSub", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.wrapping_sub(*b))), _ => Err(error("int.wrappingSub expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "wrappingMul", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.wrapping_mul(*b))), _ => Err(error("int.wrappingMul expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "wrappingNeg", SparType::Int, vec![], SparType::Int, false,
+            |_context, args| match args.first() { Some(Value::Int(a)) => Ok(Value::Int(a.wrapping_neg())), _ => Err(error("int.wrappingNeg receiver is not int")) },
+        ),
+        NativeMethod::sync(
+            "int", "saturatingAdd", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.saturating_add(*b))), _ => Err(error("int.saturatingAdd expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "saturatingSub", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.saturating_sub(*b))), _ => Err(error("int.saturatingSub expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "saturatingMul", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Int(a.saturating_mul(*b))), _ => Err(error("int.saturatingMul expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "checkedAdd", SparType::Int, vec![("other", SparType::Int)], applied("Option", vec![SparType::Int]), false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Option(a.checked_add(*b).map(|v| Box::new(Value::Int(v))))), _ => Err(error("int.checkedAdd expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "checkedSub", SparType::Int, vec![("other", SparType::Int)], applied("Option", vec![SparType::Int]), false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Option(a.checked_sub(*b).map(|v| Box::new(Value::Int(v))))), _ => Err(error("int.checkedSub expects int values")) },
+        ),
+        NativeMethod::sync(
+            "int", "checkedMul", SparType::Int, vec![("other", SparType::Int)], applied("Option", vec![SparType::Int]), false,
+            |_context, args| match (args.first(), args.get(1)) { (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(Value::Option(a.checked_mul(*b).map(|v| Box::new(Value::Int(v))))), _ => Err(error("int.checkedMul expects int values")) },
         ),
         NativeMethod::sync(
             "int", "min", SparType::Int, vec![("other", SparType::Int)], SparType::Int, false,

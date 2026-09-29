@@ -5,8 +5,9 @@
 //!
 //! * registers are untagged `i64` SSA variables (floats live as their bit
 //!   pattern and are bit-cast around each float operation);
-//! * `+ - *` wrap on overflow; `/` by zero reports "division by zero" with the
-//!   op's source span, and `i64::MIN / -1` wraps;
+//! * `+ - *`, unary `-` and `/` are checked: overflow (including
+//!   `i64::MIN / -1`) reports "integer overflow in <op>" with the op's source
+//!   span, and `/` by zero reports "division by zero";
 //! * a call made at depth `d` fails with the interpreter's call-depth error
 //!   when `d >= MAX_CALL_DEPTH`.
 //!
@@ -15,8 +16,8 @@
 //! `extern "C" fn(depth: i64, ctx: *mut JitCtx, arg0: i64, ..., argN: i64) -> i64`
 //! (at most 8 arguments, the same limit the interpreter bridge has). A
 //! non-zero `ctx.err` after the call means the returned value is meaningless:
-//! `1` = division by zero (function/op recorded in `err_fn`/`err_at`),
-//! `2` = call depth exceeded. Callee errors propagate by returning `0` as soon
+//! `1` = division by zero, `3` = integer overflow (function/op recorded in
+//! `err_fn`/`err_at`), `2` = call depth exceeded. Callee errors propagate by returning `0` as soon
 //! as the caller observes a non-zero `ctx.err`.
 //!
 //! The code lives as long as the `JitProgram`; function pointers are only used
@@ -356,6 +357,21 @@ fn lower_function(
                 set(&mut b, $dst, r);
             }};
         }
+        // Checked arithmetic: an overflow records error 3 (with this op's index,
+        // from which the caller recovers the operation name and span) and returns.
+        macro_rules! checked {
+            ($dst:expr, $x:expr, $y:expr, $method:ident) => {{
+                let (r, overflowed) = b.ins().$method($x, $y);
+                let ok = b.create_block();
+                let bad = b.create_block();
+                b.set_cold_block(bad);
+                b.ins().brif(overflowed, bad, &[], ok, &[]);
+                b.switch_to_block(bad);
+                fail!(3, ip);
+                b.switch_to_block(ok);
+                set(&mut b, $dst, r);
+            }};
+        }
         macro_rules! branch_cmp {
             ($a:expr, $b:expr, $target:expr, $cc:expr) => {{
                 let x = get(&mut b, $a);
@@ -401,9 +417,18 @@ fn lower_function(
                 let v = get(&mut b, src);
                 set(&mut b, dst, v);
             }
-            Op::AddI { dst, a, b: rb } => bin!(dst, a, rb, iadd),
-            Op::SubI { dst, a, b: rb } => bin!(dst, a, rb, isub),
-            Op::MulI { dst, a, b: rb } => bin!(dst, a, rb, imul),
+            Op::AddI { dst, a, b: rb } => {
+                let (x, y) = (get(&mut b, a), get(&mut b, rb));
+                checked!(dst, x, y, sadd_overflow);
+            }
+            Op::SubI { dst, a, b: rb } => {
+                let (x, y) = (get(&mut b, a), get(&mut b, rb));
+                checked!(dst, x, y, ssub_overflow);
+            }
+            Op::MulI { dst, a, b: rb } => {
+                let (x, y) = (get(&mut b, a), get(&mut b, rb));
+                checked!(dst, x, y, smul_overflow);
+            }
             Op::DivI { dst, a, b: rb, at } => {
                 let x = get(&mut b, a);
                 let y = get(&mut b, rb);
@@ -414,29 +439,38 @@ fn lower_function(
                 b.switch_to_block(fail_block);
                 fail!(1, at);
                 b.switch_to_block(ok);
-                // i64::MIN / -1 wraps (sdiv would trap): divide by 1 and negate.
+                // i64::MIN / -1 overflows (and sdiv would trap): report it.
+                let is_min = b.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
                 let is_neg1 = b.ins().icmp_imm_s(IntCC::Equal, y, -1);
-                let one = b.ins().iconst(types::I64, 1);
-                let safe = b.ins().select(is_neg1, one, y);
-                let q = b.ins().sdiv(x, safe);
-                let negated = b.ins().ineg(x);
-                let r = b.ins().select(is_neg1, negated, q);
+                let both = b.ins().band(is_min, is_neg1);
+                let safe = b.create_block();
+                let overflow_block = b.create_block();
+                b.set_cold_block(overflow_block);
+                b.ins().brif(both, overflow_block, &[], safe, &[]);
+                b.switch_to_block(overflow_block);
+                fail!(3, ip);
+                b.switch_to_block(safe);
+                let r = b.ins().sdiv(x, y);
                 set(&mut b, dst, r);
             }
             Op::AddII { dst, a, imm } => {
                 let x = get(&mut b, a);
-                let r = b.ins().iadd_imm_s(x, imm);
-                set(&mut b, dst, r);
+                let y = b.ins().iconst(types::I64, imm);
+                checked!(dst, x, y, sadd_overflow);
             }
             Op::SubII { dst, a, imm } => {
                 let x = get(&mut b, a);
-                let r = b.ins().iadd_imm_s(x, imm.wrapping_neg());
-                set(&mut b, dst, r);
+                let y = b.ins().iconst(types::I64, imm);
+                checked!(dst, x, y, ssub_overflow);
+            }
+            Op::IncI { reg } => {
+                let x = get(&mut b, reg);
+                let r = b.ins().iadd_imm_s(x, 1);
+                set(&mut b, reg, r);
             }
             Op::NegI { dst, a } => {
                 let x = get(&mut b, a);
-                let r = b.ins().ineg(x);
-                set(&mut b, dst, r);
+                checked!(dst, zero, x, ssub_overflow);
             }
             Op::EqI { dst, a, b: rb } => cmp!(dst, a, rb, IntCC::Equal),
             Op::NeI { dst, a, b: rb } => cmp!(dst, a, rb, IntCC::NotEqual),

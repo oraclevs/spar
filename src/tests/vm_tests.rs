@@ -292,3 +292,101 @@ fn tier2_exit_and_early_return_match() {
     );
     assert_eq!(v, Ok(17));
 }
+
+// ── Native (Cranelift) backend vs the bytecode interpreter ───────────────────
+
+/// Runs every lowered function of `source` on both backends over a grid of
+/// integer arguments and requires identical results or identical errors.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_matches_interpreter(source: &str, args: &[&[u64]]) {
+    use crate::compiled::FunctionId;
+    use crate::vm::VmState;
+    let program = Engine::default().compile_source(source).expect("compiles");
+    let mut checked = 0;
+    for index in 0..64u32 {
+        let id = FunctionId(index);
+        let Some(function) = program.vm.get(id) else {
+            continue;
+        };
+        for call_args in args.iter().filter(|a| a.len() == function.params.len()) {
+            let native = program.vm.run_native(id, call_args, 0);
+            let Some(native) = native else { return }; // no native backend on this host
+            let mut state = VmState::default();
+            let interpreted = program.vm.run_interpreted(&mut state, id, call_args, 0);
+            assert_eq!(
+                native.map_err(|e| e.to_string()),
+                interpreted.map_err(|e| e.to_string()),
+                "function {index} args {call_args:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no function was compared");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_backend_matches_interpreter_on_integer_code() {
+    native_matches_interpreter(
+        r#"
+        fn fib(n: int) -> int { if n <= 1 { return n; } return fib(n: n - 1) + fib(n: n - 2); };
+        fn collatz(n: int) -> int {
+            var mut steps: int = 0;
+            var mut x: int = n;
+            for i in range(end: 200) {
+                if x <= 1 { break; }
+                if x - (x / 2) * 2 == 0 { x = x / 2; } else { x = x * 3 + 1; }
+                steps = steps + 1;
+            }
+            return steps;
+        };
+        fn div(a: int, b: int) -> int { return a / b; };
+        fn logic(a: int, b: int) -> int {
+            if a < b && b != 0 || a == 7 { return a - b; }
+            if !(a > b) { return a * b; }
+            return -a;
+        };
+        fn down(n: int) -> int { return down(n: n + 1); };
+        fn main() -> int { return 0; };
+        "#,
+        &[
+            &[0],
+            &[1],
+            &[7],
+            &[20],
+            &[(-5i64) as u64],
+            &[10, 3],
+            &[10, 0],
+            &[i64::MIN as u64, (-1i64) as u64],
+            &[7, 7],
+            &[3, 9],
+            &[9, 3],
+            &[(-4i64) as u64, 0],
+        ],
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_backend_matches_interpreter_on_float_and_bool_code() {
+    native_matches_interpreter(
+        r#"
+        fn mix(x: float, y: float, flag: bool) -> float {
+            var mut acc: float = x * y - 1.5;
+            if flag && acc > 0.0 || !flag { acc = acc / 2.0; } else { acc = -acc; }
+            return acc + 0.25;
+        };
+        fn fdiv(a: float, b: float) -> float { return a / b; };
+        fn cmp(a: float, b: float) -> bool { return a < b || a == b; };
+        fn main() -> int { return 0; };
+        "#,
+        &[
+            &[1.5f64.to_bits(), 2.0f64.to_bits(), 1],
+            &[3.0f64.to_bits(), 2.0f64.to_bits(), 0],
+            &[(-1.0f64).to_bits(), 0.5f64.to_bits(), 1],
+            &[1.0f64.to_bits(), 0.0f64.to_bits()],
+            &[f64::NAN.to_bits(), 1.0f64.to_bits()],
+            &[2.0f64.to_bits(), 2.0f64.to_bits()],
+        ],
+    );
+}

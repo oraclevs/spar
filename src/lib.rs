@@ -34,6 +34,8 @@ pub mod task_lowering;
 pub mod tests;
 pub mod token;
 pub mod typechecker;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod jit;
 pub(crate) mod vm;
 
 pub use ast::Program;

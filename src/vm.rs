@@ -129,18 +129,37 @@ pub(crate) struct VmFunction {
 
 pub(crate) struct VmProgram {
     functions: Vec<Option<VmFunction>>,
+    /// Native code for the lowered functions, compiled on first use.
+    #[cfg(not(target_arch = "wasm32"))]
+    jit: std::sync::OnceLock<Option<crate::jit::JitProgram>>,
     /// Why each non-lowered function stayed on the tree walker.
     reasons: Vec<Option<String>>,
     names: Vec<String>,
+}
+
+impl VmFunction {
+    pub(crate) fn nregs(&self) -> usize {
+        self.nregs as usize
+    }
 }
 
 impl VmProgram {
     pub(crate) fn empty() -> Self {
         Self {
             functions: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            jit: std::sync::OnceLock::new(),
             reasons: Vec::new(),
             names: Vec::new(),
         }
+    }
+
+    pub(crate) fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
+    pub(crate) fn function_at(&self, index: usize) -> Option<&VmFunction> {
+        self.functions.get(index)?.as_ref()
     }
 
     #[inline]
@@ -205,7 +224,13 @@ impl VmProgram {
             .iter()
             .map(|f| f.map(|f| f.name.clone()).unwrap_or_default())
             .collect();
-        Self { functions: lowered, reasons, names }
+        Self {
+            functions: lowered,
+            #[cfg(not(target_arch = "wasm32"))]
+            jit: std::sync::OnceLock::new(),
+            reasons,
+            names,
+        }
     }
 
     /// Human-readable listing of every lowered function (`spar dis`).
@@ -223,7 +248,10 @@ impl VmProgram {
         }
         for (index, why) in self.reasons.iter().enumerate() {
             if let Some(why) = why {
-                out.push_str(&format!("fn {} (id {index}): tree walker ({why})\n", self.names[index]));
+                out.push_str(&format!(
+                    "fn {} (id {index}): tree walker ({why})\n",
+                    self.names[index]
+                ));
             }
         }
         out
@@ -309,7 +337,10 @@ impl<'a> Lowerer<'a> {
         };
         if ret == Prim::Void {
             l.emit(Op::RetVoid, None);
-        } else if !matches!(function.body.last(), Some(CompiledStatement::Return(Some(_), _))) {
+        } else if !matches!(
+            function.body.last(),
+            Some(CompiledStatement::Return(Some(_), _))
+        ) {
             return Err("value-returning function does not end in `return`".into());
         }
         let params = function
@@ -876,7 +907,10 @@ fn expr_kind(e: &CompiledExpression) -> &'static str {
         E::Field { .. } => "field access",
         E::Interpolation(..) => "string interpolation",
         E::Comprehension { .. } => "comprehension",
-        E::Shell(_) | E::MixedShell(_) | E::ShellProgram { .. } | E::ExecShell(_)
+        E::Shell(_)
+        | E::MixedShell(_)
+        | E::ShellProgram { .. }
+        | E::ExecShell(_)
         | E::CommandSubstitution(_) => "shell",
     }
 }
@@ -895,10 +929,64 @@ struct SavedFrame {
     dst: u32,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl VmProgram {
+    /// Native code, compiled once on first use. `SPAR_NO_JIT=1` keeps the
+    /// bytecode interpreter; any compile failure does the same.
+    fn native(&self) -> Option<&crate::jit::JitProgram> {
+        self.jit
+            .get_or_init(|| {
+                if std::env::var_os("SPAR_NO_JIT").is_some() {
+                    return None;
+                }
+                crate::jit::JitProgram::compile(self)
+            })
+            .as_ref()
+    }
+
+    pub(crate) fn run_native(
+        &self,
+        entry: FunctionId,
+        args: &[u64],
+        depth: usize,
+    ) -> Option<Result<u64, SparError>> {
+        let jit = self.native()?;
+        let mut ctx = crate::jit::JitCtx::default();
+        let result = jit.call(entry.0 as usize, args, depth as i64, &mut ctx)?;
+        Some(match ctx.err {
+            0 => Ok(result),
+            1 => {
+                let span = self
+                    .function_at(ctx.err_fn as usize)
+                    .and_then(|f| f.spans.get(ctx.err_at as usize))
+                    .cloned()
+                    .unwrap_or_else(Span::dummy);
+                Err(division_by_zero(&span))
+            }
+            _ => Err(depth_error()),
+        })
+    }
+}
+
 impl VmProgram {
     /// Runs `entry` with `args` already converted to register bits.
     /// `depth` is the caller's current call depth.
     pub(crate) fn run(
+        &self,
+        state: &mut VmState,
+        entry: FunctionId,
+        args: &[u64],
+        depth: usize,
+    ) -> Result<u64, SparError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(result) = self.run_native(entry, args, depth) {
+            return result;
+        }
+        self.run_interpreted(state, entry, args, depth)
+    }
+
+    /// The bytecode interpreter loop (the reference for the native backend).
+    pub(crate) fn run_interpreted(
         &self,
         state: &mut VmState,
         entry: FunctionId,

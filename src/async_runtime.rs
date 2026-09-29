@@ -5,8 +5,9 @@ use crate::{PromiseHandle, SparError, Value};
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeFault {
-    Raised(SparError),
-    Fatal(SparError),
+    // Boxed so `Result<Value, RuntimeFault>` stays small on the hot path.
+    Raised(Box<SparError>),
+    Fatal(Box<SparError>),
     /// A spawned task's own execution called `exit(code:)`. This is not a
     /// user-facing error — it's a side channel from a worker-side `Runtime`
     /// (whose `RuntimeContext` is an isolated `spawn_child()` copy, so
@@ -22,7 +23,7 @@ pub(crate) enum RuntimeFault {
 impl RuntimeFault {
     pub(crate) fn into_error(self) -> SparError {
         match self {
-            Self::Raised(error) | Self::Fatal(error) => error,
+            Self::Raised(error) | Self::Fatal(error) => *error,
             // Should never actually surface: every place that consumes a
             // task's result (`drive_promise`, `race`, `timeout`) translates
             // `Exit` before it can reach a caller that renders it as a
@@ -49,7 +50,7 @@ impl std::fmt::Display for RuntimeFault {
 
 impl From<SparError> for RuntimeFault {
     fn from(error: SparError) -> Self {
-        Self::Raised(error)
+        Self::Raised(Box::new(error))
     }
 }
 

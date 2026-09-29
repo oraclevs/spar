@@ -935,10 +935,10 @@ impl Runtime<'_> {
         self.program.function(id)
             .map(|function| function.is_async)
             .ok_or_else(|| {
-                RuntimeFault::Fatal(runtime_error(
+                RuntimeFault::Fatal(Box::new(runtime_error(
                     &format!("unknown function ID {}", id.0),
                     &Span::dummy(),
-                ))
+                )))
             })
     }
 
@@ -1594,7 +1594,7 @@ impl Runtime<'_> {
                 let Value::String(message) = message else {
                     return Err(type_error("str", &message, span).into());
                 };
-                Err(RuntimeFault::Fatal(runtime_error(&message, span)))
+                Err(RuntimeFault::Fatal(Box::new(runtime_error(&message, span))))
             }
             CompiledExpression::ExecShell(shell) => {
                 // Evaluate the compiled shell first so `${...}` interpolation in
@@ -2232,18 +2232,18 @@ impl Runtime<'_> {
                                 .into())
                             }
                             TaskStatus::Unknown => {
-                                return Err(RuntimeFault::Fatal(runtime_error(
+                                return Err(RuntimeFault::Fatal(Box::new(runtime_error(
                                     "race received an unknown promise",
                                     span,
-                                )))
+                                ))))
                             }
                         }
                     }
                     if !pending {
-                        return Err(RuntimeFault::Fatal(runtime_error(
+                        return Err(RuntimeFault::Fatal(Box::new(runtime_error(
                             "race scheduler made no progress",
                             span,
-                        )));
+                        ))));
                     }
                     self.scheduler
                         .wait_for_any_change(std::time::Duration::from_millis(50));
@@ -2313,10 +2313,10 @@ impl Runtime<'_> {
                             return Err(runtime_error("promise was cancelled", span).into())
                         }
                         TaskStatus::Unknown => {
-                            return Err(RuntimeFault::Fatal(runtime_error(
+                            return Err(RuntimeFault::Fatal(Box::new(runtime_error(
                                 "unknown promise handle",
                                 span,
-                            )))
+                            ))))
                         }
                     }
                     if started.elapsed() >= limit {

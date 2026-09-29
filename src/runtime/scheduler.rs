@@ -30,10 +30,10 @@ fn run_catching_panics(
                 .map(|s| (*s).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic payload".to_string());
-            Err(RuntimeFault::Fatal(super::runtime_error(
+            Err(RuntimeFault::Fatal(Box::new(super::runtime_error(
                 &format!("task panicked: {message}"),
                 &Span::dummy(),
-            )))
+            ))))
         }
     }
 }
@@ -175,10 +175,10 @@ impl Scheduler {
                     return Err(super::runtime_error("promise was cancelled", span).into())
                 }
                 TaskStatus::Unknown => {
-                    return Err(RuntimeFault::Fatal(super::runtime_error(
+                    return Err(RuntimeFault::Fatal(Box::new(super::runtime_error(
                         "unknown promise handle",
                         span,
-                    )))
+                    ))))
                 }
                 // Already running elsewhere (another worker, or this same
                 // thread via a genuine self-referential await) — nothing

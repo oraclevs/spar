@@ -16,7 +16,7 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Shell => "shell".into(),
         SparType::Error => "error".into(),
         SparType::List(inner) => format!("List<{}>", display_type(inner)),
-        SparType::Named(name) => name.clone(),
+        SparType::Named(name) => crate::naming::demangle(name),
         SparType::TypeParameter(name) => name.clone(),
         SparType::Applied { name, arguments } => format!(
             "{}<{}>",
@@ -512,6 +512,9 @@ pub(crate) fn pipe_stage_parameters_with_locals(
         current_method_receiver_mutable: false,
         expectations: Default::default(),
         in_shell_statement_scope: false,
+        type_map: Default::default(),
+            receiver_map: Default::default(),
+        record_types: false,
     }
     .pipe_stage_parameter_types(input, stage, locals, &span)
     .ok()
@@ -538,6 +541,9 @@ pub(crate) fn infer_expression_with_locals(
         current_method_receiver_mutable: false,
         expectations: Default::default(),
         in_shell_statement_scope: false,
+        type_map: Default::default(),
+            receiver_map: Default::default(),
+        record_types: false,
     }
     .infer_type_with_locals(expr, locals)
 }
@@ -597,6 +603,28 @@ pub struct TypeChecker<'a> {
     /// check instead, rather than threading a new parameter through every
     /// `check_func_stmts`/`check_if_stmt` call site.
     in_shell_statement_scope: bool,
+    /// Inferred type of every expression the checker asked about, by byte span. Filled only when
+    /// `record_types` is set (editor tooling); costs nothing otherwise.
+    type_map: std::cell::RefCell<Vec<TypedSpan>>,
+    receiver_map: std::cell::RefCell<Vec<TypedSpan>>,
+    record_types: bool,
+}
+
+/// Everything the checker inferred, for editor tooling.
+#[derive(Debug, Clone, Default)]
+pub struct TypeMap {
+    /// Inferred type per expression span.
+    pub expressions: Vec<TypedSpan>,
+    /// Receiver type of each `recv.member` / `recv.method()`, keyed by the dot's byte offset.
+    pub receivers: Vec<TypedSpan>,
+}
+
+/// An expression's inferred type at a source range (byte offsets), for hover/completion.
+#[derive(Debug, Clone)]
+pub struct TypedSpan {
+    pub start: usize,
+    pub end: usize,
+    pub ty: SparType,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -722,6 +750,9 @@ impl<'a> TypeChecker<'a> {
             current_method_receiver_mutable: false,
             expectations: Default::default(),
             in_shell_statement_scope: false,
+            type_map: Default::default(),
+            receiver_map: Default::default(),
+            record_types: false,
         }
         .infer_type(expr)
     }
@@ -737,6 +768,9 @@ impl<'a> TypeChecker<'a> {
             current_method_receiver_mutable: false,
             expectations: Default::default(),
             in_shell_statement_scope: false,
+            type_map: Default::default(),
+            receiver_map: Default::default(),
+            record_types: false,
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -744,6 +778,30 @@ impl<'a> TypeChecker<'a> {
         } else {
             Err(tc.errors)
         }
+    }
+
+    /// Like `check`, but also returns the inferred type of every expression the checker visited.
+    pub fn check_with_type_map(
+        program: &Program,
+        symbols: &'a SymbolTable,
+    ) -> (Result<(), Vec<SparError>>, TypeMap) {
+        let mut tc = TypeChecker {
+            symbols,
+            errors: Vec::new(),
+            schema_bindings: HashMap::new(),
+            current_struct: None,
+            current_impl: None,
+            mutable_bindings: HashSet::new(),
+            current_method_receiver_mutable: false,
+            expectations: Default::default(),
+            in_shell_statement_scope: false,
+            type_map: Default::default(),
+            receiver_map: Default::default(),
+            record_types: true,
+        };
+        tc.check_program(program);
+        let map = TypeMap { expressions: tc.type_map.take(), receivers: tc.receiver_map.take() };
+        (if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }, map)
     }
 
     pub fn check_with_imports(
@@ -774,6 +832,9 @@ impl<'a> TypeChecker<'a> {
             current_method_receiver_mutable: false,
             expectations: Default::default(),
             in_shell_statement_scope: false,
+            type_map: Default::default(),
+            receiver_map: Default::default(),
+            record_types: false,
         };
         tc.check_program(program);
         if tc.errors.is_empty() {
@@ -2519,6 +2580,68 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn infer_type(&self, expr: &Expr) -> Option<SparType> {
+        let ty = self.infer_type_impl(expr);
+        self.record_type(expr, &ty);
+        self.record_receiver(expr, None);
+        ty
+    }
+
+    /// For `recv.member` / `recv.method(..)` records the receiver's type at the `.` (the member
+    /// expression's span starts there). Editor tooling looks members up by dot offset because the
+    /// AST spans of these nodes do not cover the receiver. Fields of a dynamic `Record` are typed
+    /// `Any` so `.asStr()` and friends resolve.
+    fn record_receiver(&self, expr: &Expr, locals: Option<&HashMap<String, SparType>>) {
+        if !self.record_types {
+            return;
+        }
+        let (receiver, span) = match expr {
+            Expr::FieldAccess { base, span, .. } => (base.as_ref(), span),
+            Expr::MethodCall { receiver, span, .. } => (receiver.as_ref(), span),
+            _ => return,
+        };
+        if let Some(ty) = self.tooling_receiver_type(receiver, locals, 0) {
+            self.receiver_map.borrow_mut().push(TypedSpan { start: span.start, end: span.start + 1, ty });
+        }
+    }
+
+    fn tooling_receiver_type(
+        &self,
+        expr: &Expr,
+        locals: Option<&HashMap<String, SparType>>,
+        depth: usize,
+    ) -> Option<SparType> {
+        if depth > 12 {
+            return None;
+        }
+        let direct = match locals {
+            Some(locals) => self.infer_type_with_locals_impl(expr, locals),
+            None => self.infer_type_impl(expr),
+        };
+        if direct.is_some() {
+            return direct;
+        }
+        if let Expr::FieldAccess { base, .. } = expr {
+            if matches!(
+                self.tooling_receiver_type(base, locals, depth + 1),
+                Some(SparType::InlineRecord | SparType::Any)
+            ) {
+                return Some(SparType::Any);
+            }
+        }
+        None
+    }
+
+    fn record_type(&self, expr: &Expr, ty: &Option<SparType>) {
+        if !self.record_types {
+            return;
+        }
+        let (Some(ty), Some(span)) = (ty, expr_span_of(expr)) else { return };
+        if span.end > span.start {
+            self.type_map.borrow_mut().push(TypedSpan { start: span.start, end: span.end, ty: ty.clone() });
+        }
+    }
+
+    fn infer_type_impl(&self, expr: &Expr) -> Option<SparType> {
         match expr {
             Expr::Object(_, _) => None, // shape only checkable against an expected type — see check_expr_type (Task 4)
             Expr::Literal(Literal::Int(_)) => Some(SparType::Int),
@@ -3206,6 +3329,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_expr_internal(&mut self, expr: &Expr) {
+        if self.record_types {
+            let _ = self.infer_type(expr);
+        }
         match expr {
             Expr::Object(items, _) => {
                 for item in items {
@@ -4053,6 +4179,9 @@ impl<'a> TypeChecker<'a> {
         locals: &HashMap<String, SparType>,
         is_async: bool,
     ) -> Result<(), SparError> {
+        if self.record_types {
+            let _ = self.infer_type_with_locals(expr, locals);
+        }
         match expr {
             Expr::Object(items, _) => {
                 for item in items {
@@ -5521,6 +5650,17 @@ impl<'a> TypeChecker<'a> {
         expr: &Expr,
         locals: &HashMap<String, SparType>,
     ) -> Option<SparType> {
+        let ty = self.infer_type_with_locals_impl(expr, locals);
+        self.record_type(expr, &ty);
+        self.record_receiver(expr, Some(locals));
+        ty
+    }
+
+    fn infer_type_with_locals_impl(
+        &self,
+        expr: &Expr,
+        locals: &HashMap<String, SparType>,
+    ) -> Option<SparType> {
         match expr {
             Expr::Literal(lit) => match lit {
                 Literal::Int(_) => Some(SparType::Int),
@@ -6285,4 +6425,27 @@ mod tests {
             "got: {errors:?}"
         );
     }
+}
+
+fn expr_span_of(expr: &Expr) -> Option<Span> {
+    Some(match expr {
+        Expr::Literal(_) => return None,
+        Expr::String(value) => value.span.clone(),
+        Expr::NamespaceRef(value) => value.span.clone(),
+        Expr::FnCall(value) => value.span.clone(),
+        Expr::BinaryOp(value) => value.span.clone(),
+        Expr::List(_, span)
+        | Expr::Grouped(_, span)
+        | Expr::Call { span, .. }
+        | Expr::Closure { span, .. }
+        | Expr::Unary { span, .. }
+        | Expr::Await { span, .. }
+        | Expr::Comprehension { span, .. }
+        | Expr::Index { span, .. }
+        | Expr::FieldAccess { span, .. }
+        | Expr::MethodCall { span, .. }
+        | Expr::StructuredPipe { span, .. }
+        | Expr::Object(_, span) => span.clone(),
+        Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => value.span.clone(),
+    })
 }

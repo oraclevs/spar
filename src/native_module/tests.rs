@@ -386,3 +386,39 @@ fn pseudo_random_api_fuzz_never_crashes() {
         assert_eq!(unsafe { (api.ref_drop.unwrap())(r) }, SPAR_OK);
     }
 }
+
+#[test]
+fn async_state_machine_and_shutdown_cancellation() {
+    use super::async_op::*;
+    use crate::runtime::scheduler::Scheduler;
+    let api = api_table();
+    let sched = Scheduler::new(1, std::sync::Arc::new(|_| Ok(Value::Void)));
+    let (op, handle) = begin(sched.clone());
+    unsafe {
+        let mut cancelled = 9u8;
+        assert_eq!((api.async_is_cancelled.unwrap())(op, &mut cancelled), SPAR_OK);
+        assert_eq!(cancelled, 0);
+        // invalid json is rejected without settling
+        assert_eq!((api.async_complete.unwrap())(op, b"{oops".as_ptr(), 5), SPAR_E_INVALID_ARGUMENT);
+        assert_eq!((api.async_complete.unwrap())(op, b"7".as_ptr(), 1), SPAR_OK);
+        assert_eq!((api.async_complete.unwrap())(op, b"8".as_ptr(), 1), SPAR_E_INVALID_STATE);
+        assert_eq!((api.async_fail.unwrap())(op, b"x".as_ptr(), 1), SPAR_E_INVALID_STATE);
+        assert_eq!((api.async_release.unwrap())(op), SPAR_OK);
+        assert_eq!((api.async_release.unwrap())(op), SPAR_E_INVALID_HANDLE);
+        assert_eq!((api.async_complete.unwrap())(op, b"7".as_ptr(), 1), SPAR_E_INVALID_HANDLE);
+        assert_eq!((api.async_complete.unwrap())(std::ptr::null_mut(), b"7".as_ptr(), 1), SPAR_E_INVALID_ARGUMENT);
+    }
+    assert!(matches!(sched.status_snapshot(handle), crate::async_runtime::TaskStatus::Ready(Ok(Value::Int(7)))));
+
+    // shutdown cancels a running operation; a late completion is refused and never resumes anything
+    let (op2, h2) = begin(sched.clone());
+    sched.shutdown();
+    unsafe {
+        let mut cancelled = 0u8;
+        assert_eq!((api.async_is_cancelled.unwrap())(op2, &mut cancelled), SPAR_OK);
+        assert_eq!(cancelled, 1);
+        assert_eq!((api.async_complete.unwrap())(op2, b"1".as_ptr(), 1), SPAR_E_CANCELLED);
+        assert_eq!((api.async_release.unwrap())(op2), SPAR_OK);
+    }
+    assert!(sched.is_cancelled(h2));
+}

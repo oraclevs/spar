@@ -147,6 +147,25 @@ impl Scheduler {
         handle
     }
 
+    /// Creates a promise that some other thread will complete (native async operations).
+    pub(crate) fn create_external(&self) -> PromiseHandle {
+        self.inner.lock().unwrap().create_running()
+    }
+
+    /// Completes an external promise. Returns false if it was cancelled (runtime shutdown) or
+    /// already settled, in which case nothing is touched.
+    pub(crate) fn complete_external(&self, handle: PromiseHandle, result: Result<Value, RuntimeFault>) -> bool {
+        let done = self.inner.lock().unwrap().complete_if_running(handle, result);
+        if done {
+            self.changed.notify_all();
+        }
+        done
+    }
+
+    pub(crate) fn is_cancelled(&self, handle: PromiseHandle) -> bool {
+        matches!(self.inner.lock().unwrap().status(handle), TaskStatus::Cancelled)
+    }
+
     /// Blocks until `handle`'s task is done. If it hasn't started yet, this
     /// claims and runs it *inline*, on the calling thread, instead of
     /// waiting for an idle pool worker to notice it. That's not an

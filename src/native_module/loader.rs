@@ -26,7 +26,8 @@ pub const RUNTIME_CAPABILITIES: u64 = SPAR_CAP_STRINGS
     | SPAR_CAP_LISTS
     | SPAR_CAP_RECORDS
     | SPAR_CAP_NATIVE_RESOURCES
-    | SPAR_CAP_CALLBACKS;
+    | SPAR_CAP_CALLBACKS
+    | SPAR_CAP_ASYNC;
 
 #[derive(Debug)]
 pub enum NativeLoadError {
@@ -107,6 +108,7 @@ struct FnInfo {
     argc: usize,
     /// Index into `EXTERNALS` for functions that need interpreter access (`SPAR_FN_CALLS`).
     external: Option<u32>,
+    is_async: bool,
 }
 // SAFETY: `userdata` is module-owned state; the ABI requires module functions to be callable from
 // any thread that owns a call env (natives run on scheduler threads).
@@ -197,9 +199,6 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     if builder.functions.iter().any(|f| f.name == name) {
         return Err(bad(format!("function '{name}' registered twice")));
     }
-    if spec.flags & SPAR_FN_ASYNC != 0 {
-        return Err((SPAR_E_UNSUPPORTED, format!("'{name}': async native functions are not supported yet")));
-    }
     if !spec.direct.is_null() {
         return Err((SPAR_E_UNSUPPORTED, format!("'{name}': direct signatures are not supported yet")));
     }
@@ -229,6 +228,11 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         crate::parser::Parser::parse_type_text(&ret_text)
             .map_err(|e| bad(format!("'{name}': invalid return type '{ret_text}': {e}")))?
     };
+    if spec.flags & SPAR_FN_ASYNC != 0
+        && !matches!(&ret, SparType::Applied { name, arguments } if name == "Promise" && arguments.len() == 1)
+    {
+        return Err(bad(format!("'{name}': async functions must declare a `Promise<T>` return type, got '{ret_text}'")));
+    }
     let info = Arc::new(FnInfo {
         module: builder.name.clone(),
         name: name.clone(),
@@ -236,7 +240,8 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         userdata: spec.userdata,
         ret: ret_kind(&ret),
         argc: params.len(),
-        external: if spec.flags & SPAR_FN_CALLS != 0 {
+        is_async: spec.flags & SPAR_FN_ASYNC != 0,
+        external: if spec.flags & (SPAR_FN_CALLS | SPAR_FN_ASYNC) != 0 {
             let mut ext = EXTERNALS.lock().unwrap();
             ext.push(None);
             Some((ext.len() - 1) as u32)
@@ -288,11 +293,11 @@ static API: SparApiV0 = SparApiV0 {
     resource_get: Some(host::resource_get),
     resource_close: Some(host::resource_close),
     call: Some(host::call),
-    async_begin: Some(host::unsupported_async_begin),
-    async_complete: Some(host::unsupported_async_data),
-    async_fail: Some(host::unsupported_async_data),
-    async_is_cancelled: Some(host::unsupported_async_cancelled),
-    async_release: Some(host::unsupported_async_release),
+    async_begin: Some(super::async_op::async_begin_api),
+    async_complete: Some(super::async_op::async_complete),
+    async_fail: Some(super::async_op::async_fail),
+    async_is_cancelled: Some(super::async_op::async_is_cancelled),
+    async_release: Some(super::async_op::async_release),
 };
 
 /// The API table given to modules (also used by tests that load modules built in-process).
@@ -461,13 +466,15 @@ impl LoadedModule {
         for f in &self.functions {
             let info = f.info.clone();
             if let Some(index) = info.external {
+                let params = f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect();
+                let intrinsic = crate::runtime::NativeIntrinsic::External(index);
                 registry.register(NativeFunction::sync_intrinsic(
                     self.info.name.clone(),
                     f.name.clone(),
-                    f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
+                    params,
                     f.ret.clone(),
                     false,
-                    crate::runtime::NativeIntrinsic::External(index),
+                    intrinsic,
                 ))?;
                 continue;
             }
@@ -584,7 +591,19 @@ fn invoke_full(
         let status = (info.invoke)(envp, info.userdata, argv, args.len() as u64, &mut out);
         (status, out, &mut *raw)
     };
-    let result = if status == SPAR_OK {
+    let result = if status == SPAR_OK && info.is_async {
+        match env.async_op.take() {
+            Some((op, handle)) => {
+                super::async_op::mark_running(op);
+                Ok(Value::Promise(handle))
+            }
+            None => Err(fail(format!(
+                "async native function '{}::{}' returned without calling async_begin",
+                info.module, info.name
+            ))
+            .into()),
+        }
+    } else if status == SPAR_OK {
         match env.take_value(&out) {
             Ok(value) => check_ret(info, value).map_err(RuntimeFault::from),
             Err(code) => Err(fail(format!(

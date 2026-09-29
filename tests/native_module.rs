@@ -23,7 +23,7 @@ fn c_fastmath() -> &'static Path {
             .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-fvisibility=hidden", "-shared"])
             .arg(format!("-I{}", sys.join("include").display()))
             .arg(sys.join("examples/native/c-fastmath/fastmath.c"))
-            .args(["-lm", "-o"])
+            .args(["-lm", "-lpthread", "-o"])
             .arg(&lib)
             .output()
             .expect("cc");
@@ -265,4 +265,60 @@ fn cpp_module_zero_copy_bytes_from_a_file() {
     }
     let expected = (h & 0x7fff) as i32;
     assert_eq!(run_cpp(&src), Ok(expected));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Async: completion from a native worker thread through the scheduler's promise table.
+// ---------------------------------------------------------------------------------------------
+
+static ASYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn async_native_completes_from_a_worker_thread() {
+    let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let src = r#"
+        async function main() -> int {
+            var p = fastMath::delayedAdd(a: 20, b: 22, millis: 30);
+            var v: int = await p;
+            return v;
+        };
+    "#;
+    assert_eq!(run_int(src), 42);
+}
+
+#[test]
+fn async_native_operations_overlap() {
+    let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    c_fastmath(); // build outside the timed region
+    let src = r#"
+        async function main() -> int {
+            var a = fastMath::delayedAdd(a: 1, b: 1, millis: 300);
+            var b = fastMath::delayedAdd(a: 2, b: 2, millis: 300);
+            var x: int = await a;
+            var y: int = await b;
+            return x + y;
+        };
+    "#;
+    let t = std::time::Instant::now();
+    assert_eq!(run_int(src), 6);
+    assert!(t.elapsed() < std::time::Duration::from_millis(550), "operations ran sequentially: {:?}", t.elapsed());
+}
+
+#[test]
+fn async_failure_and_abandonment_surface_as_errors_not_hangs() {
+    let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let err = run_err("async function main() -> int { var p = fastMath::delayedFail(millis: 10); var v: int = await p; return v; };");
+    assert!(err.contains("async failure from C worker"), "{err}");
+    let err = run_err("async function main() -> int { var p = fastMath::abandoned(); var v: int = await p; return v; };");
+    assert!(err.contains("released without completing"), "{err}");
+}
+
+#[test]
+fn async_double_completion_is_rejected() {
+    let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(run_int("async function main() -> int { var v: int = await fastMath::delayedAdd(a: 1, b: 0, millis: 10); return v; };"), 1);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // SPAR_E_INVALID_STATE == 13 was recorded by the worker on its second async_complete.
+    assert_eq!(run_int("function main() -> int { return fastMath::secondStatus(); };"), 13);
+    assert_eq!(native_module::live_async_ops(), 0, "async operation leaked");
 }

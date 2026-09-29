@@ -747,15 +747,3 @@ pub(super) unsafe extern "C" fn call(
     })
 }
 
-pub(super) unsafe extern "C" fn unsupported_async_begin(_env: *mut SparEnv, _o: *mut *mut SparAsync) -> spar_status_t {
-    SPAR_E_UNSUPPORTED
-}
-pub(super) unsafe extern "C" fn unsupported_async_data(_a: *mut SparAsync, _p: *const u8, _n: u64) -> spar_status_t {
-    SPAR_E_UNSUPPORTED
-}
-pub(super) unsafe extern "C" fn unsupported_async_cancelled(_a: *mut SparAsync, _o: *mut u8) -> spar_status_t {
-    SPAR_E_UNSUPPORTED
-}
-pub(super) unsafe extern "C" fn unsupported_async_release(_a: *mut SparAsync) -> spar_status_t {
-    SPAR_E_UNSUPPORTED
-}

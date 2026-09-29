@@ -61,6 +61,8 @@ pub struct CallEnv {
     pub(crate) call_span: Span,
     /// A Spar-side failure (error, `exit`) raised inside a callback; re-raised after the native returns.
     pub(crate) pending_fault: Option<RuntimeFault>,
+    /// Operation created by `async_begin` during this call.
+    pub(crate) async_op: Option<(*mut SparAsync, crate::PromiseHandle)>,
 }
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
@@ -91,6 +93,7 @@ impl CallEnv {
             host: None,
             call_span: Span::dummy(),
             pending_fault: None,
+            async_op: None,
         })
     }
 
@@ -139,6 +142,7 @@ impl CallEnv {
         self.error = None;
         self.host = None;
         self.pending_fault = None;
+        self.async_op = None;
         self.scratch.clear();
         self.argv.clear();
     }

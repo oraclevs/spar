@@ -109,6 +109,27 @@ impl TaskTable {
         handle
     }
 
+    /// A promise completed from outside the pool (native async operations). It starts `Running`,
+    /// so awaiting it blocks until `complete_if_running` or shutdown cancels it.
+    pub(crate) fn create_running(&mut self) -> PromiseHandle {
+        let handle = PromiseHandle::new(self.next_id);
+        self.next_id += 1;
+        self.states.insert(handle, TaskState::Running);
+        self.created.insert(handle, std::time::Instant::now());
+        handle
+    }
+
+    /// Completes `handle` only if it is still `Running`; false when it was cancelled/settled.
+    pub(crate) fn complete_if_running(&mut self, handle: PromiseHandle, result: Result<Value, RuntimeFault>) -> bool {
+        match self.states.get(&handle) {
+            Some(TaskState::Running) => {
+                self.states.insert(handle, TaskState::Ready(result));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// When the promise was created; deadlines are measured from here so a
     /// promise that was slow to run still counts against its timeout.
     pub(crate) fn created_at(&self, handle: PromiseHandle) -> Option<std::time::Instant> {

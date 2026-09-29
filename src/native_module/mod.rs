@@ -1,6 +1,7 @@
 //! Spar Native ABI host: loads native extension modules (`.so`/`.dylib`/`.dll`) and exposes their
 //! functions through the ordinary `NativeRegistry`. See `spar-native-sys/docs/native-api`.
 
+mod async_op;
 mod buffer;
 mod env;
 mod host;
@@ -14,9 +15,11 @@ use crate::runtime::{RuntimeContext, Value};
 pub(crate) trait CallbackHost {
     fn call_callable(&mut self, callable: &Value, args: Vec<Value>, span: &Span) -> Result<Value, RuntimeFault>;
     fn context_ptr(&mut self) -> *mut RuntimeContext;
+    fn scheduler(&self) -> std::sync::Arc<crate::runtime::scheduler::Scheduler>;
 }
 
 pub use buffer::{NativeBuffer, NativeResource};
+pub use async_op::live_async_ops;
 pub use host::live_persistent_refs;
 pub(crate) use loader::call_external;
 pub use loader::{

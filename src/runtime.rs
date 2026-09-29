@@ -918,6 +918,9 @@ impl crate::native_module::CallbackHost for Runtime<'_> {
     fn context_ptr(&mut self) -> *mut RuntimeContext {
         &mut self.context as *mut RuntimeContext
     }
+    fn scheduler(&self) -> Arc<scheduler::Scheduler> {
+        self.scheduler.clone()
+    }
 }
 
 impl Runtime<'_> {

@@ -910,6 +910,16 @@ enum RuntimeFlow {
     Return(Value),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::native_module::CallbackHost for Runtime<'_> {
+    fn call_callable(&mut self, callable: &Value, args: Vec<Value>, span: &Span) -> Result<Value, RuntimeFault> {
+        self.invoke_data_callable(callable, args, span)
+    }
+    fn context_ptr(&mut self) -> *mut RuntimeContext {
+        &mut self.context as *mut RuntimeContext
+    }
+}
+
 impl Runtime<'_> {
     fn run_entry(&mut self, entry: FunctionId) -> Result<Value, RuntimeFault> {
         let result = if self.function_is_async(entry)? {
@@ -2057,6 +2067,14 @@ impl Runtime<'_> {
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
         match intrinsic {
+            #[cfg(not(target_arch = "wasm32"))]
+            NativeIntrinsic::External(index) => {
+                crate::native_module::call_external(index, self, args, span)
+            }
+            #[cfg(target_arch = "wasm32")]
+            NativeIntrinsic::External(_) => {
+                Err(runtime_error("native modules are not available on this target", span).into())
+            }
             NativeIntrinsic::JsonParse => {
                 let target = requested_type.ok_or_else(|| {
                     runtime_error("typed JSON parse is missing its reified target type", span)
@@ -2912,7 +2930,8 @@ impl Runtime<'_> {
             | NativeIntrinsic::CoreResultMap
             | NativeIntrinsic::CoreResultMapErr
             | NativeIntrinsic::CoreResultAndThen
-            | NativeIntrinsic::CoreResultOrElse => unreachable!(),
+            | NativeIntrinsic::CoreResultOrElse
+            | NativeIntrinsic::External(_) => unreachable!(),
         }
     }
 

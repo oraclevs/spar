@@ -14,6 +14,7 @@ use spar_native_sys::*;
 use super::env::CallEnv;
 use super::host;
 use crate::ast::SparType;
+use crate::async_runtime::RuntimeFault;
 use crate::error::{Span, SparError};
 use crate::runtime::{NativeFunction, NativeRegistry, RuntimeContext, Value};
 
@@ -24,7 +25,8 @@ pub const RUNTIME_CAPABILITIES: u64 = SPAR_CAP_STRINGS
     | SPAR_CAP_TYPED_ARRAYS
     | SPAR_CAP_LISTS
     | SPAR_CAP_RECORDS
-    | SPAR_CAP_NATIVE_RESOURCES;
+    | SPAR_CAP_NATIVE_RESOURCES
+    | SPAR_CAP_CALLBACKS;
 
 #[derive(Debug)]
 pub enum NativeLoadError {
@@ -103,6 +105,8 @@ struct FnInfo {
     userdata: *mut c_void,
     ret: RetKind,
     argc: usize,
+    /// Index into `EXTERNALS` for functions that need interpreter access (`SPAR_FN_CALLS`).
+    external: Option<u32>,
 }
 // SAFETY: `userdata` is module-owned state; the ABI requires module functions to be callable from
 // any thread that owns a call env (natives run on scheduler threads).
@@ -140,6 +144,9 @@ impl std::fmt::Debug for LoadedModule {
         f.debug_struct("LoadedModule").field("info", &self.info).finish()
     }
 }
+
+/// Functions that run through the interpreter (`NativeIntrinsic::External(index)`).
+static EXTERNALS: Mutex<Vec<Option<Arc<FnInfo>>>> = Mutex::new(Vec::new());
 
 static LOADED: Mutex<Vec<(PathBuf, Arc<LoadedModule>)>> = Mutex::new(Vec::new());
 
@@ -229,7 +236,17 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         userdata: spec.userdata,
         ret: ret_kind(&ret),
         argc: params.len(),
+        external: if spec.flags & SPAR_FN_CALLS != 0 {
+            let mut ext = EXTERNALS.lock().unwrap();
+            ext.push(None);
+            Some((ext.len() - 1) as u32)
+        } else {
+            None
+        },
     });
+    if let Some(index) = info.external {
+        EXTERNALS.lock().unwrap()[index as usize] = Some(info.clone());
+    }
     builder.functions.push(FunctionDef { name, params, ret, info });
     Ok(())
 }
@@ -270,7 +287,7 @@ static API: SparApiV0 = SparApiV0 {
     resource_new: Some(host::resource_new),
     resource_get: Some(host::resource_get),
     resource_close: Some(host::resource_close),
-    call: Some(host::unsupported_call),
+    call: Some(host::call),
     async_begin: Some(host::unsupported_async_begin),
     async_complete: Some(host::unsupported_async_data),
     async_fail: Some(host::unsupported_async_data),
@@ -443,13 +460,24 @@ impl LoadedModule {
     pub fn register(&self, registry: &mut NativeRegistry) -> Result<(), SparError> {
         for f in &self.functions {
             let info = f.info.clone();
+            if let Some(index) = info.external {
+                registry.register(NativeFunction::sync_intrinsic(
+                    self.info.name.clone(),
+                    f.name.clone(),
+                    f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
+                    f.ret.clone(),
+                    false,
+                    crate::runtime::NativeIntrinsic::External(index),
+                ))?;
+                continue;
+            }
             registry.register(NativeFunction::sync(
                 self.info.name.clone(),
                 f.name.clone(),
                 f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
                 f.ret.clone(),
                 false,
-                move |ctx, args| invoke(&info, ctx, args),
+                move |ctx, args| invoke(&info, ctx as *mut RuntimeContext, None, args),
             ))?;
         }
         Ok(())
@@ -514,7 +542,19 @@ fn fail(message: String) -> SparError {
     SparError::EvalError { message, span: Span::dummy() }
 }
 
-fn invoke(info: &FnInfo, ctx: &mut RuntimeContext, args: &[Value]) -> Result<Value, SparError> {
+type HostPtr = Option<*mut (dyn super::CallbackHost + 'static)>;
+
+fn invoke(info: &FnInfo, ctx: *mut RuntimeContext, host: HostPtr, args: &[Value]) -> Result<Value, SparError> {
+    invoke_full(info, ctx, host, &Span::dummy(), args).map_err(|fault| fault.into_error())
+}
+
+fn invoke_full(
+    info: &FnInfo,
+    ctx: *mut RuntimeContext,
+    host: HostPtr,
+    span: &Span,
+    args: &[Value],
+) -> Result<Value, RuntimeFault> {
     if args.len() != info.argc {
         return Err(fail(format!(
             "native function '{}::{}' expects {} arguments, got {}",
@@ -522,13 +562,18 @@ fn invoke(info: &FnInfo, ctx: &mut RuntimeContext, args: &[Value]) -> Result<Val
             info.name,
             info.argc,
             args.len()
-        )));
+        ))
+        .into());
     }
-    let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
+    let raw = Box::into_raw(CallEnv::acquire(ctx));
     // SAFETY: `raw` is uniquely owned here; the extension only reaches it through the API table,
     // which validates it. It is reclaimed (and the scope closed) below on every path.
     let (status, out, env) = unsafe {
         let env = &mut *raw;
+        env.host = host;
+        if host.is_some() {
+            env.call_span = span.clone();
+        }
         for a in args {
             let v = env.borrow_value(a);
             env.argv.push(v);
@@ -541,24 +586,60 @@ fn invoke(info: &FnInfo, ctx: &mut RuntimeContext, args: &[Value]) -> Result<Val
     };
     let result = if status == SPAR_OK {
         match env.take_value(&out) {
-            Ok(value) => check_ret(info, value),
+            Ok(value) => check_ret(info, value).map_err(RuntimeFault::from),
             Err(code) => Err(fail(format!(
                 "native function '{}::{}' returned an invalid value ({})",
                 info.module,
                 info.name,
                 status_name(code)
-            ))),
+            ))
+            .into()),
         }
+    } else if let Some(fault) = env.pending_fault.take() {
+        Err(fault)
     } else {
         let detail = env.error.take().map(|(_, m)| m);
         Err(fail(match detail {
             Some(m) => format!("{}::{}: {m}", info.module, info.name),
             None => format!("native function '{}::{}' failed: {}", info.module, info.name, status_name(status)),
-        }))
+        })
+        .into())
     };
     // SAFETY: reclaim the env allocated above.
     unsafe { Box::from_raw(raw) }.release();
     result
+}
+
+/// Runs a `SPAR_FN_CALLS` function with interpreter access (dispatched from `execute_native_intrinsic`).
+pub(crate) fn call_external(
+    index: u32,
+    rt: &mut dyn super::CallbackHost,
+    args: &[Value],
+    span: &Span,
+) -> Result<Value, RuntimeFault> {
+    let info = EXTERNALS
+        .lock()
+        .unwrap()
+        .get(index as usize)
+        .and_then(|i| i.clone())
+        .ok_or_else(|| fail(format!("unknown native module function #{index}")))?;
+    let ctx = rt.context_ptr();
+    // SAFETY: the trait-object lifetime is erased; the pointer is dropped from the env when the
+    // call ends (`end_scope`) and `rt` is not used again until this function returns.
+    let host: *mut (dyn super::CallbackHost + 'static) = unsafe { std::mem::transmute(rt as *mut dyn super::CallbackHost) };
+    invoke_full(&info, ctx, Some(host), span, args).map_err(|fault| match fault {
+        RuntimeFault::Raised(e) => RuntimeFault::Raised(Box::new(attach_span(*e, span))),
+        other => other,
+    })
+}
+
+fn attach_span(error: SparError, span: &Span) -> SparError {
+    match error {
+        SparError::EvalError { message, span: s } if s.start == 0 && s.end == 0 && s.line == 0 => {
+            SparError::EvalError { message, span: span.clone() }
+        }
+        other => other,
+    }
 }
 
 #[inline]

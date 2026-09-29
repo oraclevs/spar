@@ -12,7 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use spar_native_sys::*;
 
+use crate::async_runtime::RuntimeFault;
+use crate::error::Span;
 use crate::runtime::{RuntimeContext, Value};
+
+use super::CallbackHost;
 
 const MAGIC: u64 = 0x5350_4152_4E56_3030;
 
@@ -51,6 +55,12 @@ pub struct CallEnv {
     pub(crate) scratch: Vec<Vec<u64>>,
     pub(crate) in_call: bool,
     pub(crate) epoch: u32,
+    /// Interpreter access for `call`; only set for functions declared with `SPAR_FN_CALLS`.
+    /// Lifetime-erased: valid only while the native function runs.
+    pub(crate) host: Option<*mut (dyn CallbackHost + 'static)>,
+    pub(crate) call_span: Span,
+    /// A Spar-side failure (error, `exit`) raised inside a callback; re-raised after the native returns.
+    pub(crate) pending_fault: Option<RuntimeFault>,
 }
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
@@ -78,6 +88,9 @@ impl CallEnv {
             scratch: Vec::new(),
             in_call: false,
             epoch: 0,
+            host: None,
+            call_span: Span::dummy(),
+            pending_fault: None,
         })
     }
 
@@ -124,6 +137,8 @@ impl CallEnv {
         }
         self.used = 0;
         self.error = None;
+        self.host = None;
+        self.pending_fault = None;
         self.scratch.clear();
         self.argv.clear();
     }

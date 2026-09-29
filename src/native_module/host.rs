@@ -708,9 +708,45 @@ pub(super) unsafe extern "C" fn resource_close(env: *mut SparEnv, v: SparValue, 
 
 // ---- not yet implemented ----
 
-pub(super) unsafe extern "C" fn unsupported_call(_env: *mut SparEnv, _c: SparValue, _a: *const SparValue, _n: u64, _o: *mut SparValue) -> spar_status_t {
-    SPAR_E_UNSUPPORTED
+pub(super) unsafe extern "C" fn call(
+    env: *mut SparEnv,
+    callable: SparValue,
+    argv: *const SparValue,
+    argc: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
+    ffi(|| {
+        let env = CallEnv::from_ptr(env)?;
+        let host = env.host.ok_or(SPAR_E_UNSUPPORTED)?;
+        if callable.tag != SPAR_TAG_CALLABLE {
+            return Err(SPAR_E_TYPE);
+        }
+        if argc > 64 || (argc > 0 && argv.is_null()) {
+            return Err(SPAR_E_INVALID_ARGUMENT);
+        }
+        let target = env.value_of(&callable)?.clone();
+        let mut args = Vec::with_capacity(argc as usize);
+        for i in 0..argc as usize {
+            args.push(clone_value(env, &*argv.add(i))?);
+        }
+        let span = env.call_span.clone();
+        // SAFETY: `host` points at the interpreter that is executing this native call; it is not
+        // otherwise used until the native function returns (see `call_external`).
+        match (*host).call_callable(&target, args, &span) {
+            Ok(value) => {
+                let v = env.own_value(value);
+                put(out, v)
+            }
+            Err(fault) => {
+                let message = fault.clone().into_error().to_string();
+                env.error = Some((SPAR_E_ERROR, message));
+                env.pending_fault = Some(fault);
+                Err(SPAR_E_ERROR)
+            }
+        }
+    })
 }
+
 pub(super) unsafe extern "C" fn unsupported_async_begin(_env: *mut SparEnv, _o: *mut *mut SparAsync) -> spar_status_t {
     SPAR_E_UNSUPPORTED
 }

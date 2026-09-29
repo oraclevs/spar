@@ -68,6 +68,8 @@ pub enum NativeIntrinsic {
     CoreResultMapErr,
     CoreResultAndThen,
     CoreResultOrElse,
+    /// A native-module function that calls back into Spar; the index selects the module function.
+    External(u32),
 }
 
 pub type NativeCallback =

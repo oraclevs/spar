@@ -90,6 +90,24 @@ fn native_built_list_and_record_round_trip() {
 }
 
 #[test]
+fn native_calls_back_into_spar() {
+    let src = r#"
+        function main() -> int {
+            var factor: int = 10;
+            var out: [int] = fastMath::mapInts(values: [1, 2, 3], f: |value: int| value * factor + 1);
+            return out[0] + out[1] + out[2];
+        };
+    "#;
+    assert_eq!(run_int(src), 11 + 21 + 31);
+    // a named function works too, and errors raised inside the callback propagate with their text
+    let err = run_err(r#"
+        function boom(value: int) -> int { assert(condition: value < 2, message: "callback rejected"); return value; };
+        function main() -> int { fastMath::mapInts(values: [1, 2, 3], f: boom); return 0; };
+    "#);
+    assert!(err.contains("callback rejected"), "{err}");
+}
+
+#[test]
 fn native_errors_carry_message_and_span() {
     let msg = run_err("function main() -> int { return fastMath::fail(); };");
     assert!(msg.contains("deliberate failure from C"), "{msg}");

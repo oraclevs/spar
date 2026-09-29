@@ -60,47 +60,73 @@ fn err(message: String) -> PackageError {
 }
 
 /// Resolves the artifact path for this host inside `root`, confined to the package directory.
-pub fn resolve_artifact(spec: &NativeSpec, root: &Path) -> Result<(PathBuf, Option<String>), PackageError> {
+pub fn resolve_artifact(
+    spec: &NativeSpec,
+    root: &Path,
+) -> Result<(PathBuf, Option<String>), PackageError> {
     let keys = host_target_keys();
-    let (key, (relative, sha)) = keys
-        .iter()
-        .find_map(|k| spec.artifacts.get(k).map(|v| (k, v)))
-        .ok_or_else(|| {
-            err(format!(
+    let (key, (relative, sha)) =
+        keys.iter()
+            .find_map(|k| spec.artifacts.get(k).map(|v| (k, v)))
+            .ok_or_else(|| {
+                err(format!(
                 "native package '{}' has no artifact for this target (looked for {}; declared: {})",
                 spec.module,
                 keys.join(", "),
                 spec.artifacts.keys().cloned().collect::<Vec<_>>().join(", ")
             ))
-        })?;
+            })?;
     let rel = Path::new(relative);
-    if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir)) {
+    if rel.is_absolute()
+        || rel.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
         return Err(err(format!("native artifact '{key}' path '{relative}' must be relative and stay inside the package")));
     }
     let full = root.join(rel);
-    let canonical_root = root.canonicalize().map_err(|e| err(format!("{}: {e}", root.display())))?;
-    let canonical = full.canonicalize().map_err(|e| err(format!("native artifact {}: {e}", full.display())))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| err(format!("{}: {e}", root.display())))?;
+    let canonical = full
+        .canonicalize()
+        .map_err(|e| err(format!("native artifact {}: {e}", full.display())))?;
     if !canonical.starts_with(&canonical_root) {
-        return Err(err(format!("native artifact {} resolves outside the package", canonical.display())));
+        return Err(err(format!(
+            "native artifact {} resolves outside the package",
+            canonical.display()
+        )));
     }
     Ok((canonical, sha.clone()))
 }
 
 fn sha256_hex(path: &Path) -> Result<String, PackageError> {
     let bytes = std::fs::read(path).map_err(|e| err(format!("{}: {e}", path.display())))?;
-    Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
+    Ok(Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Loads the native module declared by the package rooted at `root` (a directory containing
 /// `spar.package.spar`). Returns `Ok(None)` when the package declares none.
-pub fn load_package_native(root: &Path, registry: &mut NativeRegistry) -> Result<Option<ModuleInfo>, PackageError> {
+pub fn load_package_native(
+    root: &Path,
+    registry: &mut NativeRegistry,
+) -> Result<Option<ModuleInfo>, PackageError> {
     let manifest_path = root.join(PACKAGE_MANIFEST_FILE);
     if !manifest_path.is_file() {
         return Ok(None);
     }
-    let source = std::fs::read_to_string(&manifest_path).map_err(|e| err(format!("{}: {e}", manifest_path.display())))?;
+    let source = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| err(format!("{}: {e}", manifest_path.display())))?;
     let manifest = PackageManifest::parse(&source, &manifest_path)?;
-    let Some(spec) = manifest.native else { return Ok(None) };
+    let Some(spec) = manifest.native else {
+        return Ok(None);
+    };
     if std::env::var_os("SPAR_NO_NATIVE").is_some_and(|v| v != "0") {
         return Err(err(format!(
             "package '{}' contains native code but native extensions are disabled (SPAR_NO_NATIVE)",
@@ -130,7 +156,8 @@ pub fn load_package_native(root: &Path, registry: &mut NativeRegistry) -> Result
     if !spec.capabilities.is_empty() {
         let mut declared = 0u64;
         for c in &spec.capabilities {
-            declared |= capability_bit(c).ok_or_else(|| err(format!("unknown capability '{c}' in `struct Native`")))?;
+            declared |= capability_bit(c)
+                .ok_or_else(|| err(format!("unknown capability '{c}' in `struct Native`")))?;
         }
         let extra = info.required_capabilities & !declared;
         if extra != 0 {

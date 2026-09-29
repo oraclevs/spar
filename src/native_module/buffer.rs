@@ -44,7 +44,12 @@ impl NativeBuffer {
     pub(crate) fn zeroed(dtype: u32, len: usize) -> Option<Self> {
         let bytes = len.checked_mul(dtype_size(dtype)?)?;
         let words = bytes.div_ceil(8);
-        Some(Self { dtype, len, storage: Storage::Owned(vec![0u64; words]), state: AtomicI32::new(0) })
+        Some(Self {
+            dtype,
+            len,
+            storage: Storage::Owned(vec![0u64; words]),
+            state: AtomicI32::new(0),
+        })
     }
 
     pub(crate) fn external(
@@ -54,15 +59,16 @@ impl NativeBuffer {
         finalize: Option<SparFinalizer>,
         userdata: *mut c_void,
     ) -> Self {
-        Self { dtype, len, storage: Storage::External { ptr, finalize, userdata }, state: AtomicI32::new(0) }
-    }
-
-    pub(crate) fn from_f64(values: &[f64]) -> Self {
-        let mut words = vec![0u64; values.len()];
-        for (w, v) in words.iter_mut().zip(values) {
-            *w = v.to_bits();
+        Self {
+            dtype,
+            len,
+            storage: Storage::External {
+                ptr,
+                finalize,
+                userdata,
+            },
+            state: AtomicI32::new(0),
         }
-        Self { dtype: SPAR_DTYPE_F64, len: values.len(), storage: Storage::Owned(words), state: AtomicI32::new(0) }
     }
 
     #[inline]
@@ -73,21 +79,24 @@ impl NativeBuffer {
         }
     }
 
-    pub(crate) fn len_bytes(&self) -> usize {
-        self.len * dtype_size(self.dtype).unwrap_or(0)
-    }
-
     /// Borrow state machine: AVAILABLE -> SHARED(n) | MUT. Returns false on conflict.
     pub(crate) fn try_borrow(&self, mutable: bool) -> bool {
         if mutable {
-            self.state.compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+            self.state
+                .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
         } else {
             let mut cur = self.state.load(Ordering::Acquire);
             loop {
                 if cur < 0 {
                     return false;
                 }
-                match self.state.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
+                match self.state.compare_exchange_weak(
+                    cur,
+                    cur + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
                     Ok(_) => return true,
                     Err(actual) => cur = actual,
                 }
@@ -110,7 +119,12 @@ impl NativeBuffer {
 
 impl Drop for NativeBuffer {
     fn drop(&mut self) {
-        if let Storage::External { ptr, finalize: Some(f), userdata } = &self.storage {
+        if let Storage::External {
+            ptr,
+            finalize: Some(f),
+            userdata,
+        } = &self.storage
+        {
             // SAFETY: the extension supplied this finalizer for this pointer; libraries are never
             // unloaded so the code is still mapped.
             unsafe { f(*ptr as *mut c_void, *userdata) };
@@ -130,8 +144,18 @@ pub struct NativeResource {
 unsafe impl Send for NativeResource {}
 
 impl NativeResource {
-    pub(crate) fn new(type_tag: u64, ptr: *mut c_void, finalize: Option<SparFinalizer>, userdata: *mut c_void) -> Self {
-        Self { type_tag, ptr, finalize, userdata }
+    pub(crate) fn new(
+        type_tag: u64,
+        ptr: *mut c_void,
+        finalize: Option<SparFinalizer>,
+        userdata: *mut c_void,
+    ) -> Self {
+        Self {
+            type_tag,
+            ptr,
+            finalize,
+            userdata,
+        }
     }
 }
 

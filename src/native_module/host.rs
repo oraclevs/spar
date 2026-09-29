@@ -54,11 +54,19 @@ struct Interner {
 static INTERNER: RwLock<Option<Interner>> = RwLock::new(None);
 
 fn intern(name: &str) -> u32 {
-    if let Some(i) = INTERNER.read().unwrap().as_ref().and_then(|t| t.map.get(name).copied()) {
+    if let Some(i) = INTERNER
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|t| t.map.get(name).copied())
+    {
         return i;
     }
     let mut guard = INTERNER.write().unwrap();
-    let table = guard.get_or_insert_with(|| Interner { names: Vec::new(), map: HashMap::new() });
+    let table = guard.get_or_insert_with(|| Interner {
+        names: Vec::new(),
+        map: HashMap::new(),
+    });
     if let Some(i) = table.map.get(name) {
         return *i;
     }
@@ -70,7 +78,11 @@ fn intern(name: &str) -> u32 {
 }
 
 fn symbol_name(id: u32) -> Option<Arc<str>> {
-    INTERNER.read().unwrap().as_ref().and_then(|t| t.names.get(id as usize).cloned())
+    INTERNER
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|t| t.names.get(id as usize).cloned())
 }
 
 // ---- persistent references ----
@@ -79,11 +91,19 @@ struct RefTable {
     slots: Vec<(u32, Option<Value>)>,
     free: Vec<u32>,
 }
-static REFS: Mutex<RefTable> = Mutex::new(RefTable { slots: Vec::new(), free: Vec::new() });
+static REFS: Mutex<RefTable> = Mutex::new(RefTable {
+    slots: Vec::new(),
+    free: Vec::new(),
+});
 
 /// Number of live persistent references (leak tests).
 pub fn live_persistent_refs() -> usize {
-    REFS.lock().unwrap().slots.iter().filter(|(_, v)| v.is_some()).count()
+    REFS.lock()
+        .unwrap()
+        .slots
+        .iter()
+        .filter(|(_, v)| v.is_some())
+        .count()
 }
 
 // ---- helpers ----
@@ -101,7 +121,11 @@ fn clone_value(env: &CallEnv, v: &SparValue) -> Result<Value, i32> {
 
 /// Element of an immutable container: borrowed pointer when the parent is call-owned data the
 /// extension cannot mutate, a clone when the parent may still grow (owned).
-unsafe fn element(env: &mut CallEnv, parent: &SparValue, ptr: *const Value) -> Result<SparValue, i32> {
+unsafe fn element(
+    env: &mut CallEnv,
+    parent: &SparValue,
+    ptr: *const Value,
+) -> Result<SparValue, i32> {
     if env.is_owned(parent)? {
         let v = (*ptr).clone();
         Ok(env.own_value(v))
@@ -112,7 +136,12 @@ unsafe fn element(env: &mut CallEnv, parent: &SparValue, ptr: *const Value) -> R
 
 // ---- errors ----
 
-pub(super) unsafe extern "C" fn error_set(env: *mut SparEnv, kind: i32, msg: *const u8, len: u64) -> spar_status_t {
+pub(super) unsafe extern "C" fn error_set(
+    env: *mut SparEnv,
+    kind: i32,
+    msg: *const u8,
+    len: u64,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let text = String::from_utf8_lossy(bytes(msg, len)?).into_owned();
@@ -123,7 +152,11 @@ pub(super) unsafe extern "C" fn error_set(env: *mut SparEnv, kind: i32, msg: *co
 
 // ---- scalars ----
 
-pub(super) unsafe extern "C" fn int_get(env: *mut SparEnv, v: SparValue, out: *mut i64) -> spar_status_t {
+pub(super) unsafe extern "C" fn int_get(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut i64,
+) -> spar_status_t {
     ffi(|| {
         CallEnv::from_ptr(env)?;
         if v.tag != SPAR_TAG_INT {
@@ -133,7 +166,11 @@ pub(super) unsafe extern "C" fn int_get(env: *mut SparEnv, v: SparValue, out: *m
     })
 }
 
-pub(super) unsafe extern "C" fn float_get(env: *mut SparEnv, v: SparValue, out: *mut f64) -> spar_status_t {
+pub(super) unsafe extern "C" fn float_get(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut f64,
+) -> spar_status_t {
     ffi(|| {
         CallEnv::from_ptr(env)?;
         match v.tag {
@@ -144,7 +181,11 @@ pub(super) unsafe extern "C" fn float_get(env: *mut SparEnv, v: SparValue, out: 
     })
 }
 
-pub(super) unsafe extern "C" fn bool_get(env: *mut SparEnv, v: SparValue, out: *mut u8) -> spar_status_t {
+pub(super) unsafe extern "C" fn bool_get(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut u8,
+) -> spar_status_t {
     ffi(|| {
         CallEnv::from_ptr(env)?;
         if v.tag != SPAR_TAG_BOOL {
@@ -156,7 +197,12 @@ pub(super) unsafe extern "C" fn bool_get(env: *mut SparEnv, v: SparValue, out: *
 
 // ---- strings / bytes ----
 
-pub(super) unsafe extern "C" fn string_new(env: *mut SparEnv, ptr: *const u8, len: u64, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn string_new(
+    env: *mut SparEnv,
+    ptr: *const u8,
+    len: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let s = std::str::from_utf8(bytes(ptr, len)?).map_err(|_| SPAR_E_UTF8)?;
@@ -165,17 +211,32 @@ pub(super) unsafe extern "C" fn string_new(env: *mut SparEnv, ptr: *const u8, le
     })
 }
 
-pub(super) unsafe extern "C" fn string_view(env: *mut SparEnv, v: SparValue, out: *mut SparStrView) -> spar_status_t {
+pub(super) unsafe extern "C" fn string_view(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut SparStrView,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         match env.value_of(&v)? {
-            Value::String(s) => put(out, SparStrView { ptr: s.as_ptr(), len: s.len() as u64 }),
+            Value::String(s) => put(
+                out,
+                SparStrView {
+                    ptr: s.as_ptr(),
+                    len: s.len() as u64,
+                },
+            ),
             _ => Err(SPAR_E_TYPE),
         }
     })
 }
 
-pub(super) unsafe extern "C" fn bytes_new(env: *mut SparEnv, ptr: *const u8, len: u64, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn bytes_new(
+    env: *mut SparEnv,
+    ptr: *const u8,
+    len: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let v = env.own_value(Value::Bytes(bytes(ptr, len)?.to_vec()));
@@ -189,7 +250,14 @@ fn token(env: &CallEnv, index: usize) -> u64 {
     ((env.epoch as u64) << 32) | (index as u64 + 1)
 }
 
-fn fill_view(view: &mut SparBufferView, data: *mut u8, len: usize, dtype: u32, flags: u32, borrow: u64) {
+fn fill_view(
+    view: &mut SparBufferView,
+    data: *mut u8,
+    len: usize,
+    dtype: u32,
+    flags: u32,
+    borrow: u64,
+) {
     *view = SparBufferView {
         struct_size: std::mem::size_of::<SparBufferView>() as u32,
         flags,
@@ -221,12 +289,24 @@ fn pack_list(items: &[Value], dtype: u32) -> Result<Vec<u64>, i32> {
                 (SPAR_DTYPE_BOOL, Value::Bool(b)) => p.write(*b as u8),
                 (SPAR_DTYPE_I64, Value::Int(n)) => (p as *mut i64).write(*n),
                 (SPAR_DTYPE_U64, Value::Int(n)) if *n >= 0 => (p as *mut u64).write(*n as u64),
-                (SPAR_DTYPE_I32, Value::Int(n)) => (p as *mut i32).write(i32::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
-                (SPAR_DTYPE_U32, Value::Int(n)) => (p as *mut u32).write(u32::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
-                (SPAR_DTYPE_I16, Value::Int(n)) => (p as *mut i16).write(i16::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
-                (SPAR_DTYPE_U16, Value::Int(n)) => (p as *mut u16).write(u16::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
-                (SPAR_DTYPE_I8, Value::Int(n)) => (p as *mut i8).write(i8::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
-                (SPAR_DTYPE_U8, Value::Int(n)) => p.write(u8::try_from(*n).map_err(|_| SPAR_E_RANGE)?),
+                (SPAR_DTYPE_I32, Value::Int(n)) => {
+                    (p as *mut i32).write(i32::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
+                (SPAR_DTYPE_U32, Value::Int(n)) => {
+                    (p as *mut u32).write(u32::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
+                (SPAR_DTYPE_I16, Value::Int(n)) => {
+                    (p as *mut i16).write(i16::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
+                (SPAR_DTYPE_U16, Value::Int(n)) => {
+                    (p as *mut u16).write(u16::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
+                (SPAR_DTYPE_I8, Value::Int(n)) => {
+                    (p as *mut i8).write(i8::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
+                (SPAR_DTYPE_U8, Value::Int(n)) => {
+                    p.write(u8::try_from(*n).map_err(|_| SPAR_E_RANGE)?)
+                }
                 (SPAR_DTYPE_U64, Value::Int(_)) => return Err(SPAR_E_RANGE),
                 _ => return Err(SPAR_E_TYPE),
             }
@@ -260,7 +340,11 @@ pub(super) unsafe extern "C" fn buffer_borrow(
                 if want_write && !owned {
                     return Err(SPAR_E_BORROW);
                 }
-                let ok = if want_write { slot.borrow == 0 } else { slot.borrow >= 0 };
+                let ok = if want_write {
+                    slot.borrow == 0
+                } else {
+                    slot.borrow >= 0
+                };
                 if !ok {
                     return Err(SPAR_E_BORROW);
                 }
@@ -273,7 +357,12 @@ pub(super) unsafe extern "C" fn buffer_borrow(
                     },
                     _ => return Err(SPAR_E_TYPE),
                 };
-                env.borrows.push(BorrowRec { gen: env.epoch, live: true, mutable: want_write, slot: index as u32, resource: None });
+                env.borrows.push(BorrowRec {
+                    live: true,
+                    mutable: want_write,
+                    slot: index as u32,
+                    resource: None,
+                });
                 let tok = token(env, env.borrows.len() - 1);
                 fill_view(&mut *out, ptr, len, dtype, out_flags, tok);
                 Ok(())
@@ -292,7 +381,12 @@ pub(super) unsafe extern "C" fn buffer_borrow(
                     return Err(SPAR_E_BORROW);
                 }
                 let (data, len, dt) = (buf.data(), buf.len, buf.dtype);
-                env.borrows.push(BorrowRec { gen: env.epoch, live: true, mutable: want_write, slot: u32::MAX, resource: Some(id) });
+                env.borrows.push(BorrowRec {
+                    live: true,
+                    mutable: want_write,
+                    slot: u32::MAX,
+                    resource: Some(id),
+                });
                 let tok = token(env, env.borrows.len() - 1);
                 fill_view(&mut *out, data, len, dt, out_flags, tok);
                 Ok(())
@@ -314,9 +408,21 @@ pub(super) unsafe extern "C" fn buffer_borrow(
                 };
                 env.scratch.push(words);
                 let ptr = env.scratch.last().unwrap().as_ptr() as *mut u8;
-                env.borrows.push(BorrowRec { gen: env.epoch, live: true, mutable: false, slot: u32::MAX, resource: None });
+                env.borrows.push(BorrowRec {
+                    live: true,
+                    mutable: false,
+                    slot: u32::MAX,
+                    resource: None,
+                });
                 let tok = token(env, env.borrows.len() - 1);
-                fill_view(&mut *out, ptr, len, dtype, out_flags | SPAR_BUFFER_COPIED, tok);
+                fill_view(
+                    &mut *out,
+                    ptr,
+                    len,
+                    dtype,
+                    out_flags | SPAR_BUFFER_COPIED,
+                    tok,
+                );
                 Ok(())
             }
             SPAR_TAG_VOID | SPAR_TAG_BOOL | SPAR_TAG_INT | SPAR_TAG_FLOAT => Err(SPAR_E_TYPE),
@@ -325,7 +431,10 @@ pub(super) unsafe extern "C" fn buffer_borrow(
     })
 }
 
-pub(super) unsafe extern "C" fn buffer_release(env: *mut SparEnv, tok: SparBorrow) -> spar_status_t {
+pub(super) unsafe extern "C" fn buffer_release(
+    env: *mut SparEnv,
+    tok: SparBorrow,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let epoch = (tok >> 32) as u32;
@@ -381,9 +490,21 @@ pub(super) unsafe extern "C" fn buffer_new(
         let id = (&mut *env.ctx).resources_mut().insert(buf);
         let value = env.own_value(Value::Resource(id));
         if borrowed.is_some() {
-            env.borrows.push(BorrowRec { gen: env.epoch, live: true, mutable: true, slot: u32::MAX, resource: Some(id) });
+            env.borrows.push(BorrowRec {
+                live: true,
+                mutable: true,
+                slot: u32::MAX,
+                resource: Some(id),
+            });
             let tok = token(env, env.borrows.len() - 1);
-            fill_view(&mut *view, data, n, dtype, SPAR_BUFFER_WRITE | SPAR_BUFFER_READ, tok);
+            fill_view(
+                &mut *view,
+                data,
+                n,
+                dtype,
+                SPAR_BUFFER_WRITE | SPAR_BUFFER_READ,
+                tok,
+            );
         }
         put(out, value)
     })
@@ -404,7 +525,7 @@ pub(super) unsafe extern "C" fn buffer_from_external(
         if data.is_null() && len != 0 {
             return Err(SPAR_E_INVALID_ARGUMENT);
         }
-        if (data as usize) % size != 0 {
+        if !(data as usize).is_multiple_of(size) {
             return Err(SPAR_E_INVALID_ARGUMENT);
         }
         // Once constructed the finalizer owns `data`; even on later failure it runs exactly once.
@@ -415,14 +536,21 @@ pub(super) unsafe extern "C" fn buffer_from_external(
     })
 }
 
-pub(super) unsafe extern "C" fn buffer_to_list(env: *mut SparEnv, v: SparValue, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn buffer_to_list(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let id = match env.value_of(&v)? {
             Value::Resource(id) => *id,
             _ => return Err(SPAR_E_TYPE),
         };
-        let buf = (&*env.ctx).resources().get::<NativeBuffer>(id).ok_or(SPAR_E_TYPE)?;
+        let buf = (&*env.ctx)
+            .resources()
+            .get::<NativeBuffer>(id)
+            .ok_or(SPAR_E_TYPE)?;
         if buf.borrow_state() < 0 {
             return Err(SPAR_E_BORROW);
         }
@@ -433,7 +561,9 @@ pub(super) unsafe extern "C" fn buffer_to_list(env: *mut SparEnv, v: SparValue, 
                 SPAR_DTYPE_F64 => Value::Float((p as *const f64).add(i).read()),
                 SPAR_DTYPE_F32 => Value::Float((p as *const f32).add(i).read() as f64),
                 SPAR_DTYPE_I64 => Value::Int((p as *const i64).add(i).read()),
-                SPAR_DTYPE_U64 => Value::Int(i64::try_from((p as *const u64).add(i).read()).map_err(|_| SPAR_E_RANGE)?),
+                SPAR_DTYPE_U64 => Value::Int(
+                    i64::try_from((p as *const u64).add(i).read()).map_err(|_| SPAR_E_RANGE)?,
+                ),
                 SPAR_DTYPE_I32 => Value::Int((p as *const i32).add(i).read() as i64),
                 SPAR_DTYPE_U32 => Value::Int((p as *const u32).add(i).read() as i64),
                 SPAR_DTYPE_I16 => Value::Int((p as *const i16).add(i).read() as i64),
@@ -452,7 +582,11 @@ pub(super) unsafe extern "C" fn buffer_to_list(env: *mut SparEnv, v: SparValue, 
 
 // ---- lists ----
 
-pub(super) unsafe extern "C" fn list_len(env: *mut SparEnv, v: SparValue, out: *mut u64) -> spar_status_t {
+pub(super) unsafe extern "C" fn list_len(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut u64,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         match env.value_of(&v)? {
@@ -462,11 +596,18 @@ pub(super) unsafe extern "C" fn list_len(env: *mut SparEnv, v: SparValue, out: *
     })
 }
 
-pub(super) unsafe extern "C" fn list_get(env: *mut SparEnv, v: SparValue, index: u64, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn list_get(
+    env: *mut SparEnv,
+    v: SparValue,
+    index: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let ptr: *const Value = match env.value_of(&v)? {
-            Value::List(l) => l.get(usize::try_from(index).map_err(|_| SPAR_E_RANGE)?).ok_or(SPAR_E_RANGE)? as *const Value,
+            Value::List(l) => l
+                .get(usize::try_from(index).map_err(|_| SPAR_E_RANGE)?)
+                .ok_or(SPAR_E_RANGE)? as *const Value,
             _ => return Err(SPAR_E_TYPE),
         };
         let item = element(env, &v, ptr)?;
@@ -474,7 +615,11 @@ pub(super) unsafe extern "C" fn list_get(env: *mut SparEnv, v: SparValue, index:
     })
 }
 
-pub(super) unsafe extern "C" fn list_new(env: *mut SparEnv, capacity: u64, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn list_new(
+    env: *mut SparEnv,
+    capacity: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let cap = usize::try_from(capacity.min(1 << 24)).unwrap_or(0);
@@ -483,7 +628,11 @@ pub(super) unsafe extern "C" fn list_new(env: *mut SparEnv, capacity: u64, out: 
     })
 }
 
-pub(super) unsafe extern "C" fn list_push(env: *mut SparEnv, list: SparValue, item: SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn list_push(
+    env: *mut SparEnv,
+    list: SparValue,
+    item: SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let item = clone_value(env, &item)?;
@@ -499,7 +648,12 @@ pub(super) unsafe extern "C" fn list_push(env: *mut SparEnv, list: SparValue, it
 
 // ---- records ----
 
-pub(super) unsafe extern "C" fn symbol_intern(env: *mut SparEnv, name: *const u8, len: u64, out: *mut SparSymbol) -> spar_status_t {
+pub(super) unsafe extern "C" fn symbol_intern(
+    env: *mut SparEnv,
+    name: *const u8,
+    len: u64,
+    out: *mut SparSymbol,
+) -> spar_status_t {
     ffi(|| {
         // Interning is process-global and thread-safe: a NULL env is allowed so modules can
         // intern field names during init.
@@ -511,7 +665,11 @@ pub(super) unsafe extern "C" fn symbol_intern(env: *mut SparEnv, name: *const u8
     })
 }
 
-pub(super) unsafe extern "C" fn record_new(env: *mut SparEnv, capacity: u64, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn record_new(
+    env: *mut SparEnv,
+    capacity: u64,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let cap = usize::try_from(capacity.min(1 << 16)).unwrap_or(0);
@@ -520,7 +678,12 @@ pub(super) unsafe extern "C" fn record_new(env: *mut SparEnv, capacity: u64, out
     })
 }
 
-pub(super) unsafe extern "C" fn record_set(env: *mut SparEnv, rec: SparValue, field: SparSymbol, item: SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn record_set(
+    env: *mut SparEnv,
+    rec: SparValue,
+    field: SparSymbol,
+    item: SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let name = symbol_name(field).ok_or(SPAR_E_INVALID_ARGUMENT)?;
@@ -535,7 +698,12 @@ pub(super) unsafe extern "C" fn record_set(env: *mut SparEnv, rec: SparValue, fi
     })
 }
 
-pub(super) unsafe extern "C" fn record_get(env: *mut SparEnv, rec: SparValue, field: SparSymbol, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn record_get(
+    env: *mut SparEnv,
+    rec: SparValue,
+    field: SparSymbol,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let name = symbol_name(field).ok_or(SPAR_E_INVALID_ARGUMENT)?;
@@ -548,7 +716,11 @@ pub(super) unsafe extern "C" fn record_get(env: *mut SparEnv, rec: SparValue, fi
     })
 }
 
-pub(super) unsafe extern "C" fn record_len(env: *mut SparEnv, rec: SparValue, out: *mut u64) -> spar_status_t {
+pub(super) unsafe extern "C" fn record_len(
+    env: *mut SparEnv,
+    rec: SparValue,
+    out: *mut u64,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         match env.value_of(&rec)? {
@@ -560,7 +732,11 @@ pub(super) unsafe extern "C" fn record_len(env: *mut SparEnv, rec: SparValue, ou
 
 // ---- options ----
 
-pub(super) unsafe extern "C" fn option_some(env: *mut SparEnv, item: SparValue, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn option_some(
+    env: *mut SparEnv,
+    item: SparValue,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let item = clone_value(env, &item)?;
@@ -569,7 +745,10 @@ pub(super) unsafe extern "C" fn option_some(env: *mut SparEnv, item: SparValue, 
     })
 }
 
-pub(super) unsafe extern "C" fn option_none(env: *mut SparEnv, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn option_none(
+    env: *mut SparEnv,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let v = env.own_value(Value::Option(None));
@@ -577,7 +756,12 @@ pub(super) unsafe extern "C" fn option_none(env: *mut SparEnv, out: *mut SparVal
     })
 }
 
-pub(super) unsafe extern "C" fn option_get(env: *mut SparEnv, opt: SparValue, is_some: *mut u8, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn option_get(
+    env: *mut SparEnv,
+    opt: SparValue,
+    is_some: *mut u8,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let ptr: Option<*const Value> = match env.value_of(&opt)? {
@@ -597,7 +781,11 @@ pub(super) unsafe extern "C" fn option_get(env: *mut SparEnv, opt: SparValue, is
 
 // ---- persistent references ----
 
-pub(super) unsafe extern "C" fn ref_new(env: *mut SparEnv, v: SparValue, out: *mut SparRef) -> spar_status_t {
+pub(super) unsafe extern "C" fn ref_new(
+    env: *mut SparEnv,
+    v: SparValue,
+    out: *mut SparRef,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let value = clone_value(env, &v)?;
@@ -618,7 +806,11 @@ pub(super) unsafe extern "C" fn ref_new(env: *mut SparEnv, v: SparValue, out: *m
     })
 }
 
-pub(super) unsafe extern "C" fn ref_get(env: *mut SparEnv, r: SparRef, out: *mut SparValue) -> spar_status_t {
+pub(super) unsafe extern "C" fn ref_get(
+    env: *mut SparEnv,
+    r: SparRef,
+    out: *mut SparValue,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let (index, gen) = ((r & 0xffff_ffff) as usize, (r >> 32) as u32);
@@ -665,7 +857,9 @@ pub(super) unsafe extern "C" fn resource_new(
 ) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
-        let id = (&mut *env.ctx).resources_mut().insert(NativeResource::new(type_tag, ptr, finalize, userdata));
+        let id = (&mut *env.ctx)
+            .resources_mut()
+            .insert(NativeResource::new(type_tag, ptr, finalize, userdata));
         let v = env.own_value(Value::Resource(id));
         put(out, v)
     })
@@ -678,11 +872,19 @@ fn resource_id(env: &CallEnv, v: &SparValue) -> Result<ResourceId, i32> {
     }
 }
 
-pub(super) unsafe extern "C" fn resource_get(env: *mut SparEnv, v: SparValue, type_tag: u64, out: *mut *mut c_void) -> spar_status_t {
+pub(super) unsafe extern "C" fn resource_get(
+    env: *mut SparEnv,
+    v: SparValue,
+    type_tag: u64,
+    out: *mut *mut c_void,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let id = resource_id(env, &v)?;
-        let res = (&*env.ctx).resources().get::<NativeResource>(id).ok_or(SPAR_E_INVALID_STATE)?;
+        let res = (&*env.ctx)
+            .resources()
+            .get::<NativeResource>(id)
+            .ok_or(SPAR_E_INVALID_STATE)?;
         if res.type_tag != type_tag {
             return Err(SPAR_E_TYPE);
         }
@@ -690,7 +892,11 @@ pub(super) unsafe extern "C" fn resource_get(env: *mut SparEnv, v: SparValue, ty
     })
 }
 
-pub(super) unsafe extern "C" fn resource_close(env: *mut SparEnv, v: SparValue, type_tag: u64) -> spar_status_t {
+pub(super) unsafe extern "C" fn resource_close(
+    env: *mut SparEnv,
+    v: SparValue,
+    type_tag: u64,
+) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let id = resource_id(env, &v)?;
@@ -746,4 +952,3 @@ pub(super) unsafe extern "C" fn call(
         }
     })
 }
-

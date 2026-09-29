@@ -19,7 +19,11 @@ trait DArg: Copy + 'static {
 impl DArg for i64 {
     #[inline(always)]
     fn get(v: &Value) -> Option<i64> {
-        if let Value::Int(i) = v { Some(*i) } else { None }
+        if let Value::Int(i) = v {
+            Some(*i)
+        } else {
+            None
+        }
     }
 }
 impl DArg for f64 {
@@ -35,7 +39,11 @@ impl DArg for f64 {
 impl DArg for u8 {
     #[inline(always)]
     fn get(v: &Value) -> Option<u8> {
-        if let Value::Bool(b) = v { Some(*b as u8) } else { None }
+        if let Value::Bool(b) = v {
+            Some(*b as u8)
+        } else {
+            None
+        }
     }
 }
 
@@ -97,14 +105,23 @@ impl<A: DArg, B: DArg, C: DArg> DArgs for (A, B, C) {
     #[inline(always)]
     unsafe fn call<R: DRet>(f: *const c_void, args: &[Value]) -> Option<R> {
         let f: unsafe extern "C" fn(A, B, C) -> R = std::mem::transmute(f);
-        Some(f(A::get(args.first()?)?, B::get(args.get(1)?)?, C::get(args.get(2)?)?))
+        Some(f(
+            A::get(args.first()?)?,
+            B::get(args.get(1)?)?,
+            C::get(args.get(2)?)?,
+        ))
     }
 }
 impl<A: DArg, B: DArg, C: DArg, D: DArg> DArgs for (A, B, C, D) {
     #[inline(always)]
     unsafe fn call<R: DRet>(f: *const c_void, args: &[Value]) -> Option<R> {
         let f: unsafe extern "C" fn(A, B, C, D) -> R = std::mem::transmute(f);
-        Some(f(A::get(args.first()?)?, B::get(args.get(1)?)?, C::get(args.get(2)?)?, D::get(args.get(3)?)?))
+        Some(f(
+            A::get(args.first()?)?,
+            B::get(args.get(1)?)?,
+            C::get(args.get(2)?)?,
+            D::get(args.get(3)?)?,
+        ))
     }
 }
 
@@ -169,25 +186,65 @@ pub(crate) fn build(f: *const c_void, sig: &str, name: String) -> Option<DirectF
     match a.len() {
         0 => by_ret!(f, n, ret, ()),
         1 => {
-            macro_rules! l1 { ($t0:ty) => { by_ret!(f, n.clone(), ret, ($t0,)) }; }
+            macro_rules! l1 {
+                ($t0:ty) => {
+                    by_ret!(f, n.clone(), ret, ($t0,))
+                };
+            }
             by_kind!(a[0], l1!())
         }
         2 => {
-            macro_rules! l2b { ($t0:ty, $t1:ty) => { by_ret!(f, n.clone(), ret, ($t0, $t1)) }; }
-            macro_rules! l2a { ($t0:ty) => { by_kind!(a[1], l2b!($t0,)) }; }
+            macro_rules! l2b {
+                ($t0:ty, $t1:ty) => {
+                    by_ret!(f, n.clone(), ret, ($t0, $t1))
+                };
+            }
+            macro_rules! l2a {
+                ($t0:ty) => {
+                    by_kind!(a[1], l2b!($t0,))
+                };
+            }
             by_kind!(a[0], l2a!())
         }
         3 => {
-            macro_rules! l3c { ($t0:ty, $t1:ty, $t2:ty) => { by_ret!(f, n.clone(), ret, ($t0, $t1, $t2)) }; }
-            macro_rules! l3b { ($t0:ty, $t1:ty) => { by_kind!(a[2], l3c!($t0, $t1,)) }; }
-            macro_rules! l3a { ($t0:ty) => { by_kind!(a[1], l3b!($t0,)) }; }
+            macro_rules! l3c {
+                ($t0:ty, $t1:ty, $t2:ty) => {
+                    by_ret!(f, n.clone(), ret, ($t0, $t1, $t2))
+                };
+            }
+            macro_rules! l3b {
+                ($t0:ty, $t1:ty) => {
+                    by_kind!(a[2], l3c!($t0, $t1,))
+                };
+            }
+            macro_rules! l3a {
+                ($t0:ty) => {
+                    by_kind!(a[1], l3b!($t0,))
+                };
+            }
             by_kind!(a[0], l3a!())
         }
         4 => {
-            macro_rules! l4d { ($t0:ty, $t1:ty, $t2:ty, $t3:ty) => { by_ret!(f, n.clone(), ret, ($t0, $t1, $t2, $t3)) }; }
-            macro_rules! l4c { ($t0:ty, $t1:ty, $t2:ty) => { by_kind!(a[3], l4d!($t0, $t1, $t2,)) }; }
-            macro_rules! l4b { ($t0:ty, $t1:ty) => { by_kind!(a[2], l4c!($t0, $t1,)) }; }
-            macro_rules! l4a { ($t0:ty) => { by_kind!(a[1], l4b!($t0,)) }; }
+            macro_rules! l4d {
+                ($t0:ty, $t1:ty, $t2:ty, $t3:ty) => {
+                    by_ret!(f, n.clone(), ret, ($t0, $t1, $t2, $t3))
+                };
+            }
+            macro_rules! l4c {
+                ($t0:ty, $t1:ty, $t2:ty) => {
+                    by_kind!(a[3], l4d!($t0, $t1, $t2,))
+                };
+            }
+            macro_rules! l4b {
+                ($t0:ty, $t1:ty) => {
+                    by_kind!(a[2], l4c!($t0, $t1,))
+                };
+            }
+            macro_rules! l4a {
+                ($t0:ty) => {
+                    by_kind!(a[1], l4b!($t0,))
+                };
+            }
             by_kind!(a[0], l4a!())
         }
         _ => None,
@@ -197,5 +254,8 @@ pub(crate) fn build(f: *const c_void, sig: &str, name: String) -> Option<DirectF
 /// Which declared Spar type each signature letter must correspond to.
 pub(crate) fn letter_matches(letter: u8, ty: &crate::ast::SparType) -> bool {
     use crate::ast::SparType::*;
-    matches!((letter, ty), (b'i', Int) | (b'f', Float) | (b'b', Bool) | (b'v', Void))
+    matches!(
+        (letter, ty),
+        (b'i', Int) | (b'f', Float) | (b'b', Bool) | (b'v', Void)
+    )
 }

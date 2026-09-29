@@ -34,7 +34,6 @@ pub(crate) struct Slot {
 }
 
 pub(crate) struct BorrowRec {
-    pub gen: u32,
     pub live: bool,
     pub mutable: bool,
     /// Slot index the borrow was taken on (`u32::MAX` for buffer resources).
@@ -142,7 +141,11 @@ impl CallEnv {
 
     fn end_scope(&mut self) {
         // Fast path: a call that only used scalars leaves nothing to clean up.
-        if self.used == 0 && self.borrows.is_empty() && self.scratch.is_empty() && self.error.is_none() {
+        if self.used == 0
+            && self.borrows.is_empty()
+            && self.scratch.is_empty()
+            && self.error.is_none()
+        {
             self.argv.clear();
             self.host = None;
             self.pending_fault = None;
@@ -210,7 +213,11 @@ impl CallEnv {
     fn alloc(&mut self, val: SlotVal) -> u64 {
         let index = self.used;
         if index == self.slots.len() {
-            self.slots.push(Slot { gen: 0, val: SlotVal::Free, borrow: 0 });
+            self.slots.push(Slot {
+                gen: 0,
+                val: SlotVal::Free,
+                borrow: 0,
+            });
         }
         let slot = &mut self.slots[index];
         slot.gen = slot.gen.wrapping_add(1).max(1);
@@ -235,7 +242,11 @@ impl CallEnv {
             other => {
                 let tag = tag_of(other);
                 let handle = self.alloc(SlotVal::Borrowed(other as *const Value));
-                SparValue { tag, flags: 0, payload: SparPayload { handle } }
+                SparValue {
+                    tag,
+                    flags: 0,
+                    payload: SparPayload { handle },
+                }
             }
         }
     }
@@ -250,7 +261,11 @@ impl CallEnv {
             other => {
                 let tag = tag_of(&other);
                 let handle = self.alloc(SlotVal::Owned(other));
-                SparValue { tag, flags: 0, payload: SparPayload { handle } }
+                SparValue {
+                    tag,
+                    flags: 0,
+                    payload: SparPayload { handle },
+                }
             }
         }
     }

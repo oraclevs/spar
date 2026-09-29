@@ -20,15 +20,32 @@ fn c_fastmath() -> &'static Path {
         let lib = dir.join("libfastmath.so");
         let sys = sys_dir();
         let out = Command::new("cc")
-            .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-fvisibility=hidden", "-shared"])
-            .args(std::env::var("SPAR_TEST_CFLAGS").unwrap_or_default().split_whitespace())
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-fPIC",
+                "-fvisibility=hidden",
+                "-shared",
+            ])
+            .args(
+                std::env::var("SPAR_TEST_CFLAGS")
+                    .unwrap_or_default()
+                    .split_whitespace(),
+            )
             .arg(format!("-I{}", sys.join("include").display()))
             .arg(sys.join("examples/native/c-fastmath/fastmath.c"))
             .args(["-lm", "-lpthread", "-o"])
             .arg(&lib)
             .output()
             .expect("cc");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         lib
     })
 }
@@ -36,23 +53,36 @@ fn c_fastmath() -> &'static Path {
 fn engine_with_native(path: &Path) -> Engine {
     let mut natives = spar::CompileOptions::default().natives;
     native_module::load_into_registry(path, &mut natives).expect("load native module");
-    Engine::new(CompileOptions { natives, ..CompileOptions::default() })
+    Engine::new(CompileOptions {
+        natives,
+        ..CompileOptions::default()
+    })
 }
 
 fn run_int(source: &str) -> i32 {
-    engine_with_native(c_fastmath()).execute_source(source).expect("program runs").exit_status
+    engine_with_native(c_fastmath())
+        .execute_source(source)
+        .expect("program runs")
+        .exit_status
 }
 
 fn run_err(source: &str) -> String {
     match engine_with_native(c_fastmath()).execute_source(source) {
         Ok(o) => panic!("expected failure, exit {}", o.exit_status),
-        Err(errors) => errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
+        Err(errors) => errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
 #[test]
 fn module_loads_and_reports_info() {
-    let info = native_module::load_module(c_fastmath()).unwrap().info().clone();
+    let info = native_module::load_module(c_fastmath())
+        .unwrap()
+        .info()
+        .clone();
     assert_eq!(info.name, "fastMath");
     assert_eq!(info.version, (0, 1, 0));
     assert!(info.functions.contains(&"add".to_string()));
@@ -63,13 +93,19 @@ fn module_loads_and_reports_info() {
 
 #[test]
 fn scalar_calls() {
-    assert_eq!(run_int("function main() -> int { return fastMath::add(a: 20, b: 22); };"), 42);
+    assert_eq!(
+        run_int("function main() -> int { return fastMath::add(a: 20, b: 22); };"),
+        42
+    );
     assert_eq!(run_int("function main() -> int { if fastMath::hypot(x: 3.0, y: 4.0) == 5.0 { return 1; } return 0; };"), 1);
 }
 
 #[test]
 fn direct_signatures_skip_marshalling_and_are_typechecked() {
-    assert_eq!(run_int("function main() -> int { return fastMath::mulD(a: 6, b: 7); };"), 42);
+    assert_eq!(
+        run_int("function main() -> int { return fastMath::mulD(a: 6, b: 7); };"),
+        42
+    );
     assert_eq!(
         run_int("function main() -> int { if fastMath::scaleD(x: 2.0, k: 1.5, negate: true) == -3.0 { return 1; } return 0; };"),
         1
@@ -77,14 +113,23 @@ fn direct_signatures_skip_marshalling_and_are_typechecked() {
     let errors = engine_with_native(c_fastmath())
         .check_source(r#"function main() -> int { return fastMath::mulD(a: "x", b: 1); };"#)
         .expect_err("type error expected");
-    assert!(errors.iter().map(|e| e.to_string()).collect::<String>().contains("expects int"));
+    assert!(errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<String>()
+        .contains("expects int"));
 }
 
 #[test]
 fn strings_are_borrowed_and_created() {
-    assert_eq!(run_int(r#"function main() -> int { return fastMath::strLen(text: "héllo"); };"#), 6);
     assert_eq!(
-        run_int(r#"function main() -> int { if fastMath::shout(text: "abc") == "ABC!" { return 7; } return 0; };"#),
+        run_int(r#"function main() -> int { return fastMath::strLen(text: "héllo"); };"#),
+        6
+    );
+    assert_eq!(
+        run_int(
+            r#"function main() -> int { if fastMath::shout(text: "abc") == "ABC!" { return 7; } return 0; };"#
+        ),
         7
     );
 }
@@ -99,7 +144,10 @@ fn typed_list_borrow_copies_into_contiguous_buffer() {
 
 #[test]
 fn native_built_list_and_record_round_trip() {
-    assert_eq!(run_int("function main() -> int { return len(value: fastMath::iota(n: 5)); };"), 5);
+    assert_eq!(
+        run_int("function main() -> int { return len(value: fastMath::iota(n: 5)); };"),
+        5
+    );
     assert_eq!(run_int("function main() -> int { var p = fastMath::pair(a: 3, b: 4); return p.sum.asInt() * 100 + p.product.asInt(); };"), 712);
 }
 
@@ -114,10 +162,12 @@ fn native_calls_back_into_spar() {
     "#;
     assert_eq!(run_int(src), 11 + 21 + 31);
     // a named function works too, and errors raised inside the callback propagate with their text
-    let err = run_err(r#"
+    let err = run_err(
+        r#"
         function boom(value: int) -> int { assert(condition: value < 2, message: "callback rejected"); return value; };
         function main() -> int { fastMath::mapInts(values: [1, 2, 3], f: boom); return 0; };
-    "#);
+    "#,
+    );
     assert!(err.contains("callback rejected"), "{err}");
 }
 
@@ -125,7 +175,8 @@ fn native_calls_back_into_spar() {
 fn native_errors_carry_message_and_span() {
     let msg = run_err("function main() -> int { return fastMath::fail(); };");
     assert!(msg.contains("deliberate failure from C"), "{msg}");
-    let msg = run_err("function main() -> int { return fastMath::add(a: 9223372036854775807, b: 1); };");
+    let msg =
+        run_err("function main() -> int { return fastMath::add(a: 9223372036854775807, b: 1); };");
     assert!(msg.contains("add overflows int"), "{msg}");
 }
 
@@ -141,13 +192,19 @@ fn signature_is_typechecked_from_descriptor() {
 
 #[test]
 fn rejects_non_module_and_missing_files() {
-    let err = native_module::load_module(Path::new("/nonexistent/lib.so")).unwrap_err().to_string();
+    let err = native_module::load_module(Path::new("/nonexistent/lib.so"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("cannot load native module"), "{err}");
     // libm exists everywhere but does not export the Spar entry symbol.
-    let libm = ["/usr/lib/libm.so.6", "/lib/x86_64-linux-gnu/libm.so.6", "/usr/lib64/libm.so.6"]
-        .iter()
-        .map(Path::new)
-        .find(|p| p.exists());
+    let libm = [
+        "/usr/lib/libm.so.6",
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib64/libm.so.6",
+    ]
+    .iter()
+    .map(Path::new)
+    .find(|p| p.exists());
     if let Some(libm) = libm {
         let err = native_module::load_module(libm).unwrap_err().to_string();
         assert!(err.contains("does not export"), "{err}");
@@ -167,7 +224,11 @@ fn rust_fastarray() -> &'static Path {
             .arg(dir.join("Cargo.toml"))
             .output()
             .expect("cargo");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         dir.join("target/release/librust_fastarray.so")
     })
 }
@@ -175,10 +236,18 @@ fn rust_fastarray() -> &'static Path {
 fn run_rust(source: &str) -> Result<i32, String> {
     let mut natives = CompileOptions::default().natives;
     native_module::load_into_registry(rust_fastarray(), &mut natives).expect("load rust module");
-    Engine::new(CompileOptions { natives, ..CompileOptions::default() })
-        .execute_source(source)
-        .map(|o| o.exit_status)
-        .map_err(|e| e.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("\n"))
+    Engine::new(CompileOptions {
+        natives,
+        ..CompileOptions::default()
+    })
+    .execute_source(source)
+    .map(|o| o.exit_status)
+    .map_err(|e| {
+        e.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[test]
@@ -214,12 +283,17 @@ fn rust_module_lists_strings_and_threads() {
 
 #[test]
 fn rust_errors_and_panics_are_contained() {
-    let err = run_rust("function main() -> int { fastArray::dot(a: [1.0], b: [1.0, 2.0]); return 0; };").unwrap_err();
+    let err =
+        run_rust("function main() -> int { fastArray::dot(a: [1.0], b: [1.0, 2.0]); return 0; };")
+            .unwrap_err();
     assert!(err.contains("length mismatch"), "{err}");
     let err = run_rust("function main() -> int { return fastArray::explode(); };").unwrap_err();
     assert!(err.contains("boom from rust"), "{err}");
     // The runtime is still usable after a contained panic.
-    assert_eq!(run_rust("function main() -> int { return fastArray::wordCount(text: \"x y\"); };"), Ok(2));
+    assert_eq!(
+        run_rust("function main() -> int { return fastArray::wordCount(text: \"x y\"); };"),
+        Ok(2)
+    );
 }
 
 #[test]
@@ -237,7 +311,11 @@ fn cpp_textkit() -> &'static Path {
     LIB.get_or_init(|| {
         let dir = sys_dir().join("examples/native/cpp-textkit");
         let out = Command::new(dir.join("build.sh")).output().expect("c++");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         dir.join("libtextkit.so")
     })
 }
@@ -245,21 +323,34 @@ fn cpp_textkit() -> &'static Path {
 fn run_cpp(source: &str) -> Result<i32, String> {
     let mut natives = CompileOptions::default().natives;
     native_module::load_into_registry(cpp_textkit(), &mut natives).expect("load cpp module");
-    Engine::new(CompileOptions { natives, ..CompileOptions::default() })
-        .execute_source(source)
-        .map(|o| o.exit_status)
-        .map_err(|e| e.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("\n"))
+    Engine::new(CompileOptions {
+        natives,
+        ..CompileOptions::default()
+    })
+    .execute_source(source)
+    .map(|o| o.exit_status)
+    .map_err(|e| {
+        e.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[test]
 fn cpp_module_strings_buffers_and_exceptions() {
     assert_eq!(
-        run_cpp(r#"function main() -> int { if textKit::upper(text: "abc") != "ABC" { return 1; } if textKit::mean(values: [1.0, 2.0, 6.0]) != 3.0 { return 2; } return 0; };"#),
+        run_cpp(
+            r#"function main() -> int { if textKit::upper(text: "abc") != "ABC" { return 1; } if textKit::mean(values: [1.0, 2.0, 6.0]) != 3.0 { return 2; } return 0; };"#
+        ),
         Ok(0)
     );
     let err = run_cpp("function main() -> int { return textKit::throws(); };").unwrap_err();
     assert!(err.contains("C++ exception"), "{err}");
-    let err = run_cpp("function main() -> int { var e: [float] = []; textKit::mean(values: e); return 0; };").unwrap_err();
+    let err = run_cpp(
+        "function main() -> int { var e: [float] = []; textKit::mean(values: e); return 0; };",
+    )
+    .unwrap_err();
     assert!(err.contains("mean of empty input"), "{err}");
 }
 
@@ -315,7 +406,11 @@ fn async_native_operations_overlap() {
     "#;
     let t = std::time::Instant::now();
     assert_eq!(run_int(src), 6);
-    assert!(t.elapsed() < std::time::Duration::from_millis(550), "operations ran sequentially: {:?}", t.elapsed());
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(550),
+        "operations ran sequentially: {:?}",
+        t.elapsed()
+    );
 }
 
 #[test]
@@ -333,7 +428,10 @@ fn async_double_completion_is_rejected() {
     assert_eq!(run_int("async function main() -> int { var v: int = await fastMath::delayedAdd(a: 1, b: 0, millis: 10); return v; };"), 1);
     std::thread::sleep(std::time::Duration::from_millis(50));
     // SPAR_E_INVALID_STATE == 13 was recorded by the worker on its second async_complete.
-    assert_eq!(run_int("function main() -> int { return fastMath::secondStatus(); };"), 13);
+    assert_eq!(
+        run_int("function main() -> int { return fastMath::secondStatus(); };"),
+        13
+    );
     assert_eq!(native_module::live_async_ops(), 0, "async operation leaked");
 }
 
@@ -356,7 +454,11 @@ fn build_fixture(tag: &str, defines: &[&str]) -> PathBuf {
         .arg(&lib)
         .output()
         .expect("cc");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     lib
 }
 
@@ -365,10 +467,14 @@ fn module_built_against_old_header_still_loads_and_runs() {
     let lib = build_fixture("ok", &[]);
     assert!(SPAR_NATIVE_MINOR_NEWER());
     let mut natives = CompileOptions::default().natives;
-    native_module::load_into_registry(&lib, &mut natives).expect("old module loads on newer runtime");
-    let out = Engine::new(CompileOptions { natives, ..CompileOptions::default() })
-        .execute_source("function main() -> int { return oldMod::twice(x: 21); };")
-        .unwrap();
+    native_module::load_into_registry(&lib, &mut natives)
+        .expect("old module loads on newer runtime");
+    let out = Engine::new(CompileOptions {
+        natives,
+        ..CompileOptions::default()
+    })
+    .execute_source("function main() -> int { return oldMod::twice(x: 21); };")
+    .unwrap();
     assert_eq!(out.exit_status, 42);
 }
 
@@ -380,10 +486,29 @@ fn SPAR_NATIVE_MINOR_NEWER() -> bool {
 #[test]
 fn incompatible_modules_are_rejected_with_clear_diagnostics() {
     let cases: Vec<(&str, Vec<&str>, &str)> = vec![
-        ("major", vec!["-DFX_MAJOR=7", "-DFX_NAME=\"badMajor\""], "ABI major 7"),
-        ("minor", vec!["-DFX_MIN_MINOR=99", "-DFX_NAME=\"badMinor\""], "needs ABI 0.99"),
-        ("caps", vec!["-DFX_CAPS=(1ull<<40)", "-DFX_NAME=\"badCaps\""], "capabilities"),
-        ("target", vec!["-DFX_TARGET=\"riscv64-unknown-plan9\"", "-DFX_NAME=\"badTarget\""], "built for target"),
+        (
+            "major",
+            vec!["-DFX_MAJOR=7", "-DFX_NAME=\"badMajor\""],
+            "ABI major 7",
+        ),
+        (
+            "minor",
+            vec!["-DFX_MIN_MINOR=99", "-DFX_NAME=\"badMinor\""],
+            "needs ABI 0.99",
+        ),
+        (
+            "caps",
+            vec!["-DFX_CAPS=(1ull<<40)", "-DFX_NAME=\"badCaps\""],
+            "capabilities",
+        ),
+        (
+            "target",
+            vec![
+                "-DFX_TARGET=\"riscv64-unknown-plan9\"",
+                "-DFX_NAME=\"badTarget\"",
+            ],
+            "built for target",
+        ),
         ("name", vec!["-DFX_NAME=\"1bad\""], "not a valid identifier"),
     ];
     for (tag, defs, expect) in cases {
@@ -396,10 +521,16 @@ fn incompatible_modules_are_rejected_with_clear_diagnostics() {
 #[test]
 fn declared_native_types_are_distinct_and_typechecked() {
     let dir = sys_dir().join("examples/native/bench-kernels");
-    assert!(Command::new(dir.join("build.sh")).status().unwrap().success());
+    assert!(Command::new(dir.join("build.sh"))
+        .status()
+        .unwrap()
+        .success());
     let mut natives = CompileOptions::default().natives;
     native_module::load_into_registry(&dir.join("libbenchkit.so"), &mut natives).unwrap();
-    let engine = Engine::new(CompileOptions { natives, ..CompileOptions::default() });
+    let engine = Engine::new(CompileOptions {
+        natives,
+        ..CompileOptions::default()
+    });
     let ok = engine
         .execute_source("function main() -> int { var c: Counter = benchkit::counterNew(); benchkit::counterBump(counter: c); return benchkit::counterBump(counter: c); };")
         .unwrap();
@@ -408,7 +539,11 @@ fn declared_native_types_are_distinct_and_typechecked() {
     let errors = engine
         .check_source("function main() -> int { var b: Buffer = benchkit::makeBuf(n: 4); return benchkit::counterBump(counter: b); };")
         .expect_err("Buffer must not be accepted as Counter");
-    assert!(errors.iter().map(|e| e.to_string()).collect::<String>().contains("Counter"));
+    assert!(errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<String>()
+        .contains("Counter"));
 }
 
 #[test]

@@ -32,28 +32,58 @@ pub const RUNTIME_CAPABILITIES: u64 = SPAR_CAP_STRINGS
 
 #[derive(Debug)]
 pub enum NativeLoadError {
-    Open { path: PathBuf, message: String },
-    MissingSymbol { path: PathBuf },
-    Descriptor { path: PathBuf, message: String },
-    Init { path: PathBuf, status: i32, message: String },
-    Registration { path: PathBuf, message: String },
+    Open {
+        path: PathBuf,
+        message: String,
+    },
+    MissingSymbol {
+        path: PathBuf,
+    },
+    Descriptor {
+        path: PathBuf,
+        message: String,
+    },
+    Init {
+        path: PathBuf,
+        status: i32,
+        message: String,
+    },
+    Registration {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for NativeLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Open { path, message } => write!(f, "cannot load native module '{}': {message}", path.display()),
+            Self::Open { path, message } => write!(
+                f,
+                "cannot load native module '{}': {message}",
+                path.display()
+            ),
             Self::MissingSymbol { path } => write!(
                 f,
-                "'{}' is not a Spar native module: it does not export '{}'",
-                path.display(),
-                "spar_native_module_v0"
+                "'{}' is not a Spar native module: it does not export 'spar_native_module_v0'",
+                path.display()
             ),
-            Self::Descriptor { path, message } => write!(f, "native module '{}' rejected: {message}", path.display()),
-            Self::Init { path, status, message } => {
-                write!(f, "native module '{}' failed to initialise (status {status}): {message}", path.display())
+            Self::Descriptor { path, message } => {
+                write!(f, "native module '{}' rejected: {message}", path.display())
             }
-            Self::Registration { path, message } => write!(f, "native module '{}': {message}", path.display()),
+            Self::Init {
+                path,
+                status,
+                message,
+            } => {
+                write!(
+                    f,
+                    "native module '{}' failed to initialise (status {status}): {message}",
+                    path.display()
+                )
+            }
+            Self::Registration { path, message } => {
+                write!(f, "native module '{}': {message}", path.display())
+            }
         }
     }
 }
@@ -62,7 +92,10 @@ impl std::error::Error for NativeLoadError {}
 
 impl From<NativeLoadError> for SparError {
     fn from(e: NativeLoadError) -> Self {
-        SparError::EvalError { message: e.to_string(), span: Span::dummy() }
+        SparError::EvalError {
+            message: e.to_string(),
+            span: Span::dummy(),
+        }
     }
 }
 
@@ -147,7 +180,9 @@ unsafe impl Sync for LoadedModule {}
 
 impl std::fmt::Debug for LoadedModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoadedModule").field("info", &self.info).finish()
+        f.debug_struct("LoadedModule")
+            .field("info", &self.info)
+            .finish()
     }
 }
 
@@ -173,15 +208,21 @@ unsafe fn text(ptr: *const u8, len: u64) -> Result<String, String> {
     if ptr.is_null() || len > 1 << 20 {
         return Err("invalid string pointer or length".into());
     }
-    String::from_utf8(std::slice::from_raw_parts(ptr, len as usize).to_vec()).map_err(|_| "string is not UTF-8".into())
+    String::from_utf8(std::slice::from_raw_parts(ptr, len as usize).to_vec())
+        .map_err(|_| "string is not UTF-8".into())
 }
 
-pub(super) unsafe extern "C" fn module_add_function(module: *mut SparModule, spec: *const SparFunctionSpec) -> spar_status_t {
+pub(super) unsafe extern "C" fn module_add_function(
+    module: *mut SparModule,
+    spec: *const SparFunctionSpec,
+) -> spar_status_t {
     if module.is_null() || spec.is_null() {
         return SPAR_E_INVALID_ARGUMENT;
     }
     let builder = &mut *(module as *mut ModuleBuilder);
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| add_function(builder, &*spec))) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        add_function(builder, &*spec)
+    })) {
         Ok(Ok(())) => SPAR_OK,
         Ok(Err((status, msg))) => {
             builder.error.get_or_insert(msg);
@@ -191,10 +232,19 @@ pub(super) unsafe extern "C" fn module_add_function(module: *mut SparModule, spe
     }
 }
 
-unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> Result<(), (i32, String)> {
+unsafe fn add_function(
+    builder: &mut ModuleBuilder,
+    spec: &SparFunctionSpec,
+) -> Result<(), (i32, String)> {
     let bad = |m: String| (SPAR_E_INVALID_ARGUMENT, m);
     if (spec.struct_size as usize) < std::mem::size_of::<SparFunctionSpec>() {
-        return Err((SPAR_E_ABI_MISMATCH, format!("function spec struct_size {} is too small", spec.struct_size)));
+        return Err((
+            SPAR_E_ABI_MISMATCH,
+            format!(
+                "function spec struct_size {} is too small",
+                spec.struct_size
+            ),
+        ));
     }
     let name = text(spec.name, spec.name_len).map_err(bad)?;
     if !is_identifier(&name) {
@@ -205,7 +255,9 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     }
     let has_direct = !spec.direct.is_null();
     if has_direct && spec.flags & (SPAR_FN_ASYNC | SPAR_FN_CALLS) != 0 {
-        return Err(bad(format!("'{name}': direct signatures cannot be async or call back into Spar")));
+        return Err(bad(format!(
+            "'{name}': direct signatures cannot be async or call back into Spar"
+        )));
     }
     let invoke = match spec.invoke {
         Some(f) => f,
@@ -226,8 +278,11 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         if !is_identifier(&pname) {
             return Err(bad(format!("'{name}': bad parameter name '{pname}'")));
         }
-        let ty = crate::parser::Parser::parse_type_text(&ptype)
-            .map_err(|e| bad(format!("'{name}': parameter '{pname}' has invalid type '{ptype}': {e}")))?;
+        let ty = crate::parser::Parser::parse_type_text(&ptype).map_err(|e| {
+            bad(format!(
+                "'{name}': parameter '{pname}' has invalid type '{ptype}': {e}"
+            ))
+        })?;
         params.push((pname, ty));
     }
     let ret_text = text(spec.ret_type, spec.ret_type_len).map_err(bad)?;
@@ -239,10 +294,16 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     };
     let direct = if has_direct {
         let sig = text(spec.direct_sig, spec.direct_sig_len).map_err(bad)?;
-        let (arg_letters, ret_letter) =
-            sig.split_once('>').ok_or_else(|| bad(format!("'{name}': direct signature '{sig}' must look like 'ii>i'")))?;
+        let (arg_letters, ret_letter) = sig.split_once('>').ok_or_else(|| {
+            bad(format!(
+                "'{name}': direct signature '{sig}' must look like 'ii>i'"
+            ))
+        })?;
         if arg_letters.len() != params.len() || ret_letter.len() != 1 {
-            return Err(bad(format!("'{name}': direct signature '{sig}' does not match its {} parameters", params.len())));
+            return Err(bad(format!(
+                "'{name}': direct signature '{sig}' does not match its {} parameters",
+                params.len()
+            )));
         }
         for (i, letter) in arg_letters.bytes().enumerate() {
             if letter == b'v' || !super::direct::letter_matches(letter, &params[i].1) {
@@ -254,7 +315,11 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         }
         Some(Arc::new(
             super::direct::build(spec.direct, &sig, format!("{}::{name}", builder.name))
-                .ok_or_else(|| bad(format!("'{name}': unsupported direct signature '{sig}' (max 4 arguments of i/f/b)")))?,
+                .ok_or_else(|| {
+                    bad(format!(
+                        "'{name}': unsupported direct signature '{sig}' (max 4 arguments of i/f/b)"
+                    ))
+                })?,
         ))
     } else {
         None
@@ -262,7 +327,9 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     if spec.flags & SPAR_FN_ASYNC != 0
         && !matches!(&ret, SparType::Applied { name, arguments } if name == "Promise" && arguments.len() == 1)
     {
-        return Err(bad(format!("'{name}': async functions must declare a `Promise<T>` return type, got '{ret_text}'")));
+        return Err(bad(format!(
+            "'{name}': async functions must declare a `Promise<T>` return type, got '{ret_text}'"
+        )));
     }
     let info = Arc::new(FnInfo {
         module: builder.name.clone(),
@@ -284,16 +351,31 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     if let Some(index) = info.external {
         EXTERNALS.lock().unwrap()[index as usize] = Some(info.clone());
     }
-    builder.functions.push(FunctionDef { name, params, ret, info });
+    builder.functions.push(FunctionDef {
+        name,
+        params,
+        ret,
+        info,
+    });
     Ok(())
 }
 
 /// Placeholder `invoke` for direct-only functions; never reached (direct adapters bypass it).
-unsafe extern "C" fn unreachable_invoke(_e: *mut SparEnv, _u: *mut c_void, _a: *const SparValue, _n: u64, _o: *mut SparValue) -> spar_status_t {
+unsafe extern "C" fn unreachable_invoke(
+    _e: *mut SparEnv,
+    _u: *mut c_void,
+    _a: *const SparValue,
+    _n: u64,
+    _o: *mut SparValue,
+) -> spar_status_t {
     SPAR_E_UNSUPPORTED
 }
 
-pub(super) unsafe extern "C" fn module_add_type(module: *mut SparModule, name: *const u8, len: u64) -> spar_status_t {
+pub(super) unsafe extern "C" fn module_add_type(
+    module: *mut SparModule,
+    name: *const u8,
+    len: u64,
+) -> spar_status_t {
     if module.is_null() {
         return SPAR_E_INVALID_ARGUMENT;
     }
@@ -306,7 +388,9 @@ pub(super) unsafe extern "C" fn module_add_type(module: *mut SparModule, name: *
             SPAR_OK
         }
         Ok(n) => {
-            builder.error.get_or_insert(format!("type name '{n}' must be a capitalised identifier"));
+            builder
+                .error
+                .get_or_insert(format!("type name '{n}' must be a capitalised identifier"));
             SPAR_E_INVALID_ARGUMENT
         }
         Err(m) => {
@@ -367,7 +451,10 @@ pub fn api_table() -> &'static SparApiV0 {
 }
 
 fn validate_descriptor(path: &Path, d: &SparModuleDescriptor) -> Result<(), NativeLoadError> {
-    let err = |m: String| NativeLoadError::Descriptor { path: path.to_path_buf(), message: m };
+    let err = |m: String| NativeLoadError::Descriptor {
+        path: path.to_path_buf(),
+        message: m,
+    };
     if (d.struct_size as usize) < std::mem::size_of::<SparModuleDescriptor>() {
         return Err(err(format!(
             "descriptor struct_size {} is smaller than the {} bytes this runtime expects (ABI {}.{})",
@@ -378,7 +465,10 @@ fn validate_descriptor(path: &Path, d: &SparModuleDescriptor) -> Result<(), Nati
         )));
     }
     if d.abi_major != SPAR_NATIVE_ABI_MAJOR {
-        return Err(err(format!("module targets ABI major {}, runtime provides {}", d.abi_major, SPAR_NATIVE_ABI_MAJOR)));
+        return Err(err(format!(
+            "module targets ABI major {}, runtime provides {}",
+            d.abi_major, SPAR_NATIVE_ABI_MAJOR
+        )));
     }
     if d.min_abi_minor > SPAR_NATIVE_ABI_MINOR {
         return Err(err(format!(
@@ -399,7 +489,8 @@ fn validate_descriptor(path: &Path, d: &SparModuleDescriptor) -> Result<(), Nati
 }
 
 fn target_matches(target: &str) -> bool {
-    target.is_empty() || (target.starts_with(std::env::consts::ARCH) && target.contains(std::env::consts::OS))
+    target.is_empty()
+        || (target.starts_with(std::env::consts::ARCH) && target.contains(std::env::consts::OS))
 }
 
 /// Loads (once per canonical path) and initialises a native module.
@@ -408,9 +499,10 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
     // same path (module statics are not required to be thread-safe during init).
     static LOAD_LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| NativeLoadError::Open { path: path.to_path_buf(), message: e.to_string() })?;
+    let canonical = path.canonicalize().map_err(|e| NativeLoadError::Open {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
     {
         let loaded = LOADED.lock().unwrap();
         if let Some((_, m)) = loaded.iter().find(|(p, _)| *p == canonical) {
@@ -419,15 +511,23 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
     }
     // SAFETY: loading a shared library runs its constructors; native modules are trusted code
     // (documented security boundary).
-    let lib = unsafe { libloading::Library::new(&canonical) }
-        .map_err(|e| NativeLoadError::Open { path: canonical.clone(), message: e.to_string() })?;
+    let lib =
+        unsafe { libloading::Library::new(&canonical) }.map_err(|e| NativeLoadError::Open {
+            path: canonical.clone(),
+            message: e.to_string(),
+        })?;
     let lib: &'static libloading::Library = Box::leak(Box::new(lib));
     let entry: libloading::Symbol<'static, unsafe extern "C" fn() -> *const SparModuleDescriptor> =
-        unsafe { lib.get(SPAR_MODULE_SYMBOL) }.map_err(|_| NativeLoadError::MissingSymbol { path: canonical.clone() })?;
+        unsafe { lib.get(SPAR_MODULE_SYMBOL) }.map_err(|_| NativeLoadError::MissingSymbol {
+            path: canonical.clone(),
+        })?;
     // SAFETY: the symbol has the documented signature; a wrong-signature export is a module bug.
     let raw = unsafe { entry() };
     if raw.is_null() {
-        return Err(NativeLoadError::Descriptor { path: canonical, message: "entry returned a null descriptor".into() });
+        return Err(NativeLoadError::Descriptor {
+            path: canonical,
+            message: "entry returned a null descriptor".into(),
+        });
     }
     // Read only the prefix the module declared, zero-padding the rest so older modules stay loadable
     // once the descriptor grows.
@@ -445,13 +545,23 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
         // A prefix shorter than we know is rejected below with a clear message.
     }
     validate_descriptor(&canonical, &desc)?;
-    let name = unsafe { text(desc.module_name, desc.module_name_len) }
-        .map_err(|m| NativeLoadError::Descriptor { path: canonical.clone(), message: format!("module name: {m}") })?;
+    let name = unsafe { text(desc.module_name, desc.module_name_len) }.map_err(|m| {
+        NativeLoadError::Descriptor {
+            path: canonical.clone(),
+            message: format!("module name: {m}"),
+        }
+    })?;
     if !is_identifier(&name) {
-        return Err(NativeLoadError::Descriptor { path: canonical, message: format!("module name '{name}' is not a valid identifier") });
+        return Err(NativeLoadError::Descriptor {
+            path: canonical,
+            message: format!("module name '{name}' is not a valid identifier"),
+        });
     }
-    let target = unsafe { text(desc.target, desc.target_len) }
-        .map_err(|m| NativeLoadError::Descriptor { path: canonical.clone(), message: format!("target: {m}") })?;
+    let target =
+        unsafe { text(desc.target, desc.target_len) }.map_err(|m| NativeLoadError::Descriptor {
+            path: canonical.clone(),
+            message: format!("target: {m}"),
+        })?;
     if !target_matches(&target) {
         return Err(NativeLoadError::Descriptor {
             path: canonical,
@@ -462,24 +572,49 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
             ),
         });
     }
-    if LOADED.lock().unwrap().iter().any(|(_, m)| m.info.name == name) {
-        return Err(NativeLoadError::Descriptor { path: canonical, message: format!("a native module named '{name}' is already loaded") });
+    if LOADED
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, m)| m.info.name == name)
+    {
+        return Err(NativeLoadError::Descriptor {
+            path: canonical,
+            message: format!("a native module named '{name}' is already loaded"),
+        });
     }
 
-    let mut builder = ModuleBuilder { name: name.clone(), functions: Vec::new(), types: Vec::new(), error: None };
+    let mut builder = ModuleBuilder {
+        name: name.clone(),
+        functions: Vec::new(),
+        types: Vec::new(),
+        error: None,
+    };
     let mut state: *mut c_void = std::ptr::null_mut();
     let init = desc.init.unwrap();
     // SAFETY: module init receives the API table and builder; a panic/unwind here is a module bug.
-    let status = unsafe { init(&API, &mut builder as *mut ModuleBuilder as *mut SparModule, &mut state) };
+    let status = unsafe {
+        init(
+            &API,
+            &mut builder as *mut ModuleBuilder as *mut SparModule,
+            &mut state,
+        )
+    };
     if status != SPAR_OK {
         return Err(NativeLoadError::Init {
             path: canonical,
             status,
-            message: builder.error.take().unwrap_or_else(|| "init returned an error".into()),
+            message: builder
+                .error
+                .take()
+                .unwrap_or_else(|| "init returned an error".into()),
         });
     }
     if let Some(m) = builder.error.take() {
-        return Err(NativeLoadError::Registration { path: canonical, message: m });
+        return Err(NativeLoadError::Registration {
+            path: canonical,
+            message: m,
+        });
     }
     let info = ModuleInfo {
         name,
@@ -535,7 +670,11 @@ impl LoadedModule {
         for f in &self.functions {
             let info = f.info.clone();
             if let Some(index) = info.external {
-                let params = f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect();
+                let params = f
+                    .params
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.clone()))
+                    .collect();
                 let intrinsic = crate::runtime::NativeIntrinsic::External(index);
                 registry.register(NativeFunction::sync_intrinsic(
                     self.info.name.clone(),
@@ -551,7 +690,10 @@ impl LoadedModule {
                 registry.register(NativeFunction::sync(
                     self.info.name.clone(),
                     f.name.clone(),
-                    f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
+                    f.params
+                        .iter()
+                        .map(|(n, t)| (n.as_str(), t.clone()))
+                        .collect(),
                     f.ret.clone(),
                     false,
                     move |_ctx, args| direct(args),
@@ -561,7 +703,10 @@ impl LoadedModule {
             registry.register(NativeFunction::sync(
                 self.info.name.clone(),
                 f.name.clone(),
-                f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
+                f.params
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.clone()))
+                    .collect(),
                 f.ret.clone(),
                 false,
                 move |ctx, args| invoke(&info, ctx as *mut RuntimeContext, None, args),
@@ -592,14 +737,22 @@ impl LoadedModule {
 /// Runs shutdown hooks of every loaded module in reverse load order. Call after every runtime
 /// context (and therefore every native resource) has been dropped.
 pub fn shutdown_all() {
-    let modules: Vec<_> = LOADED.lock().unwrap().iter().map(|(_, m)| m.clone()).collect();
+    let modules: Vec<_> = LOADED
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, m)| m.clone())
+        .collect();
     for m in modules.iter().rev() {
         m.shutdown();
     }
 }
 
 /// Loads `path` and registers its functions.
-pub fn load_into_registry(path: &Path, registry: &mut NativeRegistry) -> Result<ModuleInfo, SparError> {
+pub fn load_into_registry(
+    path: &Path,
+    registry: &mut NativeRegistry,
+) -> Result<ModuleInfo, SparError> {
     let module = load_module(path)?;
     module.register(registry)?;
     Ok(module.info().clone())
@@ -626,12 +779,20 @@ fn status_name(status: i32) -> &'static str {
 }
 
 fn fail(message: String) -> SparError {
-    SparError::EvalError { message, span: Span::dummy() }
+    SparError::EvalError {
+        message,
+        span: Span::dummy(),
+    }
 }
 
 type HostPtr = Option<*mut (dyn super::CallbackHost + 'static)>;
 
-fn invoke(info: &FnInfo, ctx: *mut RuntimeContext, host: HostPtr, args: &[Value]) -> Result<Value, SparError> {
+fn invoke(
+    info: &FnInfo,
+    ctx: *mut RuntimeContext,
+    host: HostPtr,
+    args: &[Value],
+) -> Result<Value, SparError> {
     invoke_full(info, ctx, host, &Span::dummy(), args).map_err(|fault| fault.into_error())
 }
 
@@ -700,7 +861,12 @@ fn invoke_full(
         let detail = env.error.take().map(|(_, m)| m);
         Err(fail(match detail {
             Some(m) => format!("{}::{}: {m}", info.module, info.name),
-            None => format!("native function '{}::{}' failed: {}", info.module, info.name, status_name(status)),
+            None => format!(
+                "native function '{}::{}' failed: {}",
+                info.module,
+                info.name,
+                status_name(status)
+            ),
         })
         .into())
     };
@@ -725,7 +891,8 @@ pub(crate) fn call_external(
     let ctx = rt.context_ptr();
     // SAFETY: the trait-object lifetime is erased; the pointer is dropped from the env when the
     // call ends (`end_scope`) and `rt` is not used again until this function returns.
-    let host: *mut (dyn super::CallbackHost + 'static) = unsafe { std::mem::transmute(rt as *mut dyn super::CallbackHost) };
+    let host: *mut (dyn super::CallbackHost + 'static) =
+        unsafe { std::mem::transmute(rt as *mut dyn super::CallbackHost) };
     invoke_full(&info, ctx, Some(host), span, args).map_err(|fault| match fault {
         RuntimeFault::Raised(e) => RuntimeFault::Raised(Box::new(attach_span(*e, span))),
         other => other,
@@ -735,7 +902,10 @@ pub(crate) fn call_external(
 fn attach_span(error: SparError, span: &Span) -> SparError {
     match error {
         SparError::EvalError { message, span: s } if s.start == 0 && s.end == 0 && s.line == 0 => {
-            SparError::EvalError { message, span: span.clone() }
+            SparError::EvalError {
+                message,
+                span: span.clone(),
+            }
         }
         other => other,
     }
@@ -768,18 +938,39 @@ fn check_ret(info: &FnInfo, value: Value) -> Result<Value, SparError> {
 /// Convenience used by tests: registered module functions by name.
 #[allow(dead_code)]
 pub fn loaded_modules() -> HashMap<String, ModuleInfo> {
-    LOADED.lock().unwrap().iter().map(|(_, m)| (m.info.name.clone(), m.info.clone())).collect()
+    LOADED
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, m)| (m.info.name.clone(), m.info.clone()))
+        .collect()
 }
 
 #[cfg(test)]
 pub(crate) mod bench_support {
     use super::*;
-    unsafe extern "C" fn noop(_e: *mut SparEnv, _u: *mut c_void, _a: *const SparValue, _n: u64, o: *mut SparValue) -> spar_status_t {
+    unsafe extern "C" fn noop(
+        _e: *mut SparEnv,
+        _u: *mut c_void,
+        _a: *const SparValue,
+        _n: u64,
+        o: *mut SparValue,
+    ) -> spar_status_t {
         *o = SparValue::void();
         SPAR_OK
     }
     pub(crate) fn info() -> FnInfo {
-        FnInfo { module: "m".into(), name: "f".into(), invoke: noop, userdata: std::ptr::null_mut(), ret: RetKind::Void, argc: 0, external: None, is_async: false, direct: None }
+        FnInfo {
+            module: "m".into(),
+            name: "f".into(),
+            invoke: noop,
+            userdata: std::ptr::null_mut(),
+            ret: RetKind::Void,
+            argc: 0,
+            external: None,
+            is_async: false,
+            direct: None,
+        }
     }
     pub(crate) fn call(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
         invoke(info, ctx as *mut RuntimeContext, None, &[])
@@ -795,7 +986,11 @@ pub(crate) mod bench_support {
             let status = (info.invoke)(envp, info.userdata, argv, 0, &mut out);
             (status, out, &mut *raw)
         };
-        let r = if status == SPAR_OK { env.take_value(&out).map_err(|_| fail("x".into())) } else { Err(fail("y".into())) };
+        let r = if status == SPAR_OK {
+            env.take_value(&out).map_err(|_| fail("x".into()))
+        } else {
+            Err(fail("y".into()))
+        };
         unsafe { Box::from_raw(raw) }.release();
         r
     }
@@ -810,7 +1005,11 @@ pub(crate) mod bench_support {
             (info.invoke)(envp, info.userdata, argv, 0, &mut out)
         };
         unsafe { Box::from_raw(raw) }.release();
-        if status == SPAR_OK { Ok(Value::Void) } else { Err(fail("y".into())) }
+        if status == SPAR_OK {
+            Ok(Value::Void)
+        } else {
+            Err(fail("y".into()))
+        }
     }
     pub(crate) fn v_b(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
         // as v_a but with take_value
@@ -822,9 +1021,16 @@ pub(crate) mod bench_support {
             let argv = env.argv.as_ptr();
             ((info.invoke)(envp, info.userdata, argv, 0, &mut out), out)
         };
-        let v = if status == SPAR_OK { unsafe { (*raw).take_value(&out) }.ok() } else { None };
+        let v = if status == SPAR_OK {
+            unsafe { (*raw).take_value(&out) }.ok()
+        } else {
+            None
+        };
         unsafe { Box::from_raw(raw) }.release();
-        match v { Some(v) => Ok(v), None => Err(fail("y".into())) }
+        match v {
+            Some(v) => Ok(v),
+            None => Err(fail("y".into())),
+        }
     }
     pub(crate) fn step2(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
         let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
@@ -837,11 +1043,21 @@ pub(crate) mod bench_support {
             let status = (info.invoke)(envp, info.userdata, argv, 0, &mut out);
             (status, out, &mut *raw)
         };
-        let r = if status == SPAR_OK { match env.take_value(&out) { Ok(v) => check_ret(info, v), Err(_) => Err(fail("x".into())) } } else { Err(fail("y".into())) };
+        let r = if status == SPAR_OK {
+            match env.take_value(&out) {
+                Ok(v) => check_ret(info, v),
+                Err(_) => Err(fail("x".into())),
+            }
+        } else {
+            Err(fail("y".into()))
+        };
         unsafe { Box::from_raw(raw) }.release();
         r
     }
-    pub(crate) fn call_full(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, RuntimeFault> {
+    pub(crate) fn call_full(
+        info: &FnInfo,
+        ctx: &mut RuntimeContext,
+    ) -> Result<Value, RuntimeFault> {
         invoke_full(info, ctx as *mut RuntimeContext, None, &Span::dummy(), &[])
     }
 }

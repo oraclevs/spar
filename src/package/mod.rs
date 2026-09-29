@@ -11,6 +11,8 @@ pub mod locator;
 pub mod lockfile;
 pub mod manifest;
 pub mod metadata;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
 pub mod resolver;
 pub mod source;
 pub mod store;
@@ -23,7 +25,7 @@ pub use lockfile::{
     github_package_id, local_package_id, LockedPackage, LockedSource, Lockfile, PackageId,
     LEGACY_PACKAGE_LOCK_FILE, PACKAGE_LOCK_FILE,
 };
-pub use manifest::{PackageKind, PackageManifest};
+pub use manifest::{NativeSpec, PackageKind, PackageManifest};
 pub use metadata::{metadata_kind, MetadataFileKind, PACKAGE_MANIFEST_FILE};
 pub use resolver::{DependencyResolver, ResolvedGraph, ResolvedNode};
 pub use source::{GitHubSelector, PackageSource};

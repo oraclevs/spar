@@ -38,6 +38,30 @@ impl PackageKind {
     }
 }
 
+/// Native extension declared by a package (`struct Native { ... }`).
+///
+/// ```spar
+/// struct Native {
+///     module: str = "fastArray";
+///     abi: str = "spar-native-0";
+///     capabilities: str = "typed-arrays,strings";
+///     linux_x86_64_gnu: str = "native/linux-x86_64-gnu/libfastarray.so";
+///     linux_x86_64_gnu_sha256: str = "<hex>";
+/// };
+/// ```
+/// Artifact keys are `<os>_<arch>[_<env>]` (and `..._sha256`); paths are relative to the package
+/// root and may not escape it. Nothing is ever searched for: only the path named here is loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSpec {
+    pub module: String,
+    pub abi: String,
+    pub capabilities: Vec<String>,
+    /// target key (`linux_x86_64_gnu`) -> (relative path, optional lowercase hex sha256)
+    pub artifacts: BTreeMap<String, (String, Option<String>)>,
+}
+
+pub const NATIVE_ABI_NAME: &str = "spar-native-0";
+
 #[derive(Debug, Clone)]
 pub struct PackageManifest {
     pub name: String,
@@ -50,6 +74,7 @@ pub struct PackageManifest {
     pub dependencies: BTreeMap<String, String>,
     /// alias → raw local-development override request, e.g. `"path:../http"`.
     pub overrides: BTreeMap<String, String>,
+    pub native: Option<NativeSpec>,
 }
 
 impl PackageManifest {
@@ -69,6 +94,7 @@ impl PackageManifest {
         let mut overrides = BTreeMap::new();
         let mut saw_dependencies = false;
         let mut saw_overrides = false;
+        let mut native = None;
 
         for item in &program.items {
             let TopLevelItem::Struct(structure) = item else {
@@ -94,6 +120,12 @@ impl PackageManifest {
                     }
                     saw_overrides = true;
                     overrides = literal_fields(structure, path)?;
+                }
+                "Native" => {
+                    if native.is_some() {
+                        return Err(manifest_err(path, "duplicate `struct Native` declaration"));
+                    }
+                    native = Some(native_spec(literal_fields(structure, path)?, path)?);
                 }
                 _ => return Err(unsupported(path)),
             }
@@ -208,6 +240,7 @@ impl PackageManifest {
             entry,
             dependencies,
             overrides,
+            native,
         })
     }
 
@@ -246,6 +279,22 @@ impl PackageManifest {
             out.push_str("};\n");
         }
 
+        if let Some(native) = &self.native {
+            out.push_str("\nstruct Native {\n");
+            out.push_str(&format!("    module: str = \"{}\";\n", escape(&native.module)));
+            out.push_str(&format!("    abi: str = \"{}\";\n", escape(&native.abi)));
+            if !native.capabilities.is_empty() {
+                out.push_str(&format!("    capabilities: str = \"{}\";\n", escape(&native.capabilities.join(","))));
+            }
+            for (key, (path, sha)) in &native.artifacts {
+                out.push_str(&format!("    {key}: str = \"{}\";\n", escape(path)));
+                if let Some(sha) = sha {
+                    out.push_str(&format!("    {key}_sha256: str = \"{sha}\";\n"));
+                }
+            }
+            out.push_str("};\n");
+        }
+
         out
     }
 
@@ -254,6 +303,45 @@ impl PackageManifest {
             message: format!("failed to write {}: {e}", path.display()),
         })
     }
+}
+
+fn native_spec(mut fields: BTreeMap<String, String>, path: &Path) -> Result<NativeSpec, PackageError> {
+    let module = fields
+        .remove("module")
+        .ok_or_else(|| manifest_err(path, "`struct Native` is missing required field 'module'"))?;
+    let abi = fields
+        .remove("abi")
+        .ok_or_else(|| manifest_err(path, "`struct Native` is missing required field 'abi'"))?;
+    if abi != NATIVE_ABI_NAME {
+        return Err(manifest_err(path, &format!("`struct Native` abi '{abi}' is not supported (expected '{NATIVE_ABI_NAME}')")));
+    }
+    let capabilities = fields
+        .remove("capabilities")
+        .map(|c| c.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    let mut artifacts: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+    let keys: Vec<String> = fields.keys().cloned().collect();
+    for key in keys {
+        if key.ends_with("_sha256") {
+            continue;
+        }
+        let target_ok = key.split('_').count() >= 2 && key.split('_').all(|p| !p.is_empty());
+        if !target_ok {
+            return Err(manifest_err(path, &format!("`struct Native` field '{key}' is not a target key like 'linux_x86_64_gnu'")));
+        }
+        let artifact = fields.remove(&key).unwrap();
+        let sha = fields.remove(&format!("{key}_sha256"));
+        if let Some(sha) = &sha {
+            if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(manifest_err(path, &format!("`struct Native` field '{key}_sha256' must be 64 hex characters")));
+            }
+        }
+        artifacts.insert(key, (artifact, sha.map(|s| s.to_ascii_lowercase())));
+    }
+    if let Some(stray) = fields.keys().next() {
+        return Err(manifest_err(path, &format!("`struct Native` field '{stray}' has no matching artifact path")));
+    }
+    Ok(NativeSpec { module, abi, capabilities, artifacts })
 }
 
 fn escape(text: &str) -> String {

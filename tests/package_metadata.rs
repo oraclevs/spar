@@ -12,6 +12,7 @@ fn manifest() -> PackageManifest {
         entry: PathBuf::from("src/main.spar"),
         dependencies: BTreeMap::new(),
         overrides: BTreeMap::new(),
+        native: None,
     }
 }
 

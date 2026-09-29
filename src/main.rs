@@ -765,12 +765,21 @@ fn compile_options_for_path(path: &Path) -> Result<CompileOptions, String> {
         return Ok(options);
     };
     let lock_path = project_dir.join(spar::package::PACKAGE_LOCK_FILE);
+    let mut locked = None;
     if lock_path.is_file() {
         let lockfile =
             spar::package::Lockfile::read(&lock_path).map_err(|error| error.to_string())?;
         let store = spar::package::PackageStore::new(spar::package::StorePaths::from_env());
-        options.locator = Some(spar::package::ModuleLocator::for_root(lockfile, store));
+        options.locator = Some(spar::package::ModuleLocator::for_root(lockfile.clone(), store.clone()));
+        locked = Some((lockfile, store));
     }
+    // Native extension packages (root project and locked dependencies).
+    spar::package::native::load_project_natives(
+        project_dir,
+        locked.as_ref().map(|(lock, store)| (lock, store)),
+        &mut options.natives,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(options)
 }
 

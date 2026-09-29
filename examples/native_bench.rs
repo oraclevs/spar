@@ -259,5 +259,127 @@ fn main() {
             println!("  Spar->native list (copy) {}  {}", ns(t_list), gbps(bytes, t_list));
         }
     }
+    if want("extra") || filter.is_empty() {
+        extra(&kit);
+    }
     let _ = Duration::ZERO;
+}
+
+/// bytes / typed mutation / allocation / callbacks / async / threads
+fn extra(kit: &PathBuf) {
+    let lib = unsafe { libloading::Library::new(kit).unwrap() };
+    let sys = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../spar-native-sys/examples/native");
+    let fm = sys.join("c-fastmath");
+    assert!(std::process::Command::new(fm.join("build.sh")).status().unwrap().success());
+    let ra = sys.join("rust-fastarray");
+    assert!(std::process::Command::new("cargo")
+        .args(["build", "--release", "--manifest-path"])
+        .arg(ra.join("Cargo.toml"))
+        .status()
+        .unwrap()
+        .success());
+    let mut natives = CompileOptions::default().natives;
+    spar::native_module::load_into_registry(kit, &mut natives).unwrap();
+    spar::native_module::load_into_registry(&fm.join("libfastmath.so"), &mut natives).unwrap();
+    spar::native_module::load_into_registry(&ra.join("target/release/librust_fastarray.so"), &mut natives).unwrap();
+    let eng = Engine::new(CompileOptions { natives, ..CompileOptions::default() });
+    println!("\nbulk bytes / mutation / allocation:");
+    let len = 64_000_000usize;
+    let reps = 10;
+    let data = vec![1u8; len];
+    let rust_bytes = time_fn(5, || {
+        for _ in 0..reps {
+            black_box(black_box(&data).iter().map(|b| *b as u64).sum::<u64>());
+        }
+    }) / reps as f64;
+    let raw_u8: libloading::Symbol<unsafe extern "C" fn(*const u8, usize) -> u64> = unsafe { lib.get(b"bench_raw_sum_u8").unwrap() };
+    let c_bytes = time_fn(5, || {
+        for _ in 0..reps {
+            black_box(unsafe { raw_u8(black_box(data.as_ptr()), data.len()) });
+        }
+    }) / reps as f64;
+    let prog = |body: &str| format!("fn main() -> int {{ var d: Bytes = benchkit::allocBytes(n: {len}); var mut acc: int = 0; for i in range(end: {reps}) {{ {body} }} if acc < 0 {{ return 1; }} return 0; }};");
+    let base = time_fn(3, || {
+        run_program(&eng, &prog("acc = acc + 1;"));
+    });
+    let t = (time_fn(3, || {
+        run_program(&eng, &prog("acc = acc + benchkit::sumBytes(data: d);"));
+    }) - base)
+        / reps as f64;
+    println!("  9  sumBytes {len} B zero-copy   {}  {}", ns(t), gbps(len as f64, t));
+    println!("     raw C-ABI (same C kernel)   {}  {}", ns(c_bytes), gbps(len as f64, c_bytes));
+    println!("     direct Rust (auto-vectorized, different kernel) {}  {}", ns(rust_bytes), gbps(len as f64, rust_bytes));
+    let n = 4_000_000usize;
+    let mut v: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let k = black_box(1.0000001f64);
+    let rust_scale = time_fn(5, || {
+        for _ in 0..20 {
+            for x in v.iter_mut() {
+                *x *= k;
+            }
+            black_box(&mut v);
+        }
+    }) / 20.0;
+    let prog = |body: &str| format!("fn main() -> int {{ var b: Buffer = benchkit::makeBuf(n: {n}); var mut acc: int = 0; for i in range(end: 20) {{ {body} }} if acc < 0 {{ return 1; }} return 0; }};");
+    let base = time_fn(3, || {
+        run_program(&eng, &prog("acc = acc + 1;"));
+    });
+    let t = (time_fn(3, || {
+        run_program(&eng, &prog("benchkit::scaleBuf(buf: b, k: 1.0000001);"));
+    }) - base)
+        / 20.0;
+    println!("  11 scaleBuf {n} f64 in place    {}  {}   direct Rust {}  {}", ns(t), gbps(8.0 * n as f64, t), ns(rust_scale), gbps(8.0 * n as f64, rust_scale));
+    let base = time_fn(3, || {
+        run_program(&eng, "fn main() -> int { var mut acc: int = 0; for i in range(end: 200) { acc = acc + 1; } return 0; };");
+    });
+    let t = (time_fn(3, || {
+        run_program(&eng, "fn main() -> int { var mut acc: int = 0; for i in range(end: 200) { var d: Bytes = benchkit::allocBytes(n: 1000000); acc = acc + 1; } return 0; };");
+    }) - base)
+        / 200.0;
+    println!("  14 native alloc + return 1 MB Bytes (copy)  {}", ns(t));
+
+    println!("\ncallbacks (native loop + Spar callback per element, 100k elements):");
+    let prog = |body: &str| format!("fn main() -> int {{ var xs: [int] = fastMath::iota(n: 100000); {body} return 0; }};");
+    let base = time_fn(5, || {
+        run_program(&eng, &prog(""));
+    });
+    let t_cb = time_fn(5, || {
+        run_program(&eng, &prog("var ys: [int] = fastMath::mapInts(values: xs, f: |value: int| value + 1);"));
+    }) - base;
+    let t_loop = time_fn(5, || {
+        run_program(&eng, &prog("var mut total: int = 0; for x in xs { total = total + (x + 1); }"));
+    }) - base;
+    let t_batch = time_fn(5, || {
+        run_program(&eng, &prog("var f: float = fastMath::sumF64(values: [1.5, 2.5]);"));
+    }) - base;
+    println!("  17/18 native loop + Spar closure per element {}/element", ns(t_cb / 100_000.0));
+    println!("        pure Spar for-loop doing the same      {}/element", ns(t_loop / 100_000.0));
+    println!("        (a batch native op is one call: {})", ns(t_batch.max(0.0)));
+
+    println!("\nasync round trip (delayedAdd, 0 ms, awaited one at a time):");
+    let base = time_fn(3, || {
+        run_program(&eng, "async function main() -> int { var mut acc: int = 0; for i in range(end: 2000) { acc = acc + 1; } return 0; };");
+    });
+    let t = (time_fn(3, || {
+        run_program(&eng, "async function main() -> int { var mut acc: int = 0; for i in range(end: 2000) { var v: int = await fastMath::delayedAdd(a: 1, b: 1, millis: 0); acc = acc + v; } return 0; };");
+    }) - base)
+        / 2000.0;
+    println!("  20 begin + worker thread + complete + await  {}", ns(t));
+
+    println!("\nmulti-threaded native kernel (parSum, 10M f64, Rust module):");
+    let prog = |threads: usize| format!("fn main() -> int {{ var b: Buffer = fastArray::linspace(n: 10000000); var mut acc: float = 0.0; for i in range(end: 10) {{ acc = acc + fastArray::parSum(values: b, threads: {threads}); }} if acc < 0.0 {{ return 1; }} return 0; }};");
+    let base = time_fn(3, || {
+        run_program(&eng, &prog(1).replace("fastArray::parSum(values: b, threads: 1)", "0.0"));
+    });
+    let mut t1 = 0.0;
+    for threads in [1usize, 2, 4, 8] {
+        let t = (time_fn(3, || {
+            run_program(&eng, &prog(threads));
+        }) - base)
+            / 10.0;
+        if threads == 1 {
+            t1 = t;
+        }
+        println!("  {threads} threads  {}  {}  speedup {:.2}x", ns(t), gbps(80e6, t), t1 / t);
+    }
 }

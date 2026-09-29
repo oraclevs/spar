@@ -21,6 +21,7 @@ fn c_fastmath() -> &'static Path {
         let sys = sys_dir();
         let out = Command::new("cc")
             .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-fvisibility=hidden", "-shared"])
+            .args(std::env::var("SPAR_TEST_CFLAGS").unwrap_or_default().split_whitespace())
             .arg(format!("-I{}", sys.join("include").display()))
             .arg(sys.join("examples/native/c-fastmath/fastmath.c"))
             .args(["-lm", "-lpthread", "-o"])

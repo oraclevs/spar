@@ -4926,6 +4926,7 @@ impl<'a> TypeChecker<'a> {
                     self.reject_discarded_shell_plans(&if_stmt.else_stmts);
                 }
                 FuncStmt::For(for_stmt) => self.reject_discarded_shell_plans(&for_stmt.body),
+                FuncStmt::While(while_stmt) => self.reject_discarded_shell_plans(&while_stmt.body),
                 FuncStmt::Try(try_stmt) => {
                     self.reject_discarded_shell_plans(&try_stmt.body);
                     self.reject_discarded_shell_plans(&try_stmt.handler);
@@ -5390,6 +5391,32 @@ impl<'a> TypeChecker<'a> {
                             }
                         }
                     }
+                    let body = statement.body.clone();
+                    self.check_func_stmts(&body, ret_ty, &mut loop_types, is_async);
+                }
+                FuncStmt::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        if let Err(e) =
+                            self.check_expr_with_locals_in_context(condition, local_types, is_async)
+                        {
+                            self.errors.push(e);
+                        }
+                        let cond_ty = self.infer_type_with_locals(condition, local_types);
+                        if cond_ty != Some(SparType::Bool) {
+                            self.errors.push(SparError::TypeError {
+                                message: format!(
+                                    "while condition must be 'bool', found '{}'",
+                                    cond_ty
+                                        .as_ref()
+                                        .map(display_type)
+                                        .unwrap_or_else(|| "unknown".into()),
+                                ),
+                                hint: None,
+                                span: statement.span.clone(),
+                            });
+                        }
+                    }
+                    let mut loop_types = local_types.clone();
                     let body = statement.body.clone();
                     self.check_func_stmts(&body, ret_ty, &mut loop_types, is_async);
                 }

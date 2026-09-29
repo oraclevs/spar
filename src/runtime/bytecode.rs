@@ -341,6 +341,11 @@ impl<'a> Lowerer<'a> {
                 body,
                 span,
             } => self.for_loop(*index_slot, *value_slot, iterable, body, span),
+            CompiledStatement::While {
+                condition,
+                body,
+                span,
+            } => self.while_loop(condition.as_ref(), body, span),
             CompiledStatement::Return(Some(value), span) => {
                 let start = self.code.len();
                 let (src, is_tmp) = self.operand(value);
@@ -432,6 +437,34 @@ impl<'a> Lowerer<'a> {
             self.patch(at, exit);
         }
         self.base_temp -= 3;
+    }
+
+    fn while_loop(
+        &mut self,
+        condition: Option<&CompiledExpression>,
+        body: &[CompiledStatement],
+        span: &Span,
+    ) {
+        let top = self.here();
+        let exit_jump = condition.map(|condition| {
+            let (cond, _) = self.operand(condition);
+            let at = self.at();
+            self.emit(BOp::JmpIfFalse { cond, target: 0, at }, Some(span))
+        });
+        self.loops.push(LoopPatches { breaks: Vec::new(), continues: Vec::new() });
+        self.statements(body);
+        let patches = self.loops.pop().expect("loop stack");
+        for at in patches.continues {
+            self.patch_cont(at, top);
+        }
+        self.emit(BOp::Jmp { target: top }, None);
+        let exit = self.here();
+        if let Some(exit_jump) = exit_jump {
+            self.patch(exit_jump, exit);
+        }
+        for at in patches.breaks {
+            self.patch(at, exit);
+        }
     }
 
     fn patch_cont(&mut self, at: usize, target: u32) {

@@ -443,3 +443,103 @@ fn explicit_wrapping_saturating_and_checked_methods_behave() {
     );
     assert_eq!(v, Ok(0));
 }
+
+// ── while / loop ────────────────────────────────────────────────────────────
+
+const WHILE_PROGRAM: &str = r#"
+    fn countdown(n: int) -> int {
+        var mut i: int = n;
+        var mut steps: int = 0;
+        while i > 0 {
+            i = i - 1;
+            if i == 3 { continue; }
+            steps = steps + 1;
+        }
+        return steps;
+    };
+    fn firstSquareOver(limit: int) -> int {
+        var mut n: int = 0;
+        loop {
+            n = n + 1;
+            if n * n > limit { return n; }
+        }
+    };
+    fn collatz(start: int) -> int {
+        var mut n: int = start;
+        var mut steps: int = 0;
+        while n != 1 {
+            if n - (n / 2) * 2 == 0 { n = n / 2; } else { n = 3 * n + 1; }
+            steps = steps + 1;
+        }
+        return steps;
+    };
+    fn nested(n: int) -> int {
+        var mut total: int = 0;
+        var mut a: int = 0;
+        while a < n {
+            var mut b: int = 0;
+            loop {
+                if b >= a { break; }
+                total = total + b;
+                b = b + 1;
+            }
+            a = a + 1;
+        }
+        return total;
+    };
+    fn neverRuns() -> int {
+        var mut x: int = 7;
+        while false { x = 0; }
+        return x;
+    };
+    fn main() -> int {
+        return countdown(n: 10) * 1000000 + firstSquareOver(limit: 50) * 10000
+            + collatz(start: 27) + nested(n: 6) * 100000000 / 100000000 + neverRuns();
+    };
+"#;
+
+#[test]
+fn while_and_loop_match_across_tiers_and_compute_the_right_value() {
+    // countdown: 10 iterations, one `continue` -> 9; firstSquareOver(50) = 8; collatz(27) = 111;
+    // nested(6) = 0+0+1+3+6+10 = 20; neverRuns = 7
+    let expected = 9 * 1_000_000 + 8 * 10_000 + 111 + 20 + 7;
+    assert_eq!(differential_engine(WHILE_PROGRAM), Ok(expected));
+    assert_eq!(tier2_differential(WHILE_PROGRAM), Ok(expected));
+}
+
+#[test]
+fn while_with_non_primitive_state_matches_on_the_bytecode_tier() {
+    let v = tier2_differential(
+        r#"
+        fn main() -> int {
+            var mut text: str = "";
+            var mut i: int = 0;
+            while i < 5 {
+                text = text + i.toString();
+                i = i + 1;
+            }
+            var mut items: [int] = [];
+            loop {
+                if items.length() == 4 { break; }
+                items.append(value: items.length());
+            }
+            return text.length() * 10 + items.length();
+        };
+        "#,
+    );
+    assert_eq!(v, Ok(54));
+}
+
+#[test]
+fn while_bodies_run_the_tree_walker_when_forced_off_every_tier() {
+    // Same source through the plain tree walker (both fast tiers disabled).
+    let engine = Engine::default();
+    let mut program = engine.compile_source(WHILE_PROGRAM).expect("compiles");
+    {
+        let p = Arc::get_mut(&mut program).expect("unique");
+        p.vm = VmProgram::empty();
+        p.bc = crate::runtime::bytecode::BcProgram::empty();
+    }
+    let outcome = engine.execute_compiled(&program).expect("runs");
+    assert_eq!(outcome.exit_status, 9 * 1_000_000 + 8 * 10_000 + 111 + 20 + 7);
+}

@@ -33,6 +33,7 @@ fn statement_span(statement: &Statement) -> Span {
         Statement::Break(span) | Statement::Continue(span) => span.clone(),
         Statement::If(statement) => statement.span.clone(),
         Statement::For(statement) => statement.span.clone(),
+        Statement::While(statement) => statement.span.clone(),
         Statement::Try(statement) => statement.span.clone(),
     }
 }
@@ -407,7 +408,12 @@ impl Parser {
                 self.parse_schema_item()
             }
             Token::Ident(s) if s == "task" => Ok(TopLevelItem::Task(Box::new(self.parse_task_decl()?))),
-            Token::KwIf | Token::KwFor | Token::KwBreak | Token::KwContinue => {
+            Token::KwIf
+            | Token::KwFor
+            | Token::KwWhile
+            | Token::KwLoop
+            | Token::KwBreak
+            | Token::KwContinue => {
                 Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
             }
             Token::Ident(_)
@@ -2363,6 +2369,9 @@ impl Parser {
         if self.at(&Token::KwFor) {
             return self.parse_for_stmt();
         }
+        if self.at(&Token::KwWhile) || self.at(&Token::KwLoop) {
+            return self.parse_while_stmt();
+        }
         if self.at(&Token::KwReturn) {
             let start_span = self.peek_span();
             self.advance(); // consume 'return'
@@ -2505,6 +2514,29 @@ impl Parser {
             catch_name,
             catch_span,
             handler,
+            span,
+            end_line: self.prev_line(),
+        }))
+    }
+
+    fn parse_while_stmt(&mut self) -> Result<FuncStmt, SparError> {
+        let span = self.peek_span();
+        let condition = if self.at(&Token::KwLoop) {
+            self.advance();
+            None
+        } else {
+            self.expect(&Token::KwWhile)?;
+            Some(self.parse_expr()?)
+        };
+        self.expect(&Token::LBrace)?;
+        let mut body = Vec::new();
+        while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
+            body.push(self.parse_func_stmt()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(FuncStmt::While(WhileStmt {
+            condition,
+            body,
             span,
             end_line: self.prev_line(),
         }))

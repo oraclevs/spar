@@ -790,7 +790,7 @@ fn last_top_level_semicolon(source: &str) -> Option<usize> {
 }
 
 fn is_spar_control_header(line: &str) -> bool {
-    ["if", "for", "try", "catch", "else"]
+    ["if", "for", "while", "loop", "try", "catch", "else"]
         .iter()
         .any(|keyword| starts_with_keyword(line, keyword))
 }
@@ -2980,6 +2980,8 @@ mod tests {
             ("if", Token::KwIf),
             ("else", Token::KwElse),
             ("for", Token::KwFor),
+            ("while", Token::KwWhile),
+            ("loop", Token::KwLoop),
             ("in", Token::KwIn),
             ("break", Token::KwBreak),
             ("continue", Token::KwContinue),

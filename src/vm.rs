@@ -663,6 +663,33 @@ impl<'a> Lowerer<'a> {
                 body,
                 ..
             } => self.range_loop(*index_slot, *value_slot, iterable, body),
+            CompiledStatement::While {
+                condition, body, ..
+            } => {
+                let top = self.code.len() as u32;
+                let exit_jump = match condition {
+                    Some(condition) => Some(self.branch_if_false(condition)?),
+                    None => None,
+                };
+                self.loops.push(LoopPatches {
+                    breaks: Vec::new(),
+                    continues: Vec::new(),
+                });
+                self.statements(body)?;
+                let patches = self.loops.pop()?;
+                for at in patches.continues {
+                    self.patch(at, top);
+                }
+                self.emit(Op::Jmp { target: top }, None);
+                let exit = self.code.len() as u32;
+                if let Some(exit_jump) = exit_jump {
+                    self.patch(exit_jump, exit);
+                }
+                for at in patches.breaks {
+                    self.patch(at, exit);
+                }
+                Some(())
+            }
             CompiledStatement::Break(_) => {
                 let at = self.emit(Op::Jmp { target: 0 }, None);
                 self.loops.last_mut()?.breaks.push(at);
@@ -1069,6 +1096,7 @@ fn stmt_kind(s: &CompiledStatement) -> &'static str {
         CompiledStatement::Expression(..) => "expression",
         CompiledStatement::If { .. } => "if",
         CompiledStatement::For { .. } => "for over non-range iterable",
+        CompiledStatement::While { .. } => "while",
         CompiledStatement::Return(..) => "return",
         CompiledStatement::Break(_) => "break",
         CompiledStatement::Continue(_) => "continue",

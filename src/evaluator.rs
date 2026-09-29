@@ -1697,6 +1697,27 @@ impl Evaluator {
                         }
                     }
                 }
+                Statement::While(while_statement) => loop {
+                    if let Some(condition) = &while_statement.condition {
+                        match self.eval_expr(condition, local_scope)? {
+                            ConfigValue::Bool(true) => {}
+                            ConfigValue::Bool(false) => break,
+                            _ => unreachable!("typechecker ensures bool loop condition"),
+                        }
+                    }
+                    let snapshot = local_scope.clone();
+                    let (iteration_plan, flow) = self
+                        .eval_deferred_shell_statements(&while_statement.body, local_scope)?;
+                    restore_block_scope(local_scope, &snapshot, &while_statement.body, None);
+                    steps.extend(iteration_plan.steps);
+                    match flow {
+                        StatementFlow::Normal | StatementFlow::Continue => {}
+                        StatementFlow::Break => break,
+                        flow @ StatementFlow::Return(_) => {
+                            return Ok((spar_command::ShellPlan { steps }, flow));
+                        }
+                    }
+                },
                 Statement::Try(try_statement) => {
                     let snapshot = local_scope.clone();
                     match self.eval_deferred_shell_statements(&try_statement.body, local_scope) {
@@ -3481,6 +3502,24 @@ impl Evaluator {
                         }
                     }
                 }
+                FuncStmt::While(statement) => loop {
+                    if let Some(condition) = &statement.condition {
+                        match self.eval_expr(condition, local_scope)? {
+                            ConfigValue::Bool(true) => {}
+                            ConfigValue::Bool(false) => break,
+                            _ => unreachable!("typechecker ensures bool loop condition"),
+                        }
+                    }
+                    let snapshot = local_scope.clone();
+                    let body = statement.body.clone();
+                    let flow = self.eval_func_stmts(&body, local_scope)?;
+                    restore_block_scope(local_scope, &snapshot, &body, None);
+                    match flow {
+                        StatementFlow::Normal | StatementFlow::Continue => {}
+                        StatementFlow::Break => break,
+                        flow @ StatementFlow::Return(_) => return Ok(flow),
+                    }
+                },
                 FuncStmt::If(if_stmt) => {
                     let cond = self.eval_expr(&if_stmt.condition.clone(), local_scope)?;
                     let branch = match cond {

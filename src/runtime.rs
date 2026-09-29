@@ -1430,6 +1430,31 @@ impl Runtime<'_> {
                     }
                     loop_flow
                 }
+                CompiledStatement::While {
+                    condition,
+                    body,
+                    span,
+                } => {
+                    let mut loop_flow = RuntimeFlow::Normal;
+                    loop {
+                        if let Some(condition) = condition {
+                            match self.eval_expression(condition, frame, module)? {
+                                Value::Bool(true) => {}
+                                Value::Bool(false) => break,
+                                value => return Err(type_error("bool", &value, span).into()),
+                            }
+                        }
+                        match self.execute_statements(body, frame, module)? {
+                            RuntimeFlow::Normal | RuntimeFlow::Continue => {}
+                            RuntimeFlow::Break => break,
+                            flow @ RuntimeFlow::Return(_) => {
+                                loop_flow = flow;
+                                break;
+                            }
+                        }
+                    }
+                    loop_flow
+                }
                 CompiledStatement::Return(value, _) => RuntimeFlow::Return(match value {
                     Some(value) => self.eval_expression(value, frame, module)?,
                     None => Value::Void,

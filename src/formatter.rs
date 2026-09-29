@@ -284,6 +284,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
             | Statement::Continue(span) => span.line,
             Statement::If(statement) => statement.span.line,
             Statement::For(statement) => statement.span.line,
+            Statement::While(statement) => statement.span.line,
             Statement::Try(statement) => statement.span.line,
         },
     }
@@ -1910,6 +1911,7 @@ fn func_stmt_line(stmt: &FuncStmt) -> u32 {
         FuncStmt::Try(ts) => ts.span.line,
         FuncStmt::If(is) => is.span.line,
         FuncStmt::For(fs) => fs.span.line,
+        FuncStmt::While(ws) => ws.span.line,
     }
 }
 
@@ -1930,6 +1932,7 @@ fn format_func_stmt(
         FuncStmt::Try(ts) => ts.end_line,
         FuncStmt::If(is) => is.end_line,
         FuncStmt::For(fs) => fs.end_line,
+        FuncStmt::While(ws) => ws.end_line,
         _ => line,
     };
     cx.append_trailing(trailing_line, out);
@@ -2107,6 +2110,22 @@ fn format_func_stmt_body(
             out.push_str(" in ");
             format_expr(&statement.iterable, 0, depth, config, out);
             out.push_str(" {\n");
+            format_func_stmts(&statement.body, depth + 1, config, cx, out, shell_context);
+            cx.emit_before_line(statement.end_line, depth + 1, config, out);
+            out.push_str(&ind);
+            out.push_str("}\n");
+        }
+
+        FuncStmt::While(statement) => {
+            out.push_str(&ind);
+            match &statement.condition {
+                Some(condition) => {
+                    out.push_str("while ");
+                    format_expr(condition, 0, depth, config, out);
+                    out.push_str(" {\n");
+                }
+                None => out.push_str("loop {\n"),
+            }
             format_func_stmts(&statement.body, depth + 1, config, cx, out, shell_context);
             cx.emit_before_line(statement.end_line, depth + 1, config, out);
             out.push_str(&ind);

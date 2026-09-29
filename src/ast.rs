@@ -839,6 +839,8 @@ pub enum Statement {
     If(IfStmt),
     Return(ReturnValue, Span),
     For(ForStmt),
+    /// `while cond { .. }`, or `loop { .. }` when `condition` is `None`.
+    While(WhileStmt),
     Break(Span),
     Continue(Span),
     Try(TryStmt),
@@ -862,6 +864,16 @@ pub struct TryStmt {
 pub struct ForStmt {
     pub binding: ForBinding,
     pub iterable: Expr,
+    pub body: Vec<Statement>,
+    pub span: Span,
+    /// Source line of the closing `}`.
+    pub end_line: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhileStmt {
+    /// `None` for `loop { .. }` (runs until `break`/`return`).
+    pub condition: Option<Expr>,
     pub body: Vec<Statement>,
     pub span: Span,
     /// Source line of the closing `}`.

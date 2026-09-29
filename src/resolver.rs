@@ -104,6 +104,13 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             }
             // A for-loop never guarantees execution (iterable may be empty).
             FuncStmt::For(_) => {}
+            // `loop` with no `break` of its own never falls through; a `while`
+            // may run zero times.
+            FuncStmt::While(statement) => {
+                if statement.condition.is_none() && !contains_own_break(&statement.body) {
+                    return None;
+                }
+            }
             FuncStmt::Try(statement) => {
                 let body_exit = sequence_exit_scope(&statement.body);
                 let handler_exit = sequence_exit_scope(&statement.handler);
@@ -114,6 +121,21 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
         }
     }
     Some(scope)
+}
+
+/// Whether `body` has a `break` that targets the loop that owns it (a `break` inside a
+/// nested loop targets that loop instead).
+pub(crate) fn contains_own_break(body: &[FuncStmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        FuncStmt::Break(_) => true,
+        FuncStmt::If(if_stmt) => {
+            contains_own_break(&if_stmt.then_stmts) || contains_own_break(&if_stmt.else_stmts)
+        }
+        FuncStmt::Try(try_stmt) => {
+            contains_own_break(&try_stmt.body) || contains_own_break(&try_stmt.handler)
+        }
+        _ => false,
+    })
 }
 
 pub(crate) fn stmts_always_return(stmts: &[FuncStmt]) -> bool {
@@ -128,6 +150,7 @@ fn func_stmt_span(stmt: &FuncStmt) -> Span {
         FuncStmt::If(i) => i.span.clone(),
         FuncStmt::Return(_, s) => s.clone(),
         FuncStmt::For(statement) => statement.span.clone(),
+        FuncStmt::While(statement) => statement.span.clone(),
         FuncStmt::Break(span) | FuncStmt::Continue(span) => span.clone(),
         FuncStmt::Try(statement) => statement.span.clone(),
     }
@@ -1712,6 +1735,13 @@ impl Resolver {
                     self.check_unreachable(&body);
                     // A for-loop never sets terminated — iterable may be empty.
                 }
+                FuncStmt::While(statement) => {
+                    let body = statement.body.clone();
+                    self.check_unreachable(&body);
+                    if statement.condition.is_none() && !contains_own_break(&body) {
+                        terminated = true;
+                    }
+                }
                 FuncStmt::Try(statement) => {
                     self.check_unreachable(&statement.body);
                     self.check_unreachable(&statement.handler);
@@ -2995,6 +3025,24 @@ impl Resolver {
                         allow_exec_shell,
                     );
                 }
+                FuncStmt::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        self.reject_module_exec_shell(condition, allow_exec_shell);
+                        if let Err(e) = self.resolve_expr_with_locals(condition, local_names) {
+                            self.errors.push(e);
+                        }
+                    }
+                    let mut loop_scope = local_names.clone();
+                    let mut loop_mutable = mutable_names.clone();
+                    let body = statement.body.clone();
+                    self.resolve_func_stmts(
+                        &body,
+                        &mut loop_scope,
+                        &mut loop_mutable,
+                        loop_depth + 1,
+                        allow_exec_shell,
+                    );
+                }
                 FuncStmt::Try(statement) => {
                     let mut body_scope = local_names.clone();
                     let mut body_mutable = mutable_names.clone();
@@ -3097,6 +3145,12 @@ impl Resolver {
                         }
                     }
                     self.resolve_closure_stmts_with_locals(&statement.body, &loop_locals)?;
+                }
+                FuncStmt::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        self.resolve_expr_with_locals(condition, &locals)?;
+                    }
+                    self.resolve_closure_stmts_with_locals(&statement.body, &locals)?;
                 }
                 FuncStmt::Try(statement) => {
                     self.resolve_closure_stmts_with_locals(&statement.body, &locals)?;
@@ -3642,6 +3696,19 @@ impl Resolver {
                         &mut body_locals,
                     )?;
                 }
+                Statement::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        self.resolve_expr_with_locals(condition, visible)?;
+                    }
+                    let mut body_visible = visible.clone();
+                    let mut body_locals = shell_locals.clone();
+                    self.resolve_shell_statements(
+                        &statement.body,
+                        captured,
+                        &mut body_visible,
+                        &mut body_locals,
+                    )?;
+                }
                 Statement::Return(value, _) => match value {
                     ReturnValue::Void => {}
                     ReturnValue::Expr(expression) => {
@@ -3992,6 +4059,12 @@ impl Resolver {
                     self.collect_closure_deps_expr(&if_stmt.condition, &locals, deps);
                     self.collect_closure_deps_stmts(&if_stmt.then_stmts, &locals, deps);
                     self.collect_closure_deps_stmts(&if_stmt.else_stmts, &locals, deps);
+                }
+                FuncStmt::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        self.collect_closure_deps_expr(condition, &locals, deps);
+                    }
+                    self.collect_closure_deps_stmts(&statement.body, &locals, deps);
                 }
                 FuncStmt::Try(_) => {}
             }

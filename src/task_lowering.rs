@@ -480,6 +480,13 @@ fn stmts_mention_any(stmts: &[crate::ast::FuncStmt], param_names: &HashSet<Strin
             expr_mentions_any(&statement.iterable, param_names)
                 || stmts_mention_any(&statement.body, param_names)
         }
+        crate::ast::Statement::While(statement) => {
+            statement
+                .condition
+                .as_ref()
+                .is_some_and(|condition| expr_mentions_any(condition, param_names))
+                || stmts_mention_any(&statement.body, param_names)
+        }
         crate::ast::Statement::Try(statement) => {
             stmts_mention_any(&statement.body, param_names)
                 || stmts_mention_any(&statement.handler, param_names)

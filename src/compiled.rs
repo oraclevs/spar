@@ -350,6 +350,12 @@ pub(crate) enum CompiledStatement {
         body: Vec<CompiledStatement>,
         span: Span,
     },
+    /// `while cond { .. }`; `condition` is `None` for `loop { .. }`.
+    While {
+        condition: Option<CompiledExpression>,
+        body: Vec<CompiledStatement>,
+        span: Span,
+    },
     Return(Option<CompiledExpression>, Span),
     Break(Span),
     Continue(Span),
@@ -633,6 +639,14 @@ fn visit_statements(statements: &[CompiledStatement], visit: &mut impl FnMut(&Co
             }
             CompiledStatement::For { iterable, body, .. } => {
                 visit_expression(iterable, visit);
+                visit_statements(body, visit);
+            }
+            CompiledStatement::While {
+                condition, body, ..
+            } => {
+                if let Some(condition) = condition {
+                    visit_expression(condition, visit);
+                }
                 visit_statements(body, visit);
             }
             CompiledStatement::Return(value, _) => {

@@ -212,6 +212,12 @@ fn statements(
                 }
                 statements(&mut looped.body, &nested, names, out);
             }
+            Statement::While(looped) => {
+                if let Some(condition) = &mut looped.condition {
+                    expr(condition, &locals, names, out);
+                }
+                statements(&mut looped.body, &locals, names, out);
+            }
             Statement::Try(attempt) => {
                 statements(&mut attempt.body, &locals, names, out);
                 let mut nested = locals.clone();

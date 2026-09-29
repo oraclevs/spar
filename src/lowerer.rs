@@ -278,6 +278,12 @@ impl<'a> LocalAllocator<'a> {
                         this.visit_statements(&statement.body);
                     });
                 }
+                Statement::While(statement) => {
+                    if let Some(condition) = &statement.condition {
+                        self.visit_expression(condition);
+                    }
+                    self.with_scope(|this| this.visit_statements(&statement.body));
+                }
                 Statement::Break(_) | Statement::Continue(_) => {}
                 Statement::Try(_) => {}
             }
@@ -544,6 +550,20 @@ impl FunctionLowerer<'_> {
                     index_slot,
                     value_slot,
                     iterable,
+                    body: body?,
+                    span: statement.span.clone(),
+                }
+            }
+            Statement::While(statement) => {
+                let condition = match &statement.condition {
+                    Some(condition) => Some(self.lower_expression(condition)?),
+                    None => None,
+                };
+                self.locals.scopes.push(HashMap::new());
+                let body = self.lower_statements(&statement.body);
+                self.locals.scopes.pop();
+                CompiledStatement::While {
+                    condition,
                     body: body?,
                     span: statement.span.clone(),
                 }

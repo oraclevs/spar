@@ -975,6 +975,12 @@ fn collect_calls_in_statements(statements: &[crate::ast::Statement], out: &mut H
                 collect_calls_in_expr(&looped.iterable, out);
                 collect_calls_in_statements(&looped.body, out);
             }
+            Statement::While(looped) => {
+                if let Some(condition) = &looped.condition {
+                    collect_calls_in_expr(condition, out);
+                }
+                collect_calls_in_statements(&looped.body, out);
+            }
             Statement::Try(attempt) => {
                 collect_calls_in_statements(&attempt.body, out);
                 collect_calls_in_statements(&attempt.handler, out);

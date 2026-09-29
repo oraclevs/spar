@@ -422,3 +422,92 @@ fn async_state_machine_and_shutdown_cancellation() {
     }
     assert!(sched.is_cancelled(h2));
 }
+
+/// `cargo test --release --lib native_module::tests::bench_env -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_env() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    let mut context = ctx();
+    let n = 10_000_000u64;
+    let t = Instant::now();
+    for _ in 0..n {
+        let env = CallEnv::acquire(&mut context as *mut _);
+        black_box(&env);
+        env.release();
+    }
+    println!("acquire+release: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    let api = api_table();
+    let raw = Box::into_raw(CallEnv::acquire(&mut context as *mut _));
+    let envp = unsafe { (*raw).as_ptr() };
+    let t = Instant::now();
+    let mut out = 0i64;
+    for i in 0..n {
+        unsafe { (api.int_get.unwrap())(envp, SparValue::int(black_box(i as i64)), &mut out) };
+    }
+    println!("int_get: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    unsafe { Box::from_raw(raw) }.release();
+    {
+        unsafe extern "C" fn noop(_e: *mut SparEnv, _u: *mut c_void, _a: *const SparValue, _n: u64, o: *mut SparValue) -> spar_status_t {
+            *o = SparValue::void();
+            SPAR_OK
+        }
+        let t = Instant::now();
+        for _ in 0..n {
+            let raw = Box::into_raw(CallEnv::acquire(&mut context as *mut _));
+            let (status, out) = unsafe {
+                let env = &mut *raw;
+                let mut out = SparValue::void();
+                let envp = env.as_ptr();
+                let argv = env.argv.as_ptr();
+                let f: unsafe extern "C" fn(*mut SparEnv, *mut c_void, *const SparValue, u64, *mut SparValue) -> spar_status_t = black_box(noop);
+                (f(envp, std::ptr::null_mut(), argv, 0, &mut out), out)
+            };
+            black_box((status, out.tag));
+            unsafe { Box::from_raw(raw) }.release();
+        }
+        println!("manual acquire+call+release: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+        let t = Instant::now();
+        for _ in 0..n {
+            let raw = Box::into_raw(CallEnv::acquire(&mut context as *mut _));
+            let v = unsafe { (*raw).take_value(&SparValue::void()) };
+            black_box(v.is_ok());
+            unsafe { Box::from_raw(raw) }.release();
+        }
+        println!("acquire+take_value+release: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    }
+    let info = super::loader::bench_support::info();
+    for (name, f) in [("v_a", super::loader::bench_support::v_a as fn(&_, &mut _) -> _), ("v_b", super::loader::bench_support::v_b)] {
+        let t = Instant::now();
+        for _ in 0..n {
+            black_box(f(&info, &mut context).unwrap());
+        }
+        println!("{name}: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    }
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(super::loader::bench_support::step1(&info, &mut context).unwrap());
+    }
+    println!("step1 (no check_ret): {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(super::loader::bench_support::step2(&info, &mut context).unwrap());
+    }
+    println!("step2 (+check_ret): {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(super::loader::bench_support::call(&info, &mut context).unwrap());
+    }
+    println!("invoke (noop): {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(super::loader::bench_support::call_full(&info, &mut context).unwrap());
+    }
+    println!("invoke_full (noop): {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(super::thread_token_for_bench());
+    }
+    println!("thread_token: {:.2} ns", t.elapsed().as_secs_f64() * 1e9 / n as f64);
+}

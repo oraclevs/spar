@@ -127,6 +127,67 @@ fn main() {
         println!("4b C-ABI add(i64,i64) in shared library  {}", ns(t / n as f64));
     }
 
+    // ---- ABI cost only: registry-level calls, no interpreter around them ----
+    if want("abi") || filter.is_empty() {
+        let mut natives = CompileOptions::default().natives;
+        spar::native_module::load_into_registry(&kit, &mut natives).unwrap();
+        let mut ctx = spar::RuntimeContext::new(std::env::temp_dir());
+        let span = spar::Span::dummy();
+        println!("\nABI boundary only (NativeRegistry::call, no interpreter):");
+        let calls: Vec<(&str, Vec<spar::Value>)> = vec![
+            ("noop", vec![]),
+            ("noopD", vec![]),
+            ("add", vec![spar::Value::Int(1), spar::Value::Int(2)]),
+            ("addD", vec![spar::Value::Int(1), spar::Value::Int(2)]),
+            ("add4", vec![spar::Value::Int(1), spar::Value::Int(2), spar::Value::Int(3), spar::Value::Int(4)]),
+            ("add4D", vec![spar::Value::Int(1), spar::Value::Int(2), spar::Value::Int(3), spar::Value::Int(4)]),
+            ("addF", vec![spar::Value::Float(1.0), spar::Value::Float(2.0)]),
+            ("addFD", vec![spar::Value::Float(1.0), spar::Value::Float(2.0)]),
+            ("strLen", vec![spar::Value::String("hello native world".into())]),
+            ("strCopy", vec![spar::Value::String("hello native world".into())]),
+            ("fieldSum", vec![{
+                let mut r = spar::Record::new();
+                r.insert("x", spar::Value::Int(1));
+                r.insert("y", spar::Value::Int(2));
+                spar::Value::Object(r.into())
+            }]),
+            ("sumBytes", vec![spar::Value::Bytes(vec![1; 16])]),
+        ];
+        let iters = 3_000_000u64;
+        for (name, args) in calls {
+            let (id, _) = natives.get("benchkit", name).unwrap_or_else(|| panic!("{name}"));
+            let t = time_fn(7, || {
+                for _ in 0..iters {
+                    black_box(natives.call(id, &mut ctx, black_box(&args), &span).unwrap());
+                }
+            });
+            println!("  {name:<10} {}", ns(t / iters as f64));
+        }
+        // the same call resolved directly, as the floor for a Rust closure through the registry
+        let mut floor_reg = spar::NativeRegistry::new();
+        floor_reg
+            .register(spar::NativeFunction::sync(
+                "floor",
+                "add",
+                vec![("a", spar::ast::SparType::Int), ("b", spar::ast::SparType::Int)],
+                spar::ast::SparType::Int,
+                false,
+                |_c, a| match (&a[0], &a[1]) {
+                    (spar::Value::Int(x), spar::Value::Int(y)) => Ok(spar::Value::Int(x + y)),
+                    _ => unreachable!(),
+                },
+            ))
+            .unwrap();
+        let (id, _) = floor_reg.get("floor", "add").unwrap();
+        let args = vec![spar::Value::Int(1), spar::Value::Int(2)];
+        let t = time_fn(7, || {
+            for _ in 0..iters {
+                black_box(floor_reg.call(id, &mut ctx, black_box(&args), &span).unwrap());
+            }
+        });
+        println!("  {:<10} {}  (built-in Rust closure through the same registry: the floor)", "rust-add", ns(t / iters as f64));
+    }
+
     // ---- Spar tiers ----
     let eng = engine(&kit);
     let (n1, n2) = (1_000_000, 5_000_000);
@@ -135,7 +196,9 @@ fn main() {
         ("3  Spar function call (Spar-defined add)", "fn add2(a: int, b: int) -> int { return a + b; };", "acc = add2(a: acc, b: 1);"),
         ("3  Spar->native no-op", "", "benchkit::noop();"),
         ("4  Spar->native add(int,int)", "", "acc = benchkit::add(a: acc, b: 1);"),
+        ("4d Spar->native addD (direct signature)", "", "acc = benchkit::addD(a: acc, b: 1);"),
         ("5  Spar->native add4(int x4)", "", "acc = benchkit::add4(a: acc, b: 1, c: 0, d: 0);"),
+        ("5d Spar->native add4D (direct)", "", "acc = benchkit::add4D(a: acc, b: 1, c: 0, d: 0);"),
         ("6  Spar->native addF(float,float)", "", "facc = benchkit::addF(x: facc, y: 1.0);"),
         ("7  string length via borrowed view", "var s: str = \"hello native world\";", "acc = acc + benchkit::strLen(text: s);"),
         ("8  string copy (view + string_new)", "var s: str = \"hello native world\";", "acc = acc + 1; var t: str = benchkit::strCopy(text: s);"),

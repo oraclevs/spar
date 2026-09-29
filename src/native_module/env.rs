@@ -7,7 +7,7 @@
 //! containers). `Owned` slots own their value. Handles carry `(generation << 32) | index`; a slot
 //! generation changes on every allocation, so handles from a finished call never resolve.
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use spar_native_sys::*;
@@ -66,14 +66,31 @@ pub struct CallEnv {
 }
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
+// `const` initialisers keep these as plain TLS loads (no lazy-init check on the hot path).
 thread_local! {
-    static THREAD_TOKEN: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
-    static POOL: RefCell<Vec<Box<CallEnv>>> = const { RefCell::new(Vec::new()) };
+    static THREAD_TOKEN: Cell<u64> = const { Cell::new(0) };
+    /// One pooled env per thread; nested native calls (callbacks) allocate and drop extras.
+    static POOL: Cell<Option<Box<CallEnv>>> = const { Cell::new(None) };
 }
 
 #[inline]
 pub(crate) fn thread_token() -> u64 {
-    THREAD_TOKEN.with(|t| *t)
+    THREAD_TOKEN.with(|t| {
+        let v = t.get();
+        if v != 0 {
+            v
+        } else {
+            init_thread_token(t)
+        }
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn init_thread_token(cell: &Cell<u64>) -> u64 {
+    let v = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
+    cell.set(v);
+    v
 }
 
 impl CallEnv {
@@ -99,7 +116,8 @@ impl CallEnv {
 
     /// Takes a pooled env for this thread (allocating only on first use / deep nesting).
     pub(crate) fn acquire(ctx: *mut RuntimeContext) -> Box<CallEnv> {
-        let mut env = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_else(Self::fresh);
+        let mut env = POOL.with(|p| p.take()).unwrap_or_else(Self::fresh);
+        // A pooled env may have been created on this same thread (pools are thread-local).
         env.ctx = ctx;
         env.in_call = true;
         env.epoch = env.epoch.wrapping_add(1).max(1);
@@ -113,14 +131,24 @@ impl CallEnv {
         self.ctx = std::ptr::null_mut();
         self.in_call = false;
         POOL.with(|p| {
-            let mut pool = p.borrow_mut();
-            if pool.len() < 8 {
-                pool.push(self);
+            if let Some(existing) = p.take() {
+                // Slot already refilled by a nested call that finished first: keep one, drop one.
+                p.set(Some(existing));
+            } else {
+                p.set(Some(self));
             }
         });
     }
 
     fn end_scope(&mut self) {
+        // Fast path: a call that only used scalars leaves nothing to clean up.
+        if self.used == 0 && self.borrows.is_empty() && self.scratch.is_empty() && self.error.is_none() {
+            self.argv.clear();
+            self.host = None;
+            self.pending_fault = None;
+            self.async_op = None;
+            return;
+        }
         // Release buffer-resource borrows still open so misuse can't leak a lock across calls.
         let ctx = self.ctx;
         for rec in self.borrows.drain(..) {

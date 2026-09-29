@@ -27,7 +27,8 @@ pub const RUNTIME_CAPABILITIES: u64 = SPAR_CAP_STRINGS
     | SPAR_CAP_RECORDS
     | SPAR_CAP_NATIVE_RESOURCES
     | SPAR_CAP_CALLBACKS
-    | SPAR_CAP_ASYNC;
+    | SPAR_CAP_ASYNC
+    | SPAR_CAP_DIRECT_CALLS;
 
 #[derive(Debug)]
 pub enum NativeLoadError {
@@ -99,7 +100,7 @@ fn ret_kind(ty: &SparType) -> RetKind {
     }
 }
 
-struct FnInfo {
+pub(crate) struct FnInfo {
     module: String,
     name: String,
     invoke: SparNativeFn,
@@ -109,6 +110,7 @@ struct FnInfo {
     /// Index into `EXTERNALS` for functions that need interpreter access (`SPAR_FN_CALLS`).
     external: Option<u32>,
     is_async: bool,
+    direct: Option<Arc<super::direct::DirectFn>>,
 }
 // SAFETY: `userdata` is module-owned state; the ABI requires module functions to be callable from
 // any thread that owns a call env (natives run on scheduler threads).
@@ -199,10 +201,15 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     if builder.functions.iter().any(|f| f.name == name) {
         return Err(bad(format!("function '{name}' registered twice")));
     }
-    if !spec.direct.is_null() {
-        return Err((SPAR_E_UNSUPPORTED, format!("'{name}': direct signatures are not supported yet")));
+    let has_direct = !spec.direct.is_null();
+    if has_direct && spec.flags & (SPAR_FN_ASYNC | SPAR_FN_CALLS) != 0 {
+        return Err(bad(format!("'{name}': direct signatures cannot be async or call back into Spar")));
     }
-    let invoke = spec.invoke.ok_or_else(|| bad(format!("'{name}': missing invoke entry")))?;
+    let invoke = match spec.invoke {
+        Some(f) => f,
+        None if has_direct => unreachable_invoke,
+        None => return Err(bad(format!("'{name}': missing invoke entry"))),
+    };
     if spec.param_count > 0 && spec.params.is_null() {
         return Err(bad(format!("'{name}': null params")));
     }
@@ -228,6 +235,28 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         crate::parser::Parser::parse_type_text(&ret_text)
             .map_err(|e| bad(format!("'{name}': invalid return type '{ret_text}': {e}")))?
     };
+    let direct = if has_direct {
+        let sig = text(spec.direct_sig, spec.direct_sig_len).map_err(bad)?;
+        let (arg_letters, ret_letter) =
+            sig.split_once('>').ok_or_else(|| bad(format!("'{name}': direct signature '{sig}' must look like 'ii>i'")))?;
+        if arg_letters.len() != params.len() || ret_letter.len() != 1 {
+            return Err(bad(format!("'{name}': direct signature '{sig}' does not match its {} parameters", params.len())));
+        }
+        for (i, letter) in arg_letters.bytes().enumerate() {
+            if letter == b'v' || !super::direct::letter_matches(letter, &params[i].1) {
+                return Err(bad(format!("'{name}': direct signature letter '{}' does not match parameter '{}' of type {:?}", letter as char, params[i].0, params[i].1)));
+            }
+        }
+        if !super::direct::letter_matches(ret_letter.as_bytes()[0], &ret) {
+            return Err(bad(format!("'{name}': direct return letter '{ret_letter}' does not match declared return type {ret:?}")));
+        }
+        Some(Arc::new(
+            super::direct::build(spec.direct, &sig, format!("{}::{name}", builder.name))
+                .ok_or_else(|| bad(format!("'{name}': unsupported direct signature '{sig}' (max 4 arguments of i/f/b)")))?,
+        ))
+    } else {
+        None
+    };
     if spec.flags & SPAR_FN_ASYNC != 0
         && !matches!(&ret, SparType::Applied { name, arguments } if name == "Promise" && arguments.len() == 1)
     {
@@ -241,6 +270,7 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
         ret: ret_kind(&ret),
         argc: params.len(),
         is_async: spec.flags & SPAR_FN_ASYNC != 0,
+        direct,
         external: if spec.flags & (SPAR_FN_CALLS | SPAR_FN_ASYNC) != 0 {
             let mut ext = EXTERNALS.lock().unwrap();
             ext.push(None);
@@ -254,6 +284,11 @@ unsafe fn add_function(builder: &mut ModuleBuilder, spec: &SparFunctionSpec) -> 
     }
     builder.functions.push(FunctionDef { name, params, ret, info });
     Ok(())
+}
+
+/// Placeholder `invoke` for direct-only functions; never reached (direct adapters bypass it).
+unsafe extern "C" fn unreachable_invoke(_e: *mut SparEnv, _u: *mut c_void, _a: *const SparValue, _n: u64, _o: *mut SparValue) -> spar_status_t {
+    SPAR_E_UNSUPPORTED
 }
 
 static API: SparApiV0 = SparApiV0 {
@@ -478,6 +513,17 @@ impl LoadedModule {
                 ))?;
                 continue;
             }
+            if let Some(direct) = info.direct.clone() {
+                registry.register(NativeFunction::sync(
+                    self.info.name.clone(),
+                    f.name.clone(),
+                    f.params.iter().map(|(n, t)| (n.as_str(), t.clone())).collect(),
+                    f.ret.clone(),
+                    false,
+                    move |_ctx, args| direct(args),
+                ))?;
+                continue;
+            }
             registry.register(NativeFunction::sync(
                 self.info.name.clone(),
                 f.name.clone(),
@@ -689,4 +735,79 @@ fn check_ret(info: &FnInfo, value: Value) -> Result<Value, SparError> {
 #[allow(dead_code)]
 pub fn loaded_modules() -> HashMap<String, ModuleInfo> {
     LOADED.lock().unwrap().iter().map(|(_, m)| (m.info.name.clone(), m.info.clone())).collect()
+}
+
+#[cfg(test)]
+pub(crate) mod bench_support {
+    use super::*;
+    unsafe extern "C" fn noop(_e: *mut SparEnv, _u: *mut c_void, _a: *const SparValue, _n: u64, o: *mut SparValue) -> spar_status_t {
+        *o = SparValue::void();
+        SPAR_OK
+    }
+    pub(crate) fn info() -> FnInfo {
+        FnInfo { module: "m".into(), name: "f".into(), invoke: noop, userdata: std::ptr::null_mut(), ret: RetKind::Void, argc: 0, external: None, is_async: false, direct: None }
+    }
+    pub(crate) fn call(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
+        invoke(info, ctx as *mut RuntimeContext, None, &[])
+    }
+    pub(crate) fn step1(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
+        let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
+        let (status, out, env) = unsafe {
+            let env = &mut *raw;
+            env.host = None;
+            let mut out = SparValue::void();
+            let envp = env.as_ptr();
+            let argv = env.argv.as_ptr();
+            let status = (info.invoke)(envp, info.userdata, argv, 0, &mut out);
+            (status, out, &mut *raw)
+        };
+        let r = if status == SPAR_OK { env.take_value(&out).map_err(|_| fail("x".into())) } else { Err(fail("y".into())) };
+        unsafe { Box::from_raw(raw) }.release();
+        r
+    }
+    pub(crate) fn v_a(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
+        // no host assignment, take_value result ignored
+        let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
+        let status = unsafe {
+            let env = &mut *raw;
+            let mut out = SparValue::void();
+            let envp = env.as_ptr();
+            let argv = env.argv.as_ptr();
+            (info.invoke)(envp, info.userdata, argv, 0, &mut out)
+        };
+        unsafe { Box::from_raw(raw) }.release();
+        if status == SPAR_OK { Ok(Value::Void) } else { Err(fail("y".into())) }
+    }
+    pub(crate) fn v_b(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
+        // as v_a but with take_value
+        let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
+        let (status, out) = unsafe {
+            let env = &mut *raw;
+            let mut out = SparValue::void();
+            let envp = env.as_ptr();
+            let argv = env.argv.as_ptr();
+            ((info.invoke)(envp, info.userdata, argv, 0, &mut out), out)
+        };
+        let v = if status == SPAR_OK { unsafe { (*raw).take_value(&out) }.ok() } else { None };
+        unsafe { Box::from_raw(raw) }.release();
+        match v { Some(v) => Ok(v), None => Err(fail("y".into())) }
+    }
+    pub(crate) fn step2(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, SparError> {
+        let raw = Box::into_raw(CallEnv::acquire(ctx as *mut RuntimeContext));
+        let (status, out, env) = unsafe {
+            let env = &mut *raw;
+            env.host = None;
+            let mut out = SparValue::void();
+            let envp = env.as_ptr();
+            let argv = env.argv.as_ptr();
+            let status = (info.invoke)(envp, info.userdata, argv, 0, &mut out);
+            (status, out, &mut *raw)
+        };
+        let r = if status == SPAR_OK { match env.take_value(&out) { Ok(v) => check_ret(info, v), Err(_) => Err(fail("x".into())) } } else { Err(fail("y".into())) };
+        unsafe { Box::from_raw(raw) }.release();
+        r
+    }
+    pub(crate) fn call_full(info: &FnInfo, ctx: &mut RuntimeContext) -> Result<Value, RuntimeFault> {
+        invoke_full(info, ctx as *mut RuntimeContext, None, &Span::dummy(), &[])
+    }
 }

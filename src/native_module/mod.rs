@@ -3,6 +3,7 @@
 
 mod async_op;
 mod buffer;
+mod direct;
 mod env;
 mod host;
 mod loader;
@@ -29,3 +30,8 @@ pub use loader::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn thread_token_for_bench() -> u64 {
+    env::thread_token()
+}

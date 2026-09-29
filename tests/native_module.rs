@@ -67,6 +67,19 @@ fn scalar_calls() {
 }
 
 #[test]
+fn direct_signatures_skip_marshalling_and_are_typechecked() {
+    assert_eq!(run_int("function main() -> int { return fastMath::mulD(a: 6, b: 7); };"), 42);
+    assert_eq!(
+        run_int("function main() -> int { if fastMath::scaleD(x: 2.0, k: 1.5, negate: true) == -3.0 { return 1; } return 0; };"),
+        1
+    );
+    let errors = engine_with_native(c_fastmath())
+        .check_source(r#"function main() -> int { return fastMath::mulD(a: "x", b: 1); };"#)
+        .expect_err("type error expected");
+    assert!(errors.iter().map(|e| e.to_string()).collect::<String>().contains("expects int"));
+}
+
+#[test]
 fn strings_are_borrowed_and_created() {
     assert_eq!(run_int(r#"function main() -> int { return fastMath::strLen(text: "héllo"); };"#), 6);
     assert_eq!(

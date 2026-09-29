@@ -3,6 +3,7 @@
 //! through the current package scope in the lock graph; ordinary `import`
 //! is reserved for source modules/files.
 
+pub mod app;
 pub mod commands;
 pub mod error;
 pub mod github;
@@ -17,6 +18,7 @@ pub mod resolver;
 pub mod source;
 pub mod store;
 
+pub use app::{resolve_app, AppTarget};
 pub use error::PackageError;
 pub use github::{FetchedRevision, GitCommandProvider, NetworkPolicy, PackageProvider};
 pub use local::LocalSource;

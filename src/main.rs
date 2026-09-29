@@ -195,6 +195,7 @@ fn main() {
         } => cmd_show(path, global, task, args),
         Cmd::Dump { path, global } => cmd_dump(path, global),
         Cmd::Exec { path, program_args } => cmd_exec(&path, program_args),
+        Cmd::RunApp { name, program_args } => cmd_run_app(&name, program_args),
         Cmd::Repl => cmd_repl(),
         Cmd::PackageInit { name, kind } => cmd_package_init(name, kind),
         Cmd::New { name, kind } => cmd_new(name, kind),
@@ -251,6 +252,10 @@ enum Cmd {
     },
     Exec {
         path: String,
+        program_args: Vec<String>,
+    },
+    RunApp {
+        name: String,
         program_args: Vec<String>,
     },
     Repl,
@@ -514,6 +519,22 @@ fn parse_tasks_args(args: &[String]) -> Cmd {
 }
 
 fn parse_run_args(args: &[String]) -> Cmd {
+    // `spar run --app <name> [args...]`: run a package's `main` by name. Everything
+    // after the name goes to the program; a leading `--` is optional and dropped.
+    if args.first().map(String::as_str) == Some("--app") {
+        let Some(name) = args.get(1) else {
+            return Cmd::BadArgs("`--app` requires a package name: `spar run --app <name>`".into());
+        };
+        let rest = &args[2..];
+        let program_args = match rest.first().map(String::as_str) {
+            Some("--") => rest[1..].to_vec(),
+            _ => rest.to_vec(),
+        };
+        return Cmd::RunApp {
+            name: name.clone(),
+            program_args,
+        };
+    }
     let mut path = None;
     let mut global = false;
     let mut dry_run = false;
@@ -685,6 +706,7 @@ COMMANDS:
                                         List declared tasks
     run           [task] [args...] [-f FILE | -G] [--dry-run] [--choose]
                                         Run a task (default task if omitted); same as bare `spar <task>`
+    run --app     <name> [args...]      Run the application package <name>'s `main` (entry from its manifest)
     show          <task> [args...] [-f FILE | -G]
                                         Show one task's resolved commands
     dump          [-f FILE | -G]        Dump the lowered task catalog as JSON
@@ -719,6 +741,7 @@ EXAMPLES:
     spar fmt --check server.spar
     spar tasks -f server.spar
     spar run -f server.spar
+    spar run --app omatarasu arg1 arg2      (run package `omatarasu`'s main with args)
     spar run deploy production -f server.spar
     spar run test --dry-run -f server.spar
     spar deploy production -f server.spar   (same as `run` above)
@@ -1252,6 +1275,19 @@ fn cmd_exec(path: &str, program_args: Vec<String>) {
             std::process::exit(1);
         }
     }
+}
+
+fn cmd_run_app(name: &str, program_args: Vec<String>) {
+    let cwd = std::env::current_dir().unwrap_or_else(|error| {
+        eprintln!("error: cannot determine current directory: {error}");
+        std::process::exit(1);
+    });
+    let store = spar::package::PackageStore::new(spar::package::StorePaths::from_env());
+    let target = spar::package::resolve_app(name, &cwd, &store).unwrap_or_else(|error| {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    });
+    cmd_exec(&target.entry.to_string_lossy(), program_args);
 }
 
 // ── `repl` command ────────────────────────────────────────────────────────────

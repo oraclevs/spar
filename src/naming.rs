@@ -6,6 +6,14 @@ pub fn is_camel_case(name: &str) -> bool {
     matches!(name.chars().next(), Some(c) if c.is_lowercase()) && !name.contains('_')
 }
 
+/// `MAX_RETRIES`-style names, accepted for `const` declarations alongside camelCase.
+pub fn is_screaming_snake_case(name: &str) -> bool {
+    matches!(name.chars().next(), Some(c) if c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 pub fn to_pascal_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut cap = true;

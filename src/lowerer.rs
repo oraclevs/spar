@@ -144,6 +144,8 @@ struct LocalAllocator<'a> {
     scopes: Vec<HashMap<String, (LocalSlot, SparType)>>,
     names: Vec<String>,
     types: Vec<SparType>,
+    /// Values of local `const` bindings, keyed by slot so shadowing is exact.
+    const_values: HashMap<LocalSlot, crate::ConfigValue>,
 }
 
 pub(crate) fn lower_default(
@@ -162,6 +164,17 @@ pub(crate) fn lower_default(
     Ok((expression, lowerer.locals.names.len()))
 }
 
+/// Whether a folded constant is representable as declared type `ty` without conversion.
+fn value_fits(value: &crate::ConfigValue, ty: &SparType) -> bool {
+    matches!(
+        (value, ty),
+        (crate::ConfigValue::Int(_), SparType::Int)
+            | (crate::ConfigValue::Float(_), SparType::Float)
+            | (crate::ConfigValue::Bool(_), SparType::Bool)
+            | (crate::ConfigValue::Str(_), SparType::Str)
+    )
+}
+
 impl<'a> LocalAllocator<'a> {
     fn new(symbols: &'a SymbolTable) -> Self {
         Self {
@@ -169,6 +182,24 @@ impl<'a> LocalAllocator<'a> {
             scopes: vec![HashMap::new()],
             names: Vec::new(),
             types: Vec::new(),
+            const_values: HashMap::new(),
+        }
+    }
+
+    /// Constant value of bare name `name` as seen from the current scope: a local `const`
+    /// (found through its slot), or a top-level `const` not shadowed by any local.
+    fn const_lookup(&self, name: &str) -> Option<crate::ConfigValue> {
+        match self.lookup_typed(name) {
+            Some((slot, _)) => self.const_values.get(&slot).cloned(),
+            None => {
+                let value = self.symbols.constants.get(name)?;
+                match self.symbols.globals.get(name) {
+                    Some(crate::resolver::GlobalEntry::Var { ty, .. }) if value_fits(value, ty) => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -433,7 +464,26 @@ impl FunctionLowerer<'_> {
                     .or_else(|| self.locals.expression_type(&local.value))
                     .ok_or_else(|| internal_lowering("missing checked local type", &local.span))?;
                 let value = self.lower_expression_expected(&local.value, Some(&ty))?;
+                // Evaluate a `const` before its own slot exists so it cannot see itself.
+                let folded = if local.is_const {
+                    crate::constants::eval(
+                        &local.value,
+                        &|name| self.locals.const_lookup(name),
+                        &local.span,
+                    )
+                    .ok()
+                    .filter(|value| value_fits(value, &ty))
+                } else {
+                    None
+                };
                 let slot = self.locals.allocate(local.name.clone(), ty);
+                let value = match folded {
+                    Some(folded) => {
+                        self.locals.const_values.insert(slot, folded.clone());
+                        CompiledExpression::Constant(folded, local.span.clone())
+                    }
+                    None => value,
+                };
                 CompiledStatement::StoreLocal {
                     slot,
                     value,
@@ -625,7 +675,14 @@ impl FunctionLowerer<'_> {
             Expr::NamespaceRef(reference) => {
                 if reference.segments.len() == 1 {
                     if let Some(slot) = self.locals.lookup(&reference.segments[0]) {
-                        CompiledExpression::Local(slot, reference.span.clone())
+                        match self.locals.const_values.get(&slot) {
+                            Some(value) => {
+                                CompiledExpression::Constant(value.clone(), reference.span.clone())
+                            }
+                            None => CompiledExpression::Local(slot, reference.span.clone()),
+                        }
+                    } else if let Some(value) = self.locals.const_lookup(&reference.segments[0]) {
+                        CompiledExpression::Constant(value, reference.span.clone())
                     } else if self
                         .locals
                         .symbols

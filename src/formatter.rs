@@ -304,7 +304,7 @@ fn format_top_level_item(
             if vd.exported {
                 out.push_str("export ");
             }
-            out.push_str("var ");
+            out.push_str(if vd.is_const { "const " } else { "var " });
             if vd.mutable {
                 out.push_str("mut ");
             }
@@ -1951,7 +1951,7 @@ fn format_func_stmt_body(
     match stmt {
         FuncStmt::LocalVar(lv) => {
             out.push_str(&ind);
-            out.push_str("var ");
+            out.push_str(if lv.is_const { "const " } else { "var " });
             if lv.mutable {
                 out.push_str("mut ");
             }

@@ -423,6 +423,8 @@ fn has_attribute(attributes: &[Attribute], name: &str) -> bool {
 pub struct VarDecl {
     pub exported: bool,
     pub mutable: bool,
+    /// Declared with `const`: immutable, and its initializer must be a compile-time constant.
+    pub is_const: bool,
     pub name: String,
     pub ty: SparType,
     pub value: Option<Expr>,
@@ -900,6 +902,8 @@ pub enum ForBinding {
 pub struct LocalVarDecl {
     pub name: String,
     pub mutable: bool,
+    /// Declared with `const`: immutable, and its initializer must be a compile-time constant.
+    pub is_const: bool,
     pub ty: Option<SparType>,
     pub value: Expr,
     pub span: Span,

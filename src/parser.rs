@@ -383,7 +383,7 @@ impl Parser {
     fn parse_unattributed_top_level_item(&mut self) -> Result<TopLevelItem, SparError> {
         match self.peek() {
             Token::Import     => Ok(TopLevelItem::Import(self.parse_import()?)),
-            Token::Var        => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
+            Token::Var | Token::KwConst => Ok(TopLevelItem::Var(self.parse_var_decl(false)?)),
             Token::Dynamic    => Ok(TopLevelItem::Dynamic(self.parse_dynamic_decl()?)),
             Token::LBracket   => Err(self.error("legacy section declarations were removed; declare a `struct Name { ... };` instead")),
             Token::KwStruct   => self.parse_struct(false, false),
@@ -427,7 +427,7 @@ impl Parser {
             Token::Export => {
                 self.advance();
                 match self.peek() {
-                    Token::Var      => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
+                    Token::Var | Token::KwConst => Ok(TopLevelItem::Var(self.parse_var_decl(true)?)),
                     Token::LBracket => Err(self.error("legacy section declarations were removed; use `export struct Name { ... };`")),
                     Token::KwStruct => self.parse_struct(true, false),
                     Token::Ident(s) if s == "type" => Err(self.error("`type` declarations were removed; use `export struct Name { field: Type; };`")),
@@ -638,9 +638,17 @@ impl Parser {
 
     fn parse_var_decl(&mut self, exported: bool) -> Result<VarDecl, SparError> {
         let span = self.peek_span();
-        self.expect(&Token::Var)?;
+        let is_const = self.at(&Token::KwConst);
+        if is_const {
+            self.advance();
+        } else {
+            self.expect(&Token::Var)?;
+        }
 
         let mutable = if self.at(&Token::KwMut) {
+            if is_const {
+                return Err(self.error("`const` bindings cannot be `mut`"));
+            }
             self.advance();
             true
         } else {
@@ -669,6 +677,7 @@ impl Parser {
         Ok(VarDecl {
             exported,
             mutable,
+            is_const,
             name,
             ty,
             value,
@@ -2398,7 +2407,7 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Continue(span));
         }
-        if self.at(&Token::Var) {
+        if self.at(&Token::Var) || self.at(&Token::KwConst) {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
         }
 
@@ -2590,8 +2599,16 @@ impl Parser {
 
     fn parse_local_var_decl(&mut self) -> Result<LocalVarDecl, SparError> {
         let span = self.peek_span();
-        self.expect(&Token::Var)?;
+        let is_const = self.at(&Token::KwConst);
+        if is_const {
+            self.advance();
+        } else {
+            self.expect(&Token::Var)?;
+        }
         let mutable = if self.at(&Token::KwMut) {
+            if is_const {
+                return Err(self.error("`const` bindings cannot be `mut`"));
+            }
             self.advance();
             true
         } else {
@@ -2610,6 +2627,7 @@ impl Parser {
         Ok(LocalVarDecl {
             name,
             mutable,
+            is_const,
             ty,
             value,
             span,

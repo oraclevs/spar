@@ -796,7 +796,7 @@ fn is_spar_control_header(line: &str) -> bool {
 }
 
 fn is_spar_shell_statement_start(line: &str) -> bool {
-    const SIMPLE_KEYWORDS: &[&str] = &["var", "return", "break", "continue", "command", "shell"];
+    const SIMPLE_KEYWORDS: &[&str] = &["var", "const", "return", "break", "continue", "command", "shell"];
     if SIMPLE_KEYWORDS
         .iter()
         .any(|keyword| starts_with_keyword(line, keyword))
@@ -2985,6 +2985,7 @@ mod tests {
             ("else", Token::KwElse),
             ("for", Token::KwFor),
             ("while", Token::KwWhile),
+            ("const", Token::KwConst),
             ("loop", Token::KwLoop),
             ("in", Token::KwIn),
             ("break", Token::KwBreak),

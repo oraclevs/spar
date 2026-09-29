@@ -272,6 +272,8 @@ pub struct SymbolTable {
     /// Interactive input may `await` at the top level (the session runs the
     /// expression inside an async wrapper); ordinary programs may not.
     pub top_level_await: bool,
+    /// Values of top-level `const` declarations, evaluated at compile time.
+    pub constants: HashMap<String, crate::ConfigValue>,
 }
 
 impl SymbolTable {
@@ -710,6 +712,8 @@ impl Resolver {
         self.check_function_group_import_collisions();
         self.resolve_program(program);
         self.resolve_function_bodies(program);
+        let (constants, const_errors) = crate::constants::check_program(program);
+        self.errors.extend(const_errors);
         if self.errors.is_empty() {
             Ok(SymbolTable {
                 globals: self.globals,
@@ -725,6 +729,7 @@ impl Resolver {
                 hosts: self.hosts.signatures(),
                 natives: scoped_native_signatures(program, &self.natives),
                 top_level_await: false,
+                constants,
             })
         } else {
             Err(self.errors)
@@ -778,6 +783,8 @@ impl Resolver {
         r.check_function_group_import_collisions();
         r.resolve_program(program);
         r.resolve_function_bodies(program);
+        let (constants, const_errors) = crate::constants::check_program(program);
+        r.errors.extend(const_errors);
         if r.errors.is_empty() {
             Ok(SymbolTable {
                 globals: r.globals,
@@ -793,6 +800,7 @@ impl Resolver {
                 hosts: r.hosts.signatures(),
                 natives: scoped_native_signatures(program, &r.natives),
                 top_level_await: false,
+                constants,
             })
         } else {
             Err(r.errors)
@@ -1405,7 +1413,7 @@ impl Resolver {
             );
             return;
         }
-        if !naming::is_camel_case(&decl.name) {
+        if !(naming::is_camel_case(&decl.name) || (decl.is_const && naming::is_screaming_snake_case(&decl.name))) {
             self.push_error_hint(
                 format!(
                     "variable '{}' must be camelCase (start with a lowercase letter, no underscores)",
@@ -2871,7 +2879,7 @@ impl Resolver {
                     if let Err(e) = self.resolve_expr_with_locals(&lv.value, local_names) {
                         self.errors.push(e);
                     }
-                    if !naming::is_camel_case(&lv.name) {
+                    if !(naming::is_camel_case(&lv.name) || (lv.is_const && naming::is_screaming_snake_case(&lv.name))) {
                         self.errors.push(SparError::ResolveError {
                             message: format!("local variable '{}' must be camelCase", lv.name),
                             hint: Some(naming::camel_case_hint(&lv.name)),

@@ -12,3 +12,6 @@ pub use loader::{
     api_table, load_into_registry, load_module, loaded_modules, shutdown_all, LoadedModule, ModuleInfo, NativeLoadError,
     RUNTIME_CAPABILITIES,
 };
+
+#[cfg(test)]
+mod tests;

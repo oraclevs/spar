@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) mod bytecode;
 pub(crate) mod context;
 pub(crate) mod native;
+pub(crate) mod record;
 pub(crate) mod resource;
 pub(crate) mod scheduler;
 pub(crate) mod schema;
@@ -21,6 +22,7 @@ pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
 pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
+pub use record::Record;
 pub use value::{ErrorValue, Shared, Value};
 
 use crate::ast::SparType;
@@ -1627,7 +1629,7 @@ impl Runtime<'_> {
                 };
                 for (field, expression) in overrides {
                     let override_value = self.eval_expression(expression, frame, module)?;
-                    fields.insert(field.clone(), override_value);
+                    fields.insert(field.as_str(), override_value);
                 }
                 Ok(value)
             }
@@ -1822,7 +1824,7 @@ impl Runtime<'_> {
                     .collect::<Result<Vec<_>, _>>()?),
             )),
             CompiledExpression::Object(items, span) => {
-                let mut object = indexmap::IndexMap::new();
+                let mut object = Record::new();
                 for item in items {
                     match item {
                         CompiledObjectItem::Field { name, value } => {

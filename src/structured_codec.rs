@@ -801,20 +801,20 @@ fn encode_delimited(
 }
 
 fn encode_delimited_row(
-    fields: &indexmap::IndexMap<String, Value>,
+    fields: &crate::runtime::Record,
     delimiter: u8,
     headers: &mut Option<Vec<String>>,
 ) -> Result<Vec<u8>, SparError> {
     let mut output = Vec::new();
     let ordered = if let Some(existing) = headers.as_ref() {
-        let actual = fields.keys().cloned().collect::<HashSet<_>>();
+        let actual = fields.keys().map(|key| key.to_string()).collect::<HashSet<_>>();
         let expected = existing.iter().cloned().collect::<HashSet<_>>();
         if actual != expected {
             return Err(codec_error("delimited rows must use the same field set"));
         }
         existing.clone()
     } else {
-        let mut names = fields.keys().cloned().collect::<Vec<_>>();
+        let mut names = fields.keys().map(|key| key.to_string()).collect::<Vec<_>>();
         names.sort();
         if names.is_empty() {
             return Err(codec_error(
@@ -933,7 +933,7 @@ pub(crate) fn runtime_value_to_json(value: &Value) -> Result<serde_json::Value, 
             .map(serde_json::Value::Array),
         Value::Object(values) => values
             .iter()
-            .map(|(key, value)| runtime_value_to_json(value).map(|value| (key.clone(), value)))
+            .map(|(key, value)| runtime_value_to_json(value).map(|value| (key.to_string(), value)))
             .collect::<Result<serde_json::Map<_, _>, _>>()
             .map(serde_json::Value::Object),
         Value::Map(entries) => entries

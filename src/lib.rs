@@ -61,6 +61,7 @@ pub use runtime::{
     Value,
     Shared,
     ErrorValue,
+    Record,
 };
 pub use session::{
     input_completeness, InputCompleteness, InteractiveEvalResult, InteractivePresentation,

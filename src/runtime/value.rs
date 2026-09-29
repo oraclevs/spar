@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use std::sync::Arc;
 
+use super::record::Record;
 use crate::error::{Span, SparError};
 use crate::evaluator::{ConfigValue, PromiseHandle};
 
@@ -101,29 +102,35 @@ impl FromIterator<Value> for Shared<Vec<Value>> {
     }
 }
 
-impl IntoIterator for Shared<IndexMap<String, Value>> {
-    type Item = (String, Value);
-    type IntoIter = indexmap::map::IntoIter<String, Value>;
+impl IntoIterator for Shared<Record> {
+    type Item = (Arc<str>, Value);
+    type IntoIter = std::vec::IntoIter<(Arc<str>, Value)>;
     fn into_iter(self) -> Self::IntoIter {
         self.into_inner().into_iter()
     }
 }
 
-impl<'a> IntoIterator for &'a Shared<IndexMap<String, Value>> {
-    type Item = (&'a String, &'a Value);
-    type IntoIter = indexmap::map::Iter<'a, String, Value>;
+impl<'a> IntoIterator for &'a Shared<Record> {
+    type Item = (&'a Arc<str>, &'a Value);
+    type IntoIter = super::record::Iter<'a>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
 }
 
-impl FromIterator<(String, Value)> for Shared<IndexMap<String, Value>> {
-    fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
-        Shared::from(iter.into_iter().collect::<IndexMap<_, _>>())
+impl<K: AsRef<str> + Into<Arc<str>>> FromIterator<(K, Value)> for Shared<Record> {
+    fn from_iter<I: IntoIterator<Item = (K, Value)>>(iter: I) -> Self {
+        Shared::from(iter.into_iter().collect::<Record>())
     }
 }
 
-pub type ObjectMap = Shared<IndexMap<String, Value>>;
+impl From<IndexMap<String, Value>> for Shared<Record> {
+    fn from(map: IndexMap<String, Value>) -> Self {
+        Shared::from(Record::from(map))
+    }
+}
+
+pub type ObjectMap = Shared<Record>;
 pub type ListVec = Shared<Vec<Value>>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -567,7 +574,11 @@ impl Value {
             Value::Object(values) => Ok(ConfigValue::Object(
                 values
                     .into_iter()
-                    .map(|(key, value)| value.try_into_config(span).map(|value| (key, value)))
+                    .map(|(key, value)| {
+                        value
+                            .try_into_config(span)
+                            .map(|value| (key.to_string(), value))
+                    })
                     .collect::<Result<indexmap::IndexMap<_, _>, _>>()?,
             )),
             Value::Map(values) => Ok(ConfigValue::Map(

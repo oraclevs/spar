@@ -182,7 +182,7 @@ fn string_map_arg(
         Value::Object(entries) => entries
             .iter()
             .map(|(key, value)| match value {
-                Value::String(value) => Ok((key.clone(), value.clone())),
+                Value::String(value) => Ok((key.to_string(), value.clone())),
                 value => Err(error(format!(
                     "native argument '{name}' expected Map<str, str>, received value {}",
                     value.type_name()
@@ -199,7 +199,7 @@ fn string_map_arg(
 fn response_fields<'a>(
     args: &'a [Value],
     operation: &str,
-) -> Result<&'a indexmap::IndexMap<String, Value>, SparError> {
+) -> Result<&'a crate::runtime::Record, SparError> {
     match args.first() {
         Some(Value::Object(fields)) => Ok(fields),
         Some(value) => Err(error(format!(

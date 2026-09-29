@@ -1349,7 +1349,7 @@ fn register_record_methods(registry: &mut NativeRegistry) {
             false,
             |_context, args| match args.first() {
                 Some(Value::Object(fields)) => {
-                    let mut keys = fields.keys().cloned().collect::<Vec<_>>();
+                    let mut keys = fields.keys().map(|key| key.to_string()).collect::<Vec<_>>();
                     keys.sort();
                     Ok(Value::List(keys.into_iter().map(Value::String).collect()))
                 }

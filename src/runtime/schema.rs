@@ -102,7 +102,7 @@ impl Schema {
             for (name, value) in values {
                 let observed = schema_type_of(value);
                 fields
-                    .entry(name.clone())
+                    .entry(name.to_string())
                     .and_modify(|field| {
                         field.seen += 1;
                         field.ty = merge_types(&field.ty, &observed);

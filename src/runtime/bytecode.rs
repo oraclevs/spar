@@ -24,15 +24,15 @@
 //!   (`brk`/`cont` targets) or propagated unchanged, matching the walker.
 
 use crate::compiled::{
-    CompiledExpression, CompiledFunction, CompiledStatement, FunctionId, LocalSlot, ModuleId,
+    CompiledExpression, CompiledMethodTarget, CompiledFunction, CompiledStatement, FunctionId, LocalSlot, ModuleId,
     TypedOperation,
 };
 use crate::error::Span;
 use crate::evaluator::ConfigValue;
 
 use super::{
-    eval_int_binary_value, eval_operation, runtime_error, type_error, Frame, Runtime, RuntimeFault,
-    RuntimeFlow, Value,
+    eval_int_binary_value, eval_operation, field_of_value, module_state_error, resolve_runtime_type,
+    runtime_error, type_error, Frame, Runtime, RuntimeFault, RuntimeFlow, Value,
 };
 
 const NONE: u32 = u32::MAX;
@@ -50,6 +50,27 @@ pub(crate) enum BOp {
     Move { dst: Reg, src: Reg, at: u32 },
     Bin { op: TypedOperation, dst: Reg, a: Reg, b: Reg, a_tmp: bool, b_tmp: bool, at: u32 },
     Un { op: TypedOperation, dst: Reg, a: Reg, a_tmp: bool, at: u32 },
+    /// `dst = base.field` (`names[name]`), reading an object base in place.
+    Field { dst: Reg, base: Reg, base_tmp: bool, name: u32, at: u32 },
+    /// Native function call with arguments in `first..first+n`.
+    Native { dst: Reg, function: u32, first: Reg, n: u32, ret: u32, at: u32 },
+    /// Native method call. `recv` is a local receiver's register (moved out
+    /// and back, as the tree walker does) or `NONE` when the receiver is the
+    /// first register of the argument window.
+    Method {
+        dst: Reg,
+        recv: Reg,
+        first: Reg,
+        n: u32,
+        method: crate::runtime::NativeMethodId,
+        mutates: bool,
+        at: u32,
+    },
+    /// String interpolation: `templates[t]` with expression parts read from
+    /// consecutive registers starting at `first`.
+    Interp { dst: Reg, t: u32, first: Reg, at: u32 },
+    /// `dst = [regs first..first+n]`.
+    ListNew { dst: Reg, first: Reg, n: u32 },
     /// Evaluate `exprs[e]` with the tree walker into `dst`.
     Tree { dst: Reg, e: u32 },
     /// Evaluate `exprs[e]` with the tree walker and discard the result.
@@ -80,7 +101,17 @@ pub(crate) struct BcFunction {
     consts: Vec<ConfigValue>,
     exprs: Vec<CompiledExpression>,
     stmts: Vec<CompiledStatement>,
+    names: Vec<String>,
+    types: Vec<crate::ast::SparType>,
+    templates: Vec<Vec<Part>>,
     pub(crate) nslots: usize,
+}
+
+/// One piece of an interpolated string.
+#[derive(Clone, Debug)]
+enum Part {
+    Literal(String),
+    Expr,
 }
 
 pub(crate) struct BcProgram {
@@ -143,6 +174,9 @@ struct Lowerer<'a> {
     consts: Vec<ConfigValue>,
     exprs: Vec<CompiledExpression>,
     stmts: Vec<CompiledStatement>,
+    names: Vec<String>,
+    types: Vec<crate::ast::SparType>,
+    templates: Vec<Vec<Part>>,
     slot_count: u32,
     base_temp: u32,
     next_temp: u32,
@@ -161,6 +195,9 @@ impl<'a> Lowerer<'a> {
             consts: Vec::new(),
             exprs: Vec::new(),
             stmts: Vec::new(),
+            names: Vec::new(),
+            types: Vec::new(),
+            templates: Vec::new(),
             slot_count,
             base_temp: slot_count,
             next_temp: slot_count,
@@ -175,6 +212,9 @@ impl<'a> Lowerer<'a> {
             consts: l.consts,
             exprs: l.exprs,
             stmts: l.stmts,
+            names: l.names,
+            types: l.types,
+            templates: l.templates,
             nslots: (l.max_reg.max(slot_count) + 1) as usize,
         }
     }
@@ -234,7 +274,12 @@ impl<'a> Lowerer<'a> {
         self.code[start..].iter().any(|op| {
             matches!(
                 op,
-                BOp::Tree { .. } | BOp::Eval { .. } | BOp::TreeStmt { .. } | BOp::Call { .. }
+                BOp::Tree { .. }
+                    | BOp::Method { .. }
+                    | BOp::Eval { .. }
+                    | BOp::TreeStmt { .. }
+                    | BOp::Call { .. }
+                    | BOp::Native { .. }
             )
         })
     }
@@ -506,6 +551,123 @@ impl<'a> Lowerer<'a> {
                 );
                 self.next_temp = saved.max(self.base_temp).max(dst + 1);
             }
+            CompiledExpression::MethodCall {
+                target: CompiledMethodTarget::Native(method),
+                receiver: Some(receiver),
+                arguments,
+                mutates_receiver,
+                span,
+                ..
+            } if matches!(**receiver, CompiledExpression::Local(..)) || !*mutates_receiver => {
+                let saved = self.next_temp;
+                let first = self.next_temp;
+                let recv = match &**receiver {
+                    CompiledExpression::Local(slot, _) => slot.0,
+                    _ => NONE,
+                };
+                let window = arguments.len() as u32 + u32::from(recv == NONE);
+                self.next_temp += window;
+                self.max_reg = self.max_reg.max(self.next_temp);
+                let mut reg = first;
+                if recv == NONE {
+                    self.expr_into(receiver, reg);
+                    reg += 1;
+                }
+                for argument in arguments {
+                    self.expr_into(argument, reg);
+                    reg += 1;
+                }
+                let at = self.at();
+                self.emit(
+                    BOp::Method {
+                        dst,
+                        recv,
+                        first,
+                        n: window,
+                        method: *method,
+                        mutates: *mutates_receiver,
+                        at,
+                    },
+                    Some(span),
+                );
+                self.next_temp = saved.max(self.base_temp).max(dst + 1);
+            }
+            CompiledExpression::Field { base, field, span } => {
+                let saved = self.next_temp;
+                let (base, base_tmp) = self.operand(base);
+                let name = self.names.len() as u32;
+                self.names.push(field.clone());
+                let at = self.at();
+                self.emit(BOp::Field { dst, base, base_tmp, name, at }, Some(span));
+                self.next_temp = saved.max(self.base_temp).max(dst + 1);
+            }
+            CompiledExpression::NativeCall { function, arguments, return_type, span } => {
+                let saved = self.next_temp;
+                let first = self.next_temp;
+                self.next_temp += arguments.len() as u32;
+                self.max_reg = self.max_reg.max(self.next_temp);
+                for (index, argument) in arguments.iter().enumerate() {
+                    self.expr_into(argument, first + index as u32);
+                }
+                let ret = match return_type {
+                    Some(ty) => {
+                        self.types.push(ty.clone());
+                        (self.types.len() - 1) as u32
+                    }
+                    None => NONE,
+                };
+                let at = self.at();
+                self.emit(
+                    BOp::Native {
+                        dst,
+                        function: function.0,
+                        first,
+                        n: arguments.len() as u32,
+                        ret,
+                        at,
+                    },
+                    Some(span),
+                );
+                self.next_temp = saved.max(self.base_temp).max(dst + 1);
+            }
+            CompiledExpression::Interpolation(parts, span) => {
+                let saved = self.next_temp;
+                let first = self.next_temp;
+                let mut template = Vec::with_capacity(parts.len());
+                let mut exprs = Vec::new();
+                for part in parts {
+                    match part {
+                        crate::compiled::CompiledStringPart::Literal(text) => {
+                            template.push(Part::Literal(text.clone()))
+                        }
+                        crate::compiled::CompiledStringPart::Expression(expression) => {
+                            template.push(Part::Expr);
+                            exprs.push(expression);
+                        }
+                    }
+                }
+                self.next_temp += exprs.len() as u32;
+                self.max_reg = self.max_reg.max(self.next_temp);
+                for (index, expression) in exprs.into_iter().enumerate() {
+                    self.expr_into(expression, first + index as u32);
+                }
+                let t = self.templates.len() as u32;
+                self.templates.push(template);
+                let at = self.at();
+                self.emit(BOp::Interp { dst, t, first, at }, Some(span));
+                self.next_temp = saved.max(self.base_temp).max(dst + 1);
+            }
+            CompiledExpression::List(items, _) => {
+                let saved = self.next_temp;
+                let first = self.next_temp;
+                self.next_temp += items.len() as u32;
+                self.max_reg = self.max_reg.max(self.next_temp);
+                for (index, item) in items.iter().enumerate() {
+                    self.expr_into(item, first + index as u32);
+                }
+                self.emit(BOp::ListNew { dst, first, n: items.len() as u32 }, None);
+                self.next_temp = saved.max(self.base_temp).max(dst + 1);
+            }
             other => self.tree_expr(other, dst),
         }
     }
@@ -566,6 +728,141 @@ impl Runtime<'_> {
                     let operand = take_or_clone(frame, *a, *a_tmp, span)?;
                     let result = eval_operation(*op, &[operand], span)?;
                     frame.slots[*dst as usize] = Some(result);
+                }
+                BOp::Field { dst, base, base_tmp, name, at } => {
+                    let span = &bc.spans[*at as usize];
+                    let field = bc.names[*name as usize].as_str();
+                    let direct = match frame.slots[*base as usize].as_ref() {
+                        Some(Value::Object(fields)) => Some(fields.get(field).cloned()),
+                        _ => None,
+                    };
+                    let value = match direct {
+                        Some(Some(value)) => value,
+                        _ => {
+                            let base = take_or_clone(frame, *base, *base_tmp, span)?;
+                            field_of_value(base, field, span)?
+                        }
+                    };
+                    frame.slots[*dst as usize] = Some(value);
+                }
+                BOp::Native { dst, function, first, n, ret, at } => {
+                    let span = &bc.spans[*at as usize];
+                    let mut values = Vec::with_capacity(*n as usize);
+                    for index in 0..*n {
+                        values.push(frame.take(LocalSlot(*first + index), span)?);
+                    }
+                    let id = crate::runtime::NativeFunctionId(*function);
+                    let intrinsic = self
+                        .state
+                        .as_ref()
+                        .ok_or_else(|| module_state_error(span))?
+                        .natives
+                        .intrinsic(id);
+                    let value = if let Some(intrinsic) = intrinsic {
+                        let requested = (*ret != NONE)
+                            .then(|| resolve_runtime_type(&bc.types[*ret as usize], frame, module));
+                        self.execute_native_intrinsic(intrinsic, &values, requested.as_ref(), span)?
+                    } else {
+                        let natives = &self
+                            .state
+                            .as_ref()
+                            .ok_or_else(|| module_state_error(span))?
+                            .natives;
+                        natives.call(id, &mut self.context, &values, span)?
+                    };
+                    frame.slots[*dst as usize] = Some(value);
+                }
+                BOp::Method { dst, recv, first, n, method, mutates, at } => {
+                    let span = &bc.spans[*at as usize];
+                    let mut values = Vec::with_capacity(*n as usize + 1);
+                    for index in 0..*n {
+                        values.push(frame.take(LocalSlot(*first + index), span)?);
+                    }
+                    let intrinsic = self
+                        .state
+                        .as_ref()
+                        .ok_or_else(|| module_state_error(span))?
+                        .natives
+                        .method_intrinsic(*method);
+                    let result = if *recv == NONE {
+                        // Receiver is `values[0]`; non-mutating by construction.
+                        if let Some(intrinsic) = intrinsic {
+                            self.execute_native_intrinsic(intrinsic, &values, None, span)?
+                        } else {
+                            let natives = &self
+                                .state
+                                .as_ref()
+                                .ok_or_else(|| module_state_error(span))?
+                                .natives;
+                            natives.call_method(*method, &mut self.context, &values, span)?
+                        }
+                    } else {
+                        // Local receiver: move it out, call, always move it back.
+                        let mut receiver_value = frame.take(LocalSlot(*recv), span)?;
+                        let outcome: Result<Value, RuntimeFault> = if *mutates {
+                            let natives = &self
+                                .state
+                                .as_ref()
+                                .ok_or_else(|| module_state_error(span))?
+                                .natives;
+                            natives
+                                .call_method_mut(
+                                    *method,
+                                    &mut self.context,
+                                    &mut receiver_value,
+                                    &values,
+                                    span,
+                                )
+                                .map_err(Into::into)
+                        } else {
+                            values.insert(0, receiver_value);
+                            let outcome = if let Some(intrinsic) = intrinsic {
+                                self.execute_native_intrinsic(intrinsic, &values, None, span)
+                            } else {
+                                let natives = &self
+                                    .state
+                                    .as_ref()
+                                    .ok_or_else(|| module_state_error(span))?
+                                    .natives;
+                                natives
+                                    .call_method(*method, &mut self.context, &values, span)
+                                    .map_err(Into::into)
+                            };
+                            receiver_value = values.swap_remove(0);
+                            outcome
+                        };
+                        frame.slots[*recv as usize] = Some(receiver_value);
+                        outcome?
+                    };
+                    frame.slots[*dst as usize] = Some(result);
+                }
+                BOp::Interp { dst, t, first, at } => {
+                    let span = &bc.spans[*at as usize];
+                    let mut output = String::new();
+                    let mut reg = *first;
+                    for part in &bc.templates[*t as usize] {
+                        match part {
+                            Part::Literal(text) => output.push_str(text),
+                            Part::Expr => {
+                                match frame.read(LocalSlot(reg), span)? {
+                                    Value::String(value) => output.push_str(value),
+                                    Value::Int(value) => output.push_str(&value.to_string()),
+                                    Value::Float(value) => output.push_str(&value.to_string()),
+                                    Value::Bool(value) => output.push_str(&value.to_string()),
+                                    other => return Err(type_error("primitive", other, span).into()),
+                                }
+                                reg += 1;
+                            }
+                        }
+                    }
+                    frame.slots[*dst as usize] = Some(Value::String(output));
+                }
+                BOp::ListNew { dst, first, n } => {
+                    let mut items = Vec::with_capacity(*n as usize);
+                    for index in 0..*n {
+                        items.push(frame.take(LocalSlot(*first + index), &Span::dummy())?);
+                    }
+                    frame.slots[*dst as usize] = Some(Value::List(items.into()));
                 }
                 BOp::Tree { dst, e } => {
                     let value = self.eval_expression(&bc.exprs[*e as usize], frame, module)?;

@@ -40,7 +40,7 @@ pub(crate) struct Frame {
     /// Reified generic bindings for the current function invocation. Spar's
     /// ordinary runtime remains type-erased; only operations that explicitly
     /// require a checked type (typed JSON/HTTP decoding) consult this map.
-    type_bindings: HashMap<String, RuntimeTypeBinding>,
+    type_bindings: Option<Box<HashMap<String, RuntimeTypeBinding>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +125,7 @@ impl Frame {
     pub fn new(slot_count: usize) -> Self {
         Self {
             slots: vec![None; slot_count],
-            type_bindings: HashMap::new(),
+            type_bindings: None,
         }
     }
 
@@ -224,7 +224,8 @@ fn resolve_runtime_type(
         match ty {
             SparType::TypeParameter(name) => frame
                 .type_bindings
-                .get(name)
+                .as_ref()
+                .and_then(|bindings| bindings.get(name))
                 .map(|binding| (binding.ty.clone(), Some(binding.module)))
                 .unwrap_or_else(|| (ty.clone(), None)),
             SparType::List(inner) => {
@@ -1108,7 +1109,7 @@ impl Runtime<'_> {
                     declared_return_type,
                     &actual_return.ty,
                     actual_return.module,
-                    &mut frame.type_bindings,
+                    &mut **frame.type_bindings.get_or_insert_with(Default::default),
                 );
             }
             let mut supplied = arguments.into_iter();
@@ -1273,7 +1274,7 @@ impl Runtime<'_> {
                     &function.return_type,
                     &actual_return.ty,
                     actual_return.module,
-                    &mut frame.type_bindings,
+                    &mut **frame.type_bindings.get_or_insert_with(Default::default),
                 );
             }
         }
@@ -1984,32 +1985,7 @@ impl Runtime<'_> {
             }
             CompiledExpression::Field { base, field, span } => {
                 let base = self.eval_expression(base, frame, module)?;
-                match base {
-                    Value::Object(fields) => Ok(fields.get(field).cloned().ok_or_else(|| {
-                        runtime_error(&format!("object has no field '{field}'"), span)
-                    })?),
-                    Value::Bytes(bytes) if field == "values" => Ok(Value::List(
-                        bytes
-                            .into_iter()
-                            .map(|value| Value::Int(i64::from(value)))
-                            .collect(),
-                    )),
-                    Value::Error(error) => {
-                        let value::ErrorValue { message, kind, code, cause } = *error;
-                        match field.as_str() {
-                            "message" => Ok(Value::String(message)),
-                            "kind" => Ok(Value::String(kind)),
-                            "code" => Ok(Value::Int(code)),
-                            "cause" => Ok(cause
-                                .map(|value| *value)
-                                .ok_or_else(|| runtime_error("error has no cause", span))?),
-                            _ => Err(
-                                runtime_error(&format!("error has no field '{field}'"), span).into(),
-                            ),
-                        }
-                    }
-                    value => Err(type_error("object", &value, span).into()),
-                }
+                field_of_value(base, field, span)
             }
             CompiledExpression::Interpolation(parts, span) => {
                 let mut output = String::new();
@@ -5595,6 +5571,44 @@ fn sequence_kind(value: &Value) -> String {
         Value::Float(_) => "a float".into(),
         Value::Bool(_) => "a bool".into(),
         other => format!("`{}`", other.type_name()),
+    }
+}
+
+/// `base.field` on an already-evaluated base value.
+pub(crate) fn field_of_value(
+    base: Value,
+    field: &str,
+    span: &Span,
+) -> Result<Value, RuntimeFault> {
+    match base {
+        Value::Object(fields) => Ok(fields
+            .get(field)
+            .cloned()
+            .ok_or_else(|| runtime_error(&format!("object has no field '{field}'"), span))?),
+        Value::Bytes(bytes) if field == "values" => Ok(Value::List(
+            bytes
+                .into_iter()
+                .map(|value| Value::Int(i64::from(value)))
+                .collect(),
+        )),
+        Value::Error(error) => {
+            let value::ErrorValue {
+                message,
+                kind,
+                code,
+                cause,
+            } = *error;
+            match field {
+                "message" => Ok(Value::String(message)),
+                "kind" => Ok(Value::String(kind)),
+                "code" => Ok(Value::Int(code)),
+                "cause" => Ok(cause
+                    .map(|value| *value)
+                    .ok_or_else(|| runtime_error("error has no cause", span))?),
+                _ => Err(runtime_error(&format!("error has no field '{field}'"), span).into()),
+            }
+        }
+        value => Err(type_error("object", &value, span).into()),
     }
 }
 

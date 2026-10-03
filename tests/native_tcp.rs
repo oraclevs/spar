@@ -104,7 +104,7 @@ fn local_tcp_package_loads_native_module_from_path_dependency() {
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::copy(module, &target).unwrap();
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../spar-native-sys/examples/native/rust-tcp/package/src/lib.spar");
+        .join("tests/fixtures/native_tcp_lib.spar");
     std::fs::copy(example, package.join("src/lib.spar")).unwrap();
     std::fs::write(
         package.join("spar.package.spar"),

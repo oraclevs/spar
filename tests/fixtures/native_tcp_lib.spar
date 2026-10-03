@@ -1,0 +1,42 @@
+// TCP transport primitives. HTTP request parsing and routing belong in a separate Spar library.
+import nativeTcp;
+
+fn listen(address: str) -> TcpListenerHandle {
+    return nativeTcp.listen(address: address);
+};
+
+fn localAddress(listener: TcpListenerHandle) -> str {
+    return nativeTcp.localAddress(listener: listener);
+};
+
+fn accept(listener: TcpListenerHandle) -> TcpConnectionHandle {
+    return nativeTcp.accept(listener: listener);
+};
+
+fn peerAddress(connection: TcpConnectionHandle) -> str {
+    return nativeTcp.peerAddress(connection: connection);
+};
+
+fn setReadTimeout(connection: TcpConnectionHandle, millis: int) -> void {
+    nativeTcp.setReadTimeout(connection: connection, millis: millis);
+    return;
+};
+
+fn read(connection: TcpConnectionHandle, maxBytes: int) -> Bytes {
+    return nativeTcp.read(connection: connection, maxBytes: maxBytes);
+};
+
+fn writeBytes(connection: TcpConnectionHandle, data: Bytes) -> void {
+    nativeTcp.writeBytes(connection: connection, data: data);
+    return;
+};
+
+fn writeText(connection: TcpConnectionHandle, text: str) -> void {
+    nativeTcp.writeText(connection: connection, text: text);
+    return;
+};
+
+fn close(connection: TcpConnectionHandle) -> void {
+    nativeTcp.close(connection: connection);
+    return;
+};

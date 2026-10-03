@@ -468,21 +468,30 @@ impl StructDecl {
     /// Derived validation metadata; the struct declaration owns fields and defaults.
     pub fn type_decl(&self) -> TypeDecl {
         TypeDecl {
-            name: self.name.clone(), name_span: self.span.clone(),
-            type_parameters: self.type_parameters.clone(), exported: self.exported,
-            fields: self.items.iter().filter_map(|item| {
-                let ObjectItem::Field(field) = item else { return None; };
-                Some(TypeField {
-                    name: field.name.clone(),
-                    shape: TypeFieldShape::Primitive(field.ty.clone()?),
-                    default: match &field.value {
-                        Some(FieldValue::Expr(value)) => Some(value.clone()),
-                        _ => None,
-                    },
-                    span: field.span.clone(),
+            name: self.name.clone(),
+            name_span: self.span.clone(),
+            type_parameters: self.type_parameters.clone(),
+            exported: self.exported,
+            fields: self
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let ObjectItem::Field(field) = item else {
+                        return None;
+                    };
+                    Some(TypeField {
+                        name: field.name.clone(),
+                        shape: TypeFieldShape::Primitive(field.ty.clone()?),
+                        default: match &field.value {
+                            Some(FieldValue::Expr(value)) => Some(value.clone()),
+                            _ => None,
+                        },
+                        span: field.span.clone(),
+                    })
                 })
-            }).collect(),
-            span: self.span.clone(), end_line: self.end_line,
+                .collect(),
+            span: self.span.clone(),
+            end_line: self.end_line,
         }
     }
 
@@ -563,6 +572,8 @@ pub enum SparType {
     Shell,
     Error,
     List(Box<SparType>),
+    /// `(int, str)` — a fixed-size, heterogeneous sequence of two or more elements.
+    Tuple(Vec<SparType>),
     Named(String), // a declared `type X { ... }`, referenced by name
     TypeParameter(String),
     Applied {
@@ -608,6 +619,15 @@ pub enum Expr {
     BinaryOp(BinaryOp),
     List(Vec<Expr>, Span),
     Grouped(Box<Expr>, Span),
+    /// `(a, b, ...)` — two or more comma-separated elements.
+    Tuple(Vec<Expr>, Span),
+    /// `tuple.0` — constant positional access.
+    TupleField {
+        base: Box<Expr>,
+        index: usize,
+        index_span: Span,
+        span: Span,
+    },
     Call {
         name: String,
         name_span: Span,
@@ -681,6 +701,8 @@ impl Expr {
             Expr::BinaryOp(value) => Some(&value.span),
             Expr::List(_, span)
             | Expr::Grouped(_, span)
+            | Expr::Tuple(_, span)
+            | Expr::TupleField { span, .. }
             | Expr::Call { span, .. }
             | Expr::Closure { span, .. }
             | Expr::Unary { span, .. }
@@ -828,6 +850,12 @@ pub struct FunctionBody {
 #[derive(Debug, Clone)]
 pub enum Statement {
     LocalVar(LocalVarDecl),
+    TupleBinding {
+        names: Vec<(String, Span)>,
+        ty: Option<SparType>,
+        value: Expr,
+        span: Span,
+    },
     Assignment {
         name: String,
         value: Expr,

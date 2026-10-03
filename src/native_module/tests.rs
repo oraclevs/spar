@@ -802,3 +802,62 @@ fn bench_env() {
         t.elapsed().as_secs_f64() * 1e9 / n as f64
     );
 }
+
+unsafe extern "C" fn owned_buffer_finalizer(p: *mut c_void, ud: *mut c_void) {
+    drop(Box::from_raw(p as *mut [u8; 16]));
+    let counter = Box::from_raw(ud as *mut Count);
+    counter.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[test]
+fn many_external_buffers_and_resources_finalize_once() {
+    const COUNT: usize = 1000;
+    let api = api_table();
+    let buffers = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let mut context = ctx();
+        let raw = Box::into_raw(CallEnv::acquire(&mut context as *mut _));
+        unsafe {
+            let env = (*raw).as_ptr();
+            let mut value = SparValue::void();
+            let mut resource_data = 0u64;
+            for _ in 0..COUNT {
+                let data = Box::into_raw(Box::new([0u8; 16])) as *mut c_void;
+                let user_data = Box::into_raw(Box::new(Count(buffers.clone()))) as *mut c_void;
+                let status = (api.buffer_from_external.unwrap())(
+                    env,
+                    data,
+                    SPAR_DTYPE_U8,
+                    16,
+                    Some(owned_buffer_finalizer),
+                    user_data,
+                    &mut value,
+                );
+                if status != SPAR_OK {
+                    drop(Box::from_raw(data as *mut [u8; 16]));
+                    drop(Box::from_raw(user_data as *mut Count));
+                }
+                assert_eq!(status, SPAR_OK);
+                let user_data = Box::into_raw(Box::new(Count(resources.clone()))) as *mut c_void;
+                let status = (api.resource_new.unwrap())(
+                    env,
+                    77,
+                    &mut resource_data as *mut u64 as *mut c_void,
+                    Some(count_finalizer),
+                    user_data,
+                    &mut value,
+                );
+                if status != SPAR_OK {
+                    drop(Box::from_raw(user_data as *mut Count));
+                }
+                assert_eq!(status, SPAR_OK);
+            }
+            Box::from_raw(raw).release();
+        }
+        assert_eq!(buffers.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(resources.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    assert_eq!(buffers.load(std::sync::atomic::Ordering::SeqCst), COUNT);
+    assert_eq!(resources.load(std::sync::atomic::Ordering::SeqCst), COUNT);
+}

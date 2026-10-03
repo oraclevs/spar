@@ -16,6 +16,14 @@ pub fn display_type(ty: &SparType) -> String {
         SparType::Shell => "shell".into(),
         SparType::Error => "error".into(),
         SparType::List(inner) => format!("List<{}>", display_type(inner)),
+        SparType::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         SparType::Named(name) => crate::naming::demangle(name),
         SparType::TypeParameter(name) => name.clone(),
         SparType::Applied { name, arguments } => format!(
@@ -86,11 +94,15 @@ pub(crate) fn is_assignable(expected: &SparType, actual: &SparType) -> bool {
     match (expected, actual) {
         // `Slice<T>` is the native-module spelling for "a list of T or a native Buffer": both
         // can be borrowed as contiguous memory (a list costs one copy, a Buffer none).
-        (SparType::Applied { name, arguments }, actual) if name == "Slice" && arguments.len() == 1 => match actual {
-            SparType::Named(buffer) => buffer == "Buffer",
-            SparType::List(inner) => **inner == arguments[0],
-            _ => false,
-        },
+        (SparType::Applied { name, arguments }, actual)
+            if name == "Slice" && arguments.len() == 1 =>
+        {
+            match actual {
+                SparType::Named(buffer) => buffer == "Buffer",
+                SparType::List(inner) => **inner == arguments[0],
+                _ => false,
+            }
+        }
         (
             SparType::Function {
                 params: expected_params,
@@ -133,7 +145,13 @@ fn is_row_type(ty: &SparType) -> bool {
 /// `sequence_parts`); the runtime checks the value really is a list.
 pub(crate) fn pipe_type_accepts(expected: &SparType, actual: &SparType) -> bool {
     if is_assignable(expected, actual)
-        || unify_generic(expected, actual, &mut TypeSubstitution::new(), &Span::dummy()).is_ok()
+        || unify_generic(
+            expected,
+            actual,
+            &mut TypeSubstitution::new(),
+            &Span::dummy(),
+        )
+        .is_ok()
     {
         return true;
     }
@@ -197,6 +215,12 @@ pub(crate) fn substitute_type(ty: &SparType, substitution: &TypeSubstitution) ->
             .cloned()
             .unwrap_or_else(|| ty.clone()),
         SparType::List(inner) => SparType::List(Box::new(substitute_type(inner, substitution))),
+        SparType::Tuple(items) => SparType::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_type(item, substitution))
+                .collect(),
+        ),
         SparType::Applied { name, arguments } if name == "Sequence" && arguments.len() == 1 => {
             let inner = substitute_type(&arguments[0], substitution);
             match substitution.get(SEQUENCE_SHAPE_KEY) {
@@ -247,6 +271,7 @@ pub(crate) fn mentions_type_parameter(ty: &SparType) -> bool {
     match ty {
         SparType::TypeParameter(_) => true,
         SparType::List(inner) => mentions_type_parameter(inner),
+        SparType::Tuple(items) => items.iter().any(mentions_type_parameter),
         SparType::Applied { arguments, .. } => arguments.iter().any(mentions_type_parameter),
         SparType::Function {
             params,
@@ -265,6 +290,11 @@ fn collect_type_parameter_names(ty: &SparType, out: &mut Vec<String>) {
     match ty {
         SparType::TypeParameter(name) => out.push(name.clone()),
         SparType::List(inner) => collect_type_parameter_names(inner, out),
+        SparType::Tuple(items) => {
+            for item in items {
+                collect_type_parameter_names(item, out);
+            }
+        }
         SparType::Applied { arguments, .. } => {
             for argument in arguments {
                 collect_type_parameter_names(argument, out);
@@ -321,6 +351,15 @@ pub(crate) fn unify_generic(
         SparType::List(pattern_inner) => match actual {
             SparType::List(actual_inner) => {
                 unify_generic(pattern_inner, actual_inner, substitution, span)
+            }
+            _ => type_mismatch(pattern, actual, span),
+        },
+        SparType::Tuple(pattern_items) => match actual {
+            SparType::Tuple(actual_items) if pattern_items.len() == actual_items.len() => {
+                for (pattern, actual) in pattern_items.iter().zip(actual_items) {
+                    unify_generic(pattern, actual, substitution, span)?;
+                }
+                Ok(())
             }
             _ => type_mismatch(pattern, actual, span),
         },
@@ -484,7 +523,10 @@ pub(crate) fn substitute_type_field(
     TypeField {
         name: field.name.clone(),
         shape: substitute_field_shape(&field.shape, substitution),
-        default: field.default.as_ref().map(|value| crate::loader::scope::substitute_default(value, substitution)),
+        default: field
+            .default
+            .as_ref()
+            .map(|value| crate::loader::scope::substitute_default(value, substitution)),
         span: field.span.clone(),
     }
 }
@@ -513,7 +555,7 @@ pub(crate) fn pipe_stage_parameters_with_locals(
         expectations: Default::default(),
         in_shell_statement_scope: false,
         type_map: Default::default(),
-            receiver_map: Default::default(),
+        receiver_map: Default::default(),
         record_types: false,
     }
     .pipe_stage_parameter_types(input, stage, locals, &span)
@@ -542,7 +584,7 @@ pub(crate) fn infer_expression_with_locals(
         expectations: Default::default(),
         in_shell_statement_scope: false,
         type_map: Default::default(),
-            receiver_map: Default::default(),
+        receiver_map: Default::default(),
         record_types: false,
     }
     .infer_type_with_locals(expr, locals)
@@ -800,8 +842,18 @@ impl<'a> TypeChecker<'a> {
             record_types: true,
         };
         tc.check_program(program);
-        let map = TypeMap { expressions: tc.type_map.take(), receivers: tc.receiver_map.take() };
-        (if tc.errors.is_empty() { Ok(()) } else { Err(tc.errors) }, map)
+        let map = TypeMap {
+            expressions: tc.type_map.take(),
+            receivers: tc.receiver_map.take(),
+        };
+        (
+            if tc.errors.is_empty() {
+                Ok(())
+            } else {
+                Err(tc.errors)
+            },
+            map,
+        )
     }
 
     pub fn check_with_imports(
@@ -966,12 +1018,24 @@ impl<'a> TypeChecker<'a> {
 
     fn check_struct(&mut self, decl: &StructDecl) {
         for field in decl.type_decl().fields {
-            if matches!(&field.default, Some(Expr::Call { name, args, .. }) if name == &decl.name && args.is_empty()) {
+            if matches!(&field.default, Some(Expr::Call { name, args, .. }) if name == &decl.name && args.is_empty())
+            {
                 self.push_type_error("recursive struct default; use an explicit optional boundary such as Option<T> = none()", None, field.span);
             }
         }
-        if decl.is_emit() && (!decl.type_parameters.is_empty() || decl.type_decl().fields.iter().any(|field| field.default.is_none())) {
-            self.push_type_error("#[emit] struct requires a concrete declaration with defaults for every field", None, decl.span.clone());
+        if decl.is_emit()
+            && (!decl.type_parameters.is_empty()
+                || decl
+                    .type_decl()
+                    .fields
+                    .iter()
+                    .any(|field| field.default.is_none()))
+        {
+            self.push_type_error(
+                "#[emit] struct requires a concrete declaration with defaults for every field",
+                None,
+                decl.span.clone(),
+            );
         }
         let struct_path = vec![decl.name.clone()];
         let prev_section = self.current_struct.replace(struct_path);
@@ -2600,7 +2664,11 @@ impl<'a> TypeChecker<'a> {
             _ => return,
         };
         if let Some(ty) = self.tooling_receiver_type(receiver, locals, 0) {
-            self.receiver_map.borrow_mut().push(TypedSpan { start: span.start, end: span.start + 1, ty });
+            self.receiver_map.borrow_mut().push(TypedSpan {
+                start: span.start,
+                end: span.start + 1,
+                ty,
+            });
         }
     }
 
@@ -2635,9 +2703,15 @@ impl<'a> TypeChecker<'a> {
         if !self.record_types {
             return;
         }
-        let (Some(ty), Some(span)) = (ty, expr_span_of(expr)) else { return };
+        let (Some(ty), Some(span)) = (ty, expr_span_of(expr)) else {
+            return;
+        };
         if span.end > span.start {
-            self.type_map.borrow_mut().push(TypedSpan { start: span.start, end: span.end, ty: ty.clone() });
+            self.type_map.borrow_mut().push(TypedSpan {
+                start: span.start,
+                end: span.end,
+                ty: ty.clone(),
+            });
         }
     }
 
@@ -2648,6 +2722,15 @@ impl<'a> TypeChecker<'a> {
             Expr::Literal(Literal::Float(_)) => Some(SparType::Float),
             Expr::Literal(Literal::Bool(_)) => Some(SparType::Bool),
             Expr::String(_) => Some(SparType::Str),
+            Expr::Tuple(items, _) => items
+                .iter()
+                .map(|item| self.infer_type(item))
+                .collect::<Option<Vec<_>>>()
+                .map(SparType::Tuple),
+            Expr::TupleField { base, index, .. } => match self.infer_type(base)? {
+                SparType::Tuple(items) => items.get(*index).cloned(),
+                _ => None,
+            },
             Expr::List(items, _) => items
                 .first()
                 .and_then(|e| self.infer_type(e))
@@ -2698,18 +2781,32 @@ impl<'a> TypeChecker<'a> {
                 .instantiate_call(name, type_arguments, args, None, name_span)
                 .ok()
                 .map(|(ret, _)| ret),
-            Expr::Closure { params, return_type, body, .. } => {
+            Expr::Closure {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
                 let mut closure_locals = HashMap::new();
-                let params = params.iter().map(|param| {
-                    let ty = param.ty.clone()?;
-                    closure_locals.insert(param.name.clone(), ty.clone());
-                    Some(CallableParamType { name: param.name.clone(), ty })
-                }).collect::<Option<Vec<_>>>()?;
+                let params = params
+                    .iter()
+                    .map(|param| {
+                        let ty = param.ty.clone()?;
+                        closure_locals.insert(param.name.clone(), ty.clone());
+                        Some(CallableParamType {
+                            name: param.name.clone(),
+                            ty,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 let result = return_type.clone().or_else(|| match body {
                     ClosureBody::Expr(value) => self.infer_type_with_locals(value, &closure_locals),
                     ClosureBody::Block(_) => None,
                 })?;
-                Some(SparType::Function { params, return_type: Box::new(result) })
+                Some(SparType::Function {
+                    params,
+                    return_type: Box::new(result),
+                })
             }
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Not => {
@@ -3249,6 +3346,47 @@ impl<'a> TypeChecker<'a> {
             self.validate_object_literal_expected(expr, expected, locals, label, span)?;
             return Ok(true);
         }
+        if let (Expr::Tuple(items, _), SparType::Tuple(element_types)) = (expr, expected) {
+            if items.len() != element_types.len() {
+                return Err(SparError::TypeError {
+                    message: format!(
+                        "`{label}` expects {} tuple elements but found {}",
+                        element_types.len(),
+                        items.len()
+                    ),
+                    hint: None,
+                    span: span.clone(),
+                });
+            }
+            for (index, (item, element_type)) in items.iter().zip(element_types).enumerate() {
+                let item_label = format!("{label}.{index}");
+                if self.validate_literal_expected(item, element_type, locals, &item_label, span)? {
+                    continue;
+                }
+                let actual = match locals {
+                    Some(locals) => self.infer_type_with_locals(item, locals),
+                    None => self.infer_type(item),
+                };
+                if !actual
+                    .as_ref()
+                    .is_some_and(|actual| is_assignable(element_type, actual))
+                {
+                    return Err(SparError::TypeError {
+                        message: format!(
+                            "`{item_label}` expects `{}` but found `{}`",
+                            display_type(element_type),
+                            actual
+                                .as_ref()
+                                .map(display_type)
+                                .unwrap_or_else(|| "unknown".into())
+                        ),
+                        hint: None,
+                        span: span.clone(),
+                    });
+                }
+            }
+            return Ok(true);
+        }
         if let (Expr::List(items, _), SparType::List(element_type)) = (expr, expected) {
             for (index, item) in items.iter().enumerate() {
                 let item_label = format!("{label}[{index}]");
@@ -3431,12 +3569,37 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.check_expr_internal(item);
                 }
             }
             Expr::Grouped(inner, _) => self.check_expr_internal(inner),
+            Expr::TupleField {
+                base,
+                index,
+                index_span,
+                ..
+            } => {
+                self.check_expr_internal(base);
+                match self.infer_type(base) {
+                    Some(SparType::Tuple(items)) if *index < items.len() => {}
+                    Some(SparType::Tuple(items)) => self.push_type_error(
+                        format!(
+                            "tuple index {index} out of bounds for {} elements",
+                            items.len()
+                        ),
+                        None,
+                        index_span.clone(),
+                    ),
+                    Some(other) => self.push_type_error(
+                        format!("cannot use tuple access on `{}`", display_type(&other)),
+                        None,
+                        index_span.clone(),
+                    ),
+                    None => {}
+                }
+            }
             Expr::Call { args, .. } => {
                 for arg in args {
                     self.check_expr_internal(&arg.value);
@@ -3784,20 +3947,46 @@ impl<'a> TypeChecker<'a> {
         }
         if !name.contains("::") {
             if self.constructor_parameters(name).is_some() {
-                let entry = self.symbols.types.get(name).expect("struct metadata registered");
+                let entry = self
+                    .symbols
+                    .types
+                    .get(name)
+                    .expect("struct metadata registered");
                 if type_arguments.len() != entry.type_parameters.len() {
                     return Err(SparError::TypeError {
-                        message: format!("struct '{name}' expects {} type arguments, found {}", entry.type_parameters.len(), type_arguments.len()),
-                        hint: None, span: span.clone(),
+                        message: format!(
+                            "struct '{name}' expects {} type arguments, found {}",
+                            entry.type_parameters.len(),
+                            type_arguments.len()
+                        ),
+                        hint: None,
+                        span: span.clone(),
                     });
                 }
-                let owner = if type_arguments.is_empty() { SparType::Named(name.to_string()) }
-                    else { SparType::Applied { name: name.to_string(), arguments: type_arguments.to_vec() } };
-                let (_, fields) = Self::fields_for_type(&owner, self.symbols).expect("checked struct arity");
-                let parameters = fields.iter().map(|field| (field.name.clone(), self.field_shape_to_type(&field.shape))).collect::<Vec<_>>();
+                let owner = if type_arguments.is_empty() {
+                    SparType::Named(name.to_string())
+                } else {
+                    SparType::Applied {
+                        name: name.to_string(),
+                        arguments: type_arguments.to_vec(),
+                    }
+                };
+                let (_, fields) =
+                    Self::fields_for_type(&owner, self.symbols).expect("checked struct arity");
+                let parameters = fields
+                    .iter()
+                    .map(|field| (field.name.clone(), self.field_shape_to_type(&field.shape)))
+                    .collect::<Vec<_>>();
                 self.validate_named_argument_shape(
-                    &format!("struct constructor '{name}'"), arguments, &parameters,
-                    |field| fields.iter().any(|candidate| candidate.name == field && candidate.default.is_none()), span,
+                    &format!("struct constructor '{name}'"),
+                    arguments,
+                    &parameters,
+                    |field| {
+                        fields
+                            .iter()
+                            .any(|candidate| candidate.name == field && candidate.default.is_none())
+                    },
+                    span,
                 )?;
                 return Ok((owner, parameters));
             }
@@ -4140,9 +4329,15 @@ impl<'a> TypeChecker<'a> {
             let actual = match locals {
                 Some(locals) => self.infer_type_with_locals(&argument.value, locals),
                 None => self.infer_type(&argument.value),
-            }.or_else(|| self.infer_closure_signature_for_pattern(
-                &argument.value, expected, &TypeSubstitution::new(), locals,
-            ));
+            }
+            .or_else(|| {
+                self.infer_closure_signature_for_pattern(
+                    &argument.value,
+                    expected,
+                    &TypeSubstitution::new(),
+                    locals,
+                )
+            });
             if !actual
                 .as_ref()
                 .is_some_and(|actual| is_assignable(expected, actual))
@@ -4256,7 +4451,7 @@ impl<'a> TypeChecker<'a> {
                 }
                 Ok(())
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.check_expr_with_locals_in_context(item, locals, is_async)?;
                 }
@@ -4264,6 +4459,31 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Grouped(inner, _) => {
                 self.check_expr_with_locals_in_context(inner, locals, is_async)
+            }
+            Expr::TupleField {
+                base,
+                index,
+                index_span,
+                ..
+            } => {
+                self.check_expr_with_locals_in_context(base, locals, is_async)?;
+                match self.infer_type_with_locals(base, locals) {
+                    Some(SparType::Tuple(items)) if *index < items.len() => Ok(()),
+                    Some(SparType::Tuple(items)) => Err(SparError::TypeError {
+                        message: format!(
+                            "tuple index {index} out of bounds for {} elements",
+                            items.len()
+                        ),
+                        hint: None,
+                        span: index_span.clone(),
+                    }),
+                    Some(other) => Err(SparError::TypeError {
+                        message: format!("cannot use tuple access on `{}`", display_type(&other)),
+                        hint: None,
+                        span: index_span.clone(),
+                    }),
+                    None => Ok(()),
+                }
             }
             Expr::Call { args, .. } => {
                 for arg in args {
@@ -4765,7 +4985,12 @@ impl<'a> TypeChecker<'a> {
         let mut shell_locals = locals.clone();
         let was_in_shell_statement_scope = self.in_shell_statement_scope;
         self.in_shell_statement_scope = true;
-        self.check_func_stmts(&shell.statements, &SparType::Any, &mut shell_locals, is_async);
+        self.check_func_stmts(
+            &shell.statements,
+            &SparType::Any,
+            &mut shell_locals,
+            is_async,
+        );
         self.in_shell_statement_scope = was_in_shell_statement_scope;
         Ok(())
     }
@@ -5140,6 +5365,74 @@ impl<'a> TypeChecker<'a> {
     ) {
         for stmt in stmts {
             match stmt {
+                FuncStmt::TupleBinding {
+                    names,
+                    ty,
+                    value,
+                    span,
+                } => {
+                    if let Err(error) =
+                        self.check_expr_with_locals_in_context(value, local_types, is_async)
+                    {
+                        self.errors.push(error);
+                    }
+                    let actual = self.infer_type_with_locals(value, local_types);
+                    let tuple_ty = ty.as_ref().or(actual.as_ref());
+                    match tuple_ty {
+                        Some(SparType::Tuple(items)) if items.len() == names.len() => {
+                            if let Some(declared) = ty {
+                                if let Err(error) = self.validate_literal_expected(
+                                    value,
+                                    declared,
+                                    Some(local_types),
+                                    "tuple binding",
+                                    span,
+                                ) {
+                                    self.errors.push(error);
+                                }
+                                if let Some(actual) = &actual {
+                                    if !is_assignable(declared, actual) {
+                                        self.push_type_error(
+                                            format!(
+                                                "tuple binding expects `{}` but found `{}`",
+                                                display_type(declared),
+                                                display_type(actual)
+                                            ),
+                                            None,
+                                            span.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                            for ((name, _), item_ty) in names.iter().zip(items) {
+                                local_types.insert(name.clone(), item_ty.clone());
+                                self.mutable_bindings.remove(name);
+                            }
+                        }
+                        Some(SparType::Tuple(items)) => self.push_type_error(
+                            format!(
+                                "tuple binding has {} names but value has {} elements",
+                                names.len(),
+                                items.len()
+                            ),
+                            None,
+                            span.clone(),
+                        ),
+                        Some(other) => self.push_type_error(
+                            format!(
+                                "tuple binding requires a tuple, found `{}`",
+                                display_type(other)
+                            ),
+                            None,
+                            span.clone(),
+                        ),
+                        None => self.push_type_error(
+                            "cannot infer tuple binding type",
+                            None,
+                            span.clone(),
+                        ),
+                    }
+                }
                 FuncStmt::LocalVar(lv) => {
                     if lv.mutable {
                         self.mutable_bindings.insert(lv.name.clone());
@@ -5784,18 +6077,32 @@ impl<'a> TypeChecker<'a> {
             Expr::StructuredPipe { input, stage, span } => self
                 .structured_pipe_type(input, stage, Some(locals), span)
                 .ok(),
-            Expr::Closure { params, return_type, body, .. } => {
+            Expr::Closure {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
                 let mut closure_locals = locals.clone();
-                let params = params.iter().map(|param| {
-                    let ty = param.ty.clone()?;
-                    closure_locals.insert(param.name.clone(), ty.clone());
-                    Some(CallableParamType { name: param.name.clone(), ty })
-                }).collect::<Option<Vec<_>>>()?;
+                let params = params
+                    .iter()
+                    .map(|param| {
+                        let ty = param.ty.clone()?;
+                        closure_locals.insert(param.name.clone(), ty.clone());
+                        Some(CallableParamType {
+                            name: param.name.clone(),
+                            ty,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 let result = return_type.clone().or_else(|| match body {
                     ClosureBody::Expr(value) => self.infer_type_with_locals(value, &closure_locals),
                     ClosureBody::Block(_) => None,
                 })?;
-                Some(SparType::Function { params, return_type: Box::new(result) })
+                Some(SparType::Function {
+                    params,
+                    return_type: Box::new(result),
+                })
             }
             Expr::Call {
                 name,
@@ -5855,6 +6162,17 @@ impl<'a> TypeChecker<'a> {
                 let body_ty = self.infer_type_with_locals(body, &inner_locals)?;
                 Some(SparType::List(Box::new(body_ty)))
             }
+            Expr::Tuple(items, _) => items
+                .iter()
+                .map(|item| self.infer_type_with_locals(item, locals))
+                .collect::<Option<Vec<_>>>()
+                .map(SparType::Tuple),
+            Expr::TupleField { base, index, .. } => {
+                match self.infer_type_with_locals(base, locals)? {
+                    SparType::Tuple(items) => items.get(*index).cloned(),
+                    _ => None,
+                }
+            }
             Expr::List(items, _) => {
                 let first = items
                     .first()
@@ -5910,7 +6228,11 @@ impl<'a> TypeChecker<'a> {
                     );
                 let same_enum = lty == rty
                     && matches!(&lty, SparType::Named(name) if self.symbols.enums.contains_key(name));
-                if same_primitive || same_enum || dynamic_pair(&lty, &rty) || dynamic_pair(&rty, &lty) {
+                if same_primitive
+                    || same_enum
+                    || dynamic_pair(&lty, &rty)
+                    || dynamic_pair(&rty, &lty)
+                {
                     Some(SparType::Bool)
                 } else {
                     None
@@ -6194,7 +6516,10 @@ mod tests {
     #[test]
     fn test_required_field_in_struct() {
         check_ok("struct Server { port: int; };");
-        assert!(has_type_error("struct Server { port: int; }; var server: Server = Server();", "missing required argument"));
+        assert!(has_type_error(
+            "struct Server { port: int; }; var server: Server = Server();",
+            "missing required argument"
+        ));
     }
 
     #[test]
@@ -6463,6 +6788,8 @@ fn expr_span_of(expr: &Expr) -> Option<Span> {
         Expr::FnCall(value) => value.span.clone(),
         Expr::BinaryOp(value) => value.span.clone(),
         Expr::List(_, span)
+        | Expr::Tuple(_, span)
+        | Expr::TupleField { span, .. }
         | Expr::Grouped(_, span)
         | Expr::Call { span, .. }
         | Expr::Closure { span, .. }
@@ -6474,6 +6801,8 @@ fn expr_span_of(expr: &Expr) -> Option<Span> {
         | Expr::MethodCall { span, .. }
         | Expr::StructuredPipe { span, .. }
         | Expr::Object(_, span) => span.clone(),
-        Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => value.span.clone(),
+        Expr::Shell(value) | Expr::ExecShell(value) | Expr::CommandSubstitution(value) => {
+            value.span.clone()
+        }
     })
 }

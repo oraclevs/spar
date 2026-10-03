@@ -239,7 +239,9 @@ fn expand_imports_inner(
             Ok(items) => {
                 for it in items {
                     if let Some(name) = top_level_name(&it) {
-                        if (name.starts_with("sparModule") || name.starts_with("SparModule")) && imported_helpers.contains(name) {
+                        if (name.starts_with("sparModule") || name.starts_with("SparModule"))
+                            && imported_helpers.contains(name)
+                        {
                             continue;
                         }
                         if !declared.insert(name.to_string()) {
@@ -275,11 +277,14 @@ fn expand_imports_inner(
             _ => continue,
         };
         if let Some(origin) = origin {
-            canonical_types.entry(origin.clone()).and_modify(|current| {
-                if current.starts_with("SparModule") && !name.starts_with("SparModule") {
-                    *current = name.clone();
-                }
-            }).or_insert_with(|| name.clone());
+            canonical_types
+                .entry(origin.clone())
+                .and_modify(|current| {
+                    if current.starts_with("SparModule") && !name.starts_with("SparModule") {
+                        *current = name.clone();
+                    }
+                })
+                .or_insert_with(|| name.clone());
         }
     }
     let mut type_aliases = HashMap::new();
@@ -290,7 +295,9 @@ fn expand_imports_inner(
             _ => continue,
         };
         if let Some(canonical) = origin.as_ref().and_then(|key| canonical_types.get(key)) {
-            if name != canonical { type_aliases.insert(name.clone(), canonical.clone()); }
+            if name != canonical {
+                type_aliases.insert(name.clone(), canonical.clone());
+            }
         }
     }
     new_items.retain(|item| match item {
@@ -298,7 +305,9 @@ fn expand_imports_inner(
         TopLevelItem::Enum(decl) => !type_aliases.contains_key(&decl.name),
         _ => true,
     });
-    for item in &mut new_items { scope::remap_references(item, &type_aliases); }
+    for item in &mut new_items {
+        scope::remap_references(item, &type_aliases);
+    }
     // Repeated routes to the same source method are not new declarations.
     // Keep distinct source locations so genuine duplicate methods still fail.
     let mut imported_methods = HashSet::new();
@@ -306,10 +315,15 @@ fn expand_imports_inner(
         if let TopLevelItem::Impl(implementation) = item {
             if let Some(origin) = &implementation.origin {
                 let owner = implementation.target.clone();
-                implementation.methods.retain(|method| imported_methods.insert((
-                    origin.clone(), format!("{owner:?}"), method.function.name.clone(),
-                    method.function.span.start, method.function.span.end,
-                )));
+                implementation.methods.retain(|method| {
+                    imported_methods.insert((
+                        origin.clone(),
+                        format!("{owner:?}"),
+                        method.function.name.clone(),
+                        method.function.span.start,
+                        method.function.span.end,
+                    ))
+                });
             }
         }
     }
@@ -318,21 +332,36 @@ fn expand_imports_inner(
     // keeping the actual dependency declarations scoped to their source module.
     let mut implicit_types: HashMap<String, Option<String>> = HashMap::new();
     for item in &new_items {
-        if matches!(item, TopLevelItem::Struct(decl) if decl.origin_private) { continue; }
+        if matches!(item, TopLevelItem::Struct(decl) if decl.origin_private) {
+            continue;
+        }
         let (name, origin) = match item {
             TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
             TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
             _ => continue,
         };
-        let Some((_, original)) = origin else { continue; };
-        if !name.starts_with("SparModule") || declared.contains(original) { continue; }
-        implicit_types.entry(original.clone()).and_modify(|existing| {
-            if existing.as_ref() != Some(name) { *existing = None; }
-        }).or_insert_with(|| Some(name.clone()));
+        let Some((_, original)) = origin else {
+            continue;
+        };
+        if !name.starts_with("SparModule") || declared.contains(original) {
+            continue;
+        }
+        implicit_types
+            .entry(original.clone())
+            .and_modify(|existing| {
+                if existing.as_ref() != Some(name) {
+                    *existing = None;
+                }
+            })
+            .or_insert_with(|| Some(name.clone()));
     }
-    let implicit_types = implicit_types.into_iter().filter_map(|(original, name)|
-        name.map(|name| (original, name))).collect();
-    for item in &mut new_items { scope::remap_references(item, &implicit_types); }
+    let implicit_types = implicit_types
+        .into_iter()
+        .filter_map(|(original, name)| name.map(|name| (original, name)))
+        .collect();
+    for item in &mut new_items {
+        scope::remap_references(item, &implicit_types);
+    }
     program.items = new_items;
     if errors.is_empty() {
         Ok(())
@@ -563,6 +592,11 @@ pub(crate) fn rename_spar_type(ty: &mut crate::ast::SparType, from: &str, to: &s
             }
         }
         SparType::List(inner) => rename_spar_type(inner, from, to),
+        SparType::Tuple(items) => {
+            for item in items {
+                rename_spar_type(item, from, to);
+            }
+        }
         SparType::Function {
             params,
             return_type,
@@ -694,7 +728,12 @@ fn splice_selective(
                 });
             }
             Some((_, item)) => {
-                if types_only && !matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)) {
+                if types_only
+                    && !matches!(
+                        item,
+                        TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)
+                    )
+                {
                     errors.push(SparError::ResolveError {
                         message: format!(
                             "'{}' is not a type or enum — `import type {{...}}` can only bring in \
@@ -738,7 +777,9 @@ fn splice_selective(
             TopLevelItem::Enum(decl) => &decl.name,
             _ => continue,
         };
-        if name.starts_with("SparModule") && !available.iter().any(|(existing, _)| *existing == name) {
+        if name.starts_with("SparModule")
+            && !available.iter().any(|(existing, _)| *existing == name)
+        {
             available.push((name, item));
         }
     }
@@ -772,7 +813,14 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| {
+                            matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
+                        },
                     );
                 }
             }
@@ -788,7 +836,12 @@ fn splice_selective(
                 for name in type_refs {
                     if !available.iter().any(|(candidate, item)| {
                         *candidate == name
-                            && matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                            && matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
                     }) {
                         continue;
                     }
@@ -802,7 +855,14 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| {
+                            matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
+                        },
                     );
                 }
                 // Functions the spliced body calls travel with it, whether
@@ -837,7 +897,12 @@ fn splice_selective(
                 for name in type_refs {
                     if !available.iter().any(|(candidate, item)| {
                         *candidate == name
-                            && matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_))
+                            && matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
                     }) {
                         continue;
                     }
@@ -851,7 +916,14 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| {
+                            matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
+                        },
                     );
                 }
             }
@@ -866,8 +938,28 @@ fn splice_selective(
                         collect_spar_type_refs(&ty, &mut type_refs);
                     }
                 }
-                type_refs.retain(|name| !s.type_parameters.iter().any(|parameter| parameter.name == *name)
-                    && !matches!(name.as_str(), "Map" | "Option" | "Result" | "Promise" | "Table" | "Stream" | "Sequence" | "Lookup" | "MapEntry" | "List" | "Record" | "Bytes" | "Schema" | "Args"));
+                type_refs.retain(|name| {
+                    !s.type_parameters
+                        .iter()
+                        .any(|parameter| parameter.name == *name)
+                        && !matches!(
+                            name.as_str(),
+                            "Map"
+                                | "Option"
+                                | "Result"
+                                | "Promise"
+                                | "Table"
+                                | "Stream"
+                                | "Sequence"
+                                | "Lookup"
+                                | "MapEntry"
+                                | "List"
+                                | "Record"
+                                | "Bytes"
+                                | "Schema"
+                                | "Args"
+                        )
+                });
                 let mut section_refs = Vec::new();
                 collect_section_item_refs(&s.items, &mut section_refs);
                 for name in type_refs {
@@ -881,7 +973,14 @@ fn splice_selective(
                         &mut spliced,
                         &mut errors,
                         decl,
-                        |item| matches!(item, TopLevelItem::Struct(_) | TopLevelItem::Type(_) | TopLevelItem::Enum(_)),
+                        |item| {
+                            matches!(
+                                item,
+                                TopLevelItem::Struct(_)
+                                    | TopLevelItem::Type(_)
+                                    | TopLevelItem::Enum(_)
+                            )
+                        },
                     );
                 }
                 for name in section_refs {
@@ -903,23 +1002,37 @@ fn splice_selective(
         }
         if let TopLevelItem::Struct(declaration) = &spliced[i] {
             let owner = declaration.name.clone();
-            let implementations = imported_program.items.iter().filter_map(|item| match item {
-                TopLevelItem::Impl(implementation) if impl_target_name(implementation) == Some(owner.as_str()) => Some(implementation.clone()),
-                _ => None,
-            }).collect::<Vec<_>>();
+            let implementations = imported_program
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    TopLevelItem::Impl(implementation)
+                        if impl_target_name(implementation) == Some(owner.as_str()) =>
+                    {
+                        Some(implementation.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             for mut implementation in implementations {
                 implementation.methods.retain(|method| !spliced.iter().any(|item| {
                     matches!(item, TopLevelItem::Impl(existing)
                         if impl_target_name(existing) == Some(owner.as_str())
                         && existing.methods.iter().any(|prior| prior.function.name == method.function.name))
                 }));
-                if !implementation.methods.is_empty() { spliced.push(TopLevelItem::Impl(implementation)); }
+                if !implementation.methods.is_empty() {
+                    spliced.push(TopLevelItem::Impl(implementation));
+                }
             }
         }
-        let mut dependencies = scope::dependencies(&spliced[i]).into_iter().collect::<Vec<_>>();
+        let mut dependencies = scope::dependencies(&spliced[i])
+            .into_iter()
+            .collect::<Vec<_>>();
         dependencies.sort();
         for name in dependencies {
-            if pulled.contains(&name) { continue; }
+            if pulled.contains(&name) {
+                continue;
+            }
             if let Some(item) = imported_program.items.iter().find(|item| match item {
                 TopLevelItem::Var(decl) => decl.name == name,
                 TopLevelItem::Function(decl) => decl.name == name,
@@ -935,8 +1048,14 @@ fn splice_selective(
     }
 
     if errors.is_empty() {
-        let aliases = requested.iter().filter_map(|item|
-            item.alias.as_ref().map(|alias| (item.name.clone(), alias.clone()))).collect();
+        let aliases = requested
+            .iter()
+            .filter_map(|item| {
+                item.alias
+                    .as_ref()
+                    .map(|alias| (item.name.clone(), alias.clone()))
+            })
+            .collect();
         for item in &mut spliced {
             scope::remap_references(item, &aliases);
         }
@@ -959,6 +1078,7 @@ fn collect_calls_in_statements(statements: &[crate::ast::Statement], out: &mut H
     for statement in statements {
         match statement {
             Statement::LocalVar(local) => collect_calls_in_expr(&local.value, out),
+            Statement::TupleBinding { value, .. } => collect_calls_in_expr(value, out),
             Statement::Assignment { value, .. }
             | Statement::FieldAssignment { value, .. }
             | Statement::Expression(value, _) => collect_calls_in_expr(value, out),
@@ -1029,6 +1149,7 @@ fn collect_calls_in_expr(expr: &crate::ast::Expr, out: &mut HashSet<String>) {
         }
         Expr::Unary { operand: inner, .. }
         | Expr::Grouped(inner, _)
+        | Expr::TupleField { base: inner, .. }
         | Expr::Await { value: inner, .. }
         | Expr::FieldAccess { base: inner, .. } => collect_calls_in_expr(inner, out),
         Expr::MethodCall { receiver, args, .. } => {
@@ -1041,7 +1162,7 @@ fn collect_calls_in_expr(expr: &crate::ast::Expr, out: &mut HashSet<String>) {
             collect_calls_in_expr(input, out);
             collect_calls_in_expr(stage, out);
         }
-        Expr::List(items, _) => {
+        Expr::List(items, _) | Expr::Tuple(items, _) => {
             for item in items {
                 collect_calls_in_expr(item, out);
             }
@@ -1154,6 +1275,11 @@ fn collect_spar_type_refs(ty: &crate::ast::SparType, out: &mut Vec<String>) {
             }
         }
         SparType::List(inner) => collect_spar_type_refs(inner, out),
+        SparType::Tuple(items) => {
+            for item in items {
+                collect_spar_type_refs(item, out);
+            }
+        }
         SparType::Function {
             params,
             return_type,
@@ -1510,15 +1636,27 @@ pub fn validate_schema_imports(
     // Preserve nominal identity when schema modules import a dependency privately
     // while the configuration imports that same declaration under a public alias.
     let mut identity_program = program.clone();
-    if identity_program.items.iter().any(|item| matches!(item,
-        TopLevelItem::Import(decl) if matches!(decl.kind, crate::ast::ImportKind::Selective(_)))) {
+    if identity_program.items.iter().any(|item| {
+        matches!(item,
+        TopLevelItem::Import(decl) if matches!(decl.kind, crate::ast::ImportKind::Selective(_)))
+    }) {
         expand_imports(&mut identity_program, &mut ImportLoader::new(base_dir))?;
     }
-    let visible_origins: HashMap<_, _> = identity_program.items.iter().filter_map(|item| match item {
-        TopLevelItem::Struct(decl) => decl.origin.clone().map(|origin| (origin, decl.name.clone())),
-        TopLevelItem::Enum(decl) => decl.origin.clone().map(|origin| (origin, decl.name.clone())),
-        _ => None,
-    }).collect();
+    let visible_origins: HashMap<_, _> = identity_program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TopLevelItem::Struct(decl) => decl
+                .origin
+                .clone()
+                .map(|origin| (origin, decl.name.clone())),
+            TopLevelItem::Enum(decl) => decl
+                .origin
+                .clone()
+                .map(|origin| (origin, decl.name.clone())),
+            _ => None,
+        })
+        .collect();
 
     // Build config section map once — it is the same for every schema import.
     let mut config_sections: std::collections::HashMap<String, &crate::ast::StructDecl> =
@@ -1610,19 +1748,27 @@ pub fn validate_schema_imports(
             continue;
         }
 
-        let schema_aliases: Vec<_> = schema_prog.items.iter().filter_map(|item| {
-            let (name, origin) = match item {
-                TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
-                TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
-                _ => return None,
-            };
-            visible_origins.get(origin.as_ref()?).map(|visible| (name.clone(), visible.clone()))
-        }).collect();
+        let schema_aliases: Vec<_> = schema_prog
+            .items
+            .iter()
+            .filter_map(|item| {
+                let (name, origin) = match item {
+                    TopLevelItem::Struct(decl) => (&decl.name, &decl.origin),
+                    TopLevelItem::Enum(decl) => (&decl.name, &decl.origin),
+                    _ => return None,
+                };
+                visible_origins
+                    .get(origin.as_ref()?)
+                    .map(|visible| (name.clone(), visible.clone()))
+            })
+            .collect();
         for item in &mut schema_prog.items {
             if let TopLevelItem::Schema(decl) = item {
                 for field in &mut decl.fields {
                     let crate::ast::SchemaFieldShape::Type(ty) = &mut field.shape;
-                    for (from, to) in &schema_aliases { rename_spar_type(ty, from, to); }
+                    for (from, to) in &schema_aliases {
+                        rename_spar_type(ty, from, to);
+                    }
                 }
             }
         }
@@ -1825,6 +1971,14 @@ fn kl_type_name(ty: &crate::ast::SparType) -> String {
         crate::ast::SparType::Shell => "shell".to_string(),
         crate::ast::SparType::Error => "error".to_string(),
         crate::ast::SparType::List(_) => "list".to_string(),
+        crate::ast::SparType::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(kl_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         crate::ast::SparType::Named(name) => name.clone(),
         crate::ast::SparType::TypeParameter(name) => name.clone(),
         crate::ast::SparType::Applied { name, arguments } => format!(
@@ -2238,7 +2392,9 @@ mod tests {
         let mut program = parse_src(src);
         let mut loader = ImportLoader::new(dir.path());
         expand_imports(&mut program, &mut loader).unwrap();
-        assert!(program.items.iter().any(|item| matches!(item, crate::ast::TopLevelItem::Var(decl) if decl.name == "host")));
+        assert!(program.items.iter().any(
+            |item| matches!(item, crate::ast::TopLevelItem::Var(decl) if decl.name == "host")
+        ));
     }
 
     #[test]

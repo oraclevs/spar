@@ -1104,6 +1104,7 @@ impl<'a> Lowerer<'a> {
 fn stmt_kind(s: &CompiledStatement) -> &'static str {
     match s {
         CompiledStatement::StoreLocal { .. } => "store local",
+        CompiledStatement::TupleBinding { .. } => "tuple binding",
         CompiledStatement::StoreGlobal { .. } => "store global",
         CompiledStatement::StoreFieldLocal { .. } => "store field (local)",
         CompiledStatement::StoreFieldGlobal { .. } => "store field (global)",

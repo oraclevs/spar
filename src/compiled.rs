@@ -316,6 +316,11 @@ pub(crate) enum CompiledStringPart {
 #[allow(dead_code)] // Fully consumed by the compiled runtime in Task 5.
 #[derive(Clone)]
 pub(crate) enum CompiledStatement {
+    TupleBinding {
+        slots: Vec<LocalSlot>,
+        value: CompiledExpression,
+        span: Span,
+    },
     StoreLocal {
         slot: LocalSlot,
         value: CompiledExpression,
@@ -462,12 +467,18 @@ impl CompiledProgram {
         }
 
         let vm = crate::vm::VmProgram::build(
-            builder.modules.iter().flat_map(|module| module.functions.iter()),
+            builder
+                .modules
+                .iter()
+                .flat_map(|module| module.functions.iter()),
             function_locations.len(),
         );
 
         let bc = crate::runtime::bytecode::BcProgram::build(
-            builder.modules.iter().flat_map(|module| module.functions.iter()),
+            builder
+                .modules
+                .iter()
+                .flat_map(|module| module.functions.iter()),
             function_locations.len(),
         );
 
@@ -625,6 +636,7 @@ fn visit_statements(statements: &[CompiledStatement], visit: &mut impl FnMut(&Co
     for statement in statements {
         match statement {
             CompiledStatement::StoreLocal { value, .. }
+            | CompiledStatement::TupleBinding { value, .. }
             | CompiledStatement::StoreGlobal { value, .. }
             | CompiledStatement::StoreFieldLocal { value, .. }
             | CompiledStatement::StoreFieldGlobal { value, .. }

@@ -171,6 +171,20 @@ fn statements(
     let mut locals = outer.clone();
     for statement in body {
         match statement {
+            Statement::TupleBinding {
+                names: bindings,
+                ty: declared,
+                value,
+                ..
+            } => {
+                if let Some(declared) = declared {
+                    ty(declared, names, out);
+                }
+                expr(value, &locals, names, out);
+                for (name, _) in bindings {
+                    locals.insert(name.clone());
+                }
+            }
             Statement::LocalVar(decl) => {
                 if let Some(value) = &mut decl.ty {
                     ty(value, names, out);
@@ -320,6 +334,7 @@ fn expr(value: &mut Expr, locals: &HashSet<String>, names: &Remapping, out: &mut
         }
         Expr::Unary { operand: value, .. }
         | Expr::Grouped(value, _)
+        | Expr::TupleField { base: value, .. }
         | Expr::Await { value, .. } => expr(value, locals, names, out),
         Expr::FieldAccess { base, field, .. } => {
             if matches!(base.as_ref(), Expr::NamespaceRef(reference) if reference.segments == ["global"])
@@ -339,7 +354,7 @@ fn expr(value: &mut Expr, locals: &HashSet<String>, names: &Remapping, out: &mut
             expr(input, locals, names, out);
             expr(stage, locals, names, out);
         }
-        Expr::List(values, _) => {
+        Expr::List(values, _) | Expr::Tuple(values, _) => {
             for value in values {
                 expr(value, locals, names, out);
             }

@@ -275,6 +275,7 @@ fn item_span_line(item: &TopLevelItem) -> u32 {
         TopLevelItem::Task(d) => d.span.line,
         TopLevelItem::Statement(statement) => match statement {
             Statement::LocalVar(declaration) => declaration.span.line,
+            Statement::TupleBinding { span, .. } => span.line,
             Statement::Assignment { span, .. } | Statement::FieldAssignment { span, .. } => {
                 span.line
             }
@@ -368,12 +369,26 @@ fn format_top_level_item(
                 }
                 out.push_str("fn ");
                 out.push_str(&fd.name);
-                let method_parameters: Vec<_> = fd.type_parameters.iter()
-                    .filter(|parameter| !implementation.type_parameters.iter()
-                        .any(|owner| owner.name == parameter.name))
-                    .cloned().collect();
+                let method_parameters: Vec<_> = fd
+                    .type_parameters
+                    .iter()
+                    .filter(|parameter| {
+                        !implementation
+                            .type_parameters
+                            .iter()
+                            .any(|owner| owner.name == parameter.name)
+                    })
+                    .cloned()
+                    .collect();
                 format_type_parameters(&method_parameters, out);
-                format_parameters(&fd.params, method.receiver.as_ref(), &fd.ret, 1, config, out);
+                format_parameters(
+                    &fd.params,
+                    method.receiver.as_ref(),
+                    &fd.ret,
+                    1,
+                    config,
+                    out,
+                );
                 format_func_stmts(&fd.body.stmts, 2, config, cx, out, false);
                 out.push_str(&indent(1, config));
                 out.push_str("};\n");
@@ -823,6 +838,10 @@ fn format_type(ty: &SparType) -> String {
         SparType::Shell => "shell".to_string(),
         SparType::Error => "error".to_string(),
         SparType::List(inner) => format!("List<{}>", format_type(inner)),
+        SparType::Tuple(items) => format!(
+            "({})",
+            items.iter().map(format_type).collect::<Vec<_>>().join(", ")
+        ),
         SparType::Named(name) => name.clone(),
         SparType::TypeParameter(name) => name.clone(),
         SparType::Applied { name, arguments } => format!(
@@ -983,7 +1002,6 @@ fn flatten_structured_pipe<'a>(expr: &'a Expr, stages: &mut Vec<&'a Expr>) -> &'
     }
 }
 
-
 fn flatten_logical<'a>(expr: &'a Expr, operator: &BinOp, operands: &mut Vec<&'a Expr>) {
     if let Expr::BinaryOp(binary) = expr {
         if &binary.op == operator {
@@ -1001,33 +1019,54 @@ fn format_argument(argument: &CallArg, depth: usize, config: &FormatConfig, out:
     format_expr(&argument.value, 0, depth, config, out);
 }
 
-fn format_arguments(args: &[CallArg], span: &crate::error::Span, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_arguments(
+    args: &[CallArg],
+    span: &crate::error::Span,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     let prefix = " ".repeat(current_column(out));
     let mut flat = format!("{prefix}(");
     let speculative = config.comments.suspend();
     for (index, argument) in args.iter().enumerate() {
-        if index > 0 { flat.push_str(", "); }
+        if index > 0 {
+            flat.push_str(", ");
+        }
         format_argument(argument, depth, config, &mut flat);
     }
     flat.push(')');
     drop(speculative);
     let flat = &flat[prefix.len()..];
     let commented = config.comments.has_comment_in_offsets(span.start, span.end);
-    if !commented && (args.is_empty() || (flat.chars().count() <= COMPACT_ARGUMENT_WIDTH && fits_inline(out, flat))) {
+    if !commented
+        && (args.is_empty()
+            || (flat.chars().count() <= COMPACT_ARGUMENT_WIDTH && fits_inline(out, flat)))
+    {
         out.push_str(flat);
         return;
     }
     // Keep a single wrapper attached to its multiline value, as in
     // some(value: Config(...)). This avoids a new indentation level for
     // every Option/Result wrapper while the inner fields remain vertical.
-    if !commented && args.len() == 1 && matches!(args[0].value,
-        Expr::Call { .. } | Expr::FnCall(_) | Expr::List(_, _) | Expr::Object(_, _)) {
+    if !commented
+        && args.len() == 1
+        && matches!(
+            args[0].value,
+            Expr::Call { .. } | Expr::FnCall(_) | Expr::List(_, _) | Expr::Object(_, _)
+        )
+    {
         let speculative = config.comments.suspend();
         let mut combined = format!("{prefix}(");
         format_argument(&args[0], depth, config, &mut combined);
         combined.push(')');
         drop(speculative);
-        if combined.contains('\n') && combined.lines().next().is_some_and(|line| line.chars().count() <= MAX_LINE_WIDTH) {
+        if combined.contains('\n')
+            && combined
+                .lines()
+                .next()
+                .is_some_and(|line| line.chars().count() <= MAX_LINE_WIDTH)
+        {
             out.push('(');
             format_argument(&args[0], depth, config, out);
             out.push(')');
@@ -1036,20 +1075,32 @@ fn format_arguments(args: &[CallArg], span: &crate::error::Span, depth: usize, c
     }
     out.push_str("(\n");
     for argument in args {
-        config.comments.emit_before_line(argument.span.line, depth + 1, config, out);
+        config
+            .comments
+            .emit_before_line(argument.span.line, depth + 1, config, out);
         out.push_str(&indent(depth + 1, config));
         format_argument(argument, depth + 1, config, out);
         out.push_str(",\n");
         config.comments.append_trailing(argument.span.line, out);
     }
-    config.comments.emit_before_offset(span.end, depth + 1, config, out);
+    config
+        .comments
+        .emit_before_offset(span.end, depth + 1, config, out);
     out.push_str(&indent(depth, config));
     out.push(')');
 }
 
-fn format_parameter(parameter: &Param, receiver: Option<&MethodReceiver>, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_parameter(
+    parameter: &Param,
+    receiver: Option<&MethodReceiver>,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     if let Some(receiver) = receiver {
-        if receiver.mutable { out.push_str("mut "); }
+        if receiver.mutable {
+            out.push_str("mut ");
+        }
         out.push_str("self");
     } else {
         out.push_str(&parameter.name);
@@ -1062,18 +1113,39 @@ fn format_parameter(parameter: &Param, receiver: Option<&MethodReceiver>, depth:
     }
 }
 
-fn format_parameters(params: &[Param], receiver: Option<&MethodReceiver>, result: &SparType, depth: usize, config: &FormatConfig, out: &mut String) {
+fn format_parameters(
+    params: &[Param],
+    receiver: Option<&MethodReceiver>,
+    result: &SparType,
+    depth: usize,
+    config: &FormatConfig,
+    out: &mut String,
+) {
     let suffix = format!(") -> {} {{\n", format_type(result));
     let mut flat = String::from("(");
     let speculative = config.comments.suspend();
     for (index, parameter) in params.iter().enumerate() {
-        if index > 0 { flat.push_str(", "); }
-        format_parameter(parameter, if index == 0 { receiver } else { None }, depth, config, &mut flat);
+        if index > 0 {
+            flat.push_str(", ");
+        }
+        format_parameter(
+            parameter,
+            if index == 0 { receiver } else { None },
+            depth,
+            config,
+            &mut flat,
+        );
     }
     flat.push_str(suffix.trim_end());
     drop(speculative);
-    let commented = params.first().zip(params.last()).is_some_and(|(first, last)|
-        config.comments.has_comment_in_lines(first.span.line, last.span.line + 1));
+    let commented = params
+        .first()
+        .zip(params.last())
+        .is_some_and(|(first, last)| {
+            config
+                .comments
+                .has_comment_in_lines(first.span.line, last.span.line + 1)
+        });
     if !commented && fits_inline(out, &flat) {
         out.push_str(&flat);
         out.push('\n');
@@ -1081,9 +1153,17 @@ fn format_parameters(params: &[Param], receiver: Option<&MethodReceiver>, result
     }
     out.push_str("(\n");
     for (index, parameter) in params.iter().enumerate() {
-        config.comments.emit_before_line(parameter.span.line, depth + 1, config, out);
+        config
+            .comments
+            .emit_before_line(parameter.span.line, depth + 1, config, out);
         out.push_str(&indent(depth + 1, config));
-        format_parameter(parameter, if index == 0 { receiver } else { None }, depth + 1, config, out);
+        format_parameter(
+            parameter,
+            if index == 0 { receiver } else { None },
+            depth + 1,
+            config,
+            out,
+        );
         out.push_str(",\n");
         config.comments.append_trailing(parameter.span.line, out);
     }
@@ -1203,7 +1283,14 @@ pub(crate) fn format_expr(
         } => {
             let mut chain = vec![(method, args, span)];
             let mut base = receiver.as_ref();
-            while let Expr::MethodCall { receiver, method, args, span, .. } = base {
+            while let Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                span,
+                ..
+            } = base
+            {
                 chain.push((method, args, span));
                 base = receiver.as_ref();
             }
@@ -1218,8 +1305,8 @@ pub(crate) fn format_expr(
                 format_arguments(args, span, depth, config, &mut candidate);
             }
             drop(speculative);
-            let multiline = chain.len() > 1 && (candidate.contains('\n')
-                || candidate.chars().count() > MAX_LINE_WIDTH);
+            let multiline = chain.len() > 1
+                && (candidate.contains('\n') || candidate.chars().count() > MAX_LINE_WIDTH);
             format_expr(base, 100, depth, config, out);
             for (method, args, span) in chain {
                 if multiline {
@@ -1228,7 +1315,13 @@ pub(crate) fn format_expr(
                 }
                 out.push('.');
                 out.push_str(method);
-                format_arguments(args, span, if multiline { depth + 1 } else { depth }, config, out);
+                format_arguments(
+                    args,
+                    span,
+                    if multiline { depth + 1 } else { depth },
+                    config,
+                    out,
+                );
             }
         }
 
@@ -1307,7 +1400,9 @@ pub(crate) fn format_expr(
                 let speculative = config.comments.suspend();
                 let mut flat = String::new();
                 for (index, operand) in operands.iter().enumerate() {
-                    if index > 0 { flat.push_str(&format!(" {} ", binop_symbol(&b.op))); }
+                    if index > 0 {
+                        flat.push_str(&format!(" {} ", binop_symbol(&b.op)));
+                    }
                     format_expr(operand, prec + 1, depth, config, &mut flat);
                 }
                 drop(speculative);
@@ -1319,9 +1414,17 @@ pub(crate) fn format_expr(
                             out.push_str(binop_symbol(&b.op));
                             out.push(' ');
                         }
-                        format_expr(operand, prec + 1, if index == 0 { depth } else { depth + 1 }, config, out);
+                        format_expr(
+                            operand,
+                            prec + 1,
+                            if index == 0 { depth } else { depth + 1 },
+                            config,
+                            out,
+                        );
                     }
-                    if needs_parens { out.push(')'); }
+                    if needs_parens {
+                        out.push(')');
+                    }
                     return;
                 }
             }
@@ -1381,6 +1484,21 @@ pub(crate) fn format_expr(
             }
         }
 
+        Expr::Tuple(items, _) => {
+            out.push('(');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                format_expr(item, 0, depth, config, out);
+            }
+            out.push(')');
+        }
+        Expr::TupleField { base, index, .. } => {
+            format_expr(base, 8, depth, config, out);
+            out.push('.');
+            out.push_str(&index.to_string());
+        }
         Expr::Grouped(inner, _) => {
             out.push('(');
             format_expr(inner, 0, depth, config, out);
@@ -1717,12 +1835,7 @@ fn format_shell_command(
     }
 }
 
-fn format_shell_word(
-    word: &ShellWord,
-    depth: usize,
-    config: &FormatConfig,
-    out: &mut String,
-) {
+fn format_shell_word(word: &ShellWord, depth: usize, config: &FormatConfig, out: &mut String) {
     if word.parts.is_empty() {
         out.push_str("''");
         return;
@@ -1903,6 +2016,7 @@ fn format_func_stmts(
 fn func_stmt_line(stmt: &FuncStmt) -> u32 {
     match stmt {
         FuncStmt::LocalVar(lv) => lv.span.line,
+        FuncStmt::TupleBinding { span, .. } => span.line,
         FuncStmt::Assignment { span, .. }
         | FuncStmt::FieldAssignment { span, .. }
         | FuncStmt::Expression(_, span)
@@ -1949,6 +2063,27 @@ fn format_func_stmt_body(
 ) {
     let ind = indent(depth, config);
     match stmt {
+        FuncStmt::TupleBinding {
+            names, ty, value, ..
+        } => {
+            out.push_str(&ind);
+            out.push_str("var (");
+            out.push_str(
+                &names
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push(')');
+            if let Some(ty) = ty {
+                out.push_str(": ");
+                out.push_str(&format_type(ty));
+            }
+            out.push_str(" = ");
+            format_expr(value, 0, depth, config, out);
+            out.push_str(";\n");
+        }
         FuncStmt::LocalVar(lv) => {
             out.push_str(&ind);
             out.push_str(if lv.is_const { "const " } else { "var " });
@@ -2293,10 +2428,7 @@ mod tests {
         let source = r#"struct User{name:str="Obi";active:bool=true;};impl User{function name(self)->str{return self.name;};private function normalized(self)->str{return self.name;};function deactivate(mut self)->void{self.active=false;};};"#;
         let formatted = format_source(source).expect("format should succeed");
         assert!(formatted.contains("impl User {"), "{formatted}");
-        assert!(
-            formatted.contains("fn name(self) -> str"),
-            "{formatted}"
-        );
+        assert!(formatted.contains("fn name(self) -> str"), "{formatted}");
         assert!(
             formatted.contains("private fn normalized(self) -> str"),
             "{formatted}"
@@ -2312,10 +2444,7 @@ mod tests {
         let source = "function main() -> int { var double: fn(int) -> int = fn(x:int)->int=>x*2; return 0; };";
         let formatted = format_source(source).expect("format should succeed");
         assert!(formatted.contains("fn(arg0: int) -> int"), "{formatted}");
-        assert!(
-            formatted.contains("|x: int| -> int x * 2"),
-            "{formatted}"
-        );
+        assert!(formatted.contains("|x: int| -> int x * 2"), "{formatted}");
     }
 
     #[test]
@@ -2433,8 +2562,7 @@ mod tests {
         // actually use `${...}` (see format_shell_literal_fragment).
         let source =
             "var x: shell = shell {\n    cat \"my file.txt\" | grep error > test.log;\n};\n";
-        let expected =
-            "var x: shell = shell {\n    cat 'my file.txt' | grep error > test.log;\n};";
+        let expected = "var x: shell = shell {\n    cat 'my file.txt' | grep error > test.log;\n};";
         let formatted = fmt(source);
         assert_eq!(formatted.trim(), expected);
         assert_eq!(fmt(&formatted), formatted);
@@ -2685,7 +2813,10 @@ mod tests {
             r#"struct Pair<T, V> { left: T; right: V; }; var example: Pair<str, int> = Pair<str, int>(left: "hello", right: 42); function main() -> void { var values: List<str> = ["a", "b"]; try { return; } catch err { return; } };"#,
         );
         assert!(out.contains("struct Pair<T, V> {"), "{out}");
-        assert!(out.contains("var example: Pair<str, int> = Pair<str, int>("), "{out}");
+        assert!(
+            out.contains("var example: Pair<str, int> = Pair<str, int>("),
+            "{out}"
+        );
         assert!(out.contains("left: \"hello\""), "{out}");
         assert!(out.contains("List<str>"), "{out}");
         assert!(out.contains("catch err {"), "{out}");
@@ -2797,7 +2928,8 @@ mod tests {
 
     #[test]
     fn named_struct_return_is_formatted_without_anonymous_object_coercion() {
-        let src = "struct Boxed { v: int = 0; }; function f(x: int) -> Boxed { return Boxed(v: x); };";
+        let src =
+            "struct Boxed { v: int = 0; }; function f(x: int) -> Boxed { return Boxed(v: x); };";
         let out = fmt(src);
         assert!(out.contains("fn f(x: int) -> Boxed {"));
         assert!(out.contains("    return Boxed(v: x);"));
@@ -3026,8 +3158,8 @@ function pick(flag: bool) -> int {
             load_env: None,
             shebang: None,
             items: vec![TopLevelItem::Struct(StructDecl {
-            origin_private: false,
-            origin: None,
+                origin_private: false,
+                origin: None,
                 type_parameters: Vec::new(),
                 exported: false,
                 private: false,
@@ -3041,7 +3173,10 @@ function pick(flag: bool) -> int {
         };
         let out = format_program(&program, &FormatConfig::default());
         assert!(out.contains("struct Server {"), "{out}");
-        assert!(!out.contains('['), "legacy section syntax must not be emitted: {out}");
+        assert!(
+            !out.contains('['),
+            "legacy section syntax must not be emitted: {out}"
+        );
     }
 
     #[test]
@@ -3282,7 +3417,11 @@ struct Config"#
     fn formats_record_schema_field() {
         let src = "schema X {\n    x: Record;\n};\n";
         let formatted = format_source(src).unwrap();
-        assert!(formatted.contains("x: Record;"), "record schema field: {}", formatted);
+        assert!(
+            formatted.contains("x: Record;"),
+            "record schema field: {}",
+            formatted
+        );
     }
 
     #[test]
@@ -3752,7 +3891,12 @@ struct Config"#
     fn structured_pipe_formats_as_a_readable_multiline_chain() {
         let source = "function main() -> int {\n    var result: int = 5 |> double |> fn(value: int) -> int => value + 1;\n    return result;\n};\n";
         let formatted = fmt(source);
-        assert!(formatted.contains("var result: int = 5\n        |> double\n        |> |value: int| -> int value + 1;"), "{formatted}");
+        assert!(
+            formatted.contains(
+                "var result: int = 5\n        |> double\n        |> |value: int| -> int value + 1;"
+            ),
+            "{formatted}"
+        );
         assert_eq!(fmt(&formatted), formatted);
     }
 

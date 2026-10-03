@@ -17,7 +17,9 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
             StringPart::Literal(_) => None,
             StringPart::Expr(expr) => find_exec_shell_span(expr),
         }),
-        Expr::FieldAccess { base, .. } | Expr::Grouped(base, _) => find_exec_shell_span(base),
+        Expr::FieldAccess { base, .. } | Expr::Grouped(base, _) | Expr::TupleField { base, .. } => {
+            find_exec_shell_span(base)
+        }
         Expr::MethodCall { receiver, args, .. } => find_exec_shell_span(receiver).or_else(|| {
             args.iter()
                 .find_map(|argument| find_exec_shell_span(&argument.value))
@@ -32,7 +34,7 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
         Expr::BinaryOp(binary) => {
             find_exec_shell_span(&binary.lhs).or_else(|| find_exec_shell_span(&binary.rhs))
         }
-        Expr::List(items, _) => items.iter().find_map(find_exec_shell_span),
+        Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().find_map(find_exec_shell_span),
         Expr::Call { args, .. } => args
             .iter()
             .find_map(|argument| find_exec_shell_span(&argument.value)),
@@ -50,6 +52,7 @@ fn find_exec_shell_span(expr: &Expr) -> Option<Span> {
             ClosureBody::Block(body) => body.stmts.iter().find_map(|stmt| match stmt {
                 Statement::Expression(expr, _) => find_exec_shell_span(expr),
                 Statement::LocalVar(local) => find_exec_shell_span(&local.value),
+                Statement::TupleBinding { value, .. } => find_exec_shell_span(value),
                 Statement::Assignment { value, .. } | Statement::FieldAssignment { value, .. } => {
                     find_exec_shell_span(value)
                 }
@@ -82,6 +85,15 @@ pub(crate) fn sequence_exit_scope(stmts: &[FuncStmt]) -> Option<HashMap<String, 
             FuncStmt::Return(_, _) => return None,
             FuncStmt::LocalVar(local) => {
                 scope.insert(local.name.clone(), local.ty.clone());
+            }
+            FuncStmt::TupleBinding { names, ty, .. } => {
+                for (index, (name, _)) in names.iter().enumerate() {
+                    let item = match ty {
+                        Some(SparType::Tuple(items)) => items.get(index).cloned(),
+                        _ => None,
+                    };
+                    scope.insert(name.clone(), item);
+                }
             }
             FuncStmt::Expression(Expr::Call { name, .. }, _) if name == "panic" => return None,
             FuncStmt::Expression(_, _) => {}
@@ -145,6 +157,7 @@ pub(crate) fn stmts_always_return(stmts: &[FuncStmt]) -> bool {
 fn func_stmt_span(stmt: &FuncStmt) -> Span {
     match stmt {
         FuncStmt::LocalVar(l) => l.span.clone(),
+        FuncStmt::TupleBinding { span, .. } => span.clone(),
         FuncStmt::Expression(_, span) => span.clone(),
         FuncStmt::Assignment { span, .. } | FuncStmt::FieldAssignment { span, .. } => span.clone(),
         FuncStmt::If(i) => i.span.clone(),
@@ -326,9 +339,15 @@ fn scoped_native_signatures(
 ) -> HashMap<(String, String), crate::runtime::NativeSignature> {
     let mut signatures = registry.signatures();
     for item in &program.items {
-        let TopLevelItem::Struct(decl) = item else { continue; };
-        let Some((path, original)) = &decl.origin else { continue; };
-        if !crate::stdlib::is_bundled_std_path(path) { continue; }
+        let TopLevelItem::Struct(decl) = item else {
+            continue;
+        };
+        let Some((path, original)) = &decl.origin else {
+            continue;
+        };
+        if !crate::stdlib::is_bundled_std_path(path) {
+            continue;
+        }
         for signature in signatures.values_mut() {
             crate::loader::rename_spar_type(&mut signature.ret, original, &decl.name);
             for (_, ty) in &mut signature.params {
@@ -586,6 +605,12 @@ impl Resolver {
                 Ok(())
             }
             SparType::List(inner) => self.validate_explicit_type_argument(inner, span),
+            SparType::Tuple(items) => {
+                for item in items {
+                    self.validate_explicit_type_argument(item, span)?;
+                }
+                Ok(())
+            }
             SparType::Function {
                 params,
                 return_type,
@@ -924,6 +949,11 @@ fn collect_type_parameters(ty: &SparType, out: &mut Vec<String>) {
     match ty {
         SparType::TypeParameter(name) => out.push(name.clone()),
         SparType::List(inner) => collect_type_parameters(inner, out),
+        SparType::Tuple(items) => {
+            for item in items {
+                collect_type_parameters(item, out);
+            }
+        }
         SparType::Applied { arguments, .. } => {
             for argument in arguments {
                 collect_type_parameters(argument, out);
@@ -1413,7 +1443,9 @@ impl Resolver {
             );
             return;
         }
-        if !(naming::is_camel_case(&decl.name) || (decl.is_const && naming::is_screaming_snake_case(&decl.name))) {
+        if !(naming::is_camel_case(&decl.name)
+            || (decl.is_const && naming::is_screaming_snake_case(&decl.name)))
+        {
             self.push_error_hint(
                 format!(
                     "variable '{}' must be camelCase (start with a lowercase letter, no underscores)",
@@ -1726,7 +1758,7 @@ impl Resolver {
                 FuncStmt::Return(_, _) | FuncStmt::Break(_) | FuncStmt::Continue(_) => {
                     terminated = true;
                 }
-                FuncStmt::LocalVar(_) => {}
+                FuncStmt::LocalVar(_) | FuncStmt::TupleBinding { .. } => {}
                 FuncStmt::Expression(_, _) => {}
                 FuncStmt::Assignment { .. } | FuncStmt::FieldAssignment { .. } => {}
                 FuncStmt::If(if_stmt) => {
@@ -2060,6 +2092,11 @@ impl Resolver {
                 }
             }
             SparType::List(inner) => self.resolve_type_reference(inner, parameters, span),
+            SparType::Tuple(items) => {
+                for item in items {
+                    self.resolve_type_reference(item, parameters, span);
+                }
+            }
             SparType::Function {
                 params,
                 return_type,
@@ -2220,12 +2257,14 @@ impl Resolver {
                     }
                 }
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.resolve_expr(item);
                 }
             }
-            Expr::Grouped(inner, _) => self.resolve_expr(inner),
+            Expr::Grouped(inner, _) | Expr::TupleField { base: inner, .. } => {
+                self.resolve_expr(inner)
+            }
             Expr::Call {
                 name,
                 name_span,
@@ -2447,7 +2486,12 @@ impl Resolver {
         locals: &HashSet<String>,
     ) -> Result<(), SparError> {
         let (name, args, name_span) = match stage {
-            Expr::Call { name, args, name_span, .. } => (name, args, name_span),
+            Expr::Call {
+                name,
+                args,
+                name_span,
+                ..
+            } => (name, args, name_span),
             Expr::FnCall(fc) => (&fc.name, &fc.args, &fc.span),
             _ => return self.resolve_expr_with_locals(stage, locals),
         };
@@ -2529,7 +2573,9 @@ impl Resolver {
         // stage silently skipped implicit-argument injection and then
         // failed resolve with a bogus "missing arguments" error.
         let (name, args, span) = match stage {
-            Expr::Call { name, args, span, .. } => (name, args, span),
+            Expr::Call {
+                name, args, span, ..
+            } => (name, args, span),
             Expr::FnCall(fc) => (&fc.name, &fc.args, &fc.span),
             _ => return None,
         };
@@ -2565,7 +2611,11 @@ impl Resolver {
         });
         injected.extend(args.iter().cloned());
         Some(match stage {
-            Expr::Call { name_span, type_arguments, .. } => Expr::Call {
+            Expr::Call {
+                name_span,
+                type_arguments,
+                ..
+            } => Expr::Call {
                 name: name.clone(),
                 name_span: name_span.clone(),
                 type_arguments: type_arguments.clone(),
@@ -2871,6 +2921,31 @@ impl Resolver {
     ) {
         for stmt in stmts {
             match stmt {
+                FuncStmt::TupleBinding {
+                    names,
+                    ty,
+                    value,
+                    span,
+                } => {
+                    self.reject_module_exec_shell(value, allow_exec_shell);
+                    if let Some(ty) = ty {
+                        self.check_named_type_exists(ty, span);
+                    }
+                    if let Err(error) = self.resolve_expr_with_locals(value, local_names) {
+                        self.errors.push(error);
+                    }
+                    for (name, name_span) in names {
+                        if !naming::is_camel_case(name) {
+                            self.errors.push(SparError::ResolveError {
+                                message: format!("local variable '{name}' must be camelCase"),
+                                hint: Some(naming::camel_case_hint(name)),
+                                span: name_span.clone(),
+                            });
+                        }
+                        local_names.insert(name.clone());
+                        mutable_names.remove(name);
+                    }
+                }
                 FuncStmt::LocalVar(lv) => {
                     self.reject_module_exec_shell(&lv.value, allow_exec_shell);
                     if let Some(ty) = &lv.ty {
@@ -2879,7 +2954,9 @@ impl Resolver {
                     if let Err(e) = self.resolve_expr_with_locals(&lv.value, local_names) {
                         self.errors.push(e);
                     }
-                    if !(naming::is_camel_case(&lv.name) || (lv.is_const && naming::is_screaming_snake_case(&lv.name))) {
+                    if !(naming::is_camel_case(&lv.name)
+                        || (lv.is_const && naming::is_screaming_snake_case(&lv.name)))
+                    {
                         self.errors.push(SparError::ResolveError {
                             message: format!("local variable '{}' must be camelCase", lv.name),
                             hint: Some(naming::camel_case_hint(&lv.name)),
@@ -3116,6 +3193,12 @@ impl Resolver {
         let mut locals = outer.clone();
         for stmt in stmts {
             match stmt {
+                FuncStmt::TupleBinding { names, value, .. } => {
+                    self.resolve_expr_with_locals(value, &locals)?;
+                    for (name, _) in names {
+                        locals.insert(name.clone());
+                    }
+                }
                 FuncStmt::LocalVar(local) => {
                     self.resolve_expr_with_locals(&local.value, &locals)?;
                     locals.insert(local.name.clone());
@@ -3260,13 +3343,15 @@ impl Resolver {
                 self.resolve_expr_with_locals(&b.lhs, locals)?;
                 self.resolve_expr_with_locals(&b.rhs, locals)
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.resolve_expr_with_locals(item, locals)?;
                 }
                 Ok(())
             }
-            Expr::Grouped(inner, _) => self.resolve_expr_with_locals(inner, locals),
+            Expr::Grouped(inner, _) | Expr::TupleField { base: inner, .. } => {
+                self.resolve_expr_with_locals(inner, locals)
+            }
             Expr::Call {
                 name,
                 name_span,
@@ -3631,6 +3716,13 @@ impl Resolver {
     ) -> Result<(), SparError> {
         for statement in statements {
             match statement {
+                Statement::TupleBinding { names, value, .. } => {
+                    self.resolve_expr_with_locals(value, visible)?;
+                    for (name, _) in names {
+                        visible.insert(name.clone());
+                        shell_locals.insert(name.clone());
+                    }
+                }
                 Statement::LocalVar(local) => {
                     self.resolve_expr_with_locals(&local.value, visible)?;
                     visible.insert(local.name.clone());
@@ -3964,12 +4056,12 @@ impl Resolver {
                 inner.insert(var_name.clone());
                 self.collect_closure_deps_expr(body, &inner, deps);
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.collect_closure_deps_expr(item, local_names, deps);
                 }
             }
-            Expr::Grouped(inner, _) => {
+            Expr::Grouped(inner, _) | Expr::TupleField { base: inner, .. } => {
                 self.collect_closure_deps_expr(inner, local_names, deps);
             }
             Expr::FnCall(fc) => {
@@ -4030,6 +4122,12 @@ impl Resolver {
         let mut locals = local_names.clone();
         for stmt in stmts {
             match stmt {
+                FuncStmt::TupleBinding { names, value, .. } => {
+                    self.collect_closure_deps_expr(value, &locals, deps);
+                    for (name, _) in names {
+                        locals.insert(name.clone());
+                    }
+                }
                 FuncStmt::LocalVar(lv) => {
                     self.collect_closure_deps_expr(&lv.value, &locals, deps);
                     locals.insert(lv.name.clone());
@@ -4082,7 +4180,6 @@ impl Resolver {
     fn resolve_spread(&mut self, spread: &SpreadStmt) {
         self.resolve_expr(&spread.expr);
     }
-
 }
 
 #[cfg(test)]
@@ -4335,7 +4432,10 @@ mod tests {
     #[test]
     fn test_global_reserved_struct_name() {
         assert!(has_error("struct global { port: int = 3000; };", "global"));
-        assert!(has_error("struct global { port: int = 3000; };", "reserved"));
+        assert!(has_error(
+            "struct global { port: int = 3000; };",
+            "reserved"
+        ));
     }
 
     #[test]

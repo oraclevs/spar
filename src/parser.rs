@@ -26,6 +26,7 @@ fn parse_error_start(error: &SparError) -> usize {
 fn statement_span(statement: &Statement) -> Span {
     match statement {
         Statement::LocalVar(declaration) => declaration.span.clone(),
+        Statement::TupleBinding { span, .. } => span.clone(),
         Statement::Assignment { span, .. } | Statement::FieldAssignment { span, .. } => {
             span.clone()
         }
@@ -518,7 +519,9 @@ impl Parser {
 
         // `import type { A, B } from "path";`
         if matches!(self.peek(), Token::Ident(s) if s == "type") {
-            return Err(self.error("`import type` was removed; use `import { Name } from \"./module\";`"));
+            return Err(
+                self.error("`import type` was removed; use `import { Name } from \"./module\";`")
+            );
         }
 
         // `import { A, B as C } from "path";`
@@ -1220,24 +1223,34 @@ impl Parser {
         if self.at(&Token::Colon) {
             return Err(self.error("struct type bindings were removed; declare typed fields and construct a value with `Name(field: value)`"));
         }
-        let previous_type_parameters = std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
+        let previous_type_parameters =
+            std::mem::replace(&mut self.active_type_parameters, type_parameters.clone());
         self.expect(&Token::LBrace)?;
         let mut items = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
             if self.at(&Token::HashBracket) {
-                return Err(self.error("attribute `#[...]` is only valid on top-level structs and vars"));
+                return Err(
+                    self.error("attribute `#[...]` is only valid on top-level structs and vars")
+                );
             }
             let field = self.parse_type_field(&type_parameters)?;
             let ty = match field.shape {
                 TypeFieldShape::Primitive(ty) => ty,
                 TypeFieldShape::Named(name) => SparType::Named(name),
                 TypeFieldShape::TypeParameter(name) => SparType::TypeParameter(name),
-                TypeFieldShape::Applied { name, arguments } => SparType::Applied { name, arguments },
-                TypeFieldShape::InlineRecord(_) => unreachable!("source struct fields have explicit types"),
+                TypeFieldShape::Applied { name, arguments } => {
+                    SparType::Applied { name, arguments }
+                }
+                TypeFieldShape::InlineRecord(_) => {
+                    unreachable!("source struct fields have explicit types")
+                }
             };
             items.push(ObjectItem::Field(FieldDecl {
-                name: field.name, ty: Some(ty), value: field.default.map(FieldValue::Expr),
-                end_line: self.prev_line(), span: field.span,
+                name: field.name,
+                ty: Some(ty),
+                value: field.default.map(FieldValue::Expr),
+                end_line: self.prev_line(),
+                span: field.span,
             }));
         }
         self.expect(&Token::RBrace)?;
@@ -1377,7 +1390,10 @@ impl Parser {
         let mut parser = Parser::new(tokens);
         let ty = parser.parse_type()?;
         if !parser.at(&Token::Eof) {
-            return Err(parser.error(format!("unexpected {} after type", parser.peek().human_name())));
+            return Err(parser.error(format!(
+                "unexpected {} after type",
+                parser.peek().human_name()
+            )));
         }
         Ok(ty)
     }
@@ -1392,7 +1408,30 @@ impl Parser {
             self.expect(&Token::RBracket)?;
             return Ok(SparType::List(Box::new(inner)));
         }
+        if self.at(&Token::LParen) {
+            return self.parse_tuple_type();
+        }
         self.parse_scalar_type()
+    }
+
+    /// `(int, str)` — two or more element types.
+    fn parse_tuple_type(&mut self) -> Result<SparType, SparError> {
+        self.expect(&Token::LParen)?;
+        let mut elements = vec![self.parse_type()?];
+        while self.at(&Token::Comma) {
+            self.advance();
+            if self.at(&Token::RParen) {
+                break;
+            }
+            elements.push(self.parse_type()?);
+        }
+        self.expect(&Token::RParen)?;
+        if elements.len() < 2 {
+            return Err(
+                self.error("a tuple type needs at least two element types, e.g. `(int, str)`")
+            );
+        }
+        Ok(SparType::Tuple(elements))
     }
 
     fn parse_callable_type(&mut self) -> Result<SparType, SparError> {
@@ -1691,8 +1730,29 @@ impl Parser {
                 let span = self.peek_span();
                 self.advance();
                 let inner = self.parse_expr()?;
-                self.expect(&Token::RParen)?;
-                Ok(Expr::Grouped(Box::new(inner), span))
+                if self.at(&Token::Comma) {
+                    let mut elements = vec![inner];
+                    while self.at(&Token::Comma) {
+                        self.advance();
+                        if self.at(&Token::RParen) {
+                            break;
+                        }
+                        elements.push(self.parse_expr()?);
+                    }
+                    self.expect(&Token::RParen)?;
+                    if elements.len() < 2 {
+                        return Err(SparError::ParseError {
+                            message:
+                                "single-element tuples are not supported; use the value itself"
+                                    .into(),
+                            span,
+                        });
+                    }
+                    Ok(Expr::Tuple(elements, span))
+                } else {
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::Grouped(Box::new(inner), span))
+                }
             }
             Token::Ident(_) | Token::TypeShell => self.parse_namespace_ref_or_fn_call(),
             Token::TypeStr => {
@@ -1775,6 +1835,22 @@ impl Parser {
             } else {
                 let span = self.peek_span();
                 self.advance(); // consume '.'
+                if let Token::IntLit(index) = self.peek().clone() {
+                    let index_span = self.peek_span();
+                    self.advance();
+                    expr = Expr::TupleField {
+                        base: Box::new(expr),
+                        index: index as usize,
+                        index_span,
+                        span,
+                    };
+                    continue;
+                }
+                if matches!(self.peek(), Token::FloatLit(_)) {
+                    return Err(self.error(
+                        "nested tuple access like `t.0.1` lexes as a float; write `(t.0).1`",
+                    ));
+                }
                 let (field, field_span) = self.expect_ident()?;
                 if self.at(&Token::LParen) {
                     self.advance();
@@ -2407,6 +2483,14 @@ impl Parser {
             self.expect(&Token::Semicolon)?;
             return Ok(FuncStmt::Continue(span));
         }
+        if self.at(&Token::Var)
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.token == Token::LParen)
+        {
+            return self.parse_tuple_binding();
+        }
         if self.at(&Token::Var) || self.at(&Token::KwConst) {
             return Ok(FuncStmt::LocalVar(self.parse_local_var_decl()?));
         }
@@ -2595,6 +2679,48 @@ impl Parser {
             span,
             end_line: self.prev_line(),
         }))
+    }
+
+    fn parse_tuple_binding(&mut self) -> Result<FuncStmt, SparError> {
+        let span = self.peek_span();
+        self.expect(&Token::Var)?;
+        self.expect(&Token::LParen)?;
+        let mut names = vec![self.expect_ident()?];
+        while self.at(&Token::Comma) {
+            self.advance();
+            if self.at(&Token::RParen) {
+                break;
+            }
+            names.push(self.expect_ident()?);
+        }
+        self.expect(&Token::RParen)?;
+        if names.len() < 2 {
+            return Err(self.error("tuple binding needs at least two names"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (name, name_span) in &names {
+            if !seen.insert(name) {
+                return Err(SparError::ParseError {
+                    message: format!("duplicate tuple binding `{name}`"),
+                    span: name_span.clone(),
+                });
+            }
+        }
+        let ty = if self.at(&Token::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Eq)?;
+        let value = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+        Ok(FuncStmt::TupleBinding {
+            names,
+            ty,
+            value,
+            span,
+        })
     }
 
     fn parse_local_var_decl(&mut self) -> Result<LocalVarDecl, SparError> {

@@ -423,6 +423,30 @@ fn async_failure_and_abandonment_surface_as_errors_not_hangs() {
 }
 
 #[test]
+fn native_async_timeout_cancels_wait_without_leaking_operation() {
+    let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let err = run_err(
+        r#"
+        async function main() -> int {
+            var pending = fastMath::delayedAdd(a: 20, b: 22, millis: 100);
+            var value: int = await nativeAsync::timeout(promise: pending, millis: 5);
+            return value;
+        };
+    "#,
+    );
+    assert!(
+        err.to_lowercase().contains("timed out") || err.to_lowercase().contains("timeout"),
+        "{err}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert_eq!(
+        native_module::live_async_ops(),
+        0,
+        "native async operation leaked after timeout"
+    );
+}
+
+#[test]
 fn async_double_completion_is_rejected() {
     let _g = ASYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(run_int("async function main() -> int { var v: int = await fastMath::delayedAdd(a: 1, b: 0, millis: 10); return v; };"), 1);

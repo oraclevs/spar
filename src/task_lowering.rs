@@ -398,6 +398,7 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
         // safe fallback beats a panic if that invariant ever slips.
         SparType::Any
         | SparType::List(_)
+        | SparType::Tuple(_)
         | SparType::InlineRecord
         | SparType::Named(_)
         | SparType::TypeParameter(_)
@@ -465,6 +466,7 @@ fn bare_param_ref(expr: &Expr, param_names: &HashSet<String>) -> Option<String> 
 fn stmts_mention_any(stmts: &[crate::ast::FuncStmt], param_names: &HashSet<String>) -> bool {
     stmts.iter().any(|stmt| match stmt {
         crate::ast::Statement::LocalVar(local) => expr_mentions_any(&local.value, param_names),
+        crate::ast::Statement::TupleBinding { value, .. } => expr_mentions_any(value, param_names),
         crate::ast::Statement::Assignment { value, .. }
         | crate::ast::Statement::FieldAssignment { value, .. }
         | crate::ast::Statement::Expression(value, _) => expr_mentions_any(value, param_names),
@@ -521,12 +523,19 @@ fn expr_mentions_any(expr: &Expr, param_names: &HashSet<String>) -> bool {
             expr_mentions_any(input, param_names) || expr_mentions_any(stage, param_names)
         }
         Expr::FieldAccess { base, .. } => expr_mentions_any(base, param_names),
-        Expr::FnCall(fc) => fc.args.iter().any(|a| expr_mentions_any(&a.value, param_names)),
+        Expr::FnCall(fc) => fc
+            .args
+            .iter()
+            .any(|a| expr_mentions_any(&a.value, param_names)),
         Expr::BinaryOp(op) => {
             expr_mentions_any(&op.lhs, param_names) || expr_mentions_any(&op.rhs, param_names)
         }
-        Expr::List(items, _) => items.iter().any(|i| expr_mentions_any(i, param_names)),
-        Expr::Grouped(inner, _) => expr_mentions_any(inner, param_names),
+        Expr::List(items, _) | Expr::Tuple(items, _) => {
+            items.iter().any(|i| expr_mentions_any(i, param_names))
+        }
+        Expr::Grouped(inner, _) | Expr::TupleField { base: inner, .. } => {
+            expr_mentions_any(inner, param_names)
+        }
         Expr::Call { args, .. } => args
             .iter()
             .any(|a| expr_mentions_any(&a.value, param_names)),

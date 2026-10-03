@@ -991,12 +991,14 @@ impl Evaluator {
                 self.collect_expr_deps(source, deps);
                 self.collect_expr_deps(body, deps);
             }
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 for item in items {
                     self.collect_expr_deps(item, deps);
                 }
             }
-            Expr::Grouped(inner, _) => self.collect_expr_deps(inner, deps),
+            Expr::Grouped(inner, _) | Expr::TupleField { base: inner, .. } => {
+                self.collect_expr_deps(inner, deps)
+            }
             Expr::FnCall(fc) => {
                 for arg in &fc.args {
                     self.collect_expr_deps(&arg.value, deps);
@@ -1296,10 +1298,16 @@ impl Evaluator {
         match self.eval_expr(expr, local_scope) {
             Ok(ConfigValue::Object(fields)) => Some(fields),
             Ok(value) => {
-                self.push_eval_error(EvalErr::TypeMismatch { expected: "Record/struct", got: value.type_name() });
+                self.push_eval_error(EvalErr::TypeMismatch {
+                    expected: "Record/struct",
+                    got: value.type_name(),
+                });
                 None
             }
-            Err(error) => { self.push_eval_error(error); None }
+            Err(error) => {
+                self.push_eval_error(error);
+                None
+            }
         }
     }
 
@@ -1395,7 +1403,7 @@ impl Evaluator {
                         .into(),
                 span: expr.span().cloned().unwrap_or_else(Span::dummy),
             }),
-            Expr::List(items, _) => {
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
                 let mut vals = Vec::with_capacity(items.len());
                 for item in items {
                     vals.push(self.eval_expr(item, local_scope)?);
@@ -1403,6 +1411,20 @@ impl Evaluator {
                 Ok(ConfigValue::List(vals))
             }
             Expr::Grouped(inner, _) => self.eval_expr(inner, local_scope),
+            Expr::TupleField {
+                base, index, span, ..
+            } => match self.eval_expr(base, local_scope)? {
+                ConfigValue::List(items) => {
+                    items.get(*index).cloned().ok_or_else(|| EvalErr::Fatal {
+                        message: format!("tuple index {index} out of bounds"),
+                        span: span.clone(),
+                    })
+                }
+                value => Err(EvalErr::TypeMismatch {
+                    expected: "tuple",
+                    got: value.type_name(),
+                }),
+            },
             Expr::NamespaceRef(nr) => self.eval_namespace_ref(nr, local_scope),
             Expr::MethodCall { span, .. } => Err(EvalErr::Fatal {
                 message: "method calls require the compiled runtime".into(),
@@ -1431,7 +1453,9 @@ impl Evaluator {
                 let span = span.clone();
                 self.eval_call(&name, &args, &span, local_scope)
             }
-            Expr::Unary { op, operand, span, .. } => {
+            Expr::Unary {
+                op, operand, span, ..
+            } => {
                 let operand = operand.clone();
                 let op = op.clone();
                 let unary_span = span.clone();
@@ -1591,6 +1615,26 @@ impl Evaluator {
                 ));
             }
             match statement {
+                Statement::TupleBinding {
+                    names, value, span, ..
+                } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    let ConfigValue::List(items) = value else {
+                        return Err(EvalErr::Fatal {
+                            message: "tuple binding requires a tuple".into(),
+                            span: span.clone(),
+                        });
+                    };
+                    if items.len() != names.len() {
+                        return Err(EvalErr::Fatal {
+                            message: "tuple binding length mismatch".into(),
+                            span: span.clone(),
+                        });
+                    }
+                    for ((name, _), item) in names.iter().zip(items) {
+                        local_scope.insert(name.clone(), item);
+                    }
+                }
                 Statement::LocalVar(declaration) => {
                     let value = self.eval_expr(&declaration.value, local_scope)?;
                     local_scope.insert(declaration.name.clone(), value);
@@ -1706,8 +1750,8 @@ impl Evaluator {
                         }
                     }
                     let snapshot = local_scope.clone();
-                    let (iteration_plan, flow) = self
-                        .eval_deferred_shell_statements(&while_statement.body, local_scope)?;
+                    let (iteration_plan, flow) =
+                        self.eval_deferred_shell_statements(&while_statement.body, local_scope)?;
                     restore_block_scope(local_scope, &snapshot, &while_statement.body, None);
                     steps.extend(iteration_plan.steps);
                     match flow {
@@ -3023,10 +3067,18 @@ impl Evaluator {
         call_span: &Span,
         caller_scope: &HashMap<String, ConfigValue>,
     ) -> EvalResult_ {
-        let declaration = self.program.items.iter().find_map(|item| match item {
-            TopLevelItem::Struct(decl) if decl.name == name => Some(decl.clone()),
-            _ => None,
-        }).ok_or_else(|| EvalErr::PathNotFound { path: name.to_string(), span: call_span.clone() })?;
+        let declaration = self
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                TopLevelItem::Struct(decl) if decl.name == name => Some(decl.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| EvalErr::PathNotFound {
+                path: name.to_string(),
+                span: call_span.clone(),
+            })?;
         let supplied = self.eval_explicit_args(args, caller_scope)?;
         // Guard against a struct whose own default field values (directly,
         // or via another struct's defaults) construct it again — without
@@ -3045,7 +3097,10 @@ impl Evaluator {
         self.evaluating_structs.insert(cycle_key.clone());
         let mut fields = indexmap::IndexMap::new();
         for field in declaration.type_decl().fields {
-            let value = if let Some((_, value)) = supplied.iter().find(|(key, _)| key.as_str() == field.name.as_str()) {
+            let value = if let Some((_, value)) = supplied
+                .iter()
+                .find(|(key, _)| key.as_str() == field.name.as_str())
+            {
                 value.clone()
             } else if let Some(default) = field.default {
                 match self.eval_expr(&default, &HashMap::new()) {
@@ -3057,7 +3112,10 @@ impl Evaluator {
                 }
             } else {
                 self.evaluating_structs.remove(&cycle_key);
-                return Err(EvalErr::Fatal { message: format!("struct '{name}' is missing required field '{}'", field.name), span: call_span.clone() });
+                return Err(EvalErr::Fatal {
+                    message: format!("struct '{name}' is missing required field '{}'", field.name),
+                    span: call_span.clone(),
+                });
             };
             fields.insert(field.name, value);
         }
@@ -3391,6 +3449,26 @@ impl Evaluator {
     ) -> Result<StatementFlow, EvalErr> {
         for stmt in stmts {
             match stmt {
+                FuncStmt::TupleBinding {
+                    names, value, span, ..
+                } => {
+                    let value = self.eval_expr(value, local_scope)?;
+                    let ConfigValue::List(items) = value else {
+                        return Err(EvalErr::Fatal {
+                            message: "tuple binding requires a tuple".into(),
+                            span: span.clone(),
+                        });
+                    };
+                    if items.len() != names.len() {
+                        return Err(EvalErr::Fatal {
+                            message: "tuple binding length mismatch".into(),
+                            span: span.clone(),
+                        });
+                    }
+                    for ((name, _), item) in names.iter().zip(items) {
+                        local_scope.insert(name.clone(), item);
+                    }
+                }
                 FuncStmt::LocalVar(lv) => {
                     let val = self.eval_expr(&lv.value.clone(), local_scope)?;
                     local_scope.insert(lv.name.clone(), val);
@@ -3618,9 +3696,12 @@ fn restore_block_scope(
 ) {
     let mut declared: Vec<&str> = statements
         .iter()
-        .filter_map(|statement| match statement {
-            FuncStmt::LocalVar(declaration) => Some(declaration.name.as_str()),
-            _ => None,
+        .flat_map(|statement| match statement {
+            FuncStmt::LocalVar(declaration) => vec![declaration.name.as_str()],
+            FuncStmt::TupleBinding { names, .. } => {
+                names.iter().map(|(name, _)| name.as_str()).collect()
+            }
+            _ => Vec::new(),
         })
         .collect();
     if let Some(binding) = loop_binding {
@@ -3959,14 +4040,17 @@ var endpoint: str = Config().host;
 
     #[test]
     fn test_struct_field_references_global() {
-        let r = eval_ok("var timeout: int = 30; #[emit] struct Db { timeout: int = global.timeout; };");
+        let r =
+            eval_ok("var timeout: int = 30; #[emit] struct Db { timeout: int = global.timeout; };");
         assert_eq!(struct_field(&r, &["Db"], "timeout"), ConfigValue::Int(30));
     }
 
     #[test]
     fn test_spread_merges_fields() {
         let result = eval_ok("struct Defaults { workers: int = 4; timeout: int = 30; }; var server: Record = { ...Defaults(); port: 8080; };");
-        let ConfigValue::Object(server) = &result.globals["server"] else { panic!("expected record"); };
+        let ConfigValue::Object(server) = &result.globals["server"] else {
+            panic!("expected record");
+        };
         assert_eq!(server["workers"], ConfigValue::Int(4));
         assert_eq!(server["port"], ConfigValue::Int(8080));
     }
@@ -3974,7 +4058,9 @@ var endpoint: str = Config().host;
     #[test]
     fn test_spread_explicit_overrides_spread() {
         let result = eval_ok("struct Defaults { workers: int = 4; port: int = 3000; }; var server: Record = { ...Defaults(); port: 8080; };");
-        let ConfigValue::Object(server) = &result.globals["server"] else { panic!("expected record"); };
+        let ConfigValue::Object(server) = &result.globals["server"] else {
+            panic!("expected record");
+        };
         assert_eq!(server["workers"], ConfigValue::Int(4));
         assert_eq!(server["port"], ConfigValue::Int(8080));
     }

@@ -18,11 +18,11 @@ pub use native::{
     NativeExecutionKind, NativeFunction, NativeFunctionId, NativeIntrinsic, NativeMethod,
     NativeMethodId, NativeMethodSignature, NativeRegistry, NativeSignature, ReceiverMode,
 };
+pub use record::Record;
 pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
 pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
-pub use record::Record;
 pub use value::{ErrorValue, Shared, Value};
 
 use crate::ast::SparType;
@@ -912,7 +912,12 @@ enum RuntimeFlow {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl crate::native_module::CallbackHost for Runtime<'_> {
-    fn call_callable(&mut self, callable: &Value, args: Vec<Value>, span: &Span) -> Result<Value, RuntimeFault> {
+    fn call_callable(
+        &mut self,
+        callable: &Value,
+        args: Vec<Value>,
+        span: &Span,
+    ) -> Result<Value, RuntimeFault> {
         self.invoke_data_callable(callable, args, span)
     }
     fn context_ptr(&mut self) -> *mut RuntimeContext {
@@ -948,7 +953,8 @@ impl Runtime<'_> {
     }
 
     fn function_is_async(&self, id: FunctionId) -> Result<bool, RuntimeFault> {
-        self.program.function(id)
+        self.program
+            .function(id)
             .map(|function| function.is_async)
             .ok_or_else(|| {
                 RuntimeFault::Fatal(Box::new(runtime_error(
@@ -959,7 +965,8 @@ impl Runtime<'_> {
     }
 
     fn entry_function_span(&self, id: FunctionId) -> Option<Span> {
-        self.program.function(id)
+        self.program
+            .function(id)
             .map(|function| function.span.clone())
     }
 
@@ -995,7 +1002,7 @@ impl Runtime<'_> {
 
     fn call_closure(
         &mut self,
-        closure: ClosureValue,
+        closure: &ClosureValue,
         arguments: Vec<Value>,
         call_span: &Span,
     ) -> Result<Value, RuntimeFault> {
@@ -1005,7 +1012,7 @@ impl Runtime<'_> {
     #[inline(never)]
     fn call_closure_inner(
         &mut self,
-        closure: ClosureValue,
+        closure: &ClosureValue,
         arguments: Vec<Value>,
         call_span: &Span,
     ) -> Result<Value, RuntimeFault> {
@@ -1013,7 +1020,8 @@ impl Runtime<'_> {
             return Err(runtime_error(
                 &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
                 call_span,
-            ).into());
+            )
+            .into());
         }
         if arguments.len() != closure.parameter_slots.len() {
             return Err(runtime_error(
@@ -1094,18 +1102,16 @@ impl Runtime<'_> {
         return_type: Option<RuntimeTypeBinding>,
     ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(
-                runtime_error(
-                    &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
-                    &Span::dummy(),
-                ).into(),
-            );
+            return Err(runtime_error(
+                &format!("maximum function call depth ({MAX_CALL_DEPTH}) exceeded"),
+                &Span::dummy(),
+            )
+            .into());
         }
         let program = Arc::clone(&self.program);
-        let function = program.function(id)
-            .ok_or_else(|| {
-                runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy())
-            })?;
+        let function = program.function(id).ok_or_else(|| {
+            runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy())
+        })?;
         let parameter_slots = &function.parameter_slots;
         let module = function.key.module;
         let default_values = &function.default_values;
@@ -1260,9 +1266,9 @@ impl Runtime<'_> {
         // from `&self` lets `self` be borrowed mutably for the body without an
         // atomic refcount increment/decrement on every call.
         let program: &CompiledProgram = unsafe { &*Arc::as_ptr(&self.program) };
-        let function = program
-            .function(id)
-            .ok_or_else(|| runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy()))?;
+        let function = program.function(id).ok_or_else(|| {
+            runtime_error(&format!("unknown function ID {}", id.0), &Span::dummy())
+        })?;
         let parameter_slots = &function.parameter_slots;
         let function_span = &function.span;
         if arguments.len() > parameter_slots.len() {
@@ -1341,6 +1347,19 @@ impl Runtime<'_> {
     ) -> Result<RuntimeFlow, RuntimeFault> {
         for statement in statements {
             let flow = match statement {
+                CompiledStatement::TupleBinding { slots, value, span } => {
+                    let value = self.eval_expression(value, frame, module)?;
+                    let Value::List(items) = value else {
+                        return Err(type_error("tuple", &value, span).into());
+                    };
+                    if items.len() != slots.len() {
+                        return Err(runtime_error("tuple binding length mismatch", span).into());
+                    }
+                    for (slot, item) in slots.iter().copied().zip(items.into_inner()) {
+                        frame.write(slot, item, span)?;
+                    }
+                    RuntimeFlow::Normal
+                }
                 CompiledStatement::StoreLocal { slot, value, span } => {
                     let value = self.eval_expression(value, frame, module)?;
                     frame.write(*slot, value, span)?;
@@ -1557,7 +1576,7 @@ impl Runtime<'_> {
                     .map(|argument| self.eval_expression(argument, frame, module))
                     .collect::<Result<Vec<_>, _>>()?;
                 match callee {
-                    Value::Closure(closure) => self.call_closure((closure).into_inner(), values, span),
+                    Value::Closure(closure) => self.call_closure(&closure, values, span),
                     Value::Function(function) => {
                         if self.function_is_async(function)? {
                             Ok(Value::Promise(self.scheduler.spawn(
@@ -1855,12 +1874,12 @@ impl Runtime<'_> {
                     self.call_depth,
                 )))
             }
-            CompiledExpression::List(items, _) => Ok(Value::List(
-                Shared::from(items
+            CompiledExpression::List(items, _) => Ok(Value::List(Shared::from(
+                items
                     .iter()
                     .map(|item| self.eval_expression(item, frame, module))
-                    .collect::<Result<Vec<_>, _>>()?),
-            )),
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))),
             CompiledExpression::Object(items, span) => {
                 let mut object = Record::new();
                 for item in items {
@@ -2064,15 +2083,17 @@ impl Runtime<'_> {
                 }
                 Ok(Value::List(Shared::from(output)))
             }
-            CompiledExpression::Shell(shell) => {
-                Ok(Value::Shell(Shared::from(self.eval_shell_plan(shell, frame, module)?)))
+            CompiledExpression::Shell(shell) => Ok(Value::Shell(Shared::from(
+                self.eval_shell_plan(shell, frame, module)?,
+            ))),
+            CompiledExpression::MixedShell(shell) => {
+                Ok(Value::MixedShell(Shared::from(MixedShellValue {
+                    plan: shell.clone(),
+                    captured: frame.clone(),
+                    module,
+                    span: shell.span.clone(),
+                })))
             }
-            CompiledExpression::MixedShell(shell) => Ok(Value::MixedShell(Shared::from(MixedShellValue {
-                plan: shell.clone(),
-                captured: frame.clone(),
-                module,
-                span: shell.span.clone(),
-            }))),
             CompiledExpression::CommandSubstitution(shell) => Ok(Value::String(
                 self.execute_command_substitution(shell, frame, module)?,
             )),
@@ -2856,14 +2877,11 @@ impl Runtime<'_> {
             }
             NativeIntrinsic::DataSchema => match source {
                 Value::Table(table) => Ok(Value::Schema(Shared::from(table.schema().clone()))),
-                Value::List(values) => {
-                    Schema::infer_records(values)
-                        .map(|schema| Value::Schema(Shared::from(schema)))
-                        .map_err(|error| {
-                            runtime_error(&format!("schema requires Record rows: {error}"), span)
-                                .into()
-                        })
-                }
+                Value::List(values) => Schema::infer_records(values)
+                    .map(|schema| Value::Schema(Shared::from(schema)))
+                    .map_err(|error| {
+                        runtime_error(&format!("schema requires Record rows: {error}"), span).into()
+                    }),
                 Value::Resource(_) => {
                     let (_, rows) = self.materialize_data_sequence(source, span)?;
                     Schema::infer_records(&rows)
@@ -3159,19 +3177,19 @@ impl Runtime<'_> {
         arguments: Vec<Value>,
         span: &Span,
     ) -> Result<Value, RuntimeFault> {
-        match callable.clone() {
-            Value::Closure(closure) => self.call_closure((closure).into_inner(), arguments, span),
+        match callable {
+            Value::Closure(closure) => self.call_closure(closure, arguments, span),
             Value::Function(function) => {
-                if self.function_is_async(function)? {
+                if self.function_is_async(*function)? {
                     return Err(runtime_error(
                         "structured data callbacks must be synchronous",
                         span,
                     )
                     .into());
                 }
-                self.call_function(function, arguments)
+                self.call_function(*function, arguments)
             }
-            other => Err(type_error("fn", &other, span).into()),
+            other => Err(type_error("fn", other, span).into()),
         }
     }
 
@@ -3318,9 +3336,9 @@ impl Runtime<'_> {
     ) -> Result<Value, RuntimeFault> {
         match shape {
             DataSequenceShape::List => Ok(Value::List(Shared::from(values))),
-            DataSequenceShape::Table(schema) => {
-                Ok(Value::Table(Shared::from(TableValue::with_schema(values, schema))))
-            }
+            DataSequenceShape::Table(schema) => Ok(Value::Table(Shared::from(
+                TableValue::with_schema(values, schema),
+            ))),
             DataSequenceShape::Stream(element_type) => Ok(Value::Resource(
                 self.context
                     .insert_stream(StreamResource::from_values(element_type, values)),
@@ -5191,6 +5209,13 @@ fn value_from_config_typed(
     symbols: &crate::resolver::SymbolTable,
 ) -> Value {
     match (value, expected) {
+        (ConfigValue::List(values), SparType::Tuple(elements)) => Value::List(
+            values
+                .into_iter()
+                .zip(elements)
+                .map(|(value, element)| value_from_config_typed(value, element, symbols))
+                .collect(),
+        ),
         (ConfigValue::List(values), SparType::List(element)) => Value::List(
             values
                 .into_iter()
@@ -5671,11 +5696,7 @@ fn sequence_kind(value: &Value) -> String {
 }
 
 /// `base.field` on an already-evaluated base value.
-pub(crate) fn field_of_value(
-    base: Value,
-    field: &str,
-    span: &Span,
-) -> Result<Value, RuntimeFault> {
+pub(crate) fn field_of_value(base: Value, field: &str, span: &Span) -> Result<Value, RuntimeFault> {
     match base {
         Value::Object(fields) => Ok(fields
             .get(field)
@@ -5803,7 +5824,11 @@ mod tests {
 
         assert_eq!(
             preview.value,
-            Value::List(Shared::from(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+            Value::List(Shared::from(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3)
+            ]))
         );
         assert!(preview.stream_preview);
         assert!(preview.truncated);

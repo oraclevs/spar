@@ -1,8 +1,7 @@
 //! `spar.package.spar` — the project manifest, written in Spar itself.
 //!
-//! Deliberately restricted: exactly `struct Package`, `struct Dependencies`, and an
-//! optional `struct Overrides` declaration, each holding only literal string
-//! fields (no interpolation, no function calls, no imports). Parsing a
+//! Deliberately restricted to package metadata declarations with literal fields
+//! (no interpolation, function calls, or imports). Parsing a
 //! manifest never runs the resolver, type checker, or evaluator — it's a
 //! plain AST walk over the lexer/parser output, so it's bootstrap-safe
 //! and deterministic without needing the rest of the language pipeline.
@@ -10,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Expr, FieldValue, Program, StructDecl, ObjectItem, StringPart, TopLevelItem};
+use crate::ast::{Expr, FieldValue, ObjectItem, Program, StringPart, StructDecl, TopLevelItem};
 use crate::package::error::PackageError;
 use crate::runtime_config::RuntimeSettings;
 
@@ -46,18 +45,21 @@ impl PackageKind {
 ///     module: str = "fastArray";
 ///     abi: str = "spar-native-1";
 ///     capabilities: str = "typed-arrays,strings";
-///     linux_x86_64_gnu: str = "native/linux-x86_64-gnu/libfastarray.so";
-///     linux_x86_64_gnu_sha256: str = "<hex>";
+///     interface: str = "native/interface.json";
+///     linuxX8664Gnu: str = "native/linux-x86_64-gnu/libfastarray.so";
+///     linuxX8664GnuSha256: str = "<hex>";
 /// };
 /// ```
-/// Artifact keys are `<os>_<arch>[_<env>]` (and `..._sha256`); paths are relative to the package
+/// Artifact keys use camel case (and an optional `Sha256` suffix); paths are relative to the package
 /// root and may not escape it. Nothing is ever searched for: only the path named here is loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeSpec {
     pub module: String,
     pub abi: String,
     pub capabilities: Vec<String>,
-    /// target key (`linux_x86_64_gnu`) -> (relative path, optional lowercase hex sha256)
+    /// Static signature file used by tooling without loading machine code.
+    pub interface: Option<String>,
+    /// target key (`linuxX8664Gnu`) -> (relative path, optional lowercase hex sha256)
     pub artifacts: BTreeMap<String, (String, Option<String>)>,
 }
 
@@ -113,14 +115,20 @@ impl PackageManifest {
                 }
                 "Dependencies" => {
                     if saw_dependencies {
-                        return Err(manifest_err(path, "duplicate `struct Dependencies` declaration"));
+                        return Err(manifest_err(
+                            path,
+                            "duplicate `struct Dependencies` declaration",
+                        ));
                     }
                     saw_dependencies = true;
                     dependencies = literal_fields(structure, path)?;
                 }
                 "Overrides" => {
                     if saw_overrides {
-                        return Err(manifest_err(path, "duplicate `struct Overrides` declaration"));
+                        return Err(manifest_err(
+                            path,
+                            "duplicate `struct Overrides` declaration",
+                        ));
                     }
                     saw_overrides = true;
                     overrides = literal_fields(structure, path)?;
@@ -154,10 +162,9 @@ impl PackageManifest {
             ));
         }
 
-        let name = fields
-            .get("name")
-            .cloned()
-            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'name'"))?;
+        let name = fields.get("name").cloned().ok_or_else(|| {
+            manifest_err(path, "`struct Package` is missing required field 'name'")
+        })?;
         if !is_valid_package_name(&name) {
             return Err(manifest_err(
                 path,
@@ -168,10 +175,9 @@ impl PackageManifest {
             ));
         }
 
-        let version_text = fields
-            .get("version")
-            .cloned()
-            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'version'"))?;
+        let version_text = fields.get("version").cloned().ok_or_else(|| {
+            manifest_err(path, "`struct Package` is missing required field 'version'")
+        })?;
         let version = semver::Version::parse(&version_text).map_err(|e| {
             manifest_err(
                 path,
@@ -179,10 +185,9 @@ impl PackageManifest {
             )
         })?;
 
-        let kind_text = fields
-            .get("kind")
-            .cloned()
-            .ok_or_else(|| manifest_err(path, "`struct Package` is missing required field 'kind'"))?;
+        let kind_text = fields.get("kind").cloned().ok_or_else(|| {
+            manifest_err(path, "`struct Package` is missing required field 'kind'")
+        })?;
         let kind = match kind_text.as_str() {
             "application" => PackageKind::Application,
             "library" => PackageKind::Library,
@@ -293,15 +298,27 @@ impl PackageManifest {
 
         if let Some(native) = &self.native {
             out.push_str("\nstruct Native {\n");
-            out.push_str(&format!("    module: str = \"{}\";\n", escape(&native.module)));
+            out.push_str(&format!(
+                "    module: str = \"{}\";\n",
+                escape(&native.module)
+            ));
             out.push_str(&format!("    abi: str = \"{}\";\n", escape(&native.abi)));
             if !native.capabilities.is_empty() {
-                out.push_str(&format!("    capabilities: str = \"{}\";\n", escape(&native.capabilities.join(","))));
+                out.push_str(&format!(
+                    "    capabilities: str = \"{}\";\n",
+                    escape(&native.capabilities.join(","))
+                ));
+            }
+            if let Some(interface) = &native.interface {
+                out.push_str(&format!(
+                    "    interface: str = \"{}\";\n",
+                    escape(interface)
+                ));
             }
             for (key, (path, sha)) in &native.artifacts {
                 out.push_str(&format!("    {key}: str = \"{}\";\n", escape(path)));
                 if let Some(sha) = sha {
-                    out.push_str(&format!("    {key}_sha256: str = \"{sha}\";\n"));
+                    out.push_str(&format!("    {key}Sha256: str = \"{sha}\";\n"));
                 }
             }
             out.push_str("};\n");
@@ -324,7 +341,45 @@ impl PackageManifest {
     }
 }
 
-fn native_spec(mut fields: BTreeMap<String, String>, path: &Path) -> Result<NativeSpec, PackageError> {
+/// Old underscore keys remain readable so existing package manifests do not break.
+fn native_target_key(key: &str) -> Option<String> {
+    let known = match key {
+        "linuxX8664Gnu" | "linux_x86_64_gnu" => Some("linuxX8664Gnu"),
+        "linuxX8664Musl" | "linux_x86_64_musl" => Some("linuxX8664Musl"),
+        "linuxX8664" | "linux_x86_64" => Some("linuxX8664"),
+        "linuxAarch64Gnu" | "linux_aarch64_gnu" => Some("linuxAarch64Gnu"),
+        "linuxAarch64Musl" | "linux_aarch64_musl" => Some("linuxAarch64Musl"),
+        "linuxAarch64" | "linux_aarch64" => Some("linuxAarch64"),
+        "macosX8664" | "macos_x86_64" => Some("macosX8664"),
+        "macosAarch64" | "macos_aarch64" => Some("macosAarch64"),
+        "windowsX8664Msvc" | "windows_x86_64_msvc" => Some("windowsX8664Msvc"),
+        "windowsX8664" | "windows_x86_64" => Some("windowsX8664"),
+        _ => None,
+    };
+    if let Some(known) = known {
+        return Some(known.to_string());
+    }
+    let suffix = [
+        "linux", "macos", "windows", "freebsd", "openbsd", "netbsd", "android", "ios",
+    ]
+    .iter()
+    .find_map(|os| key.strip_prefix(os))?;
+    if suffix
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        && suffix.chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        Some(key.to_string())
+    } else {
+        None
+    }
+}
+
+fn native_spec(
+    mut fields: BTreeMap<String, String>,
+    path: &Path,
+) -> Result<NativeSpec, PackageError> {
     let module = fields
         .remove("module")
         .ok_or_else(|| manifest_err(path, "`struct Native` is missing required field 'module'"))?;
@@ -336,38 +391,71 @@ fn native_spec(mut fields: BTreeMap<String, String>, path: &Path) -> Result<Nati
     }
     let capabilities = fields
         .remove("capabilities")
-        .map(|c| c.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .map(|c| {
+            c.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
+    let interface = fields.remove("interface");
     let mut artifacts: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     let keys: Vec<String> = fields.keys().cloned().collect();
     for key in keys {
-        if key.ends_with("_sha256") {
+        if key.ends_with("Sha256") || key.ends_with("_sha256") {
             continue;
         }
-        let target_ok = key.split('_').count() >= 2 && key.split('_').all(|p| !p.is_empty());
-        if !target_ok {
-            return Err(manifest_err(path, &format!("`struct Native` field '{key}' is not a target key like 'linux_x86_64_gnu'")));
-        }
+        let Some(canonical) = native_target_key(&key) else {
+            return Err(manifest_err(path, &format!("`struct Native` field '{key}' is not a supported target key like 'linuxX8664Gnu'")));
+        };
         let artifact = fields.remove(&key).unwrap();
-        let sha = fields.remove(&format!("{key}_sha256"));
+        let sha = fields
+            .remove(&format!("{key}Sha256"))
+            .or_else(|| fields.remove(&format!("{key}_sha256")));
         if let Some(sha) = &sha {
             if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(manifest_err(path, &format!("`struct Native` field '{key}_sha256' must be 64 hex characters")));
+                return Err(manifest_err(
+                    path,
+                    &format!("`struct Native` field '{key}Sha256' must be 64 hex characters"),
+                ));
             }
         }
-        artifacts.insert(key, (artifact, sha.map(|s| s.to_ascii_lowercase())));
+        if artifacts
+            .insert(
+                canonical.clone(),
+                (artifact, sha.map(|s| s.to_ascii_lowercase())),
+            )
+            .is_some()
+        {
+            return Err(manifest_err(
+                path,
+                &format!("duplicate native artifact target '{canonical}'"),
+            ));
+        }
     }
     if let Some(stray) = fields.keys().next() {
-        return Err(manifest_err(path, &format!("`struct Native` field '{stray}' has no matching artifact path")));
+        return Err(manifest_err(
+            path,
+            &format!("`struct Native` field '{stray}' has no matching artifact path"),
+        ));
     }
-    Ok(NativeSpec { module, abi, capabilities, artifacts })
+    Ok(NativeSpec {
+        module,
+        abi,
+        capabilities,
+        interface,
+        artifacts,
+    })
 }
 
 /// `struct Runtime`: typed literal fields, each key's type fixed by `runtime_config::KEYS`.
 fn runtime_settings(structure: &StructDecl, path: &Path) -> Result<RuntimeSettings, PackageError> {
     use crate::ast::{Literal, SparType};
     if !structure.type_parameters.is_empty() {
-        return Err(manifest_err(path, "manifest declarations cannot be generic"));
+        return Err(manifest_err(
+            path,
+            "manifest declarations cannot be generic",
+        ));
     }
     let mut settings = RuntimeSettings::default();
     let mut seen = std::collections::BTreeSet::new();
@@ -381,11 +469,17 @@ fn runtime_settings(structure: &StructDecl, path: &Path) -> Result<RuntimeSettin
         else {
             return Err(manifest_err(
                 path,
-                &format!("`struct Runtime`: {}", crate::runtime_config::unknown_key(&field.name)),
+                &format!(
+                    "`struct Runtime`: {}",
+                    crate::runtime_config::unknown_key(&field.name)
+                ),
             ));
         };
         if !seen.insert(field.name.clone()) {
-            return Err(manifest_err(path, &format!("duplicate field '{}'", field.name)));
+            return Err(manifest_err(
+                path,
+                &format!("duplicate field '{}'", field.name),
+            ));
         }
         let declared = match &field.ty {
             Some(SparType::Bool) => "bool",
@@ -396,7 +490,10 @@ fn runtime_settings(structure: &StructDecl, path: &Path) -> Result<RuntimeSettin
         if declared != *expected {
             return Err(manifest_err(
                 path,
-                &format!("`struct Runtime` field '{}' must be typed `{expected}`", field.name),
+                &format!(
+                    "`struct Runtime` field '{}' must be typed `{expected}`",
+                    field.name
+                ),
             ));
         }
         let Some(FieldValue::Expr(expr)) = &field.value else {
@@ -410,7 +507,10 @@ fn runtime_settings(structure: &StructDecl, path: &Path) -> Result<RuntimeSettin
                 None => {
                     return Err(manifest_err(
                         path,
-                        &format!("`struct Runtime` field '{}' must be a plain literal", field.name),
+                        &format!(
+                            "`struct Runtime` field '{}' must be a plain literal",
+                            field.name
+                        ),
                     ))
                 }
             },
@@ -438,7 +538,10 @@ fn render_runtime(runtime: &RuntimeSettings) -> String {
         out.push_str(&format!("    asyncWorkers: int = {n};\n"));
     }
     if let Some(modules) = &runtime.native_modules {
-        out.push_str(&format!("    nativeModules: str = \"{}\";\n", escape(modules)));
+        out.push_str(&format!(
+            "    nativeModules: str = \"{}\";\n",
+            escape(modules)
+        ));
     }
     out
 }
@@ -476,7 +579,10 @@ fn literal_fields(
     path: &Path,
 ) -> Result<BTreeMap<String, String>, PackageError> {
     if !structure.type_parameters.is_empty() {
-        return Err(manifest_err(path, "manifest declarations cannot be generic"));
+        return Err(manifest_err(
+            path,
+            "manifest declarations cannot be generic",
+        ));
     }
     let mut out = BTreeMap::new();
     for item in &structure.items {
@@ -484,7 +590,10 @@ fn literal_fields(
             return Err(unsupported(path));
         };
         if field.ty != Some(crate::ast::SparType::Str) {
-            return Err(manifest_err(path, "manifest fields must be explicitly typed as str"));
+            return Err(manifest_err(
+                path,
+                "manifest fields must be explicitly typed as str",
+            ));
         }
         let Some(FieldValue::Expr(expr)) = &field.value else {
             return Err(unsupported(path));

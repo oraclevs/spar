@@ -263,6 +263,28 @@ impl Compiler {
             }
         };
         program.shebang = shebang;
+        // A named import can denote a loaded native module. Its functions already live in
+        // NativeRegistry, so no source file needs loading; a same-name local file wins.
+        let native_names: std::collections::HashSet<String> = self.options.natives.signatures()
+            .into_keys().map(|(module, _)| module).collect();
+        program.items.retain(|item| {
+            let crate::ast::TopLevelItem::Import(decl) = item else { return true; };
+            let crate::ast::ImportKind::Bare(alias) = &decl.kind else { return true; };
+            if decl.package || !native_names.contains(&decl.path)
+                || self.options.base_dir.join(format!("{}.spar", decl.path)).is_file() {
+                return true;
+            }
+            if let Some(alias) = alias {
+                if alias != &decl.path {
+                    compilation.errors.push(SparError::ResolveError {
+                        message: format!("native module '{}' cannot be aliased yet", decl.path),
+                        hint: Some(format!("use `import {};`", decl.path)),
+                        span: decl.span.clone(),
+                    });
+                }
+            }
+            false
+        });
 
         let compiling_bundled_std = self
             .options

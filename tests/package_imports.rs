@@ -457,3 +457,60 @@ fn default_package_command_is_spar() {
     let text = error_text(&compilation);
     assert!(text.contains("spar add nope"), "{text}");
 }
+
+#[test]
+fn named_whole_local_import_supports_dot_call() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("helper.spar"), "fn answer() -> int { return 42; };\n").unwrap();
+    let result = spar::Engine::default().with_base_dir(temp.path()).execute_source(
+        "import helper; fn main() -> int { return helper.answer(); };",
+    );
+    assert_eq!(result.unwrap().exit_status, 42);
+}
+
+#[test]
+fn named_whole_package_import_supports_dot_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_lockfile, _store, locator) = http_dependency_fixture(temp.path());
+    let compilation = Compiler::new(CompileOptions {
+        base_dir: temp.path().to_path_buf(),
+        locator: Some(locator),
+        ..CompileOptions::default()
+    }).compile("import pkg http; export var routed: str = http.get(path: \"/pkg\");");
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    assert_eq!(compilation.result.unwrap().globals["routed"], spar::ConfigValue::Str("/pkg".into()));
+}
+
+#[test]
+fn named_import_formatting_preserves_dot_calls() {
+    let source = "import helper;\nfn main() -> int { return helper.answer(); };\n";
+    let formatted = spar::formatter::format_source(source).unwrap();
+    assert!(formatted.contains("import helper;"), "{formatted}");
+    assert!(formatted.contains("helper.answer()"), "{formatted}");
+    assert_eq!(spar::formatter::format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
+fn named_package_submodule_uses_last_segment_as_alias() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_lockfile, _store, locator) = http_dependency_fixture(temp.path());
+    let compilation = Compiler::new(CompileOptions {
+        base_dir: temp.path().to_path_buf(),
+        locator: Some(locator),
+        ..CompileOptions::default()
+    }).compile("import pkg http/fs; export var name: str = fs.readName();");
+    assert!(compilation.errors.is_empty(), "{:?}", compilation.errors);
+    assert_eq!(compilation.result.unwrap().globals["name"], spar::ConfigValue::Str("package-submodule".into()));
+}
+
+#[test]
+fn named_import_dot_call_rejects_shadowing_local() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("helper.spar"), "fn answer() -> int { return 42; };").unwrap();
+    let result = spar::Engine::default().with_base_dir(temp.path()).check_source(
+        "import helper; fn main(helper: int) -> int { return helper.answer(); };",
+    );
+    let errors = result.expect_err("shadowed import should fail");
+    let text = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("shadows an imported module"), "{text}");
+}

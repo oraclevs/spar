@@ -714,6 +714,12 @@ fn format_import_decl(imp: &ImportDecl, out: &mut String) {
             out.push_str(&escape_string_content(&imp.path));
             out.push_str("\";\n");
         }
+        ImportKind::Bare(alias) => {
+            out.push_str(if imp.package { "import pkg " } else { "import " });
+            out.push_str(&imp.path);
+            if let Some(alias) = alias { out.push_str(" as "); out.push_str(alias); }
+            out.push_str(";\n");
+        }
         ImportKind::Aliased(alias) => {
             out.push_str(if imp.package {
                 "import pkg \""
@@ -1254,12 +1260,18 @@ pub(crate) fn format_expr(
 
         Expr::Call {
             name,
+            name_span,
             type_arguments,
             args,
             span,
-            ..
         } => {
-            out.push_str(name);
+            if span.start < name_span.start {
+                // Parser lowers imported.method() to a namespaced call.
+                // Preserve its surface spelling when formatting.
+                out.push_str(&name.replacen("::", ".", 1));
+            } else {
+                out.push_str(name);
+            }
             if !type_arguments.is_empty() {
                 out.push('<');
                 out.push_str(

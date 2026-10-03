@@ -2,6 +2,9 @@
 //! against the public header only, loaded, registered, and called from real Spar source.
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "support/native_build.rs"]
+mod native_build;
 use std::sync::OnceLock;
 
 use spar::native_module;
@@ -17,36 +20,7 @@ fn c_fastmath() -> &'static Path {
     LIB.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("spar-native-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let lib = dir.join("libfastmath.so");
-        let sys = sys_dir();
-        let out = Command::new("cc")
-            .args([
-                "-std=c11",
-                "-O2",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-fPIC",
-                "-fvisibility=hidden",
-                "-shared",
-            ])
-            .args(
-                std::env::var("SPAR_TEST_CFLAGS")
-                    .unwrap_or_default()
-                    .split_whitespace(),
-            )
-            .arg(format!("-I{}", sys.join("include").display()))
-            .arg(sys.join("examples/native/c-fastmath/fastmath.c"))
-            .args(["-lm", "-lpthread", "-o"])
-            .arg(&lib)
-            .output()
-            .expect("cc");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        lib
+        native_build::build_fastmath(&dir, true)
     })
 }
 
@@ -229,7 +203,7 @@ fn rust_fastarray() -> &'static Path {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        dir.join("target/release/librust_fastarray.so")
+        dir.join("target/release").join(format!("{}rust_fastarray{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX))
     })
 }
 
@@ -583,4 +557,9 @@ fn rust_sdk_resources_are_typed_and_finalized() {
     // resource of the wrong Spar type is rejected at compile time
     let err = run_rust("function main() -> int { var b: Buffer = fastArray::linspace(n: 3); return fastArray::tallyAdd(tally: b, n: 1); };").unwrap_err();
     assert!(err.contains("Tally"), "{err}");
+}
+
+#[test]
+fn named_native_import_supports_dot_calls() {
+    assert_eq!(run_int("import fastMath; fn main() -> int { return fastMath.add(a: 40, b: 2); };"), 42);
 }

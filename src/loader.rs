@@ -225,7 +225,7 @@ fn expand_imports_inner(
         let decl = decl.clone();
 
         let spliced = match &decl.kind {
-            ImportKind::Aliased(_) | ImportKind::Schema => {
+            ImportKind::Aliased(_) | ImportKind::Bare(_) | ImportKind::Schema => {
                 new_items.push(item);
                 continue;
             }
@@ -1405,8 +1405,9 @@ pub fn collect_imports(
         let TopLevelItem::Import(decl) = item else {
             continue;
         };
-        let crate::ast::ImportKind::Aliased(decl_alias) = &decl.kind else {
-            continue;
+        let decl_alias = match &decl.kind {
+            crate::ast::ImportKind::Aliased(alias) | crate::ast::ImportKind::Bare(alias) => alias,
+            _ => continue,
         };
 
         let alias = decl_alias.clone().unwrap_or_else(|| {

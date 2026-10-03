@@ -360,6 +360,8 @@ pub enum ImportKind {
     /// `import "path" as alias;` — `None` means derive the alias from the
     /// path's file stem, exactly as today.
     Aliased(Option<String>),
+    /// `import moduleName;` or `import pkg packageName;` — whole namespace by name.
+    Bare(Option<String>),
     /// `import schema "path";`
     Schema,
     /// `import { A, B as C } from "path";`

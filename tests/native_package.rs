@@ -3,26 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/native_build.rs"]
+mod native_build;
+
 use sha2::{Digest, Sha256};
 use spar::package::{NativeSpec, PackageManifest};
 
 fn build_fastmath(out_dir: &Path) -> PathBuf {
-    let sys = Path::new(env!("CARGO_MANIFEST_DIR")).join("../spar-native-sys");
-    let lib = out_dir.join("libfastmath.so");
-    let out = Command::new("cc")
-        .args(["-std=c11", "-O2", "-fPIC", "-fvisibility=hidden", "-shared"])
-        .arg(format!("-I{}", sys.join("include").display()))
-        .arg(sys.join("examples/native/c-fastmath/fastmath.c"))
-        .args(["-lm", "-lpthread", "-o"])
-        .arg(&lib)
-        .output()
-        .expect("cc");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    lib
+    native_build::build_fastmath(out_dir, false)
+}
+
+fn fastmath_artifact() -> String {
+    format!("native/{}fastmath{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX)
 }
 
 fn target_key() -> String {
@@ -53,7 +45,7 @@ fn project(sha: Option<&str>, artifact_rel: &str) -> tempfile::TempDir {
     .unwrap();
     std::fs::write(
         dir.path().join("src/main.spar"),
-        "function main() -> int {\n    println(value: \"answer = ${fastMath::add(a: 40, b: 2)}\");\n    return 0;\n};\n",
+        "import fastMath;\nfunction main() -> int {\n    println(value: \"answer = ${fastMath.add(a: 40, b: 2)}\");\n    return 0;\n};\n",
     )
     .unwrap();
     dir
@@ -91,7 +83,7 @@ fn manifest_round_trips_native_section() {
 
 #[test]
 fn project_with_native_package_runs_through_the_cli() {
-    let dir = project(Some("real"), "native/libfastmath.so");
+    let dir = project(Some("real"), &fastmath_artifact());
     let out = spar(dir.path(), &["exec", "src/main.spar"], &[]);
     assert!(
         out.status.success(),
@@ -103,7 +95,7 @@ fn project_with_native_package_runs_through_the_cli() {
 
 #[test]
 fn tampered_artifact_is_rejected_before_loading() {
-    let dir = project(Some(&"0".repeat(64)), "native/libfastmath.so");
+    let dir = project(Some(&"0".repeat(64)), &fastmath_artifact());
     let out = spar(dir.path(), &["exec", "src/main.spar"], &[]);
     assert!(!out.status.success());
     assert!(
@@ -130,7 +122,7 @@ fn artifact_path_cannot_escape_the_package() {
 
 #[test]
 fn native_extensions_can_be_disabled() {
-    let dir = project(None, "native/libfastmath.so");
+    let dir = project(None, &fastmath_artifact());
     let out = spar(
         dir.path(),
         &["exec", "src/main.spar"],
@@ -142,7 +134,7 @@ fn native_extensions_can_be_disabled() {
 
 #[test]
 fn missing_target_artifact_is_a_clear_error() {
-    let dir = project(None, "native/libfastmath.so");
+    let dir = project(None, &fastmath_artifact());
     let manifest = std::fs::read_to_string(dir.path().join("spar.package.spar"))
         .unwrap()
         .replace(&target_key(), "plan9_mips");
@@ -171,7 +163,7 @@ fn disabled(out: &std::process::Output) -> bool {
 
 #[test]
 fn manifest_can_disable_native_and_default_is_enabled() {
-    let dir = project(Some("real"), "native/libfastmath.so");
+    let dir = project(Some("real"), &fastmath_artifact());
     assert!(spar(dir.path(), &["exec", "src/main.spar"], &[]).status.success());
     set_runtime(dir.path(), "    native: bool = false;\n");
     let out = spar(dir.path(), &["exec", "src/main.spar"], &[]);
@@ -180,7 +172,7 @@ fn manifest_can_disable_native_and_default_is_enabled() {
 
 #[test]
 fn env_var_beats_manifest() {
-    let dir = project(Some("real"), "native/libfastmath.so");
+    let dir = project(Some("real"), &fastmath_artifact());
     set_runtime(dir.path(), "    native: bool = true;\n");
     let out = spar(dir.path(), &["exec", "src/main.spar"], &[("SPAR_NO_NATIVE", "1")]);
     assert!(disabled(&out), "env must override manifest");
@@ -188,7 +180,7 @@ fn env_var_beats_manifest() {
 
 #[test]
 fn cli_flag_beats_env_var_and_manifest() {
-    let dir = project(Some("real"), "native/libfastmath.so");
+    let dir = project(Some("real"), &fastmath_artifact());
     set_runtime(dir.path(), "    native: bool = false;\n");
     let out = spar(
         dir.path(),
@@ -207,7 +199,7 @@ fn cli_flag_beats_env_var_and_manifest() {
 
 #[test]
 fn run_app_applies_manifest_runtime_and_cli_flag() {
-    let dir = project(Some("real"), "native/libfastmath.so");
+    let dir = project(Some("real"), &fastmath_artifact());
     set_runtime(dir.path(), "    native: bool = false;\n");
     let out = spar(dir.path(), &["run", "--app", "app"], &[]);
     assert!(disabled(&out), "{}", String::from_utf8_lossy(&out.stderr));

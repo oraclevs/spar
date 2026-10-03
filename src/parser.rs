@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::ast::*;
 use crate::error::{Span, SparError};
 use crate::shell_lang::{
@@ -5,12 +6,41 @@ use crate::shell_lang::{
 };
 use crate::token::{SpannedToken, Token};
 
+fn bare_import_names(tokens: &[SpannedToken]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].token != Token::Import { i += 1; continue; }
+        i += 1;
+        if matches!(tokens.get(i).map(|t| &t.token), Some(Token::Ident(name)) if name == "pkg") { i += 1; }
+        let Some(Token::Ident(first)) = tokens.get(i).map(|t| &t.token) else { continue; };
+        if matches!(first.as_str(), "schema" | "type" | "asPartOf") { continue; }
+        let mut alias = first.clone();
+        i += 1;
+        while matches!(tokens.get(i).map(|t| &t.token), Some(Token::Slash)) {
+            i += 1;
+            if let Some(Token::Ident(segment)) = tokens.get(i).map(|t| &t.token) {
+                alias = segment.clone(); i += 1;
+            } else { break; }
+        }
+        if matches!(tokens.get(i).map(|t| &t.token), Some(Token::As)) {
+            i += 1;
+            if let Some(Token::Ident(explicit)) = tokens.get(i).map(|t| &t.token) {
+                alias = explicit.clone(); i += 1;
+            }
+        }
+        if matches!(tokens.get(i).map(|t| &t.token), Some(Token::Semicolon)) { names.insert(alias); }
+    }
+    names
+}
+
 type RunHeader = (RunShell, Option<Span>, Option<String>, Option<Span>);
 
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
     active_type_parameters: Vec<TypeParameter>,
+    whole_import_names: HashSet<String>,
     /// Interactive sessions accept a bare expression as a module-level
     /// statement, so `answer + 1` or `users |> take(2)` can be previewed.
     interactive: bool,
@@ -73,8 +103,10 @@ pub(crate) fn parse_expression_tokens(tokens: Vec<SpannedToken>) -> Result<Expr,
 
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
+        let whole_import_names = bare_import_names(&tokens);
         Self {
             tokens,
+            whole_import_names,
             pos: 0,
             active_type_parameters: Vec::new(),
             interactive: false,
@@ -538,8 +570,10 @@ impl Parser {
             });
         }
 
-        // `import "path" [as alias];`
-        let path = self.parse_import_path()?;
+        // Whole namespace imports use names: `import helper;` / `import pkg http;`.
+        // Keep quoted imports readable during migration of existing source files.
+        let bare = matches!(self.peek(), Token::Ident(_));
+        let path = if bare { self.parse_bare_import_path()? } else { self.parse_import_path()? };
         let alias = if self.at(&Token::As) {
             self.advance();
             let (name, _) = self.expect_ident()?;
@@ -551,9 +585,21 @@ impl Parser {
         Ok(ImportDecl {
             path,
             package,
-            kind: ImportKind::Aliased(alias),
+            kind: if bare { ImportKind::Bare(alias) } else { ImportKind::Aliased(alias) },
             span,
         })
+    }
+
+    fn parse_bare_import_path(&mut self) -> Result<String, SparError> {
+        let (first, _) = self.expect_ident()?;
+        let mut path = first;
+        while self.at(&Token::Slash) {
+            self.advance();
+            let (segment, _) = self.expect_ident()?;
+            path.push('/');
+            path.push_str(&segment);
+        }
+        Ok(path)
     }
 
     fn parse_import_items(&mut self) -> Result<Vec<ImportItem>, SparError> {
@@ -1858,6 +1904,20 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     let mut span = span;
                     span.end = self.tokens[self.pos - 1].span.end;
+                    if let Expr::NamespaceRef(reference) = &expr {
+                        if reference.segments.len() == 1
+                            && self.whole_import_names.contains(&reference.segments[0])
+                        {
+                            expr = Expr::Call {
+                                name: format!("{}::{field}", reference.segments[0]),
+                                name_span: field_span,
+                                type_arguments: Vec::new(),
+                                args,
+                                span,
+                            };
+                            continue;
+                        }
+                    }
                     expr = Expr::MethodCall {
                         receiver: Box::new(expr),
                         method: field,

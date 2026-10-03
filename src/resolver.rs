@@ -1391,8 +1391,9 @@ impl Resolver {
         // TypeSelective imports are already spliced away by
         // loader::expand_imports before resolve ever runs — only a plain
         // aliased import reaches this function.
-        let ImportKind::Aliased(alias) = &decl.kind else {
-            return;
+        let alias = match &decl.kind {
+            ImportKind::Aliased(alias) | ImportKind::Bare(alias) => alias,
+            _ => return,
         };
 
         let namespace = alias.clone().unwrap_or_else(|| {
@@ -3357,8 +3358,22 @@ impl Resolver {
                 name_span,
                 type_arguments,
                 args,
-                ..
+                span,
             } => {
+                // A dot call on an imported namespace is lowered to a qualified
+                // call by the parser. Reject a same-named local instead of
+                // silently calling the import.
+                if span.start < name_span.start {
+                    if let Some((namespace, _)) = name.split_once("::") {
+                        if locals.contains(namespace) {
+                            return Err(SparError::ResolveError {
+                                message: format!("local variable '{namespace}' shadows an imported module"),
+                                hint: Some("rename the local variable or the import alias".into()),
+                                span: name_span.clone(),
+                            });
+                        }
+                    }
+                }
                 if name == "panic" {
                     if !type_arguments.is_empty() {
                         return Err(SparError::ResolveError {

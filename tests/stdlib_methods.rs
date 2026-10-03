@@ -229,6 +229,7 @@ fn primitive_methods_cover_string_numeric_bool_and_bytes_baseline() {
                 if text.trimEnd().endsWith(suffix: "Language") == false { return 2; }
                 if "SPAR".toLowerCase() != "spar" { return 3; }
                 if "spar".toUpperCase() != "SPAR" { return 4; }
+                if "héllo".utf8ByteLength() != 6 { return 41; }
                 if "abcdef".substring(start: 1, end: some(value: 4)) != "bcd" { return 5; }
                 if "abcdef".indexOf(needle: "cd").unwrap() != 2 { return 6; }
 
@@ -241,6 +242,7 @@ fn primitive_methods_cover_string_numeric_bool_and_bytes_baseline() {
                 var blob: Bytes = bytes(count: 3);
                 if blob.get(index: 0).isNone() { return 12; }
                 if blob.slice(start: 0, end: some(value: 2)).length() != 2 { return 13; }
+                if blob.concat(other: blob).length() != 6 { return 14; }
                 return 0;
             };
         "#)

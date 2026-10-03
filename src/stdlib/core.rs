@@ -182,6 +182,17 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
     registry
         .register_method(NativeMethod::sync(
             "str",
+            "utf8ByteLength",
+            SparType::Str,
+            vec![],
+            SparType::Int,
+            false,
+            |_context, args| Ok(Value::Int(string_receiver(args)?.len() as i64)),
+        ))
+        .expect("str.utf8ByteLength registration must be unique");
+    registry
+        .register_method(NativeMethod::sync(
+            "str",
             "isEmpty",
             SparType::Str,
             vec![],
@@ -553,6 +564,25 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
             |_context, args| empty_value(args),
         ))
         .expect("Bytes.isEmpty registration must be unique");
+    registry
+        .register_method(NativeMethod::sync(
+            "Bytes",
+            "concat",
+            bytes.clone(),
+            vec![("other", bytes.clone())],
+            bytes.clone(),
+            false,
+            |_context, args| match (args.first(), args.get(1)) {
+                (Some(Value::Bytes(left)), Some(Value::Bytes(right))) => {
+                    let mut joined = Vec::with_capacity(left.len() + right.len());
+                    joined.extend_from_slice(left);
+                    joined.extend_from_slice(right);
+                    Ok(Value::Bytes(joined))
+                }
+                _ => Err(error("Bytes.concat expects Bytes values")),
+            },
+        ))
+        .expect("Bytes.concat registration must be unique");
     registry
         .register_method(NativeMethod::sync(
             "Bytes",

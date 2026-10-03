@@ -44,7 +44,7 @@ impl PackageKind {
 /// ```spar
 /// struct Native {
 ///     module: str = "fastArray";
-///     abi: str = "spar-native-0";
+///     abi: str = "spar-native-1";
 ///     capabilities: str = "typed-arrays,strings";
 ///     linux_x86_64_gnu: str = "native/linux-x86_64-gnu/libfastarray.so";
 ///     linux_x86_64_gnu_sha256: str = "<hex>";
@@ -61,7 +61,7 @@ pub struct NativeSpec {
     pub artifacts: BTreeMap<String, (String, Option<String>)>,
 }
 
-pub const NATIVE_ABI_NAME: &str = "spar-native-0";
+pub const NATIVE_ABI_NAME: &str = "spar-native-1";
 
 #[derive(Debug, Clone)]
 pub struct PackageManifest {
@@ -331,8 +331,8 @@ fn native_spec(mut fields: BTreeMap<String, String>, path: &Path) -> Result<Nati
     let abi = fields
         .remove("abi")
         .ok_or_else(|| manifest_err(path, "`struct Native` is missing required field 'abi'"))?;
-    if abi != NATIVE_ABI_NAME {
-        return Err(manifest_err(path, &format!("`struct Native` abi '{abi}' is not supported (expected '{NATIVE_ABI_NAME}')")));
+    if abi != NATIVE_ABI_NAME && abi != "spar-native-0" {
+        return Err(manifest_err(path, &format!("`struct Native` abi '{abi}' is not supported (expected '{NATIVE_ABI_NAME}' or 'spar-native-0')")));
     }
     let capabilities = fields
         .remove("capabilities")

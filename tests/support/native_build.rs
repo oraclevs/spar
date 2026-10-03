@@ -1,19 +1,41 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Build the public-header C example with the host C toolchain.
 pub fn build_fastmath(out_dir: &Path, cflags: bool) -> PathBuf {
-    std::fs::create_dir_all(out_dir).expect("native build directory");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../spar-native-sys");
-    let source = root.join("examples/native/c-fastmath/fastmath.c");
+    build_shared(
+        "fastmath",
+        &root.join("examples/native/c-fastmath/fastmath.c"),
+        &root.join("include"),
+        out_dir,
+        false,
+        cflags,
+        &[],
+    )
+}
+
+/// Compile a native test module without writing generated binaries into a source checkout.
+pub fn build_shared(
+    name: &str,
+    source: &Path,
+    include: &Path,
+    out_dir: &Path,
+    cpp: bool,
+    cflags: bool,
+    defines: &[&str],
+) -> PathBuf {
+    std::fs::create_dir_all(out_dir).expect("native build directory");
     let output = out_dir.join(format!(
-        "{}fastmath{}",
+        "{}{}{}",
         std::env::consts::DLL_PREFIX,
+        name,
         std::env::consts::DLL_SUFFIX
     ));
-    let compiler = std::env::var("CC").unwrap_or_else(|_| {
+    let compiler = std::env::var(if cpp { "CXX" } else { "CC" }).unwrap_or_else(|_| {
         if cfg!(target_env = "msvc") {
             "cl".into()
+        } else if cpp {
+            "c++".into()
         } else {
             "cc".into()
         }
@@ -21,14 +43,26 @@ pub fn build_fastmath(out_dir: &Path, cflags: bool) -> PathBuf {
     let mut command = Command::new(&compiler);
     command.current_dir(out_dir);
     if cfg!(target_env = "msvc") {
+        command.args(["/nologo", "/LD", "/O2"]);
+        if cpp {
+            command.args(["/EHsc", "/std:c++17"]);
+        }
+        for define in defines {
+            command.arg(format!("/D{}", define.trim_start_matches("-D")));
+        }
         command
-            .args(["/nologo", "/LD", "/O2"])
-            .arg(format!("/I{}", root.join("include").display()))
-            .arg(&source)
+            .arg(format!("/I{}", include.display()))
+            .arg(source)
             .arg("/link")
             .arg(format!("/OUT:{}", output.display()));
     } else {
-        command.args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]);
+        command.args([
+            if cpp { "-std=c++17" } else { "-std=c11" },
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        ]);
         if !cfg!(windows) {
             command.args(["-fPIC", "-fvisibility=hidden"]);
         }
@@ -37,6 +71,7 @@ pub fn build_fastmath(out_dir: &Path, cflags: bool) -> PathBuf {
         } else {
             "-shared"
         });
+        command.args(defines);
         if cflags {
             command.args(
                 std::env::var("SPAR_TEST_CFLAGS")
@@ -44,9 +79,7 @@ pub fn build_fastmath(out_dir: &Path, cflags: bool) -> PathBuf {
                     .split_whitespace(),
             );
         }
-        command
-            .arg(format!("-I{}", root.join("include").display()))
-            .arg(&source);
+        command.arg(format!("-I{}", include.display())).arg(source);
         if !cfg!(windows) {
             command.arg("-lm");
         }
@@ -55,10 +88,10 @@ pub fn build_fastmath(out_dir: &Path, cflags: bool) -> PathBuf {
         }
         command.arg("-o").arg(&output);
     }
-    let result = command.output().expect("C compiler");
+    let result = command.output().expect("native C/C++ compiler");
     assert!(
         result.status.success(),
-        "C compiler {} failed:\n{}",
+        "native compiler {} failed:\n{}",
         compiler,
         String::from_utf8_lossy(&result.stderr)
     );

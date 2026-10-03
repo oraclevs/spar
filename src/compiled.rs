@@ -146,6 +146,11 @@ pub(crate) enum CompiledExpression {
         return_type: Option<SparType>,
         span: Span,
     },
+    Convert {
+        kind: String,
+        value: Box<CompiledExpression>,
+        span: Span,
+    },
     Panic {
         message: Box<CompiledExpression>,
         span: Span,
@@ -731,6 +736,7 @@ fn visit_expression(expression: &CompiledExpression, visit: &mut impl FnMut(&Com
             }
             visit_statements(body, visit);
         }
+        CompiledExpression::Convert { value, .. } => visit_expression(value, visit),
         CompiledExpression::Panic { message, .. } => visit_expression(message, visit),
         CompiledExpression::Index { source, index, .. } => {
             visit_expression(source, visit);

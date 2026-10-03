@@ -689,3 +689,58 @@ fn concurrent_global_increments_do_not_lose_updates() {
         .expect("concurrent global increments should execute");
     assert_eq!(outcome.exit_status, 8 * 2000);
 }
+
+#[test]
+fn conversion_builtins_execute_in_compiled_functions() {
+    let source = r#"
+        fn main() -> int {
+            if str(value: 42) != "42" { return 1; }
+            if int(value: " 41 ") != 41 { return 2; }
+            if float(value: "1.5") != 1.5 { return 3; }
+            if bool(value: "true") != true { return 4; }
+            return 0;
+        };
+    "#;
+    let outcome = Engine::default().execute_source(source).expect("conversions run");
+    assert_eq!(outcome.exit_status, 0);
+}
+
+#[test]
+fn invalid_compiled_conversion_reports_the_value() {
+    let source = r#"fn main() -> int { return int(value: "not a number"); };"#;
+    let error = Engine::default().execute_source(source).expect_err("invalid int");
+    let rendered = error.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(rendered.contains("cannot convert"), "{rendered}");
+}
+
+#[test]
+fn interpolation_accepts_nested_string_literals() {
+    let source = r##"fn main() -> int {
+        if "hello ${"world"}" != "hello world" { return 1; }
+        if "n=${int(value: "2")}" != "n=2" { return 2; }
+        return 0;
+    };"##;
+    let outcome = Engine::default().execute_source(source).expect("nested string interpolation");
+    assert_eq!(outcome.exit_status, 0);
+}
+
+#[test]
+fn structural_equality_compares_lists_tuples_structs_and_generic_values() {
+    let outcome = Engine::default()
+        .execute_source(
+            r#"
+            struct Pair { left: int; right: List<int>; };
+            fn same<T>(a: T, b: T) -> bool { return a == b; };
+            fn main() -> int {
+                if [1, 2] != [1, 2] { return 1; }
+                if [1, 2] == [2, 1] { return 2; }
+                if (1, "x") != (1, "x") { return 3; }
+                if Pair(left: 1, right: [2]) != Pair(left: 1, right: [2]) { return 4; }
+                if !same(a: [3], b: [3]) { return 5; }
+                return 0;
+            };
+            "#,
+        )
+        .expect("structural equality should compile and run");
+    assert_eq!(outcome.exit_status, 0);
+}

@@ -216,6 +216,7 @@ fn expand_imports_inner(
     let old_items = std::mem::take(&mut program.items);
     let mut new_items: Vec<TopLevelItem> = Vec::with_capacity(old_items.len());
     let mut imported_helpers = HashSet::new();
+    let mut imported_type_origins: HashMap<String, (PathBuf, String)> = HashMap::new();
 
     for item in old_items {
         let TopLevelItem::Import(decl) = &item else {
@@ -239,6 +240,14 @@ fn expand_imports_inner(
             Ok(items) => {
                 for it in items {
                     if let Some(name) = top_level_name(&it) {
+                        let origin = match &it {
+                            TopLevelItem::Struct(decl) => decl.origin.as_ref(),
+                            TopLevelItem::Enum(decl) => decl.origin.as_ref(),
+                            _ => None,
+                        };
+                        if origin.is_some_and(|origin| imported_type_origins.get(name) == Some(origin)) {
+                            continue;
+                        }
                         if (name.starts_with("sparModule") || name.starts_with("SparModule"))
                             && imported_helpers.contains(name)
                         {
@@ -258,6 +267,9 @@ fn expand_imports_inner(
                         }
                         if (name.starts_with("sparModule") || name.starts_with("SparModule")) {
                             imported_helpers.insert(name.to_string());
+                        }
+                        if let Some(origin) = origin {
+                            imported_type_origins.insert(name.to_string(), origin.clone());
                         }
                     }
                     new_items.push(it);
@@ -429,6 +441,7 @@ fn top_level_name(item: &crate::ast::TopLevelItem) -> Option<&str> {
         TopLevelItem::Struct(s) => Some(s.name.as_str()),
         TopLevelItem::Function(f) => Some(&f.name),
         TopLevelItem::Type(t) => Some(&t.name),
+        TopLevelItem::Enum(e) => Some(&e.name),
         _ => None,
     }
 }
@@ -440,6 +453,7 @@ fn top_level_span(item: &crate::ast::TopLevelItem) -> Option<crate::error::Span>
         TopLevelItem::Struct(s) => Some(s.span.clone()),
         TopLevelItem::Function(f) => Some(f.span.clone()),
         TopLevelItem::Type(t) => Some(t.span.clone()),
+        TopLevelItem::Enum(e) => Some(e.span.clone()),
         _ => None,
     }
 }

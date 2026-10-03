@@ -1132,11 +1132,8 @@ impl<'a> Lexer<'a> {
                     self.advance();
                 }
                 Some(b'"') => {
-                    return Err(SparError::LexError {
-                        message: "nested strings inside interpolation are not supported"
-                            .to_string(),
-                        span: Span::new(start, self.pos, line, col),
-                    });
+                    self.advance();
+                    self.lex_string(tokens, start, line, col)?;
                 }
                 Some(b'{') => {
                     self.advance();

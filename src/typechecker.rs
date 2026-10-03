@@ -84,6 +84,18 @@ fn is_legacy_callable_param(name: &str) -> bool {
         .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+fn supports_value_equality(ty: &SparType) -> bool {
+    match ty {
+        SparType::Function { .. } | SparType::Shell | SparType::Void => false,
+        SparType::List(inner) => supports_value_equality(inner),
+        SparType::Tuple(items) => items.iter().all(supports_value_equality),
+        SparType::Applied { name, arguments } => {
+            name != "Promise" && arguments.iter().all(supports_value_equality)
+        }
+        _ => true,
+    }
+}
+
 pub(crate) fn is_assignable(expected: &SparType, actual: &SparType) -> bool {
     if expected == &SparType::Any {
         return actual != &SparType::Void;
@@ -3504,9 +3516,14 @@ impl<'a> TypeChecker<'a> {
                             (SparType::Int, SparType::Int) | (SparType::Float, SparType::Float)
                         ),
                         BinOp::Fallback => l == r,
-                        BinOp::Eq
-                        | BinOp::NotEq
-                        | BinOp::Lt
+                        BinOp::Eq | BinOp::NotEq => {
+                            (l == r && supports_value_equality(l))
+                                || (matches!(l, SparType::Named(name) if name == "Record")
+                                    && matches!(r, SparType::Int | SparType::Float | SparType::Str | SparType::Bool))
+                                || (matches!(r, SparType::Named(name) if name == "Record")
+                                    && matches!(l, SparType::Int | SparType::Float | SparType::Str | SparType::Bool))
+                        }
+                        BinOp::Lt
                         | BinOp::Gt
                         | BinOp::LtEq
                         | BinOp::GtEq => {
@@ -6221,15 +6238,7 @@ impl<'a> TypeChecker<'a> {
                             SparType::Int | SparType::Float | SparType::Str | SparType::Bool
                         )
                 };
-                let same_primitive = lty == rty
-                    && matches!(
-                        lty,
-                        SparType::Int | SparType::Float | SparType::Str | SparType::Bool
-                    );
-                let same_enum = lty == rty
-                    && matches!(&lty, SparType::Named(name) if self.symbols.enums.contains_key(name));
-                if same_primitive
-                    || same_enum
+                if (lty == rty && supports_value_equality(&lty))
                     || dynamic_pair(&lty, &rty)
                     || dynamic_pair(&rty, &lty)
                 {

@@ -1649,6 +1649,10 @@ impl Runtime<'_> {
                     .call(*function, &mut self.context, &values, span)
                     .map_err(Into::into)
             }
+            CompiledExpression::Convert { kind, value, span } => {
+                let value = self.eval_expression(value, frame, module)?;
+                convert_builtin(kind, value, span)
+            }
             CompiledExpression::Panic { message, span } => {
                 let message = self.eval_expression(message, frame, module)?;
                 let Value::String(message) = message else {
@@ -5298,6 +5302,41 @@ fn value_from_config_typed(
             )
         }
         (value, _) => Value::from_config(value),
+    }
+}
+
+fn convert_builtin(kind: &str, value: Value, span: &Span) -> Result<Value, RuntimeFault> {
+    match kind {
+        "str" => Ok(Value::String(value.render_display())),
+        "int" => match value {
+            Value::Int(value) => Ok(Value::Int(value)),
+            Value::Float(value) => Ok(Value::Int(value as i64)),
+            Value::String(value) => value.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                runtime_error(&format!("cannot convert {value:?} to int"), span).into()
+            }),
+            other => Err(type_error("int, float, or str", &other, span).into()),
+        },
+        "float" => match value {
+            Value::Int(value) => Ok(Value::Float(value as f64)),
+            Value::Float(value) => Ok(Value::Float(value)),
+            Value::String(value) => value.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+                runtime_error(&format!("cannot convert {value:?} to float"), span).into()
+            }),
+            other => Err(type_error("int, float, or str", &other, span).into()),
+        },
+        "bool" => match value {
+            Value::Bool(value) => Ok(Value::Bool(value)),
+            Value::String(value) => match value.trim() {
+                "true" => Ok(Value::Bool(true)),
+                "false" => Ok(Value::Bool(false)),
+                _ => Err(runtime_error(
+                    &format!("cannot convert {value:?} to bool (expected true or false)"),
+                    span,
+                ).into()),
+            },
+            other => Err(type_error("str or bool", &other, span).into()),
+        },
+        _ => Err(runtime_error("unknown conversion builtin", span).into()),
     }
 }
 

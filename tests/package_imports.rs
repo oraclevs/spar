@@ -514,3 +514,29 @@ fn named_import_dot_call_rejects_shadowing_local() {
     let text = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
     assert!(text.contains("shadows an imported module"), "{text}");
 }
+
+#[test]
+fn repeated_selective_import_of_one_enum_is_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("types.spar"),
+        "export enum Kind { One, Two }; fn first() -> int { return 1; }; fn second() -> int { return 2; };",
+    ).unwrap();
+    let source = r#"import { Kind, first } from "types.spar";
+                    import { Kind, second } from "types.spar";
+                    fn main() -> int { return first() + second(); };"#;
+    let result = spar::Engine::default().with_base_dir(temp.path()).execute_source(source);
+    assert_eq!(result.unwrap().exit_status, 3);
+}
+
+#[test]
+fn distinct_imported_enums_with_the_same_name_still_collide() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("a.spar"), "export enum Kind { One };").unwrap();
+    fs::write(temp.path().join("b.spar"), "export enum Kind { Two };").unwrap();
+    let source = "import { Kind } from \"a.spar\"; import { Kind } from \"b.spar\";";
+    let errors = spar::Engine::default().with_base_dir(temp.path())
+        .check_source(source).expect_err("distinct enums collide");
+    let text = errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("collides"), "{text}");
+}

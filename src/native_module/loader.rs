@@ -64,7 +64,7 @@ impl std::fmt::Display for NativeLoadError {
             ),
             Self::MissingSymbol { path } => write!(
                 f,
-                "'{}' is not a Spar native module: it does not export 'spar_native_module_v0'",
+                "'{}' is not a Spar native module: it exports neither 'spar_native_module_v1' nor 'spar_native_module_v0'",
                 path.display()
             ),
             Self::Descriptor { path, message } => {
@@ -445,12 +445,19 @@ static API: SparApiV0 = SparApiV0 {
     module_add_type: Some(module_add_type),
 };
 
-/// The API table given to modules (also used by tests that load modules built in-process).
+// ABI 0 modules receive the exact version they were compiled against.
+static API_V0: SparApiV0 = SparApiV0 {
+    abi_major: 0,
+    abi_minor: 2,
+    ..API
+};
+
+/// The current API table (also used by tests that load modules built in-process).
 pub fn api_table() -> &'static SparApiV0 {
     &API
 }
 
-fn validate_descriptor(path: &Path, d: &SparModuleDescriptor) -> Result<(), NativeLoadError> {
+fn validate_descriptor(path: &Path, d: &SparModuleDescriptor, symbol_major: u16) -> Result<(), NativeLoadError> {
     let err = |m: String| NativeLoadError::Descriptor {
         path: path.to_path_buf(),
         message: m,
@@ -464,16 +471,17 @@ fn validate_descriptor(path: &Path, d: &SparModuleDescriptor) -> Result<(), Nati
             SPAR_NATIVE_ABI_MINOR
         )));
     }
-    if d.abi_major != SPAR_NATIVE_ABI_MAJOR {
+    if d.abi_major != symbol_major {
         return Err(err(format!(
-            "module targets ABI major {}, runtime provides {}",
-            d.abi_major, SPAR_NATIVE_ABI_MAJOR
+            "module entry symbol is ABI {symbol_major}, but its descriptor declares ABI {}",
+            d.abi_major
         )));
     }
-    if d.min_abi_minor > SPAR_NATIVE_ABI_MINOR {
+    let supported_minor = if d.abi_major == 0 { 2 } else { SPAR_NATIVE_ABI_MINOR };
+    if d.min_abi_minor > supported_minor {
         return Err(err(format!(
             "module needs ABI {}.{}, runtime provides {}.{}",
-            d.abi_major, d.min_abi_minor, SPAR_NATIVE_ABI_MAJOR, SPAR_NATIVE_ABI_MINOR
+            d.abi_major, d.min_abi_minor, d.abi_major, supported_minor
         )));
     }
     let missing = d.required_capabilities & !RUNTIME_CAPABILITIES;
@@ -517,8 +525,13 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
             message: e.to_string(),
         })?;
     let lib: &'static libloading::Library = Box::leak(Box::new(lib));
-    let entry: libloading::Symbol<'static, unsafe extern "C" fn() -> *const SparModuleDescriptor> =
-        unsafe { lib.get(SPAR_MODULE_SYMBOL) }.map_err(|_| NativeLoadError::MissingSymbol {
+    let (entry, symbol_major): (
+        libloading::Symbol<'static, unsafe extern "C" fn() -> *const SparModuleDescriptor>,
+        u16,
+    ) = unsafe { lib.get(SPAR_MODULE_SYMBOL) }
+        .map(|entry| (entry, SPAR_NATIVE_ABI_MAJOR))
+        .or_else(|_| unsafe { lib.get(SPAR_MODULE_SYMBOL_V0) }.map(|entry| (entry, 0)))
+        .map_err(|_| NativeLoadError::MissingSymbol {
             path: canonical.clone(),
         })?;
     // SAFETY: the symbol has the documented signature; a wrong-signature export is a module bug.
@@ -544,7 +557,7 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
     if short && declared >= 8 {
         // A prefix shorter than we know is rejected below with a clear message.
     }
-    validate_descriptor(&canonical, &desc)?;
+    validate_descriptor(&canonical, &desc, symbol_major)?;
     let name = unsafe { text(desc.module_name, desc.module_name_len) }.map_err(|m| {
         NativeLoadError::Descriptor {
             path: canonical.clone(),
@@ -593,9 +606,10 @@ pub fn load_module(path: &Path) -> Result<Arc<LoadedModule>, NativeLoadError> {
     let mut state: *mut c_void = std::ptr::null_mut();
     let init = desc.init.unwrap();
     // SAFETY: module init receives the API table and builder; a panic/unwind here is a module bug.
+    let api = if symbol_major == 0 { &API_V0 } else { &API };
     let status = unsafe {
         init(
-            &API,
+            api,
             &mut builder as *mut ModuleBuilder as *mut SparModule,
             &mut state,
         )

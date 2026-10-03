@@ -39,7 +39,7 @@ fn project(sha: Option<&str>, artifact_rel: &str) -> tempfile::TempDir {
     std::fs::write(
         dir.path().join("spar.package.spar"),
         format!(
-            "struct Package {{\n    name: str = \"app\";\n    version: str = \"0.1.0\";\n    kind: str = \"application\";\n    entry: str = \"src/main.spar\";\n}};\n\nstruct Native {{\n    module: str = \"fastMath\";\n    abi: str = \"spar-native-0\";\n    capabilities: str = \"strings,bytes,lists,records,callbacks,async\";\n    {key}: str = \"{artifact_rel}\";\n{sha_line}}};\n"
+            "struct Package {{\n    name: str = \"app\";\n    version: str = \"0.1.0\";\n    kind: str = \"application\";\n    entry: str = \"src/main.spar\";\n}};\n\nstruct Native {{\n    module: str = \"fastMath\";\n    abi: str = \"spar-native-1\";\n    capabilities: str = \"strings,bytes,lists,records,callbacks,async\";\n    {key}: str = \"{artifact_rel}\";\n{sha_line}}};\n"
         ),
     )
     .unwrap();
@@ -64,7 +64,7 @@ fn spar(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
 
 #[test]
 fn manifest_round_trips_native_section() {
-    let src = "struct Package {\n    name: str = \"p\";\n    version: str = \"1.0.0\";\n    kind: str = \"library\";\n};\nstruct Native {\n    module: str = \"m\";\n    abi: str = \"spar-native-0\";\n    linux_x86_64_gnu: str = \"n/a.so\";\n    linux_x86_64_gnu_sha256: str = \"0000000000000000000000000000000000000000000000000000000000000000\";\n};\n";
+    let src = "struct Package {\n    name: str = \"p\";\n    version: str = \"1.0.0\";\n    kind: str = \"library\";\n};\nstruct Native {\n    module: str = \"m\";\n    abi: str = \"spar-native-1\";\n    linux_x86_64_gnu: str = \"n/a.so\";\n    linux_x86_64_gnu_sha256: str = \"0000000000000000000000000000000000000000000000000000000000000000\";\n};\n";
     let m = PackageManifest::parse(src, Path::new("spar.package.spar")).unwrap();
     let spec: &NativeSpec = m.native.as_ref().unwrap();
     assert_eq!(spec.module, "m");
@@ -72,7 +72,7 @@ fn manifest_round_trips_native_section() {
     let again = PackageManifest::parse(&m.render(), Path::new("spar.package.spar")).unwrap();
     assert_eq!(again.native, m.native);
     // wrong abi and stray fields are rejected
-    let bad = src.replace("spar-native-0", "spar-native-9");
+    let bad = src.replace("spar-native-1", "spar-native-9");
     assert!(PackageManifest::parse(&bad, Path::new("x")).is_err());
     let bad = src.replace(
         "    module: str = \"m\";\n",
@@ -91,6 +91,23 @@ fn project_with_native_package_runs_through_the_cli() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("answer = 42"));
+}
+
+#[test]
+fn manifest_abi_must_match_the_loaded_artifact() {
+    let dir = project(None, &fastmath_artifact());
+    let path = dir.path().join("spar.package.spar");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("spar-native-1", "spar-native-0");
+    std::fs::write(&path, manifest).unwrap();
+    let out = spar(dir.path(), &["exec", "src/main.spar"], &[]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("manifest says 'spar-native-0'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

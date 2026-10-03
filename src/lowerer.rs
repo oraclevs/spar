@@ -953,8 +953,11 @@ impl FunctionLowerer<'_> {
                         .locals
                         .expression_type(&binary.rhs)
                         .is_some_and(|ty| is_dynamic(&ty)));
+                let structural_equality = matches!(binary.op, BinOp::Eq | BinOp::NotEq)
+                    && !matches!(left_type, SparType::Int | SparType::Float | SparType::Str | SparType::Bool)
+                    && !matches!(&left_type, SparType::Named(name) if self.locals.symbols.enums.contains_key(name));
                 CompiledExpression::Operation {
-                    operation: if dynamic_equality {
+                    operation: if dynamic_equality || structural_equality {
                         match binary.op {
                             BinOp::Eq => TypedOperation::DynamicEq,
                             BinOp::NotEq => TypedOperation::DynamicNotEq,
@@ -1629,6 +1632,17 @@ impl FunctionLowerer<'_> {
                 }
                 return Ok(CompiledExpression::Object(values, span.clone()));
             }
+        }
+        if matches!(name, "str" | "int" | "float" | "bool") {
+            let argument = arguments
+                .iter()
+                .find(|argument| argument.param_name == "value")
+                .ok_or_else(|| internal_lowering("conversion value argument is unavailable", span))?;
+            return Ok(CompiledExpression::Convert {
+                kind: name.to_string(),
+                value: Box::new(self.lower_expression(&argument.value)?),
+                span: span.clone(),
+            });
         }
         if name == "panic" {
             let message = arguments

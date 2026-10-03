@@ -58,6 +58,8 @@ fn module_loads_and_reports_info() {
         .info()
         .clone();
     assert_eq!(info.name, "fastMath");
+    assert_eq!(info.abi_major, 1);
+    assert_eq!(info.min_abi_minor, 0);
     assert_eq!(info.version, (0, 1, 0));
     assert!(info.functions.contains(&"add".to_string()));
     let mut reg = NativeRegistry::new();
@@ -181,7 +183,7 @@ fn rejects_non_module_and_missing_files() {
     .find(|p| p.exists());
     if let Some(libm) = libm {
         let err = native_module::load_module(libm).unwrap_err().to_string();
-        assert!(err.contains("does not export"), "{err}");
+        assert!(err.contains("exports neither"), "{err}");
     }
 }
 
@@ -283,14 +285,17 @@ fn mutable_borrow_of_list_is_rejected() {
 fn cpp_textkit() -> &'static Path {
     static LIB: OnceLock<PathBuf> = OnceLock::new();
     LIB.get_or_init(|| {
-        let dir = sys_dir().join("examples/native/cpp-textkit");
-        let out = Command::new(dir.join("build.sh")).output().expect("c++");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        dir.join("libtextkit.so")
+        let root = sys_dir();
+        let out = std::env::temp_dir().join(format!("spar-textkit-{}", std::process::id()));
+        native_build::build_shared(
+            "textkit",
+            &root.join("examples/native/cpp-textkit/textkit.cpp"),
+            &root.join("include"),
+            &out,
+            true,
+            true,
+            &[],
+        )
     })
 }
 
@@ -442,31 +447,25 @@ fn build_fixture(tag: &str, defines: &[&str]) -> PathBuf {
     let dir = sys_dir().join("tests/fixtures/abi-0.1");
     let out_dir = std::env::temp_dir().join(format!("spar-fixture-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&out_dir).unwrap();
-    let lib = out_dir.join("libfixture.so");
-    let out = Command::new("cc")
-        .args(["-std=c11", "-fPIC", "-fvisibility=hidden", "-shared"])
-        .args(defines)
-        .arg(format!("-I{}", dir.display()))
-        .arg(dir.join("fixture.c"))
-        .arg("-o")
-        .arg(&lib)
-        .output()
-        .expect("cc");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    lib
+    native_build::build_shared(
+        "fixture",
+        &dir.join("fixture.c"),
+        &dir,
+        &out_dir,
+        false,
+        false,
+        defines,
+    )
 }
 
 #[test]
 fn module_built_against_old_header_still_loads_and_runs() {
     let lib = build_fixture("ok", &[]);
-    assert!(SPAR_NATIVE_MINOR_NEWER());
     let mut natives = CompileOptions::default().natives;
-    native_module::load_into_registry(&lib, &mut natives)
+    let info = native_module::load_into_registry(&lib, &mut natives)
         .expect("old module loads on newer runtime");
+    assert_eq!(info.abi_major, 0);
+    assert_eq!(info.min_abi_minor, 1);
     let out = Engine::new(CompileOptions {
         natives,
         ..CompileOptions::default()
@@ -476,18 +475,13 @@ fn module_built_against_old_header_still_loads_and_runs() {
     assert_eq!(out.exit_status, 42);
 }
 
-#[allow(non_snake_case)]
-fn SPAR_NATIVE_MINOR_NEWER() -> bool {
-    spar_native_sys::SPAR_NATIVE_ABI_MINOR > 1
-}
-
 #[test]
 fn incompatible_modules_are_rejected_with_clear_diagnostics() {
     let cases: Vec<(&str, Vec<&str>, &str)> = vec![
         (
             "major",
             vec!["-DFX_MAJOR=7", "-DFX_NAME=\"badMajor\""],
-            "ABI major 7",
+            "descriptor declares ABI 7",
         ),
         (
             "minor",
@@ -518,13 +512,19 @@ fn incompatible_modules_are_rejected_with_clear_diagnostics() {
 
 #[test]
 fn declared_native_types_are_distinct_and_typechecked() {
-    let dir = sys_dir().join("examples/native/bench-kernels");
-    assert!(Command::new(dir.join("build.sh"))
-        .status()
-        .unwrap()
-        .success());
+    let root = sys_dir();
+    let out = std::env::temp_dir().join(format!("spar-benchkit-{}", std::process::id()));
+    let lib = native_build::build_shared(
+        "benchkit",
+        &root.join("examples/native/bench-kernels/benchkit.c"),
+        &root.join("include"),
+        &out,
+        false,
+        true,
+        &[],
+    );
     let mut natives = CompileOptions::default().natives;
-    native_module::load_into_registry(&dir.join("libbenchkit.so"), &mut natives).unwrap();
+    native_module::load_into_registry(&lib, &mut natives).unwrap();
     let engine = Engine::new(CompileOptions {
         natives,
         ..CompileOptions::default()

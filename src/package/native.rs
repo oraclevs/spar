@@ -145,6 +145,13 @@ pub fn load_package_native(
     }
     let module = native_module::load_module(&path).map_err(|e| err(e.to_string()))?;
     let info = module.info().clone();
+    let declared_major = if spec.abi == "spar-native-0" { 0 } else { 1 };
+    if info.abi_major != declared_major {
+        return Err(err(format!(
+            "native artifact {} declares ABI {} but the manifest says '{}'",
+            path.display(), info.abi_major, spec.abi
+        )));
+    }
     if info.name != spec.module {
         return Err(err(format!(
             "native artifact {} declares module '{}' but the manifest says '{}'",

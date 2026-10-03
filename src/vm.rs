@@ -1133,6 +1133,7 @@ fn expr_kind(e: &CompiledExpression) -> &'static str {
         E::Invoke { .. } => "closure invoke",
         E::HostCall { .. } => "host call",
         E::NativeCall { .. } => "native call (println, len, ...)",
+        E::Convert { .. } => "conversion",
         E::Panic { .. } => "panic",
         E::ImportedValue { .. } => "imported value",
         E::StructConstruct { .. } => "struct construct",

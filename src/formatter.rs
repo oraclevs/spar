@@ -936,6 +936,10 @@ fn escape_string_content(s: &str) -> String {
                 out.push('\\');
                 out.push('n');
             }
+            '\r' => {
+                out.push('\\');
+                out.push('r');
+            }
             '\t' => {
                 out.push('\\');
                 out.push('t');
@@ -3133,6 +3137,15 @@ function pick(flag: bool) -> int {
         let twice = format_source(&once).unwrap();
         assert_eq!(once, twice);
         assert!(once.contains("\\n"), "newline escape must be preserved");
+    }
+
+    #[test]
+    fn carriage_return_escape_roundtrips_for_http_headers() {
+        let source = r#"var response: str = "HTTP/1.1 200 OK\r\n\r\n";"#;
+        let once = format_source(source).unwrap();
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice);
+        assert!(once.contains(r"\r\n\r\n"), "{once}");
     }
 
     #[test]

@@ -193,13 +193,11 @@ fn generic_inference_rejects_conflicts_and_unresolved_parameters() {
 }
 
 #[test]
-fn unconstrained_generic_parameters_reject_primitive_operations() {
+fn unconstrained_generic_parameters_reject_arithmetic_but_allow_equality() {
     let addition = check_err("function add<T>(left: T, right: T) -> T { return left + right; };");
     assert!(addition.contains("binary expression"), "{addition}");
 
-    let equality =
-        check_err("function equal<T>(left: T, right: T) -> bool { return left == right; };");
-    assert!(equality.contains("binary expression"), "{equality}");
+    check_ok("function equal<T>(left: T, right: T) -> bool { return left == right; };");
 }
 
 #[test]

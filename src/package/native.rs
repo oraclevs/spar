@@ -187,10 +187,13 @@ pub fn load_project_natives(
     let mut loaded = Vec::new();
     loaded.extend(load_package_native(project_dir, registry)?);
     if let Some((lock, store)) = lockfile {
-        for id in lock.packages.keys() {
-            let snapshot = store.snapshot_path(id);
-            if snapshot.is_dir() {
-                loaded.extend(load_package_native(&snapshot, registry)?);
+        for (id, package) in &lock.packages {
+            let root = match &package.source {
+                crate::package::lockfile::LockedSource::Github { .. } => store.snapshot_path(id),
+                crate::package::lockfile::LockedSource::Path { path } => project_dir.join(path),
+            };
+            if root.is_dir() {
+                loaded.extend(load_package_native(&root, registry)?);
             }
         }
     }

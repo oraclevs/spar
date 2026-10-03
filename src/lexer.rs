@@ -1084,6 +1084,10 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             fragment.push('\n');
                         }
+                        Some(b'r') => {
+                            self.advance();
+                            fragment.push('\r');
+                        }
                         Some(b't') => {
                             self.advance();
                             fragment.push('\t');

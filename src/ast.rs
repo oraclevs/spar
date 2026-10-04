@@ -674,6 +674,7 @@ pub enum Expr {
         receiver: Box<Expr>,
         method: String,
         method_span: Span,
+        type_arguments: Vec<SparType>,
         args: Vec<CallArg>,
         span: Span,
     },

@@ -48,3 +48,9 @@ fn exit(code: int) -> void {
     nativeProcess::exit(code: code);
     return;
 };
+
+// Prints `prompt`, then reads one line from stdin (newline stripped).
+// Returns null at end of input.
+fn readLine(prompt: str) -> Option<str> {
+    return nativeProcess::readLine(prompt: prompt);
+};

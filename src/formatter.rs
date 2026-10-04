@@ -1293,21 +1293,23 @@ pub(crate) fn format_expr(
         Expr::MethodCall {
             receiver,
             method,
+            type_arguments,
             args,
             span,
             ..
         } => {
-            let mut chain = vec![(method, args, span)];
+            let mut chain = vec![(method, type_arguments, args, span)];
             let mut base = receiver.as_ref();
             while let Expr::MethodCall {
                 receiver,
                 method,
+                type_arguments,
                 args,
                 span,
                 ..
             } = base
             {
-                chain.push((method, args, span));
+                chain.push((method, type_arguments, args, span));
                 base = receiver.as_ref();
             }
             chain.reverse();
@@ -1315,22 +1317,32 @@ pub(crate) fn format_expr(
             let mut candidate = prefix.clone();
             let speculative = config.comments.suspend();
             format_expr(base, 100, depth, config, &mut candidate);
-            for (method, args, span) in &chain {
+            for (method, type_arguments, args, span) in &chain {
                 candidate.push('.');
                 candidate.push_str(method);
+                if !type_arguments.is_empty() {
+                    candidate.push('<');
+                    candidate.push_str(&type_arguments.iter().map(format_type).collect::<Vec<_>>().join(", "));
+                    candidate.push('>');
+                }
                 format_arguments(args, span, depth, config, &mut candidate);
             }
             drop(speculative);
             let multiline = chain.len() > 1
                 && (candidate.contains('\n') || candidate.chars().count() > MAX_LINE_WIDTH);
             format_expr(base, 100, depth, config, out);
-            for (method, args, span) in chain {
+            for (method, type_arguments, args, span) in chain {
                 if multiline {
                     out.push('\n');
                     out.push_str(&indent(depth + 1, config));
                 }
                 out.push('.');
                 out.push_str(method);
+                if !type_arguments.is_empty() {
+                    out.push('<');
+                    out.push_str(&type_arguments.iter().map(format_type).collect::<Vec<_>>().join(", "));
+                    out.push('>');
+                }
                 format_arguments(
                     args,
                     span,
@@ -2438,6 +2450,14 @@ fn format_nested_section_item(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn formats_generic_method_calls_without_erasing_type_arguments() {
+        let source = "fn read(response: HttpResponse) -> Record { return response.json<Record>(); };";
+        let formatted = format_source(source).unwrap();
+        assert!(formatted.contains("response.json<Record>()"), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
 
     #[test]
     fn formats_impl_methods_and_mutable_receivers_canonically() {

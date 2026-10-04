@@ -1167,6 +1167,7 @@ impl FunctionLowerer<'_> {
                     receiver_lvalue,
                     arguments,
                     mutates_receiver: entry.receiver_mutable,
+                    return_type: self.locals.expression_type(expression).or_else(|| expected.cloned()),
                     span: span.clone(),
                 }
             }

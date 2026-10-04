@@ -1700,6 +1700,7 @@ impl Runtime<'_> {
                 receiver_lvalue,
                 arguments,
                 mutates_receiver,
+                return_type,
                 span,
             } => {
                 // Fast path: `x.method(...)` on a plain local variable,
@@ -1797,8 +1798,9 @@ impl Runtime<'_> {
                                 self.call_depth,
                             )));
                         }
+                        let requested = return_type.as_ref().map(|ty| resolve_runtime_type(ty, frame, module));
                         let (result, method_frame, parameter_slots) =
-                            self.call_function_with_frame(*function, values)?;
+                            self.call_function_with_frame_typed(*function, values, requested)?;
                         let updated = if *mutates_receiver {
                             let self_slot = parameter_slots.ok_or_else(|| {
                                 runtime_error("mutable method is missing self parameter", span)

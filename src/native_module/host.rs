@@ -857,8 +857,8 @@ pub(super) unsafe extern "C" fn resource_new(
 ) -> spar_status_t {
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
-        let id = (&mut *env.ctx)
-            .resources_mut()
+        let id = (&*env.ctx)
+            .native_resources()
             .insert(NativeResource::new(type_tag, ptr, finalize, userdata));
         let v = env.own_value(Value::Resource(id));
         put(out, v)
@@ -882,13 +882,15 @@ pub(super) unsafe extern "C" fn resource_get(
         let env = CallEnv::from_ptr(env)?;
         let id = resource_id(env, &v)?;
         let res = (&*env.ctx)
-            .resources()
+            .native_resources()
             .get::<NativeResource>(id)
             .ok_or(SPAR_E_INVALID_STATE)?;
         if res.type_tag != type_tag {
             return Err(SPAR_E_TYPE);
         }
-        put(out, res.ptr)
+        let ptr = res.ptr;
+        env.native_leases.push(res);
+        put(out, ptr)
     })
 }
 
@@ -900,14 +902,14 @@ pub(super) unsafe extern "C" fn resource_close(
     ffi(|| {
         let env = CallEnv::from_ptr(env)?;
         let id = resource_id(env, &v)?;
-        let ctx = &mut *env.ctx;
-        match ctx.resources().get::<NativeResource>(id) {
+        let ctx = &*env.ctx;
+        match ctx.native_resources().get::<NativeResource>(id) {
             Some(r) if r.type_tag == type_tag => {}
             Some(_) => return Err(SPAR_E_TYPE),
             None => return Err(SPAR_E_INVALID_STATE),
         }
-        // Dropping runs the finalizer.
-        drop(ctx.resources_mut().remove::<NativeResource>(id));
+        // Active call leases defer finalization until each call returns.
+        drop(ctx.native_resources().remove::<NativeResource>(id));
         Ok(())
     })
 }

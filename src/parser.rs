@@ -1898,6 +1898,7 @@ impl Parser {
                     ));
                 }
                 let (field, field_span) = self.expect_ident()?;
+                let type_arguments = self.try_parse_call_type_arguments()?.unwrap_or_default();
                 if self.at(&Token::LParen) {
                     self.advance();
                     let args = self.parse_named_call_args()?;
@@ -1911,7 +1912,7 @@ impl Parser {
                             expr = Expr::Call {
                                 name: format!("{}::{field}", reference.segments[0]),
                                 name_span: field_span,
-                                type_arguments: Vec::new(),
+                                type_arguments,
                                 args,
                                 span,
                             };
@@ -1922,6 +1923,7 @@ impl Parser {
                         receiver: Box::new(expr),
                         method: field,
                         method_span: field_span,
+                        type_arguments,
                         args,
                         span,
                     };

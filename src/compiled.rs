@@ -112,6 +112,7 @@ pub(crate) enum CompiledExpression {
         receiver_lvalue: Option<CompiledLValue>,
         arguments: Vec<CompiledExpression>,
         mutates_receiver: bool,
+        return_type: Option<SparType>,
         span: Span,
     },
     FunctionRef {

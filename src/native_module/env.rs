@@ -62,6 +62,7 @@ pub struct CallEnv {
     pub(crate) pending_fault: Option<RuntimeFault>,
     /// Operation created by `async_begin` during this call.
     pub(crate) async_op: Option<(*mut SparAsync, crate::PromiseHandle)>,
+    pub(crate) native_leases: Vec<std::sync::Arc<super::buffer::NativeResource>>,
 }
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
@@ -110,6 +111,7 @@ impl CallEnv {
             call_span: Span::dummy(),
             pending_fault: None,
             async_op: None,
+            native_leases: Vec::new(),
         })
     }
 
@@ -145,6 +147,7 @@ impl CallEnv {
             && self.borrows.is_empty()
             && self.scratch.is_empty()
             && self.error.is_none()
+            && self.native_leases.is_empty()
         {
             self.argv.clear();
             self.host = None;
@@ -175,6 +178,7 @@ impl CallEnv {
         self.pending_fault = None;
         self.async_op = None;
         self.scratch.clear();
+        self.native_leases.clear();
         self.argv.clear();
     }
 

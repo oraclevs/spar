@@ -203,6 +203,37 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         ))
         .expect("nativeProcess::exit registration must be unique");
 
+    registry
+        .register(NativeFunction::sync(
+            "nativeProcess",
+            "readLine",
+            vec![("prompt", SparType::Str)],
+            option(SparType::Str),
+            true,
+            |_context, args| {
+                use std::io::{BufRead, Write};
+                let prompt = string_arg(args, 0, "prompt")?;
+                let mut stdout = std::io::stdout();
+                stdout
+                    .write_all(prompt.as_bytes())
+                    .and_then(|_| stdout.flush())
+                    .map_err(|e| error(format!("could not write prompt: {e}")))?;
+                let mut line = String::new();
+                let read = std::io::stdin()
+                    .lock()
+                    .read_line(&mut line)
+                    .map_err(|e| error(format!("could not read stdin: {e}")))?;
+                if read == 0 {
+                    return Ok(Value::Option(None));
+                }
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                Ok(Value::Option(Some(Box::new(Value::String(line)))))
+            },
+        ))
+        .expect("nativeProcess::readLine registration must be unique");
+
     register_command_methods(registry);
     register_process_stream_methods(registry);
 }
@@ -570,7 +601,10 @@ fn process_status_value(status: spar_process::ProcessStatus) -> Value {
         ("code".to_string(), Value::Int(i64::from(status.code))),
         ("success".to_string(), Value::Bool(status.success)),
         ("pid".to_string(), Value::Int(i64::from(status.pid))),
-        ("pipeline".to_string(), Value::List(Shared::from(Vec::new()))),
+        (
+            "pipeline".to_string(),
+            Value::List(Shared::from(Vec::new())),
+        ),
     ]);
     if let Some(signal) = status.signal {
         fields.insert("signal".into(), Value::Int(i64::from(signal)));

@@ -861,3 +861,58 @@ fn many_external_buffers_and_resources_finalize_once() {
     assert_eq!(buffers.load(std::sync::atomic::Ordering::SeqCst), COUNT);
     assert_eq!(resources.load(std::sync::atomic::Ordering::SeqCst), COUNT);
 }
+
+#[test]
+fn native_handle_survives_async_child_and_close_waits_for_call() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn finalize(ptr: *mut c_void, _ud: *mut c_void) {
+        drop(Box::from_raw(ptr as *mut u64));
+        FINALIZED.fetch_add(1, Ordering::SeqCst);
+    }
+    FINALIZED.store(0, Ordering::SeqCst);
+    let api = api_table();
+    let mut parent = ctx();
+    let mut child = parent.spawn_child();
+    let value = {
+        let raw = Box::into_raw(CallEnv::acquire(&mut parent as *mut _));
+        unsafe {
+            let env = (*raw).as_ptr();
+            let mut out = SparValue::void();
+            let ptr = Box::into_raw(Box::new(91u64)) as *mut c_void;
+            assert_eq!(
+                (api.resource_new.unwrap())(
+                    env,
+                    42,
+                    ptr,
+                    Some(finalize),
+                    std::ptr::null_mut(),
+                    &mut out
+                ),
+                SPAR_OK
+            );
+            let value = (*raw).value_of(&out).unwrap().clone();
+            Box::from_raw(raw).release();
+            value
+        }
+    };
+    let raw = Box::into_raw(CallEnv::acquire(&mut child as *mut _));
+    unsafe {
+        let env = (*raw).as_ptr();
+        let handle = (*raw).borrow_value(&value);
+        let mut ptr = std::ptr::null_mut();
+        assert_eq!(
+            (api.resource_get.unwrap())(env, handle, 42, &mut ptr),
+            SPAR_OK
+        );
+        assert_eq!(*(ptr as *const u64), 91);
+        assert_eq!((api.resource_close.unwrap())(env, handle, 42), SPAR_OK);
+        assert_eq!(FINALIZED.load(Ordering::SeqCst), 0);
+        assert_eq!(*(ptr as *const u64), 91);
+        Box::from_raw(raw).release();
+    }
+    assert_eq!(FINALIZED.load(Ordering::SeqCst), 1);
+    drop(child);
+    drop(parent);
+    assert_eq!(FINALIZED.load(Ordering::SeqCst), 1);
+}

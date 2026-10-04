@@ -193,6 +193,32 @@ impl Session {
         self.eval_interactive(fragment).map(|_| ())
     }
 
+    /// Check an interactive fragment against committed declarations without
+    /// evaluating it or changing the session. Error locations are relative to
+    /// the fragment, as they are for interactive evaluation.
+    pub fn check_interactive_fragment(
+        &self,
+        fragment: &str,
+        previous_value: Option<&crate::runtime::Value>,
+    ) -> Result<(), Vec<SparError>> {
+        let normalized = normalize_interactive_fragment(fragment);
+        let candidate_source = join_committed_source(&self.committed_source, &normalized);
+        let (origin, origin_line) = fragment_origin(&self.committed_source);
+        let options = CompileOptions {
+            evaluate: false,
+            ..self.options.clone()
+        };
+        Compiler::new(options)
+            .with_interactive_expressions()
+            .with_interactive_previous_type(previous_value.and_then(|value| self.previous_value_type(value)))
+            .compile(&candidate_source)
+            .into_result()
+            .map(|_| ())
+            .map_err(|errors| {
+                relocate_errors(errors, origin, origin_line, 0, fragment.len())
+            })
+    }
+
     /// Evaluates one interactive fragment and returns the value of the final
     /// direct module-level expression, if the fragment ends in one. The
     /// session is committed only after successful parse, typecheck, and
@@ -479,6 +505,31 @@ impl Session {
         // defaults any leftover type parameter to `Record`, the same dynamic
         // bridge type `parse<T>`/`json<T>` callers reach for explicitly when
         // they don't need (or don't yet know) a more specific shape.
+        // A direct generic JSON method at the prompt has no expected type
+        // from a containing declaration. Reify the same Record default in
+        // the temporary runtime wrapper so its body and return type agree.
+        let mut runtime_expression = expression.clone();
+        if matches!(expression_type, crate::ast::SparType::TypeParameter(_)) {
+            if let crate::ast::Expr::MethodCall {
+                method,
+                method_span,
+                type_arguments,
+                ..
+            } = expression_ast
+            {
+                if method == "json" && type_arguments.is_empty() {
+                    if let Some(start) = candidate_source.rfind(&expression) {
+                        if let Some(index) = method_span.end.checked_sub(start) {
+                            if index <= runtime_expression.len()
+                                && runtime_expression.is_char_boundary(index)
+                            {
+                                runtime_expression.insert_str(index, "<Record>");
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let expression_type = default_unresolved_type_parameters(&expression_type);
         let return_type = crate::typechecker::display_type(&expression_type);
 
@@ -497,11 +548,11 @@ impl Session {
         let async_keyword = if uses_await { "async " } else { "" };
         let function_source = if expression_type == crate::ast::SparType::Void {
             format!(
-                "{async_keyword}fn {function_name}() -> void {{ {expression}; return; }};"
+                "{async_keyword}fn {function_name}() -> void {{ {runtime_expression}; return; }};"
             )
         } else {
             format!(
-                "{async_keyword}fn {function_name}() -> {return_type} {{ return {expression}; }};"
+                "{async_keyword}fn {function_name}() -> {return_type} {{ return {runtime_expression}; }};"
             )
         };
         let runtime_source = if committed.trim().is_empty() {

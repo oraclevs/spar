@@ -152,7 +152,7 @@ fn http_response_json_rejects_invalid_or_non_object_json() {
         server.join().unwrap();
         let rendered = format!("{errors:?}");
         assert!(
-            rendered.contains("invalid JSON") || rendered.contains("JSON object"),
+            rendered.contains("invalid JSON") || rendered.contains("JSON object") || rendered.contains("expected Record, found array"),
             "unexpected error: {rendered}"
         );
     }

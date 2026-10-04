@@ -1,8 +1,56 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResourceId(pub(crate) u64);
+
+/// Native handles are shared across async tasks in one execution tree.
+/// A call keeps a lease so close cannot finalize a handle while that call uses it.
+#[derive(Clone, Default)]
+pub struct SharedResourceTable {
+    inner: Arc<Mutex<SharedResourceState>>,
+}
+
+#[derive(Default)]
+struct SharedResourceState {
+    next_id: u64,
+    resources: HashMap<ResourceId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl SharedResourceTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn insert<T: Any + Send + Sync>(&self, value: T) -> ResourceId {
+        let mut state = self.inner.lock().unwrap();
+        let id = ResourceId(state.next_id | (1u64 << 63));
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .filter(|n| *n < (1u64 << 63))
+            .expect("native resource ID overflow");
+        state.resources.insert(id, Arc::new(value));
+        id
+    }
+    pub fn get<T: Any + Send + Sync>(&self, id: ResourceId) -> Option<Arc<T>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .resources
+            .get(&id)?
+            .clone()
+            .downcast()
+            .ok()
+    }
+    pub fn remove<T: Any + Send + Sync>(&self, id: ResourceId) -> Option<Arc<T>> {
+        let mut state = self.inner.lock().unwrap();
+        if !state.resources.get(&id)?.is::<T>() {
+            return None;
+        }
+        state.resources.remove(&id)?.downcast().ok()
+    }
+}
 
 #[derive(Default)]
 pub struct ResourceTable {

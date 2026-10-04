@@ -50,6 +50,33 @@ pub fn display_type(ty: &SparType) -> String {
     }
 }
 
+fn bind_method_type_arguments(
+    method: &str,
+    entry: &FunctionEntry,
+    arguments: &[SparType],
+    substitution: &mut TypeSubstitution,
+    span: &Span,
+) -> Result<(), SparError> {
+    if arguments.is_empty() {
+        return Ok(());
+    }
+    if arguments.len() != entry.type_parameters.len() {
+        return Err(SparError::TypeError {
+            message: format!(
+                "method '{method}' expects {} type arguments, found {}",
+                entry.type_parameters.len(),
+                arguments.len()
+            ),
+            hint: None,
+            span: span.clone(),
+        });
+    }
+    for (parameter, argument) in entry.type_parameters.iter().zip(arguments) {
+        substitution.insert(parameter.name.clone(), argument.clone());
+    }
+    Ok(())
+}
+
 fn promise_type(inner: SparType) -> SparType {
     SparType::Applied {
         name: "Promise".to_string(),
@@ -2752,9 +2779,10 @@ impl<'a> TypeChecker<'a> {
             Expr::MethodCall {
                 receiver,
                 method,
+                type_arguments,
                 args,
                 ..
-            } => self.infer_method_call(receiver, method, args, None).ok(),
+            } => self.infer_method_call(receiver, method, type_arguments, args, None).ok(),
             Expr::StructuredPipe { input, stage, span } => {
                 self.structured_pipe_type(input, stage, None, span).ok()
             }
@@ -2968,6 +2996,7 @@ impl<'a> TypeChecker<'a> {
         &self,
         receiver: &Expr,
         method: &str,
+        type_arguments: &[SparType],
         args: &[CallArg],
         locals: Option<&HashMap<String, SparType>>,
     ) -> Result<SparType, SparError> {
@@ -2994,6 +3023,7 @@ impl<'a> TypeChecker<'a> {
             });
         }
         let mut substitution = TypeSubstitution::new();
+        bind_method_type_arguments(method, &entry.function, type_arguments, &mut substitution, receiver.span().unwrap_or(&entry.function.span))?;
         if entry.has_receiver {
             let actual_receiver = match locals {
                 Some(locals) => self.infer_type_with_locals(receiver, locals),
@@ -4562,6 +4592,7 @@ impl<'a> TypeChecker<'a> {
             Expr::MethodCall {
                 receiver,
                 method,
+                type_arguments,
                 args,
                 span,
                 ..
@@ -4682,6 +4713,7 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 let mut substitution = TypeSubstitution::new();
+                bind_method_type_arguments(method, &entry.function, type_arguments, &mut substitution, span)?;
                 if entry.has_receiver {
                     if let (Some(actual_receiver), Some((_, expected_receiver))) = (
                         self.infer_type_with_locals(receiver, locals),
@@ -6086,10 +6118,11 @@ impl<'a> TypeChecker<'a> {
             Expr::MethodCall {
                 receiver,
                 method,
+                type_arguments,
                 args,
                 ..
             } => self
-                .infer_method_call(receiver, method, args, Some(locals))
+                .infer_method_call(receiver, method, type_arguments, args, Some(locals))
                 .ok(),
             Expr::StructuredPipe { input, stage, span } => self
                 .structured_pipe_type(input, stage, Some(locals), span)

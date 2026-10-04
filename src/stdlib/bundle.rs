@@ -44,7 +44,22 @@ pub fn configured_precompiled_bundle() -> Option<PathBuf> {
 /// Source identity retained for diagnostics and LSP navigation. Runtime reads
 /// use the embedded snapshot, even if this checkout changes or disappears.
 pub fn source_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib")
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("SPA_HOME").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(home).join("stdlib"));
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(data).join("spar/stdlib"));
+    } else if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(home).join(".local/share/spar/stdlib"));
+    }
+    candidates.push(PathBuf::from("/usr/local/share/spar/stdlib"));
+    candidates.push(PathBuf::from("/usr/share/spar/stdlib"));
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"));
+    candidates
+        .into_iter()
+        .find(|root| root.join("src/lib.spar").is_file())
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
 }
 
 pub fn source_module_path(module: &str) -> Option<PathBuf> {

@@ -142,6 +142,8 @@ pub struct NativeResource {
 
 // SAFETY: ownership of `ptr` moved to the runtime; the ABI requires thread-safe finalizers.
 unsafe impl Send for NativeResource {}
+// Resource payloads and finalizers must be thread-safe under the native ABI.
+unsafe impl Sync for NativeResource {}
 
 impl NativeResource {
     pub(crate) fn new(

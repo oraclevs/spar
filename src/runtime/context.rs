@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::{Span, SparError};
 
-use super::resource::{ResourceId, ResourceTable};
+use super::resource::{ResourceId, ResourceTable, SharedResourceTable};
 use super::stream::StreamResource;
 use super::value::Value;
 
@@ -114,6 +114,7 @@ pub struct RuntimeContext {
     stdout: RuntimeOutput,
     stderr: RuntimeOutput,
     resources: ResourceTable,
+    native_resources: SharedResourceTable,
     previous_value: Option<Value>,
     structured_terminal: bool,
     capture_mixed: bool,
@@ -144,6 +145,7 @@ impl RuntimeContext {
             stdout: RuntimeOutput::Stdout,
             stderr: RuntimeOutput::Stderr,
             resources: ResourceTable::new(),
+            native_resources: SharedResourceTable::new(),
             previous_value: None,
             structured_terminal: false,
             capture_mixed: false,
@@ -184,11 +186,8 @@ impl RuntimeContext {
     }
 
     /// Builds an independent execution context for a spawned async task: cwd,
-    /// args, environment, and stdio are inherited (stdio via shared `Arc`s, so
-    /// writes still land in the same place); `resources` starts empty because
-    /// `Box<dyn Any + Send>` handles aren't `Clone` and sharing an open handle
-    /// mutably across threads would be unsound — a spawned task owns its own
-    /// resource lifecycle.
+    /// args, environment, and stdio are inherited. Ordinary task resources
+    /// remain local; native handles share a synchronized table and call leases.
     pub(crate) fn spawn_child(&self) -> RuntimeContext {
         RuntimeContext {
             cwd: self.cwd.clone(),
@@ -198,6 +197,7 @@ impl RuntimeContext {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
             resources: ResourceTable::new(),
+            native_resources: self.native_resources.clone(),
             previous_value: None,
             structured_terminal: self.structured_terminal,
             capture_mixed: false,
@@ -314,6 +314,10 @@ impl RuntimeContext {
 
     pub fn stderr_is_terminal(&self) -> bool {
         self.stderr.is_terminal()
+    }
+
+    pub fn native_resources(&self) -> &SharedResourceTable {
+        &self.native_resources
     }
 
     pub fn resources(&self) -> &ResourceTable {

@@ -1927,6 +1927,23 @@ fn format_shell_literal_fragment(value: &str, out: &mut String) {
     }
 }
 
+fn format_object_key(name: &str, out: &mut String) {
+    let ordinary = Lexer::new(name)
+        .tokenize()
+        .ok()
+        .is_some_and(|tokens| {
+            matches!(tokens.as_slice(), [crate::token::SpannedToken { token: crate::token::Token::Ident(value), .. }, crate::token::SpannedToken { token: crate::token::Token::Eof, .. }] if value == name)
+                || matches!(tokens.as_slice(), [crate::token::SpannedToken { token: crate::token::Token::KwCommand | crate::token::Token::KwExec | crate::token::Token::TypeShell, .. }, crate::token::SpannedToken { token: crate::token::Token::Eof, .. }])
+        });
+    if ordinary {
+        out.push_str(name);
+    } else {
+        out.push(char::from(34));
+        out.push_str(&escape_string_content(name));
+        out.push(char::from(34));
+    }
+}
+
 /// Renders one `{ ... }` object-literal field or spread, `"; "`-terminated,
 /// shared verbatim by the inline and multi-line `Expr::Object` branches —
 /// the multi-line branch strips the trailing space and adds its own `\n`.
@@ -1938,7 +1955,7 @@ fn format_object_item_flat(
 ) {
     match item {
         ObjectItem::Field(f) => {
-            out.push_str(&f.name);
+            format_object_key(&f.name, out);
             out.push_str(": ");
             if let Some(ty) = &f.ty {
                 out.push_str(&format_type(ty));
@@ -2000,7 +2017,7 @@ fn format_object_item_wrapped(
                 out.push_str(&flat);
                 return;
             }
-            out.push_str(&f.name);
+            format_object_key(&f.name, out);
             out.push_str(": {\n");
             for nested_item in nested {
                 let (item_line, item_end_line) = section_item_lines(nested_item);
@@ -2641,6 +2658,20 @@ mod tests {
         let reformatted = fmt(&formatted);
         assert_eq!(formatted, reformatted, "formatting must be idempotent");
         assert!(formatted.contains("{ name:"), "got: {formatted}");
+    }
+
+    #[test]
+    fn quoted_map_key_survives_formatting_and_evaluation() {
+        let source = r#"var headers: Map<str, str> = { "content-type": "text/plain"; };"#;
+        let formatted = fmt(source);
+        assert!(formatted.contains("\"content-type\":"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+        let mut session = crate::Engine::default().session();
+        session.eval(&formatted).unwrap();
+        let Some(crate::ConfigValue::Object(fields)) = session.value("headers") else {
+            panic!("expected object-backed map, got {:?}", session.value("headers"));
+        };
+        assert_eq!(fields.get("content-type"), Some(&crate::ConfigValue::Str("text/plain".into())));
     }
 
     #[test]

@@ -416,6 +416,38 @@ impl Session {
         preview_limit: usize,
     ) -> Result<InteractivePreviewResult, Vec<SparError>> {
         let normalized = normalize_interactive_fragment(fragment);
+        if let Some((name, expression, mutable, span)) = awaited_http_declaration(&normalized) {
+            // Check the binding before its network effect is executed.
+            self.check_interactive_fragment(
+                &format!("var {}{name}: HttpResponse = HttpResponse();", if mutable { "mut " } else { "" }),
+                previous_value.as_ref(),
+            )?;
+            let preview = self.eval_interactive_preview_with_context(
+                &expression, cwd, environment, previous_value, preview_limit,
+            )?;
+            let value = match preview {
+                InteractivePreviewResult::RuntimeValue(value) => value.value,
+                InteractivePreviewResult::Value(value) => crate::runtime::Value::from_config(value),
+                _ => {
+                    return Err(vec![SparError::EvalError {
+                        message: "awaited HTTP declaration did not produce an HttpResponse".into(),
+                        span,
+                    }]);
+                }
+            };
+            let Some(source) = captured_http_source(&name, mutable, &value) else {
+                return Err(vec![SparError::EvalError {
+                    message: "the HTTP response cannot be stored as a prompt variable".into(),
+                    span,
+                }]);
+            };
+            self.eval_interactive_with_context(&source, cwd, environment)
+                .map_err(|_| vec![SparError::EvalError {
+                    message: "the HTTP response could not be stored as a prompt variable".into(),
+                    span,
+                }])?;
+            return Ok(InteractivePreviewResult::Empty);
+        }
         let Some((prefix, expression)) = split_final_expression(&normalized)? else {
             return self
                 .eval_interactive_with_context(fragment, cwd, environment)
@@ -1237,6 +1269,114 @@ fn runtime_context(
         }),
     );
     context
+}
+
+/// Detect the data-valued HTTP binding that a prompt must execute once.
+fn awaited_http_declaration(fragment: &str) -> Option<(String, String, bool, crate::Span)> {
+    use crate::ast::{Expr, SparType, TopLevelItem};
+    let tokens = crate::lexer::Lexer::new(fragment).tokenize().ok()?;
+    let program = crate::parser::Parser::new(tokens).interactive().parse().ok()?;
+    let [TopLevelItem::Var(declaration)] = program.items.as_slice() else {
+        return None;
+    };
+    if declaration.is_const
+        || !matches!(&declaration.ty, SparType::Named(name) if name == "HttpResponse")
+    {
+        return None;
+    }
+    let Some(Expr::Await { span, .. }) = &declaration.value else {
+        return None;
+    };
+    let expression = fragment
+        .get(span.start..)?
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_owned();
+    Some((
+        declaration.name.clone(),
+        expression,
+        declaration.mutable,
+        declaration.span.clone(),
+    ))
+}
+
+fn captured_http_string(value: &str) -> Option<String> {
+    fn quoted(part: &str) -> Option<String> {
+        let mut output = String::from("\"");
+        for character in part.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                control if control.is_control() => return None,
+                other => output.push(other),
+            }
+        }
+        output.push('"');
+        Some(output)
+    }
+    // Spar interpolates ${...} in strings. Keep untrusted response text
+    // literal by never placing '$' and '{' in the same quoted segment.
+    let mut parts = value.split("${");
+    let mut expression = quoted(parts.next().unwrap_or_default())?;
+    for part in parts {
+        expression.push_str(" + \"$\" + ");
+        expression.push_str(&quoted(&format!("{{{part}"))?);
+    }
+    Some(expression)
+}
+
+fn captured_http_source(
+    name: &str,
+    mutable: bool,
+    value: &crate::runtime::Value,
+) -> Option<String> {
+    use crate::runtime::Value;
+    let Value::Object(fields) = value else {
+        return None;
+    };
+    let Some(Value::Int(status)) = fields.get("status") else {
+        return None;
+    };
+    let Some(Value::String(body)) = fields.get("body") else {
+        return None;
+    };
+    let Some(Value::Map(headers)) = fields.get("headers") else {
+        return None;
+    };
+    let content_type = match fields.get("contentType") {
+        Some(Value::Option(None)) => "none<str>()".to_owned(),
+        Some(Value::Option(Some(value))) => {
+            let Value::String(value) = value.as_ref() else {
+                return None;
+            };
+            format!("some(value: {})", captured_http_string(value)?)
+        }
+        _ => return None,
+    };
+    let mut header_source = String::from("{ ");
+    for (key, value) in headers.iter() {
+        let (Value::String(key), Value::String(value)) = (key, value) else {
+            return None;
+        };
+        if key.contains("${") {
+            return None;
+        }
+        header_source.push_str(&format!(
+            "{}: {}; ",
+            captured_http_string(&key)?,
+            captured_http_string(value)?
+        ));
+    }
+    header_source.push('}');
+    Some(format!(
+        "var {}{name}: HttpResponse = HttpResponse(status: {status}, body: {}, headers: {header_source}, contentType: {content_type});",
+        if mutable { "mut " } else { "" },
+        captured_http_string(body)?,
+    ))
 }
 
 #[cfg(test)]

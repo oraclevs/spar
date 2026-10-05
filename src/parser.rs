@@ -2175,7 +2175,15 @@ impl Parser {
         }
 
         let span = self.peek_span();
-        let (name, _) = self.expect_ident()?;
+        let name = if self.at(&Token::StringStart) {
+            let string = self.parse_interp_string()?;
+            match string.parts.as_slice() {
+                [StringPart::Literal(name)] => name.clone(),
+                _ => return Err(self.error("object keys cannot contain interpolation")),
+            }
+        } else {
+            self.expect_ident()?.0
+        };
         self.expect(&Token::Colon)?;
         let value = FieldValue::Expr(self.parse_expr()?);
         self.expect(&Token::Semicolon)?;

@@ -47,6 +47,12 @@ pub struct StackFrame {
 pub struct StackTrace {
     pub frames: Vec<StackFrame>,
     pub pending_call: Option<Span>,
+    /// The next function the error leaves never started (its arguments
+    /// failed), so `RuntimeFault::leave_function` skips it once.
+    pub suppress_next_leave: bool,
+    /// Set by the skipped leave above: the call-site note that follows is
+    /// skipped too, since the call never happened.
+    pub suppress_next_note: bool,
 }
 
 pub enum FrameLine<'a> {

@@ -23,15 +23,34 @@ pub(crate) enum RuntimeFault {
 impl RuntimeFault {
     /// The call expression at `call_span` produced this fault.
     pub(crate) fn note_call(self, call_span: &crate::error::Span) -> Self {
-        self.map_error(|error| error.traced_mut().note_call(call_span.clone()))
+        self.map_error(|error| {
+            let trace = error.traced_mut();
+            // The call itself never happened (its arguments failed).
+            if std::mem::take(&mut trace.suppress_next_note) {
+                return;
+            }
+            trace.note_call(call_span.clone());
+        })
     }
 
     /// The fault is leaving the user function `function`.
     pub(crate) fn leave_function(self, function: &str) -> Self {
         self.map_error(|error| {
             let at = error.span().clone();
-            error.traced_mut().push_frame(function, &at);
+            let trace = error.traced_mut();
+            // An argument failed before the callee started: it has no frame.
+            if std::mem::take(&mut trace.suppress_next_leave) {
+                trace.suppress_next_note = true;
+                return;
+            }
+            trace.push_frame(function, &at);
         })
+    }
+
+    /// The fault came from evaluating a call's arguments, so the callee
+    /// being called never ran and must not appear in the trace.
+    pub(crate) fn in_arguments(self) -> Self {
+        self.map_error(|error| error.traced_mut().suppress_next_leave = true)
     }
 
     fn map_error(self, apply: impl FnOnce(&mut SparError)) -> Self {

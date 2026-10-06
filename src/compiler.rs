@@ -106,6 +106,10 @@ pub struct CompileOptions {
     /// without an `import`, for every name the program does not declare or
     /// import itself. Off by default; interactive shells turn it on.
     pub data_prelude: bool,
+    /// `source_map` id stamped on every span of the source being compiled.
+    /// `0` (the default) is "the entry source"; aliased imports compile with
+    /// their own registered id so their errors name their own file.
+    pub file_id: u32,
 }
 
 impl Default for CompileOptions {
@@ -122,6 +126,7 @@ impl Default for CompileOptions {
             bundled_packages: BundledPackageRoots::default(),
             effect_ledger: None,
             data_prelude: false,
+            file_id: 0,
         }
     }
 }
@@ -243,7 +248,7 @@ impl Compiler {
 
         let lexer = Lexer::new(source);
         let shebang = lexer.shebang().map(str::to_owned);
-        let tokens = match lexer.tokenize() {
+        let tokens = match lexer.tokenize_file(self.options.file_id) {
             Ok(tokens) => tokens,
             Err(error) => {
                 compilation.errors.push(error);

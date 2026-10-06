@@ -1066,10 +1066,9 @@ impl Runtime<'_> {
         first: u32,
         n: u32,
     ) -> Result<Value, RuntimeFault> {
-        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| self.bytecode_call_inner(id, caller, first as usize, n as usize))
-            .map_err(|fault| match &name {
-                Some(name) => fault.leave_function(name),
+            .map_err(|fault| match self.program.function(id) {
+                Some(function) => fault.leave_function(&function.name),
                 None => fault,
             })
     }

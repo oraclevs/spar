@@ -180,3 +180,56 @@ fn missing_shell_program_names_the_program_and_line() {
     assert!(stderr.contains("main.spar:2:"), "{stderr}");
     assert!(!stderr.contains("os error 2"), "{stderr}");
 }
+
+#[test]
+fn aliased_import_errors_name_the_imported_file() {
+    let lib = "fn boom(x: int) -> int {\n    return 10 / x;\n};\nfn wrap(x: int) -> int {\n    return boom(x: x);\n};\n";
+    let main = "import \"./lib.spar\" as m;\nfn main() -> int {\n    return m::wrap(x: 0);\n};\n";
+    for stderr in run_tiers(main, &[("lib.spar", lib)]) {
+        assert!(stderr.contains("lib.spar:2:"), "{stderr}");
+        assert!(stderr.contains("return 10 / x;"), "{stderr}");
+        let trace = trace_section(&stderr);
+        assert!(trace.contains("in boom"), "{stderr}");
+        assert!(trace.contains("lib.spar:2:"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_failing_argument_does_not_add_a_frame_for_the_callee() {
+    let source = "fn id(x: int) -> int {\n    return x;\n};\nfn main() -> int {\n    var n: int = 0;\n    return id(x: 10 / n);\n};\n";
+    let outputs = run_tiers(source, &[]);
+    for stderr in &outputs {
+        let trace = trace_section(stderr);
+        assert!(!trace.contains("id "), "callee never ran:\n{stderr}");
+        assert!(trace.contains("in main"), "{stderr}");
+    }
+    let traces: Vec<String> = outputs.iter().map(|o| trace_section(o)).collect();
+    assert_eq!(traces[0], traces[1], "tree vs bytecode\n{}\n{}", outputs[0], outputs[1]);
+    assert_eq!(traces[1], traces[2], "bytecode vs jit\n{}\n{}", outputs[1], outputs[2]);
+}
+
+#[test]
+fn a_nested_failing_argument_names_only_the_functions_that_ran() {
+    let source = "fn inner(y: int) -> int {\n    return 10 / y;\n};\nfn outer(x: int) -> int {\n    return x;\n};\nfn main() -> int {\n    return outer(x: inner(y: 0));\n};\n";
+    for stderr in run_tiers(source, &[]) {
+        let trace = trace_section(&stderr);
+        assert!(trace.contains("in inner"), "{stderr}");
+        assert!(!trace.contains("outer"), "outer never ran:\n{stderr}");
+        assert!(trace.contains("called from main"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_returned_shell_plan_is_reported_at_its_own_line() {
+    let dir = project("twoplans");
+    fs::write(
+        dir.join("main.spar"),
+        "fn main() -> shell {\n    var p: shell = shell { definitely_missing_zz; };\n    var q: shell = shell {\n\n\n        true;\n    };\n    return p;\n};\n",
+    )
+    .unwrap();
+    let output = spar().current_dir(&dir).args(["exec", "main.spar"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not run 'definitely_missing_zz'"), "{stderr}");
+    assert!(stderr.contains("main.spar:2:"), "{stderr}");
+    assert!(!stderr.contains("main.spar:6:"), "{stderr}");
+}

@@ -348,10 +348,10 @@ pub(crate) struct Runtime<'a> {
     jobs: Vec<spar_process::Job>,
     last_job: Option<Value>,
     shell_exit: bool,
-    /// Where the steps of the most recently evaluated shell expression were
-    /// written, so a plan returned from a function can still report the
-    /// line of the command that failed. Used only when the step counts match.
-    last_shell_step_spans: Vec<Span>,
+    /// Where the steps of recently evaluated shell expressions were written,
+    /// keyed by the plan value's address, so a plan returned from a function
+    /// can still report the line of the command that failed.
+    last_shell_step_spans: Vec<(usize, Vec<Span>)>,
     shell_cwd: Option<std::path::PathBuf>,
     context: RuntimeContext,
     _marker: std::marker::PhantomData<&'a ()>,
@@ -1125,12 +1125,11 @@ impl Runtime<'_> {
         arguments: Vec<Value>,
         return_type: Option<RuntimeTypeBinding>,
     ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
-        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| {
             self.call_function_with_frame_typed_inner(id, arguments, return_type)
         })
-        .map_err(|fault| match &name {
-            Some(name) => fault.leave_function(name),
+        .map_err(|fault| match self.program.function(id) {
+            Some(function) => fault.leave_function(&function.name),
             None => fault,
         })
     }
@@ -1244,7 +1243,9 @@ impl Runtime<'_> {
         use crate::vm::Prim;
         let mut bits = [0u64; 8];
         for (index, (argument, prim)) in arguments.iter().zip(&vm_function.params).enumerate() {
-            let value = self.eval_expression(argument, caller, caller_module)?;
+            let value = self
+                .eval_expression(argument, caller, caller_module)
+                .map_err(RuntimeFault::in_arguments)?;
             bits[index] = match (prim, value) {
                 (Prim::Int, Value::Int(v)) => v as u64,
                 (Prim::Float, Value::Float(v)) => v.to_bits(),
@@ -1284,12 +1285,11 @@ impl Runtime<'_> {
         caller_module: ModuleId,
         return_type: Option<&SparType>,
     ) -> Result<Value, RuntimeFault> {
-        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| {
             self.call_direct_inline_inner(id, arguments, caller, caller_module, return_type)
         })
-        .map_err(|fault| match &name {
-            Some(name) => fault.leave_function(name),
+        .map_err(|fault| match self.program.function(id) {
+            Some(function) => fault.leave_function(&function.name),
             None => fault,
         })
     }
@@ -1353,7 +1353,10 @@ impl Runtime<'_> {
         // `Void` placeholder (skipped named parameter) falls through to the
         // default in pass 2, exactly as with a pre-evaluated argument list.
         for (argument, slot) in arguments.iter().zip(parameter_slots.iter().copied()) {
-            match self.eval_expression(argument, caller, caller_module)? {
+            match self
+                .eval_expression(argument, caller, caller_module)
+                .map_err(RuntimeFault::in_arguments)?
+            {
                 Value::Void => {}
                 value => frame.write(slot, value, function_span)?,
             }
@@ -2156,9 +2159,17 @@ impl Runtime<'_> {
                 Ok(Value::List(Shared::from(output)))
             }
             CompiledExpression::Shell(shell) => {
-                let plan = self.eval_shell_plan(shell, frame, module)?;
-                self.last_shell_step_spans = shell_step_spans(shell);
-                Ok(Value::Shell(Shared::from(plan)))
+                let plan = Shared::from(self.eval_shell_plan(shell, frame, module)?);
+                // Remember the spans by the plan's identity (a handful of the
+                // most recent), so a plan returned later is matched to its own
+                // source and not to whichever shell expression ran last.
+                let identity = &*plan as *const spar_command::ShellPlan as usize;
+                if self.last_shell_step_spans.len() >= 8 {
+                    self.last_shell_step_spans.remove(0);
+                }
+                self.last_shell_step_spans
+                    .push((identity, shell_step_spans(shell)));
+                Ok(Value::Shell(plan))
             }
             CompiledExpression::MixedShell(shell) => {
                 Ok(Value::MixedShell(Shared::from(MixedShellValue {
@@ -3786,11 +3797,13 @@ impl Runtime<'_> {
     /// Step spans for a plan a function just returned, or none when they do
     /// not line up with it.
     fn returned_shell_step_spans(&self, plan: &spar_command::ShellPlan) -> Vec<Span> {
-        if self.last_shell_step_spans.len() == plan.steps.len() {
-            self.last_shell_step_spans.clone()
-        } else {
-            Vec::new()
-        }
+        let identity = plan as *const spar_command::ShellPlan as usize;
+        self.last_shell_step_spans
+            .iter()
+            .rev()
+            .find(|(known, spans)| *known == identity && spans.len() == plan.steps.len())
+            .map(|(_, spans)| spans.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn execute_native_shell_plan_at(

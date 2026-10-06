@@ -378,8 +378,9 @@ fn load_imported_program(
             span: Span::dummy(),
         }]
     })?;
+    let file_id = crate::source_map::register(&path.display().to_string(), &source);
     let tokens = crate::lexer::Lexer::new(&source)
-        .tokenize()
+        .tokenize_file(file_id)
         .map_err(|error| {
             vec![SparError::ResolveError {
                 message: format!("import file '{}' has a lex error: {error}", path.display()),

@@ -875,7 +875,10 @@ impl ModuleGraphBuilder {
                         span: Span::dummy(),
                     }]
                 })?;
+                let file_id =
+                    crate::source_map::register(&path.display().to_string(), &source);
                 let import_options = CompileOptions {
+                    file_id,
                     base_dir: path
                         .parent()
                         .unwrap_or_else(|| Path::new("."))

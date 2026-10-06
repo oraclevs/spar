@@ -1259,17 +1259,19 @@ fn relocate_errors(
     col_shift: u32,
     len: usize,
 ) -> Vec<SparError> {
-    let relocate = |span: &mut crate::Span| {
+    // `pin` is where a span outside the user's text ends up: the start of the
+    // input for the error itself, nowhere (a blank location) for trace frames.
+    let relocate = |span: &mut crate::Span, pin: fn() -> crate::Span| {
         // A span from a real file on disk is already in that file's own
         // coordinates. One from a bundled module (std) has no file to show,
-        // so it is pinned to the start of the input like any foreign span.
+        // so it is pinned like any foreign span.
         if span.file != 0 {
             let on_disk = crate::source_map::lookup(span.file).is_some_and(|file| {
                 let path = std::path::Path::new(&file.path);
                 !crate::stdlib::is_bundled_std_path(path) && path.exists()
             });
             if !on_disk {
-                *span = crate::Span::new(0, 0, 1, 1);
+                *span = pin();
             }
             return;
         }
@@ -1283,17 +1285,18 @@ fn relocate_errors(
                 span.col = span.col.saturating_sub(col_shift).max(1);
             }
         } else {
-            *span = crate::Span::new(0, 0, 1, 1);
+            *span = pin();
         }
     };
+    let start_of_input = || crate::Span::new(0, 0, 1, 1);
     for error in &mut errors {
-        relocate(error.span_mut());
+        relocate(error.span_mut(), start_of_input);
         if let SparError::Traced(traced) = error {
             for frame in &mut traced.trace.frames {
-                relocate(&mut frame.location);
+                relocate(&mut frame.location, crate::Span::dummy);
             }
             if let Some(pending) = &mut traced.trace.pending_call {
-                relocate(pending);
+                relocate(pending, crate::Span::dummy);
             }
             // The session wraps the user's expression in a synthetic
             // function; show its call site as "top level" instead.
@@ -1304,11 +1307,17 @@ fn relocate_errors(
                 .is_some_and(|frame| frame.function.starts_with("sparshInteractivePreview"))
             {
                 if let Some(wrapper) = traced.trace.frames.pop() {
-                    // The column inside the synthetic wrapper means nothing in
-                    // the user's text; keep the line and point at its start.
-                    let mut at = wrapper.location;
-                    at.col = 1;
-                    traced.trace.pending_call = Some(at);
+                    // With nothing else on the stack the error happened in the
+                    // typed input itself: there is no trace to show. Otherwise
+                    // keep the line and point at the start of the input (the
+                    // column inside the wrapper means nothing to the user).
+                    traced.trace.pending_call = if traced.trace.frames.is_empty() {
+                        None
+                    } else {
+                        let mut at = wrapper.location;
+                        at.col = 1;
+                        Some(at)
+                    };
                 }
             }
         }
@@ -1330,10 +1339,9 @@ fn shift_into_fragment(
     let before = &fragment[..offset];
     let extra_lines = before.matches('\n').count() as u32;
     let extra_cols = (offset - before.rfind('\n').map_or(0, |newline| newline + 1)) as u32;
-    for error in &mut errors {
-        let span = error.span_mut();
-        if span.file != 0 {
-            continue;
+    let shift = |span: &mut crate::Span| {
+        if span.file != 0 || span.line == 0 {
+            return;
         }
         if span.line == 1 {
             span.col += extra_cols;
@@ -1341,6 +1349,17 @@ fn shift_into_fragment(
         span.start += offset;
         span.end += offset;
         span.line += extra_lines;
+    };
+    for error in &mut errors {
+        shift(error.span_mut());
+        if let SparError::Traced(traced) = error {
+            for frame in &mut traced.trace.frames {
+                shift(&mut frame.location);
+            }
+            if let Some(pending) = &mut traced.trace.pending_call {
+                shift(pending);
+            }
+        }
     }
     errors
 }

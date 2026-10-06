@@ -1452,6 +1452,7 @@ impl FunctionLowerer<'_> {
                 })
                 .collect::<Result<Vec<_>, SparError>>()?,
             span: word.span.clone(),
+            glob: word.glob,
         })
     }
 

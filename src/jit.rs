@@ -35,12 +35,38 @@ use crate::vm::{Op, VmFunction, VmProgram};
 
 const MAX_ARGS: usize = 8;
 
+pub(crate) const MAX_JIT_FRAMES: usize = 64;
+
+/// One caller recorded while an error unwinds: which function, and the index
+/// of its call op.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct JitFrame {
+    pub(crate) function: u32,
+    pub(crate) at: u32,
+}
+
+// Field offsets are baked into the generated code: err 0, err_fn 4, err_at 8,
+// frame_count 12, frames from 16 (8 bytes each).
+#[repr(C)]
 pub(crate) struct JitCtx {
     pub(crate) err: u32,
     pub(crate) err_fn: u32,
     pub(crate) err_at: u32,
+    pub(crate) frame_count: u32,
+    pub(crate) frames: [JitFrame; MAX_JIT_FRAMES],
+}
+
+impl Default for JitCtx {
+    fn default() -> Self {
+        Self {
+            err: 0,
+            err_fn: 0,
+            err_at: 0,
+            frame_count: 0,
+            frames: [JitFrame::default(); MAX_JIT_FRAMES],
+        }
+    }
 }
 
 pub(crate) struct JitProgram {
@@ -634,11 +660,35 @@ fn lower_function(
                 let call = b.ins().call(callee_ref, &args);
                 let result = b.inst_results(call)[0];
                 set(&mut b, dst, result);
-                // A callee error is already recorded in the context.
+                // A callee error is already recorded in the context; add this
+                // function as one more caller of it before unwinding.
                 let err = b
                     .ins()
                     .load(types::I32, MemFlagsData::trusted(), ctx_ptr, 0);
-                b.ins().brif(err, propagate, &[], blocks[ip + 1], &[]);
+                let record = b.create_block();
+                b.set_cold_block(record);
+                b.ins().brif(err, record, &[], blocks[ip + 1], &[]);
+                b.switch_to_block(record);
+                let count = b
+                    .ins()
+                    .load(types::I32, MemFlagsData::trusted(), ctx_ptr, 12);
+                let cap = b.ins().iconst(types::I32, (MAX_JIT_FRAMES - 1) as i64);
+                let below = b.ins().icmp(IntCC::UnsignedLessThan, count, cap);
+                let slot = b.ins().select(below, count, cap);
+                let slot64 = b.ins().uextend(types::I64, slot);
+                let eight = b.ins().iconst(types::I64, 8);
+                let offset = b.ins().imul(slot64, eight);
+                let entry_ptr = b.ins().iadd(ctx_ptr, offset);
+                let caller_fn = b.ins().iconst(types::I32, index as i64);
+                let call_at = b.ins().iconst(types::I32, ip as i64);
+                b.ins()
+                    .store(MemFlagsData::trusted(), caller_fn, entry_ptr, 16);
+                b.ins()
+                    .store(MemFlagsData::trusted(), call_at, entry_ptr, 20);
+                let one = b.ins().iconst(types::I32, 1);
+                let next = b.ins().iadd(count, one);
+                b.ins().store(MemFlagsData::trusted(), next, ctx_ptr, 12);
+                b.ins().jump(propagate, &[]);
                 terminated = true;
             }
             Op::Ret { src } => {

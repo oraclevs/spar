@@ -906,7 +906,13 @@ impl Runtime<'_> {
                     if self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let span = &bc.spans[ip];
                         let outcome = match value {
-                            Value::Shell(plan) => Some(self.execute_native_shell_plan(&plan, span)?),
+                            Value::Shell(plan) => {
+                                let step_spans = match &bc.exprs[*e as usize] {
+                                    CompiledExpression::Shell(shell) => super::shell_step_spans(shell),
+                                    _ => Vec::new(),
+                                };
+                                Some(self.execute_native_shell_plan_at(&plan, span, &step_spans)?)
+                            }
                             Value::MixedShell(shell) => Some(self.execute_mixed_shell(&shell)?),
                             Value::ShellProgram(program) => Some(self.execute_shell_program(&program)?),
                             _ => None,
@@ -951,7 +957,9 @@ impl Runtime<'_> {
                     }
                 }
                 BOp::Call { dst, function, first, n } => {
-                    let value = self.bytecode_call(FunctionId(*function), frame, *first, *n)?;
+                    let value = self
+                        .bytecode_call(FunctionId(*function), frame, *first, *n)
+                        .map_err(|fault| fault.note_call(&bc.spans[ip]))?;
                     frame.slots[*dst as usize] = Some(value);
                 }
                 BOp::Ret { src, is_tmp, at } => {
@@ -1058,7 +1066,12 @@ impl Runtime<'_> {
         first: u32,
         n: u32,
     ) -> Result<Value, RuntimeFault> {
+        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| self.bytecode_call_inner(id, caller, first as usize, n as usize))
+            .map_err(|fault| match &name {
+                Some(name) => fault.leave_function(name),
+                None => fault,
+            })
     }
 
     #[inline(never)]

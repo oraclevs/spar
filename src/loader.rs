@@ -668,7 +668,8 @@ fn splice_selective(
         }]
     })?;
 
-    let tokens = crate::lexer::Lexer::new(&src).tokenize().map_err(|e| {
+    let file_id = crate::source_map::register(&full_path.display().to_string(), &src);
+    let tokens = crate::lexer::Lexer::new(&src).tokenize_file(file_id).map_err(|e| {
         vec![SparError::ResolveError {
             message: format!("import file '{}' has a lex error: {}", decl.path, e),
             hint: None,
@@ -1474,7 +1475,8 @@ pub fn collect_imports(
             }
         };
 
-        let tokens = match crate::lexer::Lexer::new(&src).tokenize() {
+        let file_id = crate::source_map::register(&full_path.display().to_string(), &src);
+        let tokens = match crate::lexer::Lexer::new(&src).tokenize_file(file_id) {
             Ok(t) => t,
             Err(e) => {
                 errors.push(SparError::ResolveError {
@@ -1708,7 +1710,9 @@ pub fn validate_schema_imports(
             }
         };
 
-        let schema_tokens = match crate::lexer::Lexer::new(&schema_src).tokenize() {
+        let schema_file_id =
+            crate::source_map::register(&full_path.display().to_string(), &schema_src);
+        let schema_tokens = match crate::lexer::Lexer::new(&schema_src).tokenize_file(schema_file_id) {
             Ok(t) => t,
             Err(e) => {
                 errors.push(SparError::SchemaError {

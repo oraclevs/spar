@@ -1259,8 +1259,20 @@ fn relocate_errors(
     col_shift: u32,
     len: usize,
 ) -> Vec<SparError> {
-    for error in &mut errors {
-        let span = error.span_mut();
+    let relocate = |span: &mut crate::Span| {
+        // A span from a real file on disk is already in that file's own
+        // coordinates. One from a bundled module (std) has no file to show,
+        // so it is pinned to the start of the input like any foreign span.
+        if span.file != 0 {
+            let on_disk = crate::source_map::lookup(span.file).is_some_and(|file| {
+                let path = std::path::Path::new(&file.path);
+                !crate::stdlib::is_bundled_std_path(path) && path.exists()
+            });
+            if !on_disk {
+                *span = crate::Span::new(0, 0, 1, 1);
+            }
+            return;
+        }
         // `len` is the length of the user's text: a span past it belongs to
         // some other source (a bundled module, say) and is not in the input.
         if span.start >= origin && span.end <= origin + len && span.line > origin_line {
@@ -1272,6 +1284,33 @@ fn relocate_errors(
             }
         } else {
             *span = crate::Span::new(0, 0, 1, 1);
+        }
+    };
+    for error in &mut errors {
+        relocate(error.span_mut());
+        if let SparError::Traced(traced) = error {
+            for frame in &mut traced.trace.frames {
+                relocate(&mut frame.location);
+            }
+            if let Some(pending) = &mut traced.trace.pending_call {
+                relocate(pending);
+            }
+            // The session wraps the user's expression in a synthetic
+            // function; show its call site as "top level" instead.
+            if traced
+                .trace
+                .frames
+                .last()
+                .is_some_and(|frame| frame.function.starts_with("sparshInteractivePreview"))
+            {
+                if let Some(wrapper) = traced.trace.frames.pop() {
+                    // The column inside the synthetic wrapper means nothing in
+                    // the user's text; keep the line and point at its start.
+                    let mut at = wrapper.location;
+                    at.col = 1;
+                    traced.trace.pending_call = Some(at);
+                }
+            }
         }
     }
     errors
@@ -1293,6 +1332,9 @@ fn shift_into_fragment(
     let extra_cols = (offset - before.rfind('\n').map_or(0, |newline| newline + 1)) as u32;
     for error in &mut errors {
         let span = error.span_mut();
+        if span.file != 0 {
+            continue;
+        }
         if span.line == 1 {
             span.col += extra_cols;
         }

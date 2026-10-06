@@ -21,6 +21,33 @@ pub(crate) enum RuntimeFault {
 }
 
 impl RuntimeFault {
+    /// The call expression at `call_span` produced this fault.
+    pub(crate) fn note_call(self, call_span: &crate::error::Span) -> Self {
+        self.map_error(|error| error.traced_mut().note_call(call_span.clone()))
+    }
+
+    /// The fault is leaving the user function `function`.
+    pub(crate) fn leave_function(self, function: &str) -> Self {
+        self.map_error(|error| {
+            let at = error.span().clone();
+            error.traced_mut().push_frame(function, &at);
+        })
+    }
+
+    fn map_error(self, apply: impl FnOnce(&mut SparError)) -> Self {
+        match self {
+            Self::Raised(mut error) => {
+                apply(&mut error);
+                Self::Raised(error)
+            }
+            Self::Fatal(mut error) => {
+                apply(&mut error);
+                Self::Fatal(error)
+            }
+            exit @ Self::Exit(_) => exit,
+        }
+    }
+
     pub(crate) fn into_error(self) -> SparError {
         match self {
             Self::Raised(error) | Self::Fatal(error) => *error,

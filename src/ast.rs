@@ -266,6 +266,9 @@ pub struct ShellWord {
     pub text: String,
     pub parts: Vec<ShellWordPart>,
     pub span: Span,
+    /// Unquoted `*`, `?` or `[...]` in a command argument: expand against the
+    /// working directory at run time.
+    pub glob: bool,
 }
 
 #[derive(Debug, Clone)]

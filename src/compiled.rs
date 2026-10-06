@@ -292,6 +292,7 @@ pub(crate) struct CompiledShellRedirect {
 pub(crate) struct CompiledShellWord {
     pub parts: Vec<CompiledShellWordPart>,
     pub span: Span,
+    pub glob: bool,
 }
 
 #[derive(Clone)]

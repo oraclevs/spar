@@ -2124,7 +2124,7 @@ impl Parser {
         Ok(Expr::Shell(ShellExpr {
             statements,
             steps,
-            span: Span::new(start.start, end.end, start.line, start.col),
+            span: Span::new(start.start, end.end, start.line, start.col).with_file(start.file),
             foreign_shell,
             end_line: end.line,
         }))
@@ -2160,7 +2160,7 @@ impl Parser {
         let close = self.expect(&Token::RBrace)?.span.clone();
         // Cover the whole `{ ... }` so the formatter can tell which comments
         // sit inside it.
-        let span = Span::new(open.start, close.end, open.line, open.col);
+        let span = Span::new(open.start, close.end, open.line, open.col).with_file(open.file);
         Ok(Expr::Object(items, span))
     }
 

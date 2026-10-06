@@ -294,6 +294,7 @@ fn decoder_subspan(raw: &str, parent: &Span, start: usize, end: usize) -> Span {
         line,
         col,
     )
+    .with_file(parent.file)
 }
 
 fn top_level_positions(text: &str, needle: u8) -> Vec<usize> {
@@ -747,7 +748,12 @@ impl<'a> BodyParser<'a> {
             };
             let mut value_text = value.to_string();
             let mut end_span = token.span.clone();
-            self.merge_adjacent_fragments(&mut parts, &mut value_text, &mut end_span)?;
+            self.merge_adjacent_fragments(
+                &mut parts,
+                &mut value_text,
+                &mut end_span,
+                &mut GlobScan::default(),
+            )?;
             if parts.is_empty() {
                 parts.push(ShellWordPart::Literal(String::new()));
             }
@@ -757,6 +763,7 @@ impl<'a> BodyParser<'a> {
                     text: value_text,
                     parts,
                     span: value_span,
+                    glob: false,
                 },
                 span: Span::new(
                     token.span.start,
@@ -960,6 +967,7 @@ impl<'a> BodyParser<'a> {
         parts: &mut Vec<ShellWordPart>,
         combined_text: &mut String,
         end_span: &mut Span,
+        scan: &mut GlobScan,
     ) -> Result<(), SparError> {
         // Shell quoting is compositional: adjacent fragments with no
         // intervening whitespace form one argv word.  For example:
@@ -981,6 +989,7 @@ impl<'a> BodyParser<'a> {
                 Token::ShellLiteralWord(text) => (text, true),
                 _ => break,
             };
+            scan.fragment(&next_text, next_literal, &next.span);
             let next_parts = if next_literal {
                 vec![ShellWordPart::Literal(next_text.clone())]
             } else {
@@ -1009,15 +1018,18 @@ impl<'a> BodyParser<'a> {
         } else {
             parse_word_parts(&text, &token.span)?
         };
+        let mut scan = GlobScan::default();
+        scan.fragment(&text, literal, &token.span);
         let mut combined_text = text;
         let mut end_span = token.span.clone();
 
-        self.merge_adjacent_fragments(&mut parts, &mut combined_text, &mut end_span)?;
+        self.merge_adjacent_fragments(&mut parts, &mut combined_text, &mut end_span, &mut scan)?;
 
         Ok(ShellWord {
             text: combined_text,
             parts,
             span: end_span,
+            glob: scan.expands(),
         })
     }
 
@@ -1029,6 +1041,30 @@ impl<'a> BodyParser<'a> {
             .or_else(|| self.tokens.last().map(|token| token.span.clone()))
             .unwrap_or_else(Span::dummy);
         parse_error(message, span)
+    }
+}
+
+/// Tracks whether a word has glob characters outside quotes. A word that also
+/// quotes a glob character is left alone, since the evaluated text no longer
+/// says which `*` was quoted.
+#[derive(Default)]
+struct GlobScan {
+    unquoted: bool,
+    quoted: bool,
+}
+
+impl GlobScan {
+    fn fragment(&mut self, text: &str, single_quoted: bool, span: &Span) {
+        let double_quoted = !single_quoted && span.end - span.start >= text.len() + 2;
+        if single_quoted || double_quoted {
+            self.quoted |= spar_command::glob::has_glob_chars(text);
+        } else {
+            self.unquoted |= spar_command::glob::has_unescaped_glob_chars(text);
+        }
+    }
+
+    fn expands(&self) -> bool {
+        self.unquoted && !self.quoted
     }
 }
 
@@ -1209,7 +1245,7 @@ fn relocate_tokens(
         let start = real_origin + (token.span.start - synthetic_origin);
         let end = real_origin + token.span.end.saturating_sub(synthetic_origin);
         let col = word_span.col + start.saturating_sub(word_span.start) as u32;
-        token.span = Span::new(start, end.max(start), word_span.line, col);
+        token.span = Span::new(start, end.max(start), word_span.line, col).with_file(word_span.file);
     }
 }
 
@@ -1241,7 +1277,7 @@ fn valid_environment_name(name: &str) -> bool {
 }
 
 fn joined_span(start: &Span, end: &Span) -> Span {
-    Span::new(start.start, end.end, start.line, start.col)
+    Span::new(start.start, end.end, start.line, start.col).with_file(start.file)
 }
 
 fn parse_error(message: impl Into<String>, span: Span) -> SparError {

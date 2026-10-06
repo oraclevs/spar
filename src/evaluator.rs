@@ -1828,6 +1828,7 @@ impl Evaluator {
         local_scope: &HashMap<String, ConfigValue>,
     ) -> Result<spar_command::CommandPlan, EvalErr> {
         let mut args = Vec::with_capacity(command.args.len());
+        let mut glob_args = Vec::new();
         for argument in &command.args {
             let spread = match argument.parts.as_slice() {
                 [ShellWordPart::Literal(prefix), ShellWordPart::Expr(expression)]
@@ -1852,6 +1853,9 @@ impl Evaluator {
                     args.push(shell_scalar_to_string(value)?);
                 }
             } else {
+                if argument.glob {
+                    glob_args.push(args.len());
+                }
                 args.push(self.eval_deferred_shell_word(argument, local_scope)?);
             }
         }
@@ -1866,6 +1870,7 @@ impl Evaluator {
         Ok(spar_command::CommandPlan {
             program: self.eval_deferred_shell_word(&command.program, local_scope)?,
             args,
+            glob_args,
             env,
             cwd: None,
             stdin: self.eval_deferred_shell_redirect(command.stdin.as_ref(), local_scope)?,
@@ -2836,6 +2841,13 @@ fn lower_shell_command(command: &ShellCommandExpr) -> spar_command::CommandPlan 
             })
             .collect(),
         background: command.background,
+        glob_args: command
+            .args
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| word.glob)
+            .map(|(index, _)| index)
+            .collect(),
     }
 }
 
@@ -3488,6 +3500,19 @@ impl Evaluator {
                     local_scope.insert(lv.name.clone(), val);
                 }
                 FuncStmt::Expression(expr, span) => {
+                    // Where the statement's first command was written, so a
+                    // spawn failure points at it instead of the whole block.
+                    let first_command_span = match expr {
+                        Expr::Shell(shell) => shell.steps.first().map(|(_, step)| match step {
+                            ShellStep::Command(command) => command.program.span.clone(),
+                            ShellStep::Pipeline(commands) => commands
+                                .first()
+                                .map(|command| command.program.span.clone())
+                                .unwrap_or_else(|| span.clone()),
+                            ShellStep::MixedPipeline(_) => span.clone(),
+                        }),
+                        _ => None,
+                    };
                     let value = self.eval_expr(expr, local_scope)?;
                     if self.shell_result_depth > 0 {
                         if let ConfigValue::Shell(mut plan) = value {
@@ -3509,7 +3534,7 @@ impl Evaluator {
                                 ..spar_process::ExecutionOptions::default()
                             };
                             let outcome = execute_shell_plan_with_options(&plan, &options)
-                                .map_err(|error| EvalErr::Fatal { message: format!("could not execute shell command: {error}"), span: span.clone() })?;
+                                .map_err(|error| EvalErr::Fatal { message: crate::error::shell_spawn_message(plan_first_program(&plan), &error), span: first_command_span.clone().unwrap_or_else(|| span.clone()) })?;
                             self.runtime_context.set_last_exit_code(outcome.exit_code);
                         }
                     }
@@ -4242,5 +4267,18 @@ var endpoint: str = Config().host;
         "#,
         );
         assert_eq!(global(&r, "kind"), ConfigValue::Str("runtime".into()));
+    }
+}
+
+/// First program of a shell plan, for error messages.
+fn plan_first_program(plan: &spar_command::ShellPlan) -> &str {
+    match plan.steps.first() {
+        Some((_, spar_command::Step::Command(command))) => command.program.as_str(),
+        Some((_, spar_command::Step::Pipeline(pipeline))) => pipeline
+            .commands
+            .first()
+            .map(|command| command.program.as_str())
+            .unwrap_or(""),
+        None => "",
     }
 }

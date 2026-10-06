@@ -1192,7 +1192,7 @@ impl VmProgram {
         let jit = self.native()?;
         let mut ctx = crate::jit::JitCtx::default();
         let result = jit.call(entry.0 as usize, args, depth as i64, &mut ctx)?;
-        Some(match ctx.err {
+        let outcome = match ctx.err {
             0 => Ok(result),
             1 => {
                 let span = self
@@ -1216,11 +1216,62 @@ impl VmProgram {
                 Err(overflow(&span, what))
             }
             _ => Err(depth_error()),
-        })
+        };
+        // The generated code recorded each caller while the error unwound;
+        // rebuild the interpreter's oldest-first saved frames from them.
+        Some(outcome.map_err(|error| {
+            if ctx.err == 2 {
+                return error;
+            }
+            let count = (ctx.frame_count as usize).min(crate::jit::MAX_JIT_FRAMES);
+            let frames: Vec<SavedFrame> = ctx.frames[..count]
+                .iter()
+                .rev()
+                .map(|frame| SavedFrame {
+                    function: frame.function,
+                    ip: frame.at + 1,
+                    base: 0,
+                    dst: 0,
+                })
+                .collect();
+            self.trace_from(error, ctx.err_fn, &frames)
+        }))
     }
 }
 
 impl VmProgram {
+    /// Builds the trace for an error raised while `function` was executing
+    /// with `frames` as its caller chain (oldest first). Frames for every
+    /// function below the entry function are added here; the entry
+    /// function's own frame is added by `Runtime::call_direct_inline`, so
+    /// this only tells it where inside the entry function the call happened.
+    fn trace_from(&self, mut error: SparError, function: u32, frames: &[SavedFrame]) -> SparError {
+        let name_of = |id: u32| {
+            self.function_at(id as usize)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| "<function>".to_string())
+        };
+        let call_span = |saved: &SavedFrame| {
+            self.function_at(saved.function as usize)
+                .and_then(|f| f.spans.get((saved.ip as usize).saturating_sub(1)))
+                .cloned()
+                .unwrap_or_else(Span::dummy)
+        };
+        let error_span = error.span().clone();
+        let trace = error.traced_mut();
+        if let Some(entry_call) = frames.first() {
+            // Innermost: the function that raised the error.
+            trace.push_frame(&name_of(function), &error_span);
+            // Callers, newest first, down to (but excluding) the entry function.
+            for saved in frames.iter().skip(1).rev() {
+                trace.note_call(call_span(saved));
+                trace.push_frame(&name_of(saved.function), &error_span);
+            }
+            trace.note_call(call_span(entry_call));
+        }
+        error
+    }
+
     /// Runs `entry` with `args` already converted to register bits.
     /// `depth` is the caller's current call depth.
     pub(crate) fn run(
@@ -1289,48 +1340,48 @@ impl VmProgram {
                 Op::Move { dst, src } => set!(dst, r!(src)),
                 Op::AddI { dst, a, b } => match i!(a).checked_add(i!(b)) {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "addition")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "addition"), function, frames)),
                 },
                 Op::SubI { dst, a, b } => match i!(a).checked_sub(i!(b)) {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "subtraction")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "subtraction"), function, frames)),
                 },
                 Op::MulI { dst, a, b } => match i!(a).checked_mul(i!(b)) {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "multiplication")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "multiplication"), function, frames)),
                 },
                 Op::DivI { dst, a, b, at } => {
                     let divisor = i!(b);
                     if divisor == 0 {
-                        return Err(division_by_zero(&current.spans[at as usize]));
+                        return Err(self.trace_from(division_by_zero(&current.spans[at as usize]), function, frames));
                     }
                     match i!(a).checked_div(divisor) {
                         Some(v) => set!(dst, v as u64),
-                        None => return Err(overflow(&current.spans[ip], "division")),
+                        None => return Err(self.trace_from(overflow(&current.spans[ip], "division"), function, frames)),
                     }
                 }
                 Op::RemI { dst, a, b, at } => {
                     let divisor = i!(b);
                     if divisor == 0 {
-                        return Err(division_by_zero(&current.spans[at as usize]));
+                        return Err(self.trace_from(division_by_zero(&current.spans[at as usize]), function, frames));
                     }
                     match i!(a).checked_rem(divisor) {
                         Some(v) => set!(dst, v as u64),
-                        None => return Err(overflow(&current.spans[ip], "remainder")),
+                        None => return Err(self.trace_from(overflow(&current.spans[ip], "remainder"), function, frames)),
                     }
                 }
                 Op::AddII { dst, a, imm } => match i!(a).checked_add(imm) {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "addition")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "addition"), function, frames)),
                 },
                 Op::SubII { dst, a, imm } => match i!(a).checked_sub(imm) {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "subtraction")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "subtraction"), function, frames)),
                 },
                 Op::IncI { reg } => set!(reg, (i!(reg).wrapping_add(1)) as u64),
                 Op::NegI { dst, a } => match i!(a).checked_neg() {
                     Some(v) => set!(dst, v as u64),
-                    None => return Err(overflow(&current.spans[ip], "negation")),
+                    None => return Err(self.trace_from(overflow(&current.spans[ip], "negation"), function, frames)),
                 },
                 Op::EqI { dst, a, b } => set!(dst, (i!(a) == i!(b)) as u64),
                 Op::NeI { dst, a, b } => set!(dst, (i!(a) != i!(b)) as u64),
@@ -1350,14 +1401,14 @@ impl VmProgram {
                 Op::DivF { dst, a, b, at } => {
                     let divisor = f!(b);
                     if divisor == 0.0 {
-                        return Err(division_by_zero(&current.spans[at as usize]));
+                        return Err(self.trace_from(division_by_zero(&current.spans[at as usize]), function, frames));
                     }
                     set!(dst, (f!(a) / divisor).to_bits())
                 }
                 Op::RemF { dst, a, b, at } => {
                     let divisor = f!(b);
                     if divisor == 0.0 {
-                        return Err(division_by_zero(&current.spans[at as usize]));
+                        return Err(self.trace_from(division_by_zero(&current.spans[at as usize]), function, frames));
                     }
                     set!(dst, (f!(a) % divisor).to_bits())
                 }
@@ -1465,7 +1516,7 @@ impl VmProgram {
                     first,
                 } => {
                     if depth + frames.len() + 1 >= MAX_CALL_DEPTH {
-                        return Err(depth_error());
+                        return Err(self.trace_from(depth_error(), function, frames));
                     }
                     let callee_fn = self.functions[callee as usize]
                         .as_ref()

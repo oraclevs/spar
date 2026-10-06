@@ -348,6 +348,10 @@ pub(crate) struct Runtime<'a> {
     jobs: Vec<spar_process::Job>,
     last_job: Option<Value>,
     shell_exit: bool,
+    /// Where the steps of the most recently evaluated shell expression were
+    /// written, so a plan returned from a function can still report the
+    /// line of the command that failed. Used only when the step counts match.
+    last_shell_step_spans: Vec<Span>,
     shell_cwd: Option<std::path::PathBuf>,
     context: RuntimeContext,
     _marker: std::marker::PhantomData<&'a ()>,
@@ -414,6 +418,7 @@ impl<'a> Runtime<'a> {
                     jobs: Vec::new(),
                     last_job: None,
                     shell_exit: false,
+                    last_shell_step_spans: Vec::new(),
                     shell_cwd: None,
                     context: invocation.context,
                     _marker: std::marker::PhantomData,
@@ -454,6 +459,7 @@ impl<'a> Runtime<'a> {
             jobs: Vec::new(),
             last_job: None,
             shell_exit: false,
+                    last_shell_step_spans: Vec::new(),
             shell_cwd: None,
             context,
             _marker: std::marker::PhantomData,
@@ -523,6 +529,18 @@ impl MixedDecoderState {
         }
     }
 
+    fn splits_top_level_array(&self) -> bool {
+        matches!(
+            self,
+            Self::Codec(parser)
+                if matches!(
+                    parser.format(),
+                    crate::structured_codec::StructuredFormat::Json
+                        | crate::structured_codec::StructuredFormat::Yaml
+                )
+        )
+    }
+
     fn finish(self) -> Result<Vec<Value>, SparError> {
         match self {
             Self::Codec(parser) => parser.finish(),
@@ -553,6 +571,9 @@ struct MixedInputState {
     status: Option<spar_process::PipelineStatus>,
     finished: bool,
     cancelled: bool,
+    /// A top-level JSON/YAML array was split into rows, so a one-row result
+    /// is still a list and must not be unwrapped for display.
+    rows_from_document: bool,
 }
 
 fn mixed_input_lock_error() -> SparError {
@@ -617,7 +638,16 @@ fn mixed_input_next(shared: &Arc<Mutex<MixedInputState>>) -> Result<Option<Value
                     message: "mixed pipeline decoder is unavailable".into(),
                     span: Span::dummy(),
                 })?;
-                state.pending.extend(decoder.finish()?);
+                let splits_array = decoder.splits_top_level_array();
+                let mut values = decoder.finish()?;
+                if splits_array && values.len() == 1 && matches!(values[0], Value::List(_)) {
+                    // `from json` on `[a, b]` yields rows a, b like `from csv`.
+                    if let Some(Value::List(items)) = values.pop() {
+                        values = items.iter().cloned().collect();
+                        state.rows_from_document = true;
+                    }
+                }
+                state.pending.extend(values);
                 state.finished = true;
                 return Ok(state.pending.pop_front());
             }
@@ -737,8 +767,9 @@ pub(crate) fn execute_program_with_context(
             let span = runtime
                 .entry_function_span(entry)
                 .unwrap_or_else(Span::dummy);
+            let step_spans = runtime.returned_shell_step_spans(&plan);
             runtime
-                .execute_native_shell_plan(&plan, &span)
+                .execute_native_shell_plan_at(&plan, &span, &step_spans)
                 .map(|outcome| Value::Int(i64::from(outcome.exit_code)))
                 .map_err(|fault| vec![fault.into_error()])
         }
@@ -796,8 +827,9 @@ pub(crate) fn call_function_with_context(
             let span = runtime
                 .entry_function_span(function)
                 .unwrap_or_else(Span::dummy);
+            let step_spans = runtime.returned_shell_step_spans(&plan);
             runtime
-                .execute_native_shell_plan(&plan, &span)
+                .execute_native_shell_plan_at(&plan, &span, &step_spans)
                 .map(|outcome| outcome.exit_code)
                 .map_err(|fault| vec![fault.into_error()])
         }
@@ -1010,6 +1042,7 @@ impl Runtime<'_> {
         call_span: &Span,
     ) -> Result<Value, RuntimeFault> {
         crate::recursion::with_stack(|| self.call_closure_inner(closure, arguments, call_span))
+            .map_err(|fault| fault.leave_function("<closure>").note_call(call_span))
     }
 
     #[inline(never)]
@@ -1092,8 +1125,13 @@ impl Runtime<'_> {
         arguments: Vec<Value>,
         return_type: Option<RuntimeTypeBinding>,
     ) -> Result<(Value, Frame, Option<LocalSlot>), RuntimeFault> {
+        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| {
             self.call_function_with_frame_typed_inner(id, arguments, return_type)
+        })
+        .map_err(|fault| match &name {
+            Some(name) => fault.leave_function(name),
+            None => fault,
         })
     }
 
@@ -1246,8 +1284,13 @@ impl Runtime<'_> {
         caller_module: ModuleId,
         return_type: Option<&SparType>,
     ) -> Result<Value, RuntimeFault> {
+        let name = self.program.function(id).map(|function| function.name.clone());
         crate::recursion::with_stack(|| {
             self.call_direct_inline_inner(id, arguments, caller, caller_module, return_type)
+        })
+        .map_err(|fault| match &name {
+            Some(name) => fault.leave_function(name),
+            None => fault,
         })
     }
 
@@ -1409,7 +1452,15 @@ impl Runtime<'_> {
                     if self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let outcome = match value {
                             Value::Shell(plan) => {
-                                Some(self.execute_native_shell_plan(&plan, statement_span)?)
+                                let step_spans = match expression {
+                                    CompiledExpression::Shell(shell) => shell_step_spans(shell),
+                                    _ => Vec::new(),
+                                };
+                                Some(self.execute_native_shell_plan_at(
+                                    &plan,
+                                    statement_span,
+                                    &step_spans,
+                                )?)
                             }
                             Value::MixedShell(shell) => Some(self.execute_mixed_shell(&shell)?),
                             Value::ShellProgram(program) => {
@@ -1598,6 +1649,7 @@ impl Runtime<'_> {
                             )))
                         } else {
                             self.call_function(function, values)
+                                .map_err(|fault| fault.note_call(span))
                         }
                     }
                     other => Err(type_error("fn", &other, span).into()),
@@ -1811,7 +1863,8 @@ impl Runtime<'_> {
                         }
                         let requested = return_type.as_ref().map(|ty| resolve_runtime_type(ty, frame, module));
                         let (result, method_frame, parameter_slots) =
-                            self.call_function_with_frame_typed(*function, values, requested)?;
+                            self.call_function_with_frame_typed(*function, values, requested)
+                                .map_err(|fault| fault.note_call(span))?;
                         let updated = if *mutates_receiver {
                             let self_slot = parameter_slots.ok_or_else(|| {
                                 runtime_error("mutable method is missing self parameter", span)
@@ -1866,16 +1919,18 @@ impl Runtime<'_> {
                 function,
                 arguments,
                 return_type,
-                span: _,
+                span,
             } => {
                 if !self.function_is_async(*function)? {
-                    return self.call_direct_inline(
-                        *function,
-                        arguments,
-                        frame,
-                        module,
-                        return_type.as_ref(),
-                    );
+                    return self
+                        .call_direct_inline(
+                            *function,
+                            arguments,
+                            frame,
+                            module,
+                            return_type.as_ref(),
+                        )
+                        .map_err(|fault| fault.note_call(span));
                 }
                 let values = arguments
                     .iter()
@@ -2100,9 +2155,11 @@ impl Runtime<'_> {
                 }
                 Ok(Value::List(Shared::from(output)))
             }
-            CompiledExpression::Shell(shell) => Ok(Value::Shell(Shared::from(
-                self.eval_shell_plan(shell, frame, module)?,
-            ))),
+            CompiledExpression::Shell(shell) => {
+                let plan = self.eval_shell_plan(shell, frame, module)?;
+                self.last_shell_step_spans = shell_step_spans(shell);
+                Ok(Value::Shell(Shared::from(plan)))
+            }
             CompiledExpression::MixedShell(shell) => {
                 Ok(Value::MixedShell(Shared::from(MixedShellValue {
                     plan: shell.clone(),
@@ -3205,6 +3262,7 @@ impl Runtime<'_> {
                     .into());
                 }
                 self.call_function(*function, arguments)
+                    .map_err(|fault| fault.note_call(span))
             }
             other => Err(type_error("fn", other, span).into()),
         }
@@ -3458,7 +3516,7 @@ impl Runtime<'_> {
         let mut captured = Vec::new();
         let mut executed = false;
 
-        for (join, source_step) in &plan.steps {
+        for (step_index, (join, source_step)) in plan.steps.iter().enumerate() {
             let should_run = match join {
                 spar_command::Join::Always => true,
                 spar_command::Join::OnSuccess => success,
@@ -3711,6 +3769,7 @@ impl Runtime<'_> {
             stderr: None,
             redirections: vec![],
             background: false,
+            glob_args: Vec::new(),
         })
     }
 
@@ -3718,6 +3777,27 @@ impl Runtime<'_> {
         &mut self,
         plan: &spar_command::ShellPlan,
         span: &Span,
+    ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
+        self.execute_native_shell_plan_at(plan, span, &[])
+    }
+
+    /// `step_spans[i]` is where step `i` of `plan` was written (its program
+    /// word), so a failing command is reported at its own line.
+    /// Step spans for a plan a function just returned, or none when they do
+    /// not line up with it.
+    fn returned_shell_step_spans(&self, plan: &spar_command::ShellPlan) -> Vec<Span> {
+        if self.last_shell_step_spans.len() == plan.steps.len() {
+            self.last_shell_step_spans.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(super) fn execute_native_shell_plan_at(
+        &mut self,
+        plan: &spar_command::ShellPlan,
+        span: &Span,
+        step_spans: &[Span],
     ) -> Result<crate::evaluator::ShellPlanOutcome, RuntimeFault> {
         let mut outcome = crate::evaluator::ShellPlanOutcome {
             success: true,
@@ -3730,7 +3810,7 @@ impl Runtime<'_> {
             environment: Some(self.context.environment_pairs()),
             ..spar_process::ExecutionOptions::default()
         };
-        for (join, source_step) in &plan.steps {
+        for (step_index, (join, source_step)) in plan.steps.iter().enumerate() {
             let should_run = match join {
                 spar_command::Join::Always => true,
                 spar_command::Join::OnSuccess => outcome.success,
@@ -3880,7 +3960,19 @@ impl Runtime<'_> {
                 }
             }
             .map_err(|error| {
-                runtime_error(&format!("could not execute native command: {error}"), span)
+                let program = match source_step {
+                    spar_command::Step::Command(command) => command.program.as_str(),
+                    spar_command::Step::Pipeline(pipeline) => pipeline
+                        .commands
+                        .first()
+                        .map(|command| command.program.as_str())
+                        .unwrap_or(""),
+                };
+                let at = step_spans.get(step_index).unwrap_or(span);
+                SparError::EvalError {
+                    message: crate::error::shell_spawn_message(program, &error),
+                    span: at.clone(),
+                }
             })?;
             let status = output
                 .pipeline_status
@@ -3949,7 +4041,7 @@ impl Runtime<'_> {
                             span: shell.span.clone(),
                         };
                         let plan = self.eval_shell_plan(&single, &mut frame, shell.module)?;
-                        self.execute_native_shell_plan(&plan, &shell.span)?
+                        self.execute_native_shell_plan_at(&plan, &shell.span, &shell_step_spans(&single))?
                     }
                 };
                 if self.shell_exit {
@@ -4142,6 +4234,7 @@ impl Runtime<'_> {
             status: None,
             finished: false,
             cancelled: false,
+            rows_from_document: false,
         }));
         let pull_state = Arc::clone(&shared);
         let cancel_state = Arc::clone(&shared);
@@ -4181,7 +4274,11 @@ impl Runtime<'_> {
                 }
                 crate::structured_input::DecoderKind::Custom => false,
             };
-            if pipeline.encoder_format.is_none() && document_decoder {
+            let rows_from_document = shared
+                .lock()
+                .map(|state| state.rows_from_document)
+                .unwrap_or(false);
+            if pipeline.encoder_format.is_none() && document_decoder && !rows_from_document {
                 value = match value {
                     Value::List(mut items) if items.len() == 1 => items.remove(0),
                     Value::Table(table) if table.len() == 1 => table.rows()[0].clone(),
@@ -4513,6 +4610,7 @@ impl Runtime<'_> {
         module: crate::compiled::ModuleId,
     ) -> Result<spar_command::CommandPlan, RuntimeFault> {
         let mut args = Vec::with_capacity(command.args.len());
+        let mut glob_args = Vec::new();
         for argument in &command.args {
             // Args is intentionally expanded only when it occupies the entire
             // shell word. Each stored string is already one argv entry and is
@@ -4549,6 +4647,9 @@ impl Runtime<'_> {
                     args.push(shell_primitive_to_string(value, &argument.span)?);
                 }
             } else {
+                if argument.glob {
+                    glob_args.push(args.len());
+                }
                 args.push(self.eval_shell_word(argument, frame, module)?);
             }
         }
@@ -4566,6 +4667,7 @@ impl Runtime<'_> {
         Ok(spar_command::CommandPlan {
             program,
             args,
+            glob_args,
             env,
             cwd: None,
             stdin: self.eval_shell_redirect(command.stdin.as_ref(), frame, module)?,
@@ -5779,6 +5881,23 @@ pub(crate) fn field_of_value(base: Value, field: &str, span: &Span) -> Result<Va
         }
         value => Err(type_error("object", &value, span).into()),
     }
+}
+
+/// Where each step of a compiled shell expression was written: its first
+/// command's program word.
+pub(super) fn shell_step_spans(shell: &CompiledShellExpr) -> Vec<Span> {
+    shell
+        .steps
+        .iter()
+        .map(|(_, step)| match step {
+            CompiledShellStep::Command(command) => command.program.span.clone(),
+            CompiledShellStep::Pipeline(commands) => commands
+                .first()
+                .map(|command| command.program.span.clone())
+                .unwrap_or_else(Span::dummy),
+            CompiledShellStep::MixedPipeline(_) => Span::dummy(),
+        })
+        .collect()
 }
 
 fn runtime_error(message: &str, span: &Span) -> SparError {

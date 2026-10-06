@@ -470,6 +470,7 @@ fn command_plan_from_parts(
         stderr: None,
         redirections: vec![],
         background: false,
+        glob_args: Vec::new(),
     })
 }
 

@@ -906,6 +906,15 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Tokenizes and stamps every token span with a `source_map` file id.
+    pub fn tokenize_file(self, file: u32) -> Result<Vec<SpannedToken>, SparError> {
+        let mut tokens = self.tokenize()?;
+        for token in &mut tokens {
+            token.span.file = file;
+        }
+        Ok(tokens)
+    }
+
     /// A leading `#!...` line, if `source` started with one. Only valid to
     /// read before/alongside `tokenize()` — `Lexer::new` computes it
     /// up front from raw source, independent of tokenizing.

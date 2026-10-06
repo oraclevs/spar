@@ -512,7 +512,7 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "MapEntry")
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "ShellResult" | "MapEntry")
                     && !self.types.contains_key(name)
                 {
                     Err(SparError::ResolveError {
@@ -544,7 +544,7 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
-                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "MapEntry") {
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "ShellResult" | "MapEntry") {
                     if arguments.len() != 2 {
                         return Err(SparError::ResolveError {
                             message: format!(
@@ -1986,7 +1986,7 @@ impl Resolver {
                 }
             }
             SparType::Named(name) => {
-                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "MapEntry")
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "ShellResult" | "MapEntry")
                     && !self.types.contains_key(name)
                 {
                     self.push_error(
@@ -2042,7 +2042,7 @@ impl Resolver {
                 }
             }
             SparType::Applied { name, arguments } => {
-                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "MapEntry") {
+                if matches!(name.as_str(), "Map" | "Lookup" | "Result" | "ShellResult" | "MapEntry") {
                     if arguments.len() != 2 {
                         self.push_error(
                             format!(

@@ -301,7 +301,7 @@ impl<'a> Lowerer<'a> {
             CompiledStatement::StoreLocal { slot, value, .. } => {
                 self.expr_into(value, slot.0);
             }
-            CompiledStatement::Expression(expression, _) => match expression {
+            CompiledStatement::Expression(expression, span) => match expression {
                 CompiledExpression::DirectCall { .. } if self.call_is_lowerable(expression) => {
                     let dst = self.temp();
                     self.expr_into(expression, dst);
@@ -309,7 +309,7 @@ impl<'a> Lowerer<'a> {
                 _ => {
                     let e = self.exprs.len() as u32;
                     self.exprs.push(expression.clone());
-                    self.emit(BOp::Eval { e }, None);
+                    self.emit(BOp::Eval { e }, Some(span));
                 }
             },
             CompiledStatement::If {
@@ -902,7 +902,17 @@ impl Runtime<'_> {
                     frame.slots[*dst as usize] = Some(value);
                 }
                 BOp::Eval { e } => {
-                    self.eval_expression(&bc.exprs[*e as usize], frame, module)?;
+                    let value = self.eval_expression(&bc.exprs[*e as usize], frame, module)?;
+                    if self.shell_depth > 0 || self.shell_result_depth > 0 {
+                        let span = &bc.spans[ip];
+                        let outcome = match value {
+                            Value::Shell(plan) => Some(self.execute_native_shell_plan(&plan, span)?),
+                            Value::MixedShell(shell) => Some(self.execute_mixed_shell(&shell)?),
+                            Value::ShellProgram(program) => Some(self.execute_shell_program(&program)?),
+                            _ => None,
+                        };
+                        if let Some(outcome) = outcome { self.shell_outcome = Some(outcome); }
+                    }
                 }
                 BOp::TreeStmt { s, brk, cont } => {
                     let statement = std::slice::from_ref(&bc.stmts[*s as usize]);
@@ -1142,7 +1152,11 @@ impl Runtime<'_> {
                 let value = self.eval_expression(default, &mut frame, module)?;
                 frame.write(slot, value, function_span)?;
             }
-            match self.run_body(program, id, &function.body, &mut frame, module)? {
+            let shell_result_function = matches!(&function.return_type, crate::ast::SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2);
+            let previous_depth = std::mem::replace(&mut self.shell_result_depth, usize::from(shell_result_function));
+            let body_result = self.run_body(program, id, &function.body, &mut frame, module);
+            self.shell_result_depth = previous_depth;
+            match body_result? {
                 RuntimeFlow::Return(value) => Ok(value),
                 RuntimeFlow::Normal => Ok(Value::Void),
                 RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(

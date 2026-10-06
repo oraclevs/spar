@@ -152,6 +152,7 @@ pub struct Session {
     identifiers: BTreeSet<String>,
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
+    function_return_types: BTreeMap<String, crate::ast::SparType>,
     structured_terminal: bool,
     /// Parameter names of the prelude's `std/data` functions, so interactive
     /// clients can label arguments before anything has been compiled.
@@ -165,6 +166,7 @@ struct EvaluatedCandidate {
     identifiers: BTreeSet<String>,
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
+    function_return_types: BTreeMap<String, crate::ast::SparType>,
     interactive: InteractiveEvalResult,
 }
 
@@ -179,6 +181,7 @@ impl Session {
             identifiers: BTreeSet::new(),
             functions: BTreeSet::new(),
             function_params: BTreeMap::new(),
+            function_return_types: BTreeMap::new(),
             structured_terminal: false,
             prelude_params: BTreeMap::new(),
         }
@@ -652,7 +655,9 @@ impl Session {
         identifiers.remove(&function_name);
         identifiers.remove("_");
         let mut function_params = BTreeMap::new();
+        let mut function_return_types = BTreeMap::new();
         for (name, entry) in &symbols.imported_functions {
+            function_return_types.insert(name.clone(), entry.ret.clone());
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -662,6 +667,7 @@ impl Session {
             if name == &function_name {
                 continue;
             }
+            function_return_types.insert(name.clone(), entry.ret.clone());
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -690,6 +696,7 @@ impl Session {
         self.identifiers = identifiers;
         self.functions = functions;
         self.function_params = function_params;
+        self.function_return_types = function_return_types;
 
         match execution {
             crate::runtime::InteractiveRuntimeExecution::Process(outcome) => {
@@ -729,6 +736,7 @@ impl Session {
         self.identifiers = evaluated.identifiers;
         self.functions = evaluated.functions;
         self.function_params = evaluated.function_params;
+        self.function_return_types = evaluated.function_return_types;
         Ok(evaluated.interactive)
     }
 
@@ -903,13 +911,16 @@ impl Session {
         identifiers.extend(symbols.imports.keys().cloned());
         identifiers.extend(symbols.tasks.keys().cloned());
         let mut function_params = BTreeMap::new();
+        let mut function_return_types = BTreeMap::new();
         for (name, entry) in &symbols.imported_functions {
+            function_return_types.insert(name.clone(), entry.ret.clone());
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
             );
         }
         for (name, entry) in &symbols.functions {
+            function_return_types.insert(name.clone(), entry.ret.clone());
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -949,6 +960,7 @@ impl Session {
             identifiers,
             functions,
             function_params,
+            function_return_types,
             interactive,
         })
     }
@@ -1021,6 +1033,11 @@ impl Session {
             .iter()
             .map(String::as_str)
             .chain(self.prelude_names().map(|name| -> &'a str { name }))
+    }
+
+    /// Declared return type of a callable visible to the interactive session.
+    pub fn function_return_type(&self, name: &str) -> Option<&crate::ast::SparType> {
+        self.function_return_types.get(name)
     }
 
     /// Named parameter labels for an interactive function call.

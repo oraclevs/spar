@@ -10,6 +10,15 @@ pub struct CommentTrivia {
     pub start: usize,
 }
 
+fn is_shell_result_function_header(tokens: &[SpannedToken]) -> bool {
+    let Some(arrow) = tokens.iter().rposition(|token| token.token == Token::Arrow) else {
+        return false;
+    };
+    let tail = &tokens[arrow + 1..];
+    matches!(tail.first().map(|token| &token.token), Some(Token::Ident(name)) if name == "ShellResult")
+        && matches!(tail.last().map(|token| &token.token), Some(Token::Gt))
+}
+
 pub struct Lexer<'a> {
     source: &'a str,
     bytes: &'a [u8],
@@ -1502,7 +1511,7 @@ impl<'a> Lexer<'a> {
             self.lex_run_body(tokens)
         } else {
             tokens.push(SpannedToken::new(Token::ShellBlockStart, span));
-            self.lex_shell_block(tokens)
+            self.lex_shell_block(tokens, false)
         }
     }
 
@@ -1632,7 +1641,7 @@ impl<'a> Lexer<'a> {
         if foreign_bash {
             self.lex_foreign_bash_block(tokens)
         } else {
-            self.lex_shell_block(tokens)
+            self.lex_shell_block(tokens, false)
         }
     }
 
@@ -1657,7 +1666,7 @@ impl<'a> Lexer<'a> {
             Token::ShellBlockStart,
             Span::new(exec.span.start, self.pos, exec.span.line, exec.span.col),
         ));
-        self.lex_shell_block(tokens)
+        self.lex_shell_block(tokens, false)
     }
 
     fn lex_foreign_bash_block(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
@@ -1732,7 +1741,7 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    fn lex_shell_block(&mut self, tokens: &mut Vec<SpannedToken>) -> Result<(), SparError> {
+    fn lex_shell_block(&mut self, tokens: &mut Vec<SpannedToken>, function_body: bool) -> Result<(), SparError> {
         let body_start = self.pos;
         let body_line = self.line;
         let body_col = self.col;
@@ -1801,7 +1810,7 @@ impl<'a> Lexer<'a> {
                             .collect();
                         let offsets = NormalizedOffsets::new(original, &normalized, &inserted);
                         for mut token in nested.into_iter().filter(|token| {
-                            token.token != Token::Eof && token.token != Token::KwCommand
+                            token.token != Token::Eof && (function_body || token.token != Token::KwCommand)
                         }) {
                             let (start, end) =
                                 offsets.original_range(original, token.span.start, token.span.end);
@@ -1827,7 +1836,7 @@ impl<'a> Lexer<'a> {
                             });
                         }
                         tokens.push(SpannedToken::new(
-                            Token::ShellBlockEnd,
+                            if function_body { Token::RBrace } else { Token::ShellBlockEnd },
                             Span::new(body_end, self.pos, close_line, close_col),
                         ));
                         return Ok(());
@@ -2453,12 +2462,16 @@ impl<'a> Lexer<'a> {
                     self.last_token_line = line;
                 }
                 b'{' => {
+                    let shell_result_body = is_shell_result_function_header(&tokens);
                     self.advance();
                     tokens.push(SpannedToken::new(
                         Token::LBrace,
                         self.span_at(start, line, col),
                     ));
                     self.last_token_line = line;
+                    if shell_result_body {
+                        self.lex_shell_block(&mut tokens, true)?;
+                    }
                 }
                 b'}' => {
                     self.advance();

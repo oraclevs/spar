@@ -7,6 +7,24 @@ fn execute(source: &str) -> Result<Value, Vec<crate::SparError>> {
 }
 
 #[test]
+fn shell_result_function_executes_body_and_returns_typed_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran.txt");
+    let source = format!(r#"
+        fn mark() -> ShellResult<str, str> {{
+            echo ran > "{}";
+            return ok(value: "payload");
+        }};
+        fn main() -> int {{
+            var result: ShellResult<str, str> = mark();
+            return 0;
+        }};
+    "#, marker.display());
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran\n");
+}
+
+#[test]
 fn async_call_is_scheduled_once_and_await_returns_value() {
     let value = execute(
         r#"

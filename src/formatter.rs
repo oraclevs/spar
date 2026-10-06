@@ -389,7 +389,7 @@ fn format_top_level_item(
                     config,
                     out,
                 );
-                format_func_stmts(&fd.body.stmts, 2, config, cx, out, false);
+                format_func_stmts(&fd.body.stmts, 2, config, cx, out, is_shell_result_return(&fd.ret));
                 out.push_str(&indent(1, config));
                 out.push_str("};\n");
             }
@@ -408,7 +408,7 @@ fn format_top_level_item(
             out.push_str(&fd.name);
             format_type_parameters(&fd.type_parameters, out);
             format_parameters(&fd.params, None, &fd.ret, 0, config, out);
-            format_func_stmts(&fd.body.stmts, 1, config, cx, out, false);
+            format_func_stmts(&fd.body.stmts, 1, config, cx, out, is_shell_result_return(&fd.ret));
             cx.emit_before_line(fd.body.span.line, 1, config, out);
             out.push_str("};\n");
         }
@@ -479,7 +479,7 @@ fn format_top_level_item(
                 out.push_str(&f.name);
                 format_type_parameters(&f.type_parameters, out);
                 format_parameters(&f.params, None, &f.ret, 1, config, out);
-                format_func_stmts(&f.body.stmts, 2, config, cx, out, false);
+                format_func_stmts(&f.body.stmts, 2, config, cx, out, is_shell_result_return(&f.ret));
                 cx.emit_before_line(f.body.span.line, 2, config, out);
                 out.push_str("    }\n");
             }
@@ -2045,6 +2045,10 @@ fn indent(depth: usize, config: &FormatConfig) -> String {
     " ".repeat(depth * config.indent_width)
 }
 
+fn is_shell_result_return(ty: &SparType) -> bool {
+    matches!(ty, SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2)
+}
+
 fn format_func_stmts(
     stmts: &[FuncStmt],
     depth: usize,
@@ -2690,6 +2694,15 @@ mod tests {
         );
         assert!(formatted.contains("kids: true;"), "got: {formatted}");
         assert_eq!(fmt(&formatted), formatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn shell_result_body_keeps_bare_commands() {
+        let src = "fn profile() -> ShellResult<str, str> {\n echo hello;\n return ok(value: \"OCC\");\n};\n";
+        let formatted = fmt(src);
+        assert!(formatted.contains("echo hello;"), "{formatted}");
+        assert!(!formatted.contains("shell {"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]

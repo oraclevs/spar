@@ -343,6 +343,7 @@ pub(crate) struct Runtime<'a> {
     scheduler: Arc<scheduler::Scheduler>,
     is_entry: bool,
     shell_depth: usize,
+    shell_result_depth: usize,
     shell_outcome: Option<crate::evaluator::ShellPlanOutcome>,
     jobs: Vec<spar_process::Job>,
     last_job: Option<Value>,
@@ -408,6 +409,7 @@ impl<'a> Runtime<'a> {
                     scheduler,
                     is_entry: false,
                     shell_depth: 0,
+            shell_result_depth: 0,
                     shell_outcome: None,
                     jobs: Vec::new(),
                     last_job: None,
@@ -447,6 +449,7 @@ impl<'a> Runtime<'a> {
             scheduler: pool_scheduler,
             is_entry: true,
             shell_depth: 0,
+                    shell_result_depth: 0,
             shell_outcome: None,
             jobs: Vec::new(),
             last_job: None,
@@ -1167,7 +1170,11 @@ impl Runtime<'_> {
                     }
                 }
             }
-            let value = match self.run_body(&program, id, body, &mut frame, module)? {
+            let shell_result_function = matches!(declared_return_type, SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2);
+            let previous_depth = std::mem::replace(&mut self.shell_result_depth, usize::from(shell_result_function));
+            let body_result = self.run_body(&program, id, body, &mut frame, module);
+            self.shell_result_depth = previous_depth;
+            let value = match body_result? {
                 RuntimeFlow::Return(value) => value,
                 RuntimeFlow::Normal => Value::Void,
                 RuntimeFlow::Break | RuntimeFlow::Continue => {
@@ -1325,7 +1332,11 @@ impl Runtime<'_> {
                 let value = self.eval_expression(default, &mut frame, module)?;
                 frame.write(slot, value, function_span)?;
             }
-            match self.run_body(program, id, &function.body, &mut frame, module)? {
+            let shell_result_function = matches!(&function.return_type, SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2);
+            let previous_depth = std::mem::replace(&mut self.shell_result_depth, usize::from(shell_result_function));
+            let body_result = self.run_body(program, id, &function.body, &mut frame, module);
+            self.shell_result_depth = previous_depth;
+            match body_result? {
                 RuntimeFlow::Return(value) => Ok(value),
                 RuntimeFlow::Normal => Ok(Value::Void),
                 RuntimeFlow::Break | RuntimeFlow::Continue => Err(runtime_error(
@@ -1395,7 +1406,7 @@ impl Runtime<'_> {
                 }
                 CompiledStatement::Expression(expression, statement_span) => {
                     let value = self.eval_expression(expression, frame, module)?;
-                    if self.shell_depth > 0 {
+                    if self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let outcome = match value {
                             Value::Shell(plan) => {
                                 Some(self.execute_native_shell_plan(&plan, statement_span)?)
@@ -4943,7 +4954,7 @@ impl Runtime<'_> {
                 runtime_error("no previous interactive value is available", span).into()
             });
         }
-        if name == "status" && self.shell_depth > 0 {
+        if name == "status" && (self.shell_depth > 0 || self.shell_result_depth > 0) {
             let outcome =
                 self.shell_outcome
                     .clone()
@@ -4981,7 +4992,7 @@ impl Runtime<'_> {
             ]);
             return Ok(Value::Object(Shared::from(fields)));
         }
-        if name == "lastJob" && self.shell_depth > 0 {
+        if name == "lastJob" && (self.shell_depth > 0 || self.shell_result_depth > 0) {
             return self
                 .last_job
                 .clone()
@@ -5270,7 +5281,7 @@ fn value_from_config_typed(
             )
         }
         (ConfigValue::Result(value), SparType::Applied { name, arguments })
-            if name == "Result" && arguments.len() == 2 =>
+            if matches!(name.as_str(), "Result" | "ShellResult") && arguments.len() == 2 =>
         {
             Value::Result(match value {
                 Ok(value) => Ok(Box::new(value_from_config_typed(

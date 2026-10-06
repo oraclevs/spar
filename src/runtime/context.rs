@@ -56,6 +56,10 @@ pub enum RuntimeInput {
 }
 
 impl RuntimeInput {
+    fn is_terminal(&self) -> bool {
+        matches!(self, RuntimeInput::Stdin) && io::stdin().is_terminal()
+    }
+
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self::Buffer(Arc::new(Mutex::new(bytes.into().into())))
     }
@@ -306,6 +310,10 @@ impl RuntimeContext {
 
     pub fn write_stderr(&self, bytes: &[u8]) -> io::Result<()> {
         self.stderr.write_all(bytes)
+    }
+
+    pub fn stdin_is_terminal(&self) -> bool {
+        self.stdin.is_terminal()
     }
 
     pub fn stdout_is_terminal(&self) -> bool {

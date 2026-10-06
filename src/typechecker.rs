@@ -130,6 +130,11 @@ pub(crate) fn is_assignable(expected: &SparType, actual: &SparType) -> bool {
     if expected == actual {
         return true;
     }
+    if let (SparType::Applied { name, arguments }, SparType::Applied { name: actual_name, arguments: actual_arguments }) = (expected, actual) {
+        if name == "ShellResult" && actual_name == "Result" && arguments == actual_arguments {
+            return true;
+        }
+    }
     match (expected, actual) {
         // `Slice<T>` is the native-module spelling for "a list of T or a native Buffer": both
         // can be borrowed as contiguous memory (a list costs one copy, a Buffer none).
@@ -5212,7 +5217,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_function_decl(&mut self, f: &FunctionDecl) {
-        self.reject_discarded_shell_plans(&f.body.stmts);
+        if !matches!(&f.ret, SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2) {
+            self.reject_discarded_shell_plans(&f.body.stmts);
+        }
         let mut default_locals = HashMap::new();
         for param in &f.params {
             let Some(default) = &param.default else {
@@ -5799,8 +5806,14 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
+        let constructor_type = match ret_ty {
+            SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2 => {
+                SparType::Applied { name: "Result".into(), arguments: arguments.clone() }
+            }
+            other => other.clone(),
+        };
         if let ReturnValue::Expr(expr) = ret_value {
-            self.expect_call_type(expr, ret_ty);
+            self.expect_call_type(expr, &constructor_type);
             if !matches!(ret_ty, SparType::Void) {
                 match self.validate_literal_expected(
                     expr,

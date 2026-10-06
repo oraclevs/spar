@@ -210,19 +210,17 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             vec![("prompt", SparType::Str)],
             option(SparType::Str),
             true,
-            |_context, args| {
-                use std::io::{BufRead, Write};
+            |context, args| {
                 let prompt = string_arg(args, 0, "prompt")?;
-                let mut stdout = std::io::stdout();
-                stdout
-                    .write_all(prompt.as_bytes())
-                    .and_then(|_| stdout.flush())
+                context
+                    .write_stdout(prompt.as_bytes())
                     .map_err(|e| error(format!("could not write prompt: {e}")))?;
-                let mut line = String::new();
-                let read = std::io::stdin()
-                    .lock()
-                    .read_line(&mut line)
+                let bytes = context
+                    .read_stdin_line()
                     .map_err(|e| error(format!("could not read stdin: {e}")))?;
+                let read = bytes.len();
+                let mut line = String::from_utf8(bytes)
+                    .map_err(|_| error("stdin contains bytes that are not valid UTF-8"))?;
                 if read == 0 {
                     return Ok(Value::Option(None));
                 }

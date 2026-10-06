@@ -1,3 +1,11 @@
+fn isStdinTty() -> bool {
+    return nativeTerminal::isStdinTty();
+};
+
+fn supportsColor() -> bool {
+    return nativeTerminal::supportsColor();
+};
+
 fn isStdoutTty() -> bool {
     return nativeTerminal::isStdoutTty();
 };
@@ -40,4 +48,94 @@ fn clearScreen() -> str {
 
 fn moveCursor(row: int, column: int) -> str {
     return nativeTerminal::moveCursor(row: row, column: column);
+};
+
+fn dim(text: str) -> str {
+    return nativeTerminal::style(code: 2, text: text);
+};
+
+fn underline(text: str) -> str {
+    return nativeTerminal::style(code: 4, text: text);
+};
+
+fn cyan(text: str) -> str {
+    return nativeTerminal::style(code: 36, text: text);
+};
+
+fn magenta(text: str) -> str {
+    return nativeTerminal::style(code: 35, text: text);
+};
+
+fn reset() -> str {
+    return nativeTerminal::reset();
+};
+
+fn clearLine() -> str {
+    return nativeTerminal::clearLine();
+};
+
+fn hideCursor() -> str {
+    return nativeTerminal::hideCursor();
+};
+
+fn showCursor() -> str {
+    return nativeTerminal::showCursor();
+};
+
+fn saveCursor() -> str {
+    return nativeTerminal::saveCursor();
+};
+
+fn restoreCursor() -> str {
+    return nativeTerminal::restoreCursor();
+};
+
+fn enterAlternateScreen() -> str {
+    return nativeTerminal::enterAlternateScreen();
+};
+
+fn leaveAlternateScreen() -> str {
+    return nativeTerminal::leaveAlternateScreen();
+};
+
+fn prompt(message: str) -> Option<str> {
+    return nativeProcess::readLine(prompt: message);
+};
+
+fn clearToEnd() -> str {
+    return nativeTerminal::clearToEnd();
+};
+
+fn clearToLineEnd() -> str {
+    return nativeTerminal::clearToLineEnd();
+};
+
+fn bell() -> str {
+    return nativeTerminal::bell();
+};
+
+fn moveUp(count: int) -> str {
+    return nativeTerminal::moveUp(count: count);
+};
+
+fn moveDown(count: int) -> str {
+    return nativeTerminal::moveDown(count: count);
+};
+
+fn moveRight(count: int) -> str {
+    return nativeTerminal::moveRight(count: count);
+};
+
+fn moveLeft(count: int) -> str {
+    return nativeTerminal::moveLeft(count: count);
+};
+
+fn redIfColor(text: str) -> str {
+    if supportsColor() { return red(text: text); }
+    return text;
+};
+
+fn boldIfColor(text: str) -> str {
+    if supportsColor() { return bold(text: text); }
+    return text;
 };

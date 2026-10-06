@@ -299,6 +299,7 @@ pub struct Evaluator {
     program: Program,
     symbols: SymbolTable,
     call_depth: usize,
+    shell_result_depth: usize,
     global_cache: HashMap<String, ConfigValue>,
     struct_cache: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     evaluating: HashSet<String>,
@@ -453,6 +454,7 @@ impl Evaluator {
             program,
             symbols,
             call_depth: 0,
+            shell_result_depth: 0,
             global_cache: HashMap::new(),
             struct_cache: HashMap::new(),
             evaluating: HashSet::new(),
@@ -812,7 +814,7 @@ impl Evaluator {
                 span: Span::dummy(),
             })?;
         let mut local_scope = HashMap::new();
-        self.eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)
+        self.eval_declared_function_body(&func_decl, &mut local_scope)
             .map(|flow| flow.into_return().unwrap_or(ConfigValue::Int(0)))
             .map_err(EvalErr::into_kl_error)
     }
@@ -2489,7 +2491,7 @@ impl Evaluator {
                 sub.call_depth = self.call_depth + 1;
                 sub.eval_default_args(&function, &mut bound)?;
                 let result = sub
-                    .eval_func_stmts(&function.body.stmts, &mut bound)?
+                    .eval_declared_function_body(&function, &mut bound)?
                     .into_return()
                     .unwrap_or(ConfigValue::Int(0));
                 self.absorb_diagnostics(&mut sub);
@@ -3216,7 +3218,7 @@ impl Evaluator {
                     sub.call_depth = self.call_depth;
                     let result = (|| {
                         sub.eval_default_args(&fd, &mut local_scope)?;
-                        sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)
+                        sub.eval_declared_function_body(&fd, &mut local_scope)
                     })();
                     self.runtime_context = std::mem::replace(
                         &mut sub.runtime_context,
@@ -3262,7 +3264,7 @@ impl Evaluator {
                 }
                 self.eval_default_args(&fd, &mut local_scope)?;
                 let result = self
-                    .eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)?
+                    .eval_declared_function_body(&fd, &mut local_scope)?
                     .into_return()
                     .unwrap_or(ConfigValue::Int(0));
                 self.call_depth -= 1;
@@ -3309,7 +3311,7 @@ impl Evaluator {
                     sub.call_depth = self.call_depth;
                     let result = (|| {
                         sub.eval_default_args(&fd, &mut local_scope)?;
-                        sub.eval_func_stmts(&fd.body.stmts.clone(), &mut local_scope)
+                        sub.eval_declared_function_body(&fd, &mut local_scope)
                     })();
                     self.runtime_context = std::mem::replace(
                         &mut sub.runtime_context,
@@ -3401,7 +3403,7 @@ impl Evaluator {
         self.eval_default_args(&func_decl, &mut local_scope)?;
 
         let result = self
-            .eval_func_stmts(&func_decl.body.stmts.clone(), &mut local_scope)?
+            .eval_declared_function_body(&func_decl, &mut local_scope)?
             .into_return()
             // resolver ensures every path returns, except a `void`
             // function's implicit fallthrough, whose value a caller can
@@ -3442,6 +3444,18 @@ impl Evaluator {
         Ok(())
     }
 
+    fn eval_declared_function_body(
+        &mut self,
+        function: &FunctionDecl,
+        local_scope: &mut HashMap<String, ConfigValue>,
+    ) -> Result<StatementFlow, EvalErr> {
+        let shell_result = matches!(&function.ret, SparType::Applied { name, arguments } if name == "ShellResult" && arguments.len() == 2);
+        let previous_depth = std::mem::replace(&mut self.shell_result_depth, usize::from(shell_result));
+        let result = self.eval_func_stmts(&function.body.stmts, local_scope);
+        self.shell_result_depth = previous_depth;
+        result
+    }
+
     fn eval_func_stmts(
         &mut self,
         stmts: &[FuncStmt],
@@ -3473,8 +3487,32 @@ impl Evaluator {
                     let val = self.eval_expr(&lv.value.clone(), local_scope)?;
                     local_scope.insert(lv.name.clone(), val);
                 }
-                FuncStmt::Expression(expr, _) => {
-                    self.eval_expr(expr, local_scope)?;
+                FuncStmt::Expression(expr, span) => {
+                    let value = self.eval_expr(expr, local_scope)?;
+                    if self.shell_result_depth > 0 {
+                        if let ConfigValue::Shell(mut plan) = value {
+                            let cwd = spar_command::WorkingDirectory::Path(self.runtime_context.cwd().to_string_lossy().into_owned());
+                            for (_, step) in &mut plan.steps {
+                                match step {
+                                    spar_command::Step::Command(command) => {
+                                        if command.cwd.is_none() { command.cwd = Some(cwd.clone()); }
+                                    }
+                                    spar_command::Step::Pipeline(pipeline) => {
+                                        for command in &mut pipeline.commands {
+                                            if command.cwd.is_none() { command.cwd = Some(cwd.clone()); }
+                                        }
+                                    }
+                                }
+                            }
+                            let options = spar_process::ExecutionOptions {
+                                environment: Some(self.runtime_context.environment_pairs()),
+                                ..spar_process::ExecutionOptions::default()
+                            };
+                            let outcome = execute_shell_plan_with_options(&plan, &options)
+                                .map_err(|error| EvalErr::Fatal { message: format!("could not execute shell command: {error}"), span: span.clone() })?;
+                            self.runtime_context.set_last_exit_code(outcome.exit_code);
+                        }
+                    }
                 }
                 FuncStmt::Assignment { name, value, .. } => {
                     let value = self.eval_expr(value, local_scope)?;

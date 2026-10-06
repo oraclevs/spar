@@ -248,9 +248,11 @@ fn terminal_helpers_respect_buffered_io_and_expose_controls() {
             r#"
             import pkg { isStdinTty, isStdoutTty, supportsColor, prompt, cyan, clearLine,
                 hideCursor, showCursor, saveCursor, restoreCursor,
-                enterAlternateScreen, leaveAlternateScreen, clearToEnd, clearToLineEnd, bell, moveUp, moveDown, moveLeft, moveRight, redIfColor } from "std/terminal";
+                enterAlternateScreen, leaveAlternateScreen, clearToEnd, clearToLineEnd, bell, moveUp, moveDown, moveLeft, moveRight, redIfColor, readKey, width, height } from "std/terminal";
             fn main() -> int {
                 if isStdinTty() || isStdoutTty() || supportsColor() { return 1; }
+                if !readKey(timeoutMs: 0).isNone() { return 8; }
+                if width() != 111 || height() != 37 { return 9; }
                 if prompt(message: "Name: ").unwrap() != "Ada" { return 2; }
                 print(value: cyan(text: "hi"));
                 print(value: clearLine());
@@ -276,6 +278,8 @@ fn terminal_helpers_respect_buffered_io_and_expose_controls() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let mut context = RuntimeContext::for_base_dir(program.base_dir());
     context.set_stdin(RuntimeInput::from_bytes(b"Ada\n".to_vec()));
+    context.env_set("COLUMNS", "111");
+    context.env_set("LINES", "37");
     context.set_stdout(RuntimeOutput::Buffer(output.clone()));
     let outcome = engine
         .execute_compiled_with_context(&program, context)

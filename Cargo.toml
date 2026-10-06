@@ -41,6 +41,7 @@ runtime-stats = []
 profile = ["dep:pprof"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crossterm = "0.29"
 stacker = "0.1"
 libloading = "0.9"
 cranelift-codegen = "0.136"

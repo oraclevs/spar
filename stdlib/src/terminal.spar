@@ -139,3 +139,10 @@ fn boldIfColor(text: str) -> str {
     if supportsColor() { return bold(text: text); }
     return text;
 };
+
+// Reads one key from a real terminal. -1 blocks; 0 polls immediately.
+// Returns none when input is redirected or the timeout expires. Raw mode
+// is restored before this function returns, including on read errors.
+fn readKey(timeoutMs: int = -1) -> Option<str> {
+    return nativeTerminal::readKey(timeoutMs: timeoutMs);
+};

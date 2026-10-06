@@ -1130,7 +1130,13 @@ fn register_result_methods(registry: &mut NativeRegistry) {
 
     for method in methods {
         let name = method.name.clone();
+        let mut shell_method = method.clone();
+        shell_method.owner = "ShellResult".into();
+        if let SparType::Applied { name, .. } = &mut shell_method.receiver {
+            *name = "ShellResult".into();
+        }
         registry.register_method(method).unwrap_or_else(|_| panic!("Result.{name} registration must be unique"));
+        registry.register_method(shell_method).unwrap_or_else(|_| panic!("ShellResult.{name} registration must be unique"));
     }
 }
 

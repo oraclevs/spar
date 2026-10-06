@@ -25,6 +25,22 @@ fn shell_result_function_executes_body_and_returns_typed_result() {
 }
 
 #[test]
+fn shell_result_exposes_result_methods() {
+    let source = r#"
+        fn pass() -> ShellResult<int, str> { return ok(value: 7); };
+        fn fail() -> ShellResult<int, str> { return err(error: "no"); };
+        fn main() -> int {
+            var success: ShellResult<int, str> = pass();
+            var failure: ShellResult<int, str> = fail();
+            if !success.isOk() || success.unwrap() != 7 { return 1; }
+            if !failure.isErr() || failure.unwrapErr() != "no" { return 2; }
+            return 0;
+        };
+    "#;
+    assert_eq!(Engine::default().execute_source(source).unwrap().exit_status, 0);
+}
+
+#[test]
 fn async_call_is_scheduled_once_and_await_returns_value() {
     let value = execute(
         r#"

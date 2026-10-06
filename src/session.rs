@@ -210,13 +210,13 @@ impl Session {
         };
         Compiler::new(options)
             .with_interactive_expressions()
-            .with_interactive_previous_type(previous_value.and_then(|value| self.previous_value_type(value)))
+            .with_interactive_previous_type(
+                previous_value.and_then(|value| self.previous_value_type(value)),
+            )
             .compile(&candidate_source)
             .into_result()
             .map(|_| ())
-            .map_err(|errors| {
-                relocate_errors(errors, origin, origin_line, 0, fragment.len())
-            })
+            .map_err(|errors| relocate_errors(errors, origin, origin_line, 0, fragment.len()))
     }
 
     /// Evaluates one interactive fragment and returns the value of the final
@@ -348,9 +348,9 @@ impl Session {
             || self
                 .committed_source
                 .contains(&format!("fn {function_name}"))
-                || self
-                    .committed_source
-                    .contains(&format!("function {function_name}"))
+            || self
+                .committed_source
+                .contains(&format!("function {function_name}"))
         {
             suffix += 1;
             function_name = format!("sparshInteractiveShellPreview{suffix}");
@@ -419,11 +419,18 @@ impl Session {
         if let Some((name, expression, mutable, span)) = awaited_http_declaration(&normalized) {
             // Check the binding before its network effect is executed.
             self.check_interactive_fragment(
-                &format!("var {}{name}: HttpResponse = HttpResponse();", if mutable { "mut " } else { "" }),
+                &format!(
+                    "var {}{name}: HttpResponse = HttpResponse();",
+                    if mutable { "mut " } else { "" }
+                ),
                 previous_value.as_ref(),
             )?;
             let preview = self.eval_interactive_preview_with_context(
-                &expression, cwd, environment, previous_value, preview_limit,
+                &expression,
+                cwd,
+                environment,
+                previous_value,
+                preview_limit,
             )?;
             let value = match preview {
                 InteractivePreviewResult::RuntimeValue(value) => value.value,
@@ -442,10 +449,13 @@ impl Session {
                 }]);
             };
             self.eval_interactive_with_context(&source, cwd, environment)
-                .map_err(|_| vec![SparError::EvalError {
-                    message: "the HTTP response could not be stored as a prompt variable".into(),
-                    span,
-                }])?;
+                .map_err(|_| {
+                    vec![SparError::EvalError {
+                        message: "the HTTP response could not be stored as a prompt variable"
+                            .into(),
+                        span,
+                    }]
+                })?;
             return Ok(InteractivePreviewResult::Empty);
         }
         let Some((prefix, expression)) = split_final_expression(&normalized)? else {
@@ -741,6 +751,22 @@ impl Session {
             .map(|evaluated| evaluated.interactive)
     }
 
+    /// Evaluates a transient fragment while capturing its direct stdout writes.
+    /// The caller owns the returned bytes and can route them into a shell pipeline.
+    pub fn eval_transient_capture_stdout_with_context(
+        &self,
+        fragment: &str,
+        cwd: &Path,
+        environment: &[(OsString, OsString)],
+    ) -> Result<(InteractiveEvalResult, Vec<u8>), Vec<SparError>> {
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let mut context = runtime_context(cwd, environment);
+        context.set_stdout(crate::runtime::RuntimeOutput::Buffer(stdout.clone()));
+        let evaluated = self.evaluate_candidate(fragment, Some(context))?;
+        let bytes = stdout.lock().expect("stdout buffer lock poisoned").clone();
+        Ok((evaluated.interactive, bytes))
+    }
+
     /// Parses and evaluates one native shell command/plan against the current
     /// Spar session without committing it. `${expr}` therefore sees persistent
     /// Spar variables and named function arguments while the resulting plan
@@ -941,8 +967,14 @@ impl Session {
         }
         let mut options = self.options.clone();
         options.evaluate = false;
-        let compilation = Compiler::new(options).compile(&self.committed_source).into_result()?;
-        if !compilation.symbols.as_ref().is_some_and(|symbols| symbols.structs.contains_key(&vec![name.to_string()])) {
+        let compilation = Compiler::new(options)
+            .compile(&self.committed_source)
+            .into_result()?;
+        if !compilation
+            .symbols
+            .as_ref()
+            .is_some_and(|symbols| symbols.structs.contains_key(&vec![name.to_string()]))
+        {
             return Ok(None);
         }
         match self.eval_transient(&format!("{name}()"))? {
@@ -1019,10 +1051,15 @@ fn default_unresolved_type_parameters(ty: &crate::ast::SparType) -> crate::ast::
     use crate::ast::SparType;
     match ty {
         SparType::TypeParameter(_) => SparType::Named("Record".into()),
-        SparType::List(inner) => SparType::List(Box::new(default_unresolved_type_parameters(inner))),
+        SparType::List(inner) => {
+            SparType::List(Box::new(default_unresolved_type_parameters(inner)))
+        }
         SparType::Applied { name, arguments } => SparType::Applied {
             name: name.clone(),
-            arguments: arguments.iter().map(default_unresolved_type_parameters).collect(),
+            arguments: arguments
+                .iter()
+                .map(default_unresolved_type_parameters)
+                .collect(),
         },
         SparType::Function {
             params,
@@ -1275,7 +1312,10 @@ fn runtime_context(
 fn awaited_http_declaration(fragment: &str) -> Option<(String, String, bool, crate::Span)> {
     use crate::ast::{Expr, SparType, TopLevelItem};
     let tokens = crate::lexer::Lexer::new(fragment).tokenize().ok()?;
-    let program = crate::parser::Parser::new(tokens).interactive().parse().ok()?;
+    let program = crate::parser::Parser::new(tokens)
+        .interactive()
+        .parse()
+        .ok()?;
     let [TopLevelItem::Var(declaration)] = program.items.as_slice() else {
         return None;
     };
@@ -1381,10 +1421,10 @@ fn captured_http_source(
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::value::Shared;
     use super::*;
     use crate::engine::Engine;
     use crate::host::{HostFunction, HostRegistry};
+    use crate::runtime::value::Shared;
     use crate::runtime::Value;
 
     #[test]
@@ -1395,9 +1435,9 @@ mod tests {
             SparType::Named("Record".into())
         );
         assert_eq!(
-            default_unresolved_type_parameters(&SparType::List(Box::new(
-                SparType::TypeParameter("T".into())
-            ))),
+            default_unresolved_type_parameters(&SparType::List(Box::new(SparType::TypeParameter(
+                "T".into()
+            )))),
             SparType::List(Box::new(SparType::Named("Record".into())))
         );
         assert_eq!(
@@ -1887,7 +1927,9 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
+            &format!(
+                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+            ),
         )
         .expect("mixed pipeline without `to` should run");
 
@@ -1944,7 +1986,9 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         plain.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut plain,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
+            &format!(
+                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+            ),
         );
         // No terminal and no `to`: falls back to JSON Lines bytes.
         assert!(
@@ -1971,7 +2015,9 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.enable_data_prelude();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
+            &format!(
+                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+            ),
         )
         .expect("`where` should resolve through the prelude");
         assert!(
@@ -2229,7 +2275,9 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let mut session = Engine::default().session();
         let error = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"),
+            &format!(
+                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+            ),
         )
         .unwrap_err();
         let SparError::TypeError { hint, .. } = &error[0] else {
@@ -2274,7 +2322,10 @@ struct Config { prompt: Prompt = Prompt(); };"#,
                 assert_eq!(values, vec![ConfigValue::Int(1), ConfigValue::Int(2)]);
             }
             InteractivePreviewResult::RuntimeValue(value) => {
-                assert_eq!(value.value, Value::List(Shared::from(vec![Value::Int(1), Value::Int(2)])));
+                assert_eq!(
+                    value.value,
+                    Value::List(Shared::from(vec![Value::Int(1), Value::Int(2)]))
+                );
             }
             other => panic!("expected piped previous value, found {other:?}"),
         }

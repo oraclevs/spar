@@ -796,7 +796,9 @@ fn is_spar_control_header(line: &str) -> bool {
 }
 
 fn is_spar_shell_statement_start(line: &str) -> bool {
-    const SIMPLE_KEYWORDS: &[&str] = &["var", "const", "return", "break", "continue", "command", "shell"];
+    const SIMPLE_KEYWORDS: &[&str] = &[
+        "var", "const", "return", "break", "continue", "command", "shell",
+    ];
     if SIMPLE_KEYWORDS
         .iter()
         .any(|keyword| starts_with_keyword(line, keyword))
@@ -2323,6 +2325,13 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
+                continue;
+            }
+            // An escaped delimiter belongs to this argv word, including escaped
+            // whitespace and punctuation. Decode the backslash after tokenization.
+            if byte == b'\\' && self.peek_at(1).is_some_and(|next| next != b'\n') {
+                self.advance();
+                self.advance_char();
                 continue;
             }
             // `$(...)` is one shell-word segment even when the native command

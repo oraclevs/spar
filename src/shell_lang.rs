@@ -1032,16 +1032,52 @@ impl<'a> BodyParser<'a> {
     }
 }
 
+fn find_unescaped_dollar(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\\' {
+            chars.next();
+        } else if ch == '$' {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn unescape_shell_literal(text: &str, quoted: bool) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                if quoted && next != '$' {
+                    output.push(ch);
+                }
+                output.push(next);
+            } else {
+                output.push(ch);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparError> {
     let mut parts = Vec::new();
     let mut cursor = 0;
     // Where `text[0]` sits in the real source: a quoted fragment's token
     // span includes its surrounding quotes, its text does not.
-    let origin = span.start + usize::from(span.end - span.start == text.len() + 2);
-    while let Some(relative) = text[cursor..].find('$') {
+    let quoted = span.end - span.start >= text.len() + 2;
+    let origin = span.start + usize::from(quoted);
+    while let Some(relative) = find_unescaped_dollar(&text[cursor..]) {
         let dollar = cursor + relative;
         if dollar > cursor {
-            parts.push(ShellWordPart::Literal(text[cursor..dollar].to_string()));
+            parts.push(ShellWordPart::Literal(unescape_shell_literal(
+                &text[cursor..dollar],
+                quoted,
+            )));
         }
         if text[dollar..].starts_with("${") {
             let expression_start = dollar + 2;
@@ -1095,10 +1131,13 @@ fn parse_word_parts(text: &str, span: &Span) -> Result<Vec<ShellWordPart>, SparE
         }
     }
     if cursor < text.len() {
-        parts.push(ShellWordPart::Literal(text[cursor..].to_string()));
+        parts.push(ShellWordPart::Literal(unescape_shell_literal(
+            &text[cursor..],
+            quoted,
+        )));
     }
     if parts.is_empty() {
-        parts.push(ShellWordPart::Literal(text.to_string()));
+        parts.push(ShellWordPart::Literal(unescape_shell_literal(text, quoted)));
     }
     Ok(parts)
 }
@@ -1356,6 +1395,34 @@ mod tests {
         assert_eq!(command.args.len(), 1);
         assert_eq!(command.args[0].text, "my file.txt");
         assert!(parse_block("shell {}").steps.is_empty());
+    }
+
+    #[test]
+    fn shell_words_decode_escaped_punctuation_space_and_dollar() {
+        let expression = parse_block(
+            r#"shell { find /tmp -type f \( -iname '*.jpg' \); echo foo\ bar; echo \$HOME; }"#,
+        );
+        let ShellStep::Command(find) = &expression.steps[0].1 else {
+            panic!("expected find");
+        };
+        assert!(
+            matches!(find.args[3].parts.as_slice(), [ShellWordPart::Literal(value)] if value == "(")
+        );
+        assert!(
+            matches!(find.args[6].parts.as_slice(), [ShellWordPart::Literal(value)] if value == ")")
+        );
+        let ShellStep::Command(echo) = &expression.steps[1].1 else {
+            panic!("expected echo");
+        };
+        assert!(
+            matches!(echo.args[0].parts.as_slice(), [ShellWordPart::Literal(value)] if value == "foo bar")
+        );
+        let ShellStep::Command(echo) = &expression.steps[2].1 else {
+            panic!("expected echo");
+        };
+        assert!(
+            matches!(echo.args[0].parts.as_slice(), [ShellWordPart::Literal(value)] if value == "$HOME")
+        );
     }
 
     #[test]

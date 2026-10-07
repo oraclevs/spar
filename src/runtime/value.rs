@@ -11,7 +11,7 @@ use super::{ClosureValue, MixedShellValue, Schema, ShellProgramValue, TableValue
 /// Error side of a `Result`/`ShellResult`. Carries the process exit code that
 /// `err(error:, exitCode:)` was given (default 1) next to the error value.
 /// Equality compares only the wrapped value, so the code never changes `==`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ErrBox {
     pub value: Box<Value>,
     pub exit_code: i32,
@@ -24,6 +24,13 @@ impl ErrBox {
 
     pub fn with_exit_code(value: Value, exit_code: i32) -> Self {
         Self { value: Box::new(value), exit_code }
+    }
+}
+
+impl std::fmt::Debug for ErrBox {
+    /// Prints only the wrapped value so `{:?}` output matches the pre-exit-code form.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.value, formatter)
     }
 }
 

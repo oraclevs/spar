@@ -519,7 +519,7 @@ function main() -> ShellResult<int, str> {
 }
 
 #[test]
-fn err_exit_code_defaults_to_one_for_a_fresh_err_after_an_explicit_code() {
+fn fresh_err_returned_after_a_mapped_explicit_code_err_exits_one() {
     let src = r#"
 function make() -> Result<int, str> { return err(error: "x", exitCode: 5); };
 function main() -> ShellResult<int, str> {
@@ -536,14 +536,20 @@ function main() -> ShellResult<int, str> {
 fn err_exit_code_survives_nested_functions_and_result_methods() {
     let src = r#"
 function inner() -> ShellResult<int, str> { return err(error: "deep", exitCode: 9); };
-function middle() -> ShellResult<int, str> { return inner(); };
+function middle() -> ShellResult<int, str> {
+    var kept: ShellResult<int, str> = inner();
+    var other: ShellResult<int, str> = err<int, str>(error: "other");
+    return kept;
+};
 function main() -> ShellResult<int, str> { return middle(); };
 "#;
     assert_eq!(exit_of(src), 9);
     let mapped = r#"
 function make() -> Result<int, str> { return err(error: "x", exitCode: 4); };
 function main() -> ShellResult<int, str> {
-    var r: Result<int, str> = make().mapErr(transform: fn(error: str) -> str { return error + "!"; });
+    var base: Result<int, str> = make();
+    var other: Result<int, str> = err<int, str>(error: "other");
+    var r: Result<int, str> = base.mapErr(transform: fn(error: str) -> str { return error + "!"; });
     return r;
 };
 "#;
@@ -601,4 +607,28 @@ async function main() -> ShellResult<int, str> {
 };
 "#;
     assert_eq!(exit_of(src), 8);
+}
+
+#[test]
+fn err_without_an_explicit_code_exits_one_after_an_earlier_handled_explicit_code() {
+    let src = r#"
+function main() -> ShellResult<int, str> {
+    var handled: Result<int, str> = err<int, str>(error: "a", exitCode: 5);
+    var o: Option<int> = none<int>();
+    var r: Result<int, str> = o.okOr(error: "missing");
+    return r;
+};
+"#;
+    assert_eq!(exit_of(src), 1);
+}
+
+#[test]
+fn documented_limit_module_level_err_exit_code_is_lost_through_config_round_trip() {
+    let src = r#"
+var stored: ShellResult<int, str> = err<int, str>(error: "m", exitCode: 7);
+function main() -> ShellResult<int, str> { return stored; };
+"#;
+    // Known limitation: module-level values round-trip through ConfigValue,
+    // which has no exit code, so the code falls back to 1.
+    assert_eq!(exit_of(src), 1);
 }

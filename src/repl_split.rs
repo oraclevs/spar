@@ -458,13 +458,17 @@ fn scan(src: &str) -> Scan {
                     i += 1;
                 }
                 '/' if next == Some('/') && (prev_ws || chars[i - 1].1 == ';') => {
-                    comment_at.get_or_insert(idx);
+                    if brace == 0 && nest == 0 && stack.is_empty() {
+                        comment_at.get_or_insert(idx);
+                    }
                     while chars.get(i + 1).is_some_and(|(_, c)| *c != '\n') {
                         i += 1;
                     }
                 }
                 '#' if prev_ws && next != Some('[') => {
-                    comment_at.get_or_insert(idx);
+                    if brace == 0 && nest == 0 && stack.is_empty() {
+                        comment_at.get_or_insert(idx);
+                    }
                     while chars.get(i + 1).is_some_and(|(_, c)| *c != '\n') {
                         i += 1;
                     }
@@ -773,7 +777,10 @@ mod tests {
     fn classification_edge_cases() {
         assert_eq!(kinds("docker-compose up", &["docker"])[0].0, ReplKind::Command);
         assert_eq!(kinds("ls/foo", &["ls"])[0].0, ReplKind::Command);
-        assert_eq!(kinds("echo \"a |> b\"", &[])[0].0, ReplKind::Command);
+        assert_eq!(
+            kinds("echo \"a |> b\"", &[]),
+            vec![(ReplKind::Command, "echo \"a |> b\"".into())]
+        );
         assert_eq!(kinds("[[ -f x ]]", &[])[0].0, ReplKind::Command);
         assert_eq!(kinds("[ -f x ]", &[])[0].0, ReplKind::Command);
         assert_eq!(kinds("7z x f", &[])[0].0, ReplKind::Command);
@@ -782,5 +789,46 @@ mod tests {
         assert_eq!(kinds("$(ls; pwd)", &[]).len(), 1);
         assert_eq!(kinds("a=1", &[])[0].0, ReplKind::Command);
         assert_eq!(kinds("FOO=bar cmd", &[])[0].0, ReplKind::Command);
+    }
+
+    fn assert_insert_only(src: &str, n: &[&str]) -> ReplStatement {
+        let st = first(src, n);
+        assert_eq!(st.kind, ReplKind::Spar);
+        assert_eq!(strip_inserted(&st), src, "{}", st.text);
+        for &(a, b) in &st.inserted {
+            assert!(matches!(&st.text[a..b], "~ " | ";"), "{:?} in {}", &st.text[a..b], st.text);
+        }
+        assert!(!st.text.contains(";;") && !st.text.contains("; ;"), "{}", st.text);
+        st
+    }
+
+    #[test]
+    fn inner_comments_do_not_move_the_outer_terminator() {
+        let src = "for i in [1] {\n if a {\n echo x // c\n }\n}";
+        let st = assert_insert_only(src, &["a"]);
+        assert!(st.text.contains("~ echo x; // c"), "{}", st.text);
+        assert_eq!(st.text.matches(';').count(), 1, "{}", st.text);
+        let mut session = crate::Engine::default().session();
+        session.eval("var a: bool = true;").unwrap();
+        session.eval(&st.text).expect("rewritten text parses and runs");
+
+        let src = "for i in [1] {\n var l: int = (\n 1 // c\n + 2\n )\n echo y\n}";
+        let st = assert_insert_only(src, &[]);
+        assert_eq!(st.text.matches(';').count(), 2, "{}", st.text);
+        session.eval(&st.text).expect("paren variant parses and runs");
+    }
+
+    #[test]
+    fn else_chains_and_catch_are_insert_only() {
+        let st = assert_insert_only("if a {\n echo x\n} else {\n echo y\n}", &["a"]);
+        assert!(st.text.contains("~ echo x;") && st.text.contains("~ echo y;"), "{}", st.text);
+        let st = assert_insert_only("if a { echo x } else { echo y }", &["a"]);
+        assert!(st.text.contains("~ echo y;"), "{}", st.text);
+        let st = assert_insert_only("try {\n echo x\n} catch e {\n echo y // c\n e\n}", &[]);
+        assert!(st.text.contains("~ echo x;") && st.text.contains("~ echo y; // c"), "{}", st.text);
+        let mut session = crate::Engine::default().session();
+        session.eval("var a: bool = true;").unwrap();
+        let st = first("if a {\n echo x\n} else {\n echo y\n}", &["a"]);
+        session.eval(&st.text).expect("else chain runs");
     }
 }

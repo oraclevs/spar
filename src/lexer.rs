@@ -56,7 +56,7 @@ fn normalize_shell_body(body: &str) -> String {
 }
 
 /// Like `normalize_shell_body`, also returning the byte ranges of the
-/// `command ` prefixes it inserted (needed to map a lex error in the
+/// `~ ` prefixes it inserted (needed to map a lex error in the
 /// normalized text back onto the original when no tokens exist to show them).
 fn normalize_shell_body_tracked(body: &str, optional_semicolons: bool) -> (String, Vec<(usize, usize)>) {
     let mut inserted: Vec<(usize, usize)> = Vec::new();
@@ -3583,5 +3583,58 @@ mod optional_semicolon_tests {
         assert_eq!(normalized, "\n    return ok(value: 0); // done\n");
         let (strict, _) = normalize_shell_body_tracked(body, false);
         assert_eq!(strict, "\n    return ok(value: 0) // done\n");
+    }
+
+    #[test]
+    fn tokens_after_an_inserted_semicolon_keep_their_source_spans() {
+        let source = "function f() -> ShellResult<int, str> {\n    var n: int = 2\n    var m: int = 3 // c\n    echo hi\n    return ok(value: m)\n}\n";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let mut checked = 0;
+        for token in &tokens {
+            let slice = &source[token.span.start..token.span.end];
+            match &token.token {
+                Token::Ident(name) if name == "m" || name == "n" || name == "ok" => {
+                    assert_eq!(slice, name.as_str());
+                    checked += 1;
+                }
+                Token::KwReturn => {
+                    assert_eq!(slice, "return");
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(checked >= 5, "checked {checked}");
+    }
+
+    fn normalized(body: &str) -> String {
+        normalize_shell_body_tracked(body, true).0
+    }
+
+    #[test]
+    fn native_glob_line_does_not_swallow_the_next_line() {
+        assert_eq!(
+            normalized("\n    ls *\n    return ok(value: 0)\n"),
+            "\n    ~ ls *;\n    return ok(value: 0);\n"
+        );
+    }
+
+    #[test]
+    fn trailing_pipe_and_and_continue_a_command() {
+        assert_eq!(normalized("\n    echo a |\n        grep a\n"), "\n    ~ echo a | grep a;\n");
+        assert_eq!(normalized("\n    echo a &&\n        echo b\n"), "\n    ~ echo a && echo b;\n");
+    }
+
+    #[test]
+    fn trailing_operator_or_comma_continues_a_spar_statement() {
+        let out = normalized("\n    var x: int = 1 +\n    2\n    return ok(value: x)\n");
+        assert_eq!(out, "\n    var x: int = 1 +\n    2;\n    return ok(value: x);\n");
+        let out = normalized("\n    var y: int = f(1,\n    2)\n");
+        assert_eq!(out, "\n    var y: int = f(1,\n    2);\n");
+    }
+
+    #[test]
+    fn explicit_marker_line_without_semicolon_gets_no_second_marker() {
+        assert_eq!(normalized("\n    ~ echo hi\n"), "\n    ~ echo hi;\n");
     }
 }

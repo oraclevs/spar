@@ -713,3 +713,15 @@ fn plain_function_bodies_still_require_semicolons() {
     "#;
     assert!(Engine::default().compile_source(source).is_err());
 }
+
+#[test]
+fn type_error_on_a_line_missing_its_semicolon_points_at_the_users_text() {
+    let source = "function f() -> ShellResult<int, str> {\n    var n: int = \"x\"\n    return ok(value: 0)\n};\nfunction main() -> int { return 0; };\n";
+    let Err(errors) = Engine::default().compile_source(source) else {
+        panic!("must fail");
+    };
+    let span = errors[0].span().clone();
+    assert_eq!(span.line, 2, "{errors:?}");
+    assert_eq!(span.col, 5, "{span:?}");
+    assert_eq!(&source[span.start..span.end], "var", "{span:?}");
+}

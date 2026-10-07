@@ -744,7 +744,7 @@ pub(crate) fn execute_program_with_context(
 ) -> Result<Value, Vec<SparError>> {
     let entry = program.entry_main.ok_or_else(|| {
         vec![SparError::ResolveError {
-            message: "no 'main' function found — Execute mode requires a zero-argument 'main' returning 'int', 'void', or 'shell'".into(),
+            message: "no 'main' function found — Execute mode requires a zero-argument 'main' returning 'int', 'void', or 'ShellResult<T, E>'".into(),
             hint: None,
             span: Span::dummy(),
         }]
@@ -772,6 +772,14 @@ pub(crate) fn execute_program_with_context(
                 .execute_native_shell_plan_at(&plan, &span, &step_spans)
                 .map(|outcome| Value::Int(i64::from(outcome.exit_code)))
                 .map_err(|fault| vec![fault.into_error()])
+        }
+        Value::Result(Ok(_)) => Ok(Value::Int(0)),
+        Value::Result(Err(error)) => {
+            let code = runtime.context.last_err_exit_code().unwrap_or(1);
+            let _ = runtime
+                .context
+                .write_stderr(format!("{}\n", error.render_display()).as_bytes());
+            Ok(Value::Int(i64::from(code)))
         }
         other => Ok(other),
     }

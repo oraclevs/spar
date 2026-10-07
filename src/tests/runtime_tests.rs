@@ -461,3 +461,26 @@ fn marker_statement_runs_a_command_group() {
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "a\nb\n");
     let _ = std::fs::remove_file(&out);
 }
+
+#[test]
+fn shell_result_main_exit_status_follows_ok_and_err() {
+    let ok_src = "function main() -> ShellResult<int, str> {\n echo hi;\n return ok(value: 7);\n};";
+    assert_eq!(Engine::default().execute_source(ok_src).unwrap().exit_status, 0);
+    let err_src = "function main() -> ShellResult<int, str> { return err(error: \"boom\"); };";
+    assert_eq!(Engine::default().execute_source(err_src).unwrap().exit_status, 1);
+    let code_src = "function main() -> ShellResult<int, str> { return err(error: \"boom\", exitCode: 7); };";
+    assert_eq!(Engine::default().execute_source(code_src).unwrap().exit_status, 7);
+}
+
+#[test]
+fn plain_result_err_accepts_exit_code_and_stays_a_value() {
+    let source = r#"
+        fn fail() -> Result<int, str> { return err(error: "no", exitCode: 3); };
+        fn main() -> int {
+            var r: Result<int, str> = fail();
+            if !r.isErr() || r.unwrapErr() != "no" { return 2; }
+            return 0;
+        };
+    "#;
+    assert_eq!(Engine::default().execute_source(source).unwrap().exit_status, 0);
+}

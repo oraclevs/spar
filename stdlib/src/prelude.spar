@@ -43,6 +43,6 @@ fn ok<T, E>(value: T) -> Result<T, E> {
     return nativeCore::ok(value: value);
 };
 
-fn err<T, E>(error: E) -> Result<T, E> {
-    return nativeCore::err(error: error);
+fn err<T, E>(error: E, exitCode: int = 1) -> Result<T, E> {
+    return nativeCore::err(error: error, exitCode: exitCode);
 };

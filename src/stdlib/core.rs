@@ -153,14 +153,19 @@ fn register_sum_type_constructors(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeCore",
             "err",
-            vec![("error", e)],
+            vec![("error", e), ("exitCode", SparType::Int)],
             result_te,
             true,
-            |_context, args| {
+            |context, args| {
                 let value = args
                     .first()
                     .cloned()
                     .ok_or_else(|| error("missing native argument 'error'"))?;
+                let code = match args.get(1) {
+                    Some(Value::Int(code)) => *code as i32,
+                    _ => 1,
+                };
+                context.set_last_err_exit_code(code);
                 Ok(Value::Result(Err(Box::new(value))))
             },
         ))

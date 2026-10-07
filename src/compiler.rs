@@ -706,12 +706,16 @@ pub fn validate_entry_signature(program: &Program) -> Result<(), SparError> {
         });
     }
     if !matches!(
-        main.ret,
+        &main.ret,
         crate::ast::SparType::Int | crate::ast::SparType::Void | crate::ast::SparType::Shell
+    ) && !matches!(
+        &main.ret,
+        crate::ast::SparType::Applied { name, arguments }
+            if name == "ShellResult" && arguments.len() == 2
     ) {
         return Err(SparError::TypeError {
             message: format!(
-                "'main' must return 'int', 'void', or 'shell', found '{}'",
+                "'main' must return 'int', 'void', or 'ShellResult<T, E>', found '{}'",
                 crate::typechecker::display_type(&main.ret)
             ),
             hint: None,
@@ -768,11 +772,16 @@ mod tests {
     }
 
     #[test]
-    fn execute_entry_rejects_a_non_int_non_void_non_shell_return_type() {
+    fn execute_entry_rejects_a_non_int_non_void_non_shell_result_return_type() {
         assert_entry_error(
             "function main() -> str { return \"ok\"; };",
-            "must return 'int', 'void', or 'shell'",
+            "must return 'int', 'void', or 'ShellResult<T, E>'",
         );
+    }
+
+    #[test]
+    fn execute_entry_accepts_shell_result_main() {
+        assert_entry_ok("function main() -> ShellResult<int, str> { return ok(value: 0); };");
     }
 
     #[test]

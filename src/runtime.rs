@@ -1452,7 +1452,11 @@ impl Runtime<'_> {
                 }
                 CompiledStatement::Expression(expression, statement_span) => {
                     let value = self.eval_expression(expression, frame, module)?;
-                    if self.shell_depth > 0 || self.shell_result_depth > 0 {
+                    let run_now = matches!(
+                        expression,
+                        CompiledExpression::Shell(shell) | CompiledExpression::MixedShell(shell) if shell.run_now
+                    );
+                    if run_now || self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let outcome = match value {
                             Value::Shell(plan) => {
                                 let step_spans = match expression {
@@ -4052,6 +4056,7 @@ impl Runtime<'_> {
                         let single = CompiledShellExpr {
                             steps: vec![(crate::ast::ShellJoin::Always, step.clone())],
                             span: shell.span.clone(),
+                            run_now: false,
                         };
                         let plan = self.eval_shell_plan(&single, &mut frame, shell.module)?;
                         self.execute_native_shell_plan_at(&plan, &shell.span, &shell_step_spans(&single))?

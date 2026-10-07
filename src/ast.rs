@@ -143,6 +143,9 @@ pub struct ShellExpr {
     /// Source line of the closing token, so the formatter keeps comments
     /// trailing the last statement inside the block.
     pub end_line: u32,
+    /// True for the `~ cmd` statement form, which always runs its command
+    /// even outside a shell-result body.
+    pub run_now: bool,
 }
 
 #[derive(Debug, Clone)]

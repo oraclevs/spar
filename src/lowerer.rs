@@ -1246,6 +1246,7 @@ impl FunctionLowerer<'_> {
 
     fn lower_shell(&mut self, shell: &ShellExpr) -> Result<CompiledShellExpr, SparError> {
         Ok(CompiledShellExpr {
+            run_now: shell.run_now,
             steps: shell
                 .steps
                 .iter()

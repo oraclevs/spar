@@ -1390,6 +1390,11 @@ impl<'a> Lexer<'a> {
                 Token::At
             }
 
+            b'~' if matches!(self.peek_at(1), Some(b' ' | b'\t' | b'\r' | b'\n')) => {
+                self.advance();
+                Token::KwCommand
+            }
+
             _ => {
                 let ch = self
                     .advance_char()
@@ -3307,6 +3312,26 @@ mod tests {
         assert!(!tokens
             .iter()
             .any(|token| matches!(token, Token::ShellWord(_))));
+    }
+
+    #[test]
+    fn tilde_marker_lexes_as_command_start() {
+        let tokens: Vec<Token> = Lexer::new("function f() -> int {\n    ~ echo hi;\n    return 0;\n};")
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        assert!(tokens.contains(&Token::KwCommand));
+    }
+
+    #[test]
+    fn tilde_in_words_is_not_a_marker() {
+        for src in ["cd ~;", "ls ~/projects;", "echo \"~ x\";"] {
+            let wrapped = format!("function f() -> ShellResult<int, str> {{\n    {src}\n    return ok(value: 0);\n}};");
+            let tokens: Vec<Token> = Lexer::new(&wrapped).tokenize().unwrap().into_iter().map(|t| t.token).collect();
+            assert_eq!(tokens.iter().filter(|t| **t == Token::KwCommand).count(), 1, "{src}: only the inserted command prefix");
+        }
     }
 
     #[test]

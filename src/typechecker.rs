@@ -5186,6 +5186,9 @@ impl<'a> TypeChecker<'a> {
         for statement in statements {
             match statement {
                 FuncStmt::Expression(Expr::Shell(shell), span) => {
+                    if shell.run_now {
+                        continue;
+                    }
                     self.push_type_error(
                         "this shell value is created but never run, so it does nothing",
                         Some(

@@ -213,6 +213,7 @@ pub(crate) enum CompiledExpression {
 pub(crate) struct CompiledShellExpr {
     pub steps: Vec<(ShellJoin, CompiledShellStep)>,
     pub span: Span,
+    pub run_now: bool,
 }
 
 #[derive(Clone)]

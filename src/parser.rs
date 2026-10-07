@@ -2127,6 +2127,7 @@ impl Parser {
             span: Span::new(start.start, end.end, start.line, start.col).with_file(start.file),
             foreign_shell,
             end_line: end.line,
+            run_now: false,
         }))
     }
 

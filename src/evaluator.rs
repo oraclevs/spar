@@ -3515,7 +3515,7 @@ impl Evaluator {
                         _ => None,
                     };
                     let value = self.eval_expr(expr, local_scope)?;
-                    if self.shell_result_depth > 0 {
+                    if self.shell_result_depth > 0 || matches!(expr, Expr::Shell(s) if s.run_now) {
                         if let ConfigValue::Shell(mut plan) = value {
                             let cwd = spar_command::WorkingDirectory::Path(self.runtime_context.cwd().to_string_lossy().into_owned());
                             for (_, step) in &mut plan.steps {

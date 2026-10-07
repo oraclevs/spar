@@ -350,3 +350,32 @@ fn compiled_arithmetic_stops_after_the_left_operand_fails() {
     ).unwrap();
     assert_eq!(value, Value::Int(7));
 }
+
+#[test]
+fn tilde_statement_runs_in_a_plain_function() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran.txt");
+    let source = format!(r#"
+        function main() -> int {{
+            ~ echo ran > "{}";
+            return 0;
+        }};
+    "#, marker.display());
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran\n");
+}
+
+#[test]
+fn tilde_statement_failure_does_not_abort_the_function() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("after.txt");
+    let source = format!(r#"
+        function main() -> int {{
+            ~ false;
+            ~ echo after > "{}";
+            return 0;
+        }};
+    "#, marker.display());
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "after\n");
+}

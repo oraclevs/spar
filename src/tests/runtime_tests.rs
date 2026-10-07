@@ -411,3 +411,26 @@ fn tilde_pipeline_statement_runs() {
     assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "piped\n");
 }
+
+#[test]
+fn shell_result_body_runs_a_program_named_command() {
+    // `command ls` is the POSIX wrapper builtin; with the keyword gone it is just a program word.
+    let source = r#"
+        function probe() -> ShellResult<int, str> {
+            command -v sh;
+            return ok(value: 0);
+        };
+        function main() -> int {
+            probe();
+            return 0;
+        };
+    "#;
+    let r = Engine::default().execute_source(source);
+    // `command` is now an ordinary program word: the body tries to run a
+    // program of that name (and, absent one on PATH, reports exactly that).
+    let rendered = format!("{:?}", r);
+    assert!(
+        r.is_ok() || rendered.contains("could not run 'command'"),
+        "{rendered}"
+    );
+}

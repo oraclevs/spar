@@ -394,30 +394,6 @@ fn parse_shell_block_expression() {
 }
 
 #[test]
-fn parse_command_sugar_equals_a_single_statement_shell_block() {
-    fn command_shape(program: crate::ast::Program) -> (String, Vec<String>) {
-        let crate::ast::TopLevelItem::Var(declaration) = &program.items[0] else {
-            panic!("expected variable declaration")
-        };
-        let Some(crate::ast::Expr::Shell(expression)) = &declaration.value else {
-            panic!("expected shell expression")
-        };
-        let crate::ast::ShellStep::Command(command) = &expression.steps[0].1 else {
-            panic!("expected command")
-        };
-        (
-            command.program.text.clone(),
-            command.args.iter().map(|arg| arg.text.clone()).collect(),
-        )
-    }
-
-    assert_eq!(
-        command_shape(parse_ok("var x: shell = command echo hi;")),
-        command_shape(parse_ok("var x: shell = shell { echo hi; };"))
-    );
-}
-
-#[test]
 fn parse_exec_shell_expression() {
     let program =
         parse_ok("function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };");
@@ -1367,12 +1343,11 @@ fn native_shell_words_are_contextual_names_outside_construct_position() {
 fn command_exec_and_shell_construct_forms_remain_reserved_in_construct_position() {
     let program = parse_ok(
         r#"
-        var one: shell = command echo one;
         var two: shell = shell { echo two; };
         function run() -> shell { return exec { echo three; }; };
         "#,
     );
-    assert_eq!(program.items.len(), 3);
+    assert_eq!(program.items.len(), 2);
 }
 
 #[test]

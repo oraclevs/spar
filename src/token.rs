@@ -233,7 +233,7 @@ impl Token {
             Token::KwCatch => "'catch'",
             Token::KwStruct => "'struct'",
             Token::KwImpl => "'impl'",
-            Token::KwCommand => "'command'",
+            Token::KwCommand => "'~'",
             Token::KwExec => "'exec'",
             Token::Arrow => "'->'",
             Token::FatArrow => "'=>'",
@@ -307,7 +307,6 @@ pub fn keyword_or_ident(s: String) -> Token {
         "catch" => Token::KwCatch,
         "struct" => Token::KwStruct,
         "impl" => Token::KwImpl,
-        "command" => Token::KwCommand,
         "exec" => Token::KwExec,
         _ => Token::Ident(s),
     }

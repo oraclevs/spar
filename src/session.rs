@@ -798,19 +798,6 @@ impl Session {
         } else {
             format!("{trimmed};")
         };
-        // This entry point only receives native command lines. A leading
-        // `command` is the POSIX wrapper builtin here, not Spar's `command`
-        // sugar, so keep it as the program name.
-        let terminated = if terminated == "command;"
-            || terminated
-                .strip_prefix("command")
-                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-        {
-            format!("command {terminated}")
-        } else {
-            terminated
-        };
-
         // The ordinary Spar parser accepts module declarations at the top
         // level, not a bare `shell { ... }` expression.  Evaluate the native
         // shell expression as a temporary typed declaration instead.  This
@@ -825,11 +812,7 @@ impl Session {
         }
         let wrapper_prefix = format!("var {name}: shell = shell {{\n");
         let fragment = format!("{wrapper_prefix}{terminated}\n}};");
-        // `command` may have been inserted before the user's text on its first
-        // line; errors are reported in the coordinates of what was typed.
-        let inserted = terminated
-            .len()
-            .saturating_sub(trimmed.len() + usize::from(!trimmed.ends_with(';')));
+        let inserted = 0usize;
         let mut shell_context = runtime_context(cwd, environment);
         if let Some(code) = last_exit_code {
             shell_context.set_last_exit_code(code);

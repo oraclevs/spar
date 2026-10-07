@@ -2175,10 +2175,17 @@ fn format_func_stmt_body(
         }
 
         FuncStmt::Expression(expr, _) => {
-            if shell_context {
-                if let Expr::Shell(shell) = expr {
-                    if shell.statements.is_empty() {
+            if let Expr::Shell(shell) = expr {
+                if shell.statements.is_empty() {
+                    if shell_context {
                         format_shell_steps(&shell.steps, depth, config, out);
+                        return;
+                    }
+                    if shell.run_now {
+                        out.push_str(&ind);
+                        out.push_str("~ ");
+                        format_shell_steps_inline(&shell.steps, depth, config, out);
+                        out.push_str(";\n");
                         return;
                     }
                 }
@@ -2607,12 +2614,6 @@ mod tests {
     }
 
     #[test]
-    fn format_command_sugar_uses_the_canonical_shell_block() {
-        let formatted = fmt("var x: shell = command echo hi;\n");
-        assert_eq!(formatted.trim(), "var x: shell = shell {\n    echo hi;\n};");
-    }
-
-    #[test]
     fn format_pipeline_redirect_and_quoted_word() {
         // Canonical form now prefers single quotes for a literal word with
         // no interpolation — double quotes are reserved for words that
@@ -2694,6 +2695,15 @@ mod tests {
         );
         assert!(formatted.contains("kids: true;"), "got: {formatted}");
         assert_eq!(fmt(&formatted), formatted, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn marker_statement_keeps_its_marker_outside_shell_result_bodies() {
+        let src = "function f() -> int {\n    ~ echo hi | cat;\n    return 0;\n};\n";
+        let formatted = fmt(src);
+        assert!(formatted.contains("    ~ echo hi | cat;\n"), "{formatted}");
+        assert!(!formatted.contains("shell {"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]

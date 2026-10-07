@@ -209,8 +209,8 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
             Some(PendingKind::NativeCommand) => {
                 output.push_str(&pending_indent);
                 if !is_marker_segment(pending.trim()) {
-                    inserted.push((output.len(), output.len() + "command ".len()));
-                    output.push_str("command ");
+                    inserted.push((output.len(), output.len() + "~ ".len()));
+                    output.push_str("~ ");
                 }
                 output.push_str(pending.trim());
                 output.push_str(&pending_comment);
@@ -224,7 +224,7 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
 
 /// Maps byte offsets in a normalized shell body back to the original body.
 ///
-/// Normalization only ever inserts text (`command ` prefixes, `;`/`&`
+/// Normalization only ever inserts text (`~ ` prefixes, `;`/`&`
 /// terminators), re-flows whitespace, and drops explicit `\` line
 /// continuations; every other non-whitespace character survives in order.
 /// That lets the two texts be aligned on their non-whitespace characters.
@@ -419,8 +419,8 @@ fn prefix_native_command_segments(
             let segment = line[start..index].trim();
             if !segment.is_empty() {
                 if !is_marker_segment(segment) {
-                    inserted.push((base + output.len(), base + output.len() + "command ".len()));
-                    output.push_str("command ");
+                    inserted.push((base + output.len(), base + output.len() + "~ ".len()));
+                    output.push_str("~ ");
                 }
                 output.push_str(segment);
                 output.push(';');
@@ -440,8 +440,8 @@ fn prefix_native_command_segments(
             let segment = line[start..index].trim();
             if !segment.is_empty() {
                 if !is_marker_segment(segment) {
-                    inserted.push((base + output.len(), base + output.len() + "command ".len()));
-                    output.push_str("command ");
+                    inserted.push((base + output.len(), base + output.len() + "~ ".len()));
+                    output.push_str("~ ");
                 }
                 output.push_str(segment);
                 output.push_str(" &;");
@@ -452,8 +452,8 @@ fn prefix_native_command_segments(
     let tail = line[start..].trim();
     if !tail.is_empty() {
         if !is_marker_segment(tail) {
-            inserted.push((base + output.len(), base + output.len() + "command ".len()));
-            output.push_str("command ");
+            inserted.push((base + output.len(), base + output.len() + "~ ".len()));
+            output.push_str("~ ");
         }
         output.push_str(tail);
         if !tail.ends_with(';') {
@@ -818,7 +818,7 @@ fn is_spar_control_header(line: &str) -> bool {
 
 fn is_spar_shell_statement_start(line: &str) -> bool {
     const SIMPLE_KEYWORDS: &[&str] = &[
-        "var", "const", "return", "break", "continue", "command", "shell",
+        "var", "const", "return", "break", "continue", "shell", "__shell",
     ];
     if SIMPLE_KEYWORDS
         .iter()
@@ -1827,7 +1827,7 @@ impl<'a> Lexer<'a> {
                                     ));
                                 }
                             };
-                        // Normalization inserts `command ` prefixes and
+                        // Normalization inserts `~ ` prefixes and
                         // terminators and re-flows whitespace, so nested
                         // spans are relative to text that does not exist in
                         // the file. Map them back onto the original body.
@@ -2593,7 +2593,7 @@ impl<'a> Lexer<'a> {
                             append_native_command_line(&mut normalized_body, line);
                         }
                         let normalized_body = normalized_body.trim();
-                        let wrapped = format!("command {normalized_body};");
+                        let wrapped = format!("~ {normalized_body};");
                         let nested =
                             Lexer::new(&wrapped)
                                 .tokenize()
@@ -2611,7 +2611,7 @@ impl<'a> Lexer<'a> {
                                     },
                                     other => other,
                                 })?;
-                        // `wrapped` inserts a `command ` prefix and a `;` terminator and
+                        // `wrapped` inserts a `~ ` prefix and a `;` terminator and
                         // re-flows whitespace, so nested spans do not exist in the file.
                         // Map them back onto the original body like the `shell { }` path.
                         let inserted: Vec<(usize, usize)> = nested
@@ -3313,23 +3313,10 @@ mod tests {
     }
 
     #[test]
-    fn command_keyword_stays_soft_in_field_and_call_positions() {
-        assert_eq!(
-            lex("type Tool { command: str; exec: str; shell: str; };")
-                .into_iter()
-                .filter(|token| !matches!(token, Token::Eof))
-                .collect::<Vec<_>>()
-                .iter()
-                .filter(|token| matches!(token, Token::KwCommand))
-                .count(),
-            1
-        );
-
-        let tokens = lex("command(name: \"x\");");
-        assert!(tokens.contains(&Token::KwCommand));
-        assert!(!tokens
-            .iter()
-            .any(|token| matches!(token, Token::ShellWord(_))));
+    fn command_is_an_ordinary_identifier() {
+        let tokens: Vec<Token> = Lexer::new("var command: int = 1;").tokenize().unwrap().into_iter().map(|t| t.token).collect();
+        assert!(!tokens.contains(&Token::KwCommand));
+        assert!(tokens.contains(&Token::Ident("command".into())));
     }
 
     #[test]
@@ -3395,9 +3382,9 @@ mod tests {
     }
 
     #[test]
-    fn command_sugar_uses_the_native_command_tokenizer() {
+    fn marker_uses_the_native_command_tokenizer() {
         assert_eq!(
-            lex(r#"command echo "hello world";"#),
+            lex(r#"~ echo "hello world";"#),
             vec![
                 Token::KwCommand,
                 Token::ShellWord("echo".into()),

@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn shell_lang_command_sugar_uses_the_same_segment_parser() {
-        let tokens = Lexer::new("command echo hello;")
+        let tokens = Lexer::new("~ echo hello;")
             .tokenize()
             .expect("lex failed");
         let (expression, consumed) =

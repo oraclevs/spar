@@ -44,6 +44,9 @@ pub struct Parser {
     /// Interactive sessions accept a bare expression as a module-level
     /// statement, so `answer + 1` or `users |> take(2)` can be previewed.
     interactive: bool,
+    /// True while parsing an `if`/`while`/`for` head, where a following `{`
+    /// opens the body and `shell` is an ordinary variable.
+    in_block_head: bool,
 }
 
 fn parse_error_start(error: &SparError) -> usize {
@@ -110,6 +113,7 @@ impl Parser {
             pos: 0,
             active_type_parameters: Vec::new(),
             interactive: false,
+            in_block_head: false,
         }
     }
 
@@ -185,6 +189,13 @@ impl Parser {
 
     fn at(&self, tok: &Token) -> bool {
         self.peek() == tok
+    }
+
+    fn parse_block_head_expr(&mut self) -> Result<Expr, SparError> {
+        let saved = std::mem::replace(&mut self.in_block_head, true);
+        let result = self.parse_expr();
+        self.in_block_head = saved;
+        result
     }
 
     fn next_is(&self, tok: &Token) -> bool {
@@ -1856,7 +1867,14 @@ impl Parser {
                 }
                 Ok(Expr::ExecShell(shell))
             }
-            Token::KwExec => self.parse_namespace_ref_or_fn_call(),
+            Token::KwExec => {
+                if matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::Ident(n)) if n == "shell") {
+                    return Err(self.error(
+                        "the `shell` type is internal; use `ShellResult<T, E>` for functions that run commands, or prefix a single command with `~`",
+                    ));
+                }
+                self.parse_namespace_ref_or_fn_call()
+            }
             Token::CommandSubStart => {
                 let (shell, consumed) = parse_command_substitution(&self.tokens[self.pos..])?;
                 self.pos += consumed;
@@ -2241,7 +2259,7 @@ impl Parser {
         let span = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
 
-        if name == "shell" && self.at(&Token::LBrace) {
+        if name == "shell" && !self.in_block_head && self.at(&Token::LBrace) {
             return Err(self.error(
                 "the `shell` type is internal; use `ShellResult<T, E>` for functions that run commands, or prefix a single command with `~`",
             ));
@@ -2353,7 +2371,7 @@ impl Parser {
         self.expect(&Token::KwFor)?;
         let (var_name, var_name_span) = self.expect_ident()?;
         self.expect(&Token::KwIn)?;
-        let source = self.parse_expr()?;
+        let source = self.parse_block_head_expr()?;
         self.expect(&Token::LBrace)?;
         let body = self.parse_expr()?;
         self.expect(&Token::RBrace)?;
@@ -2701,7 +2719,7 @@ impl Parser {
             None
         } else {
             self.expect(&Token::KwWhile)?;
-            Some(self.parse_expr()?)
+            Some(self.parse_block_head_expr()?)
         };
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
@@ -2746,7 +2764,7 @@ impl Parser {
             }
         };
         self.expect(&Token::KwIn)?;
-        let iterable = self.parse_expr()?;
+        let iterable = self.parse_block_head_expr()?;
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {
@@ -2844,7 +2862,7 @@ impl Parser {
     fn parse_if_stmt(&mut self) -> Result<IfStmt, SparError> {
         let span = self.peek_span();
         self.expect(&Token::KwIf)?;
-        let condition = self.parse_expr()?;
+        let condition = self.parse_block_head_expr()?;
         self.expect(&Token::LBrace)?;
         let mut then_stmts = Vec::new();
         while !self.at(&Token::RBrace) && !self.at(&Token::Eof) {

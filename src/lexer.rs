@@ -827,7 +827,7 @@ fn is_spar_shell_statement_start(line: &str) -> bool {
         return true;
     }
 
-    // `exec { ... }` / `exec shell { ... }` is Spar; `exec printf ok` is the
+    // `exec { ... }` / `exec __shell { ... }` is Spar; `exec printf ok` is the
     // exec builtin.
     if starts_with_keyword(line, "exec") {
         let rest = line["exec".len()..].trim_start();

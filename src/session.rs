@@ -578,11 +578,7 @@ impl Session {
         let expression_type = default_unresolved_type_parameters(&expression_type);
         // This text is compiled back as source, where the shell type is only
         // spellable internally.
-        let return_type = if expression_type == crate::ast::SparType::Shell {
-            "__shell".to_string()
-        } else {
-            crate::typechecker::display_type(&expression_type)
-        };
+        let return_type = type_source_text(&expression_type);
 
         let mut function_name = "sparshInteractivePreview".to_string();
         let mut suffix = 0_u64;
@@ -1082,6 +1078,34 @@ fn default_unresolved_type_parameters(ty: &crate::ast::SparType) -> crate::ast::
         },
         other => other.clone(),
     }
+}
+
+/// Spells a type so it can be compiled back as source: the shell type is
+/// only writable as `__shell`, including nested occurrences.
+fn type_source_text(ty: &crate::ast::SparType) -> String {
+    fn internalize(ty: &crate::ast::SparType) -> crate::ast::SparType {
+        match ty {
+            crate::ast::SparType::Shell => crate::ast::SparType::Named("__shell".into()),
+            crate::ast::SparType::List(inner) => crate::ast::SparType::List(Box::new(internalize(inner))),
+            crate::ast::SparType::Tuple(items) => crate::ast::SparType::Tuple(items.iter().map(internalize).collect()),
+            crate::ast::SparType::Applied { name, arguments } => crate::ast::SparType::Applied {
+                name: name.clone(),
+                arguments: arguments.iter().map(internalize).collect(),
+            },
+            crate::ast::SparType::Function { params, return_type } => crate::ast::SparType::Function {
+                params: params
+                    .iter()
+                    .map(|param| crate::ast::CallableParamType {
+                        name: param.name.clone(),
+                        ty: internalize(&param.ty),
+                    })
+                    .collect(),
+                return_type: Box::new(internalize(return_type)),
+            },
+            other => other.clone(),
+        }
+    }
+    crate::typechecker::display_type(&internalize(ty))
 }
 
 fn interactive_value_type(value: &crate::runtime::Value) -> Option<crate::ast::SparType> {
@@ -1716,6 +1740,20 @@ struct Config { prompt: Prompt = Prompt(); };"#,
             InteractiveEvalResult::Empty
         );
         assert_eq!(session.value("value"), Some(&ConfigValue::Int(7)));
+    }
+
+    #[test]
+    fn type_source_text_spells_nested_shell_types_internally() {
+        let ty = crate::ast::SparType::List(Box::new(crate::ast::SparType::Applied {
+            name: "ShellResult".into(),
+            arguments: vec![crate::ast::SparType::Shell, crate::ast::SparType::Str],
+        }));
+        let text = type_source_text(&ty);
+        assert_eq!(text, "List<ShellResult<__shell, str>>");
+        let source = format!("var x: {text};");
+        let tokens = crate::lexer::Lexer::new(&source).tokenize().unwrap();
+        crate::parser::Parser::new(tokens).parse().unwrap();
+        assert_eq!(type_source_text(&crate::ast::SparType::Shell), "__shell");
     }
 
     #[test]

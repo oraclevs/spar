@@ -1590,3 +1590,40 @@ fn internal_spelling_still_parses() {
         .parse()
         .is_ok());
 }
+
+fn parse_src(src: &str) -> Result<crate::ast::Program, String> {
+    let tokens = crate::lexer::Lexer::new(src).tokenize().map_err(|e| format!("{e:?}"))?;
+    crate::parser::Parser::new(tokens).parse().map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn shell_variable_is_legal_before_a_block() {
+    for src in [
+        "function f() -> int { var shell: bool = true; if shell { return 1; } return 0; };",
+        "function f() -> int { var shell: [int] = [1]; for x in shell { return x; } return 0; };",
+        "function f() -> int { var shell: int = 1; while shell > 0 { break; } return 0; };",
+        "function f() -> int { var shell: int = 1; while shell { break; } return 0; };",
+        "function f() -> [int] { var shell: [int] = [1]; return for x in shell { x }; };",
+        "function f() -> int { var shell: bool = false; if shell { return 1; } else if shell { return 2; } return 0; };",
+    ] {
+        parse_src(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+    }
+}
+
+#[test]
+fn shell_block_at_statement_start_gives_migration_error() {
+    for src in [
+        "function f() -> int { shell { echo hi; }; return 0; };",
+        "function f() -> int { var r: int = shell { echo hi; }; return 0; };",
+        "function f() -> int { var r: shell = 1; return 0; };",
+    ] {
+        let err = parse_src(src).unwrap_err();
+        assert!(err.contains("ShellResult"), "{src}: {err}");
+    }
+}
+
+#[test]
+fn exec_shell_gives_migration_error() {
+    let err = parse_src("function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };").unwrap_err();
+    assert!(err.contains("ShellResult") && err.contains('~'), "{err}");
+}

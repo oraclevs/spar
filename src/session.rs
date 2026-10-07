@@ -1008,12 +1008,15 @@ impl Session {
             .chain(self.prelude_names().map(|name| -> &'a str { name }))
     }
 
-    /// Every name a REPL statement can refer to: variables, functions and
-    /// the implicit `_`.
+    /// Names the user declared in this session (variables and functions)
+    /// plus the implicit `_`.
     pub fn scope_names(&self) -> std::collections::HashSet<String> {
-        self.identifiers()
-            .chain(self.function_names())
-            .map(str::to_string)
+        // Only names the user declared: prelude functions (`sleep`, `env`,
+        // `read`, ...) would otherwise shadow real commands of the same name.
+        self.identifiers
+            .iter()
+            .chain(self.functions.iter())
+            .cloned()
             .chain(std::iter::once("_".to_string()))
             .collect()
     }

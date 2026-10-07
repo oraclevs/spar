@@ -58,7 +58,7 @@ fn normalize_shell_body(body: &str) -> String {
 /// Like `normalize_shell_body`, also returning the byte ranges of the
 /// `command ` prefixes it inserted (needed to map a lex error in the
 /// normalized text back onto the original when no tokens exist to show them).
-pub(crate) fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
+fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
     let mut inserted: Vec<(usize, usize)> = Vec::new();
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PendingKind {

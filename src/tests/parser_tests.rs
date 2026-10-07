@@ -1627,3 +1627,22 @@ fn exec_shell_gives_migration_error() {
     let err = parse_src("function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };").unwrap_err();
     assert!(err.contains("ShellResult") && err.contains('~'), "{err}");
 }
+
+#[test]
+fn bare_command_in_a_plain_function_suggests_the_marker() {
+    let error = parse_err("function main() -> int {\n    echo hi;\n    return 0;\n};");
+    assert!(error.contains("only function calls may be used as expression statements"), "{error}");
+    assert!(error.contains("~ echo hi") && error.contains("ShellResult"), "{error}");
+}
+
+#[test]
+fn bare_command_hint_is_not_attached_to_other_expression_statements() {
+    let error = parse_err("function main() -> int { 42; return 0; };");
+    assert!(!error.contains("ShellResult"), "{error}");
+}
+
+#[test]
+fn bare_command_with_flag_uses_actual_command_text_in_hint() {
+    let error = parse_err("function main() -> int {\n    ls -la;\n    return 0;\n};");
+    assert!(error.contains("`~ ls -la`"), "{error}");
+}

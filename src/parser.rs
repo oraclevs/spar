@@ -2661,6 +2661,7 @@ impl Parser {
         }
 
         let span = self.peek_span();
+        let stmt_start = self.pos;
         let expression = self.parse_expr()?;
         if !matches!(
             expression,
@@ -2671,13 +2672,64 @@ impl Parser {
                 | Expr::ExecShell(_)
                 | Expr::StructuredPipe { .. }
         ) {
-            return Err(SparError::ParseError {
-                message: "only function calls may be used as expression statements".into(),
-                span,
-            });
+            let mut message = "only function calls may be used as expression statements".to_string();
+            if let Some(command) = self.command_like_text(stmt_start) {
+                message.push_str(&format!(
+                    "; to run a shell command here write `~ {command}`, or move shell-heavy code into a function returning `ShellResult<T, E>`"
+                ));
+            }
+            return Err(SparError::ParseError { message, span });
         }
         self.expect(&Token::Semicolon)?;
         Ok(FuncStmt::Expression(expression, span))
+    }
+
+    /// When the statement starting at token `start` reads like a shell command
+    /// (`echo hi`, `ls -la`), rebuild its text from the token stream.
+    fn command_like_text(&self, start: usize) -> Option<String> {
+        let first = self.tokens.get(start)?;
+        if !matches!(first.token, Token::Ident(_)) {
+            return None;
+        }
+        let second = self.tokens.get(start + 1)?;
+        let looks_like_arg = match &second.token {
+            Token::Ident(_)
+            | Token::IntLit(_)
+            | Token::FloatLit(_)
+            | Token::StringStart
+            | Token::Slash => true,
+            // `ls -la`: a flag has a space before the dash and none after it.
+            Token::Minus => {
+                let after = self.tokens.get(start + 2)?;
+                second.span.start > first.span.end && second.span.end == after.span.start
+            }
+            _ => false,
+        };
+        if !looks_like_arg {
+            return None;
+        }
+        let mut text = String::new();
+        let mut prev_end: Option<usize> = None;
+        for st in &self.tokens[start..] {
+            let piece = match &st.token {
+                Token::Semicolon | Token::Eof => break,
+                Token::Ident(name) => name.clone(),
+                Token::IntLit(n) => n.to_string(),
+                Token::FloatLit(f) => f.to_string(),
+                Token::Minus => "-".into(),
+                Token::Slash => "/".into(),
+                Token::Dot => ".".into(),
+                _ => break,
+            };
+            if let Some(end) = prev_end {
+                if st.span.start > end {
+                    text.push(' ');
+                }
+            }
+            text.push_str(&piece);
+            prev_end = Some(st.span.end);
+        }
+        Some(text)
     }
 
     fn parse_try_stmt(&mut self) -> Result<FuncStmt, SparError> {

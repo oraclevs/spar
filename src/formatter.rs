@@ -2718,6 +2718,15 @@ mod tests {
     }
 
     #[test]
+    fn marker_inside_nested_blocks_of_a_plain_function_round_trips() {
+        let src = "function f() -> int {\n    if true {\n        ~ echo a;\n    }\n    for x in [1, 2] {\n        ~ echo b;\n    }\n    return 0;\n};\n";
+        let formatted = fmt(src);
+        assert!(formatted.contains("~ echo a;") && formatted.contains("~ echo b;"), "{formatted}");
+        assert!(!formatted.contains("__shell {"), "{formatted}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
     fn shell_result_body_keeps_bare_commands() {
         let src = "fn profile() -> ShellResult<str, str> {\n echo hello;\n return ok(value: \"OCC\");\n};\n";
         let formatted = fmt(src);

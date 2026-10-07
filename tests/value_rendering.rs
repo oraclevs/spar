@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use spar::{Shared, Value};
+use spar::{ErrBox, Shared, Value};
 
 #[test]
 fn display_renderer_is_recursive_and_structural() {
@@ -7,7 +7,7 @@ fn display_renderer_is_recursive_and_structural() {
         Value::String("spar".into()),
         Value::Map(vec![(Value::String("answer".into()), Value::Int(42))].into()),
         Value::Option(Some(Box::new(Value::Bool(true)))),
-        Value::Result(Err(Box::new(Value::String("boom".into())))),
+        Value::Result(Err(ErrBox::new(Value::String("boom".into())))),
     ]));
 
     assert_eq!(

@@ -127,9 +127,6 @@ pub struct RuntimeContext {
     requested_exit: Option<i32>,
     inherit_exec_output: bool,
     last_exit_code: Option<i32>,
-    /// Exit code of the most recent `err(error:, exitCode:)` call; read by a
-    /// `ShellResult` entry point to pick the process exit status.
-    last_err_exit_code: Option<i32>,
 }
 
 impl std::fmt::Debug for RuntimeContext {
@@ -161,7 +158,6 @@ impl RuntimeContext {
             requested_exit: None,
             inherit_exec_output: false,
             last_exit_code: None,
-            last_err_exit_code: None,
         }
     }
 
@@ -214,7 +210,6 @@ impl RuntimeContext {
             requested_exit: None,
             inherit_exec_output: self.inherit_exec_output,
             last_exit_code: None,
-            last_err_exit_code: None,
         }
     }
 
@@ -247,14 +242,6 @@ impl RuntimeContext {
     /// continuation of a caller-tracked shell session (e.g. an interactive
     /// prompt's previous command) rather than a fresh compiled `Runtime`
     /// that tracks its own `shell_outcome` as it executes.
-    pub fn last_err_exit_code(&self) -> Option<i32> {
-        self.last_err_exit_code
-    }
-
-    pub fn set_last_err_exit_code(&mut self, code: i32) {
-        self.last_err_exit_code = Some(code);
-    }
-
     pub fn last_exit_code(&self) -> Option<i32> {
         self.last_exit_code
     }

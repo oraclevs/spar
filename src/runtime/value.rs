@@ -8,6 +8,38 @@ use crate::evaluator::{ConfigValue, PromiseHandle};
 use super::resource::ResourceId;
 use super::{ClosureValue, MixedShellValue, Schema, ShellProgramValue, TableValue};
 
+/// Error side of a `Result`/`ShellResult`. Carries the process exit code that
+/// `err(error:, exitCode:)` was given (default 1) next to the error value.
+/// Equality compares only the wrapped value, so the code never changes `==`.
+#[derive(Clone, Debug)]
+pub struct ErrBox {
+    pub value: Box<Value>,
+    pub exit_code: i32,
+}
+
+impl ErrBox {
+    pub fn new(value: Value) -> Self {
+        Self { value: Box::new(value), exit_code: 1 }
+    }
+
+    pub fn with_exit_code(value: Value, exit_code: i32) -> Self {
+        Self { value: Box::new(value), exit_code }
+    }
+}
+
+impl PartialEq for ErrBox {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl std::ops::Deref for ErrBox {
+    type Target = Box<Value>;
+    fn deref(&self) -> &Box<Value> {
+        &self.value
+    }
+}
+
 /// Payload of `Value::Error`, boxed to keep `Value` small.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ErrorValue {
@@ -149,7 +181,7 @@ pub enum Value {
     Object(ObjectMap),
     Map(MapValue),
     Option(std::option::Option<Box<Value>>),
-    Result(std::result::Result<Box<Value>, Box<Value>>),
+    Result(std::result::Result<Box<Value>, ErrBox>),
     Table(Shared<TableValue>),
     Schema(Shared<Schema>),
     Error(Box<ErrorValue>),
@@ -483,7 +515,7 @@ impl Value {
             }
             ConfigValue::Result(value) => Value::Result(match value {
                 Ok(value) => Ok(Box::new(Value::from_config(*value))),
-                Err(value) => Err(Box::new(Value::from_config(*value))),
+                Err(value) => Err(ErrBox::new(Value::from_config(*value))),
             }),
             ConfigValue::Shell(plan) => Value::Shell(Shared::from(plan)),
             ConfigValue::ShellProgram(program) => Value::ShellProgram(Shared::from(program)),
@@ -521,7 +553,8 @@ impl Value {
                 None => true,
             },
             Value::Result(value) => match value {
-                Ok(value) | Err(value) => value.is_data_comparable(),
+                Ok(value) => value.is_data_comparable(),
+                Err(error) => error.value.is_data_comparable(),
             },
             Value::Table(table) => table.rows().iter().all(Value::is_data_comparable),
             Value::Schema(_) | Value::Error(_) => true,
@@ -595,7 +628,7 @@ impl Value {
             })),
             Value::Result(value) => Ok(ConfigValue::Result(match value {
                 Ok(value) => Ok(Box::new(value.try_into_config(span)?)),
-                Err(value) => Err(Box::new(value.try_into_config(span)?)),
+                Err(value) => Err(Box::new(value.value.try_into_config(span)?)),
             })),
             Value::Table(_) => Err(SparError::EvalError {
                 message: "table values cannot be converted to configuration values; serialize them explicitly".into(),
@@ -674,7 +707,7 @@ mod tests {
             Value::Option(None),
             Value::Option(Some(Box::new(Value::Int(1)))),
             Value::Result(Ok(Box::new(Value::Int(1)))),
-            Value::Result(Err(Box::new(Value::String("bad".into())))),
+            Value::Result(Err(ErrBox::new(Value::String("bad".into())))),
             Value::Error(Box::new(ErrorValue {
                 message: "broken".into(),
                 kind: "test".into(),

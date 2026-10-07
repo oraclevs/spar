@@ -23,7 +23,7 @@ pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
 pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
-pub use value::{ErrorValue, Shared, Value};
+pub use value::{ErrBox, ErrorValue, Shared, Value};
 
 use crate::ast::SparType;
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus};
@@ -775,7 +775,7 @@ pub(crate) fn execute_program_with_context(
         }
         Value::Result(Ok(_)) => Ok(Value::Int(0)),
         Value::Result(Err(error)) => {
-            let code = runtime.context.last_err_exit_code().unwrap_or(1);
+            let code = error.exit_code;
             let _ = runtime
                 .context
                 .write_stderr(format!("{}\n", error.render_display()).as_bytes());
@@ -3193,7 +3193,7 @@ impl Runtime<'_> {
                         )?;
                         Ok(Value::Result(Ok(Box::new(mapped))))
                     }
-                    Err(error) => Ok(Value::Result(Err(Box::new(error.as_ref().clone())))),
+                    Err(error) => Ok(Value::Result(Err(error.clone()))),
                 }
             }
             NativeIntrinsic::CoreResultMapErr => {
@@ -3211,7 +3211,7 @@ impl Runtime<'_> {
                             vec![error.as_ref().clone()],
                             span,
                         )?;
-                        Ok(Value::Result(Err(Box::new(mapped))))
+                        Ok(Value::Result(Err(crate::runtime::value::ErrBox::with_exit_code(mapped, error.exit_code))))
                     }
                 }
             }
@@ -3235,7 +3235,7 @@ impl Runtime<'_> {
                             Err(type_error("Result", &mapped, span).into())
                         }
                     }
-                    Err(error) => Ok(Value::Result(Err(Box::new(error.as_ref().clone())))),
+                    Err(error) => Ok(Value::Result(Err(error.clone()))),
                 }
             }
             NativeIntrinsic::CoreResultOrElse => {
@@ -5414,7 +5414,7 @@ fn value_from_config_typed(
                     &arguments[0],
                     symbols,
                 ))),
-                Err(value) => Err(Box::new(value_from_config_typed(
+                Err(value) => Err(crate::runtime::value::ErrBox::new(value_from_config_typed(
                     *value,
                     &arguments[1],
                     symbols,

@@ -67,6 +67,7 @@ pub use runtime::{
     Schema, SchemaField, SchemaInferenceError, SchemaType, StreamResource, StreamState, TableValue,
     Value,
     Shared,
+    ErrBox,
     ErrorValue,
     Record,
 };

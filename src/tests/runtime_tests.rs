@@ -484,3 +484,121 @@ fn plain_result_err_accepts_exit_code_and_stays_a_value() {
     "#;
     assert_eq!(Engine::default().execute_source(source).unwrap().exit_status, 0);
 }
+
+fn exit_of(source: &str) -> i32 {
+    Engine::default().execute_source(source).unwrap().exit_status
+}
+
+#[test]
+fn err_exit_code_travels_with_the_value_not_the_last_call() {
+    let src = r#"
+function main() -> ShellResult<int, str> {
+    var e: ShellResult<int, str> = err<int, str>(error: "a", exitCode: 5);
+    var f: ShellResult<int, str> = err<int, str>(error: "b");
+    return e;
+};
+"#;
+    assert_eq!(exit_of(src), 5);
+}
+
+#[test]
+fn err_exit_code_survives_a_helper_that_builds_its_own_err() {
+    let src = r#"
+function noisy() -> int {
+    var r: Result<int, str> = err<int, str>(error: "inner");
+    if r.isErr() { return 1; }
+    return 0;
+};
+function main() -> ShellResult<int, str> {
+    var e: ShellResult<int, str> = err<int, str>(error: "a", exitCode: 6);
+    var n: int = noisy();
+    return e;
+};
+"#;
+    assert_eq!(exit_of(src), 6);
+}
+
+#[test]
+fn err_exit_code_defaults_to_one_for_a_fresh_err_after_an_explicit_code() {
+    let src = r#"
+function make() -> Result<int, str> { return err(error: "x", exitCode: 5); };
+function main() -> ShellResult<int, str> {
+    var first: Result<int, str> = make();
+    var mapped: Result<int, str> = first.map(transform: fn(value: int) -> int { return value; });
+    var fresh: ShellResult<int, str> = err<int, str>(error: "z");
+    return fresh;
+};
+"#;
+    assert_eq!(exit_of(src), 1);
+}
+
+#[test]
+fn err_exit_code_survives_nested_functions_and_result_methods() {
+    let src = r#"
+function inner() -> ShellResult<int, str> { return err(error: "deep", exitCode: 9); };
+function middle() -> ShellResult<int, str> { return inner(); };
+function main() -> ShellResult<int, str> { return middle(); };
+"#;
+    assert_eq!(exit_of(src), 9);
+    let mapped = r#"
+function make() -> Result<int, str> { return err(error: "x", exitCode: 4); };
+function main() -> ShellResult<int, str> {
+    var r: Result<int, str> = make().mapErr(transform: fn(error: str) -> str { return error + "!"; });
+    return r;
+};
+"#;
+    assert_eq!(exit_of(mapped), 4);
+}
+
+#[test]
+fn err_exit_code_does_not_change_value_equality() {
+    let src = r#"
+function main() -> int {
+    var a: Result<int, str> = err(error: "x", exitCode: 3);
+    var b: Result<int, str> = err(error: "x");
+    if a != b { return 1; }
+    return 0;
+};
+"#;
+    assert_eq!(exit_of(src), 0);
+}
+
+#[test]
+fn err_rejects_exit_codes_outside_0_to_255() {
+    for code in ["256", "-1"] {
+        let src = format!("function main() -> ShellResult<int, str> {{ return err(error: \"x\", exitCode: {code}); }};");
+        let errors = Engine::default().execute_source(&src).unwrap_err();
+        assert!(format!("{errors:?}").contains("between 0 and 255"), "{code}: {errors:?}");
+    }
+    let src = "function main() -> ShellResult<int, str> { return err(error: \"x\", exitCode: 255); };";
+    assert_eq!(exit_of(src), 255);
+}
+
+#[test]
+fn err_rejects_a_non_int_exit_code_at_type_check() {
+    let src = "function main() -> ShellResult<int, str> { return err(error: \"x\", exitCode: \"3\"); };";
+    assert!(Engine::default().compile_source(src).is_err());
+}
+
+#[test]
+fn err_positional_arguments_match_other_prelude_functions() {
+    let positional = "function main() -> ShellResult<int, str> { return err(\"x\", 3); };";
+    let named = "function main() -> ShellResult<int, str> { return ok(5); };";
+    // Positional calls to user and prelude functions are rejected consistently.
+    assert_eq!(
+        Engine::default().compile_source(positional).is_err(),
+        Engine::default().compile_source(named).is_err()
+    );
+}
+
+#[test]
+fn err_exit_code_survives_an_async_task() {
+    let src = r#"
+async function work() -> ShellResult<int, str> { return err(error: "t", exitCode: 8); };
+async function main() -> ShellResult<int, str> {
+    var p: ShellResult<int, str> = await work();
+    return p;
+};
+"#;
+    assert_eq!(exit_of(src), 8);
+}

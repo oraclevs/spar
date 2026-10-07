@@ -1114,3 +1114,18 @@ fn eval_recursion_supports_one_thousand_calls() {
     let result = eval_src("function count(n: int) -> int { if n == 0 { return 0; } return 1 + count(n: n - 1); }; var result: int = count(n: 999);");
     assert_eq!(result.globals["result"], crate::evaluator::ConfigValue::Int(999));
 }
+
+#[test]
+fn eval_tilde_statement_runs_in_evaluator_tier() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("eval.txt");
+    let src = format!(r#"
+        function f() -> int {{
+            ~ echo ev > "{}";
+            return 1;
+        }};
+        export var r: int = f();
+    "#, marker.display());
+    eval_src(&src);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ev\n");
+}

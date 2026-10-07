@@ -903,10 +903,7 @@ impl Runtime<'_> {
                 }
                 BOp::Eval { e } => {
                     let value = self.eval_expression(&bc.exprs[*e as usize], frame, module)?;
-                    let run_now = matches!(
-                        &bc.exprs[*e as usize],
-                        CompiledExpression::Shell(shell) | CompiledExpression::MixedShell(shell) if shell.run_now
-                    );
+                    let run_now = bc.exprs[*e as usize].runs_now();
                     if run_now || self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let span = &bc.spans[ip];
                         let outcome = match value {

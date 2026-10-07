@@ -208,8 +208,10 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
         match pending_kind {
             Some(PendingKind::NativeCommand) => {
                 output.push_str(&pending_indent);
-                inserted.push((output.len(), output.len() + "command ".len()));
-                output.push_str("command ");
+                if !is_marker_segment(pending.trim()) {
+                    inserted.push((output.len(), output.len() + "command ".len()));
+                    output.push_str("command ");
+                }
                 output.push_str(pending.trim());
                 output.push_str(&pending_comment);
             }
@@ -365,6 +367,10 @@ fn trailing_unquoted_backslash(text: &str) -> Option<&str> {
         .then(|| &trimmed[..trimmed.len() - 1])
 }
 
+fn is_marker_segment(segment: &str) -> bool {
+    segment.strip_prefix('~').is_some_and(|rest| rest.starts_with(char::is_whitespace))
+}
+
 fn prefix_native_command_segments(
     line: &str,
     base: usize,
@@ -412,8 +418,10 @@ fn prefix_native_command_segments(
         if ch == ';' {
             let segment = line[start..index].trim();
             if !segment.is_empty() {
-                inserted.push((base + output.len(), base + output.len() + "command ".len()));
-                output.push_str("command ");
+                if !is_marker_segment(segment) {
+                    inserted.push((base + output.len(), base + output.len() + "command ".len()));
+                    output.push_str("command ");
+                }
                 output.push_str(segment);
                 output.push(';');
             }
@@ -431,8 +439,10 @@ fn prefix_native_command_segments(
         {
             let segment = line[start..index].trim();
             if !segment.is_empty() {
-                inserted.push((base + output.len(), base + output.len() + "command ".len()));
-                output.push_str("command ");
+                if !is_marker_segment(segment) {
+                    inserted.push((base + output.len(), base + output.len() + "command ".len()));
+                    output.push_str("command ");
+                }
                 output.push_str(segment);
                 output.push_str(" &;");
             }
@@ -441,8 +451,10 @@ fn prefix_native_command_segments(
     }
     let tail = line[start..].trim();
     if !tail.is_empty() {
-        inserted.push((base + output.len(), base + output.len() + "command ".len()));
-        output.push_str("command ");
+        if !is_marker_segment(tail) {
+            inserted.push((base + output.len(), base + output.len() + "command ".len()));
+            output.push_str("command ");
+        }
         output.push_str(tail);
         if !tail.ends_with(';') {
             output.push(';');
@@ -1189,7 +1201,7 @@ impl<'a> Lexer<'a> {
                     self.collect_block_comment(start, line, start, line, col)?;
                 }
                 Some(c) => {
-                    let tok = self.lex_single_token(c, start, line, col)?;
+                    let tok = self.lex_single_token(c, start, line, col, false)?;
                     if let Some(t) = tok {
                         tokens.push(t);
                     }
@@ -1204,6 +1216,7 @@ impl<'a> Lexer<'a> {
         start: usize,
         line: u32,
         col: u32,
+        marker_ok: bool,
     ) -> Result<Option<SpannedToken>, SparError> {
         let tok = match c {
             b'+' => {
@@ -1390,7 +1403,8 @@ impl<'a> Lexer<'a> {
                 Token::At
             }
 
-            b'~' if matches!(self.peek_at(1), Some(b' ' | b'\t' | b'\r' | b'\n')) => {
+            b'~' if marker_ok
+                && matches!(self.peek_at(1), Some(b' ' | b'\t' | b'\r' | b'\n')) => {
                 self.advance();
                 Token::KwCommand
             }
@@ -2496,7 +2510,11 @@ impl<'a> Lexer<'a> {
                     self.last_token_line = line;
                 }
                 _ => {
-                    if let Some(t) = self.lex_single_token(c, start, line, col)? {
+                    let marker_ok = matches!(
+                        tokens.last().map(|token| &token.token),
+                        None | Some(Token::Semicolon | Token::LBrace | Token::RBrace | Token::ShellBlockEnd)
+                    );
+                    if let Some(t) = self.lex_single_token(c, start, line, col, marker_ok)? {
                         self.last_token_line = line;
                         let is_run = matches!(&t.token, Token::Ident(s) if s == "run");
                         let is_shell_return_type =
@@ -3323,6 +3341,48 @@ mod tests {
             .map(|t| t.token)
             .collect();
         assert!(tokens.contains(&Token::KwCommand));
+    }
+
+    #[test]
+    fn tilde_marker_span_is_one_byte() {
+        let tokens = Lexer::new("function f() -> int {\n    ~ echo hi;\n    return 0;\n};")
+            .tokenize()
+            .unwrap();
+        let marker = tokens.iter().find(|t| t.token == Token::KwCommand).unwrap();
+        assert_eq!(marker.span.end - marker.span.start, 1);
+    }
+
+    #[test]
+    fn tilde_marker_only_at_statement_boundaries() {
+        assert!(Lexer::new("a ~ b;").tokenize().is_err());
+        assert!(Lexer::new("var x = ~ echo hi;").tokenize().is_err());
+        for src in [
+            "~ echo hi;",
+            "var a = 1; ~ echo hi;",
+            "function f() -> int { if true { ~ echo yes; }; return 0; };",
+        ] {
+            let tokens = Lexer::new(src).tokenize().unwrap();
+            assert!(tokens.iter().any(|t| t.token == Token::KwCommand), "{src}");
+        }
+    }
+
+    #[test]
+    fn tilde_in_comment_user_and_interpolation_is_not_a_marker() {
+        let tokens: Vec<Token> = Lexer::new("function f() -> int {\n    // ~ x\n    return 0;\n};")
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        assert!(!tokens.contains(&Token::KwCommand));
+        let tokens: Vec<Token> = Lexer::new("function f() -> ShellResult<int, str> {\n    ls ~user;\n    return ok(value: 0);\n};")
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        assert_eq!(tokens.iter().filter(|t| **t == Token::KwCommand).count(), 1);
+        assert!(Lexer::new("var s = \"${ ~ }\";").tokenize().is_err());
     }
 
     #[test]

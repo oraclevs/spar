@@ -1452,10 +1452,7 @@ impl Runtime<'_> {
                 }
                 CompiledStatement::Expression(expression, statement_span) => {
                     let value = self.eval_expression(expression, frame, module)?;
-                    let run_now = matches!(
-                        expression,
-                        CompiledExpression::Shell(shell) | CompiledExpression::MixedShell(shell) if shell.run_now
-                    );
+                    let run_now = expression.runs_now();
                     if run_now || self.shell_depth > 0 || self.shell_result_depth > 0 {
                         let outcome = match value {
                             Value::Shell(plan) => {

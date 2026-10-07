@@ -209,6 +209,13 @@ pub(crate) enum CompiledExpression {
     CommandSubstitution(CompiledShellExpr),
 }
 
+impl CompiledExpression {
+    /// True for a `~ cmd` statement expression, which always runs.
+    pub(crate) fn runs_now(&self) -> bool {
+        matches!(self, CompiledExpression::Shell(shell) | CompiledExpression::MixedShell(shell) if shell.run_now)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CompiledShellExpr {
     pub steps: Vec<(ShellJoin, CompiledShellStep)>,

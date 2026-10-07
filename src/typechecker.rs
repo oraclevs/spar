@@ -5192,8 +5192,8 @@ impl<'a> TypeChecker<'a> {
                     self.push_type_error(
                         "this shell value is created but never run, so it does nothing",
                         Some(
-                            "use `exec shell { ... }` to run it and capture its output, \
-                             `return` it from a function that returns `shell`, or \
+                            "use `~ cmd` to run a command as a statement, `exec shell { ... }` \
+                             to run it and capture its output, `return` it from a function that returns `shell`, or \
                              assign it with `var plan: shell = ...;`"
                                 .into(),
                         ),

@@ -379,3 +379,35 @@ fn tilde_statement_failure_does_not_abort_the_function() {
     assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "after\n");
 }
+
+#[test]
+fn tilde_statement_runs_inside_shell_result_function() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("sr.txt");
+    let source = format!(r#"
+        function go() -> ShellResult<int, str> {{
+            ~ echo sr > "{}";
+            return ok(value: 0);
+        }};
+        function main() -> int {{
+            var r = go();
+            return 0;
+        }};
+    "#, marker.display());
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "sr\n");
+}
+
+#[test]
+fn tilde_pipeline_statement_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("pipe.txt");
+    let source = format!(r#"
+        function main() -> int {{
+            ~ echo piped | cat > "{}";
+            return 0;
+        }};
+    "#, marker.display());
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "piped\n");
+}

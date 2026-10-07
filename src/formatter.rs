@@ -1933,7 +1933,7 @@ fn format_object_key(name: &str, out: &mut String) {
         .ok()
         .is_some_and(|tokens| {
             matches!(tokens.as_slice(), [crate::token::SpannedToken { token: crate::token::Token::Ident(value), .. }, crate::token::SpannedToken { token: crate::token::Token::Eof, .. }] if value == name)
-                || matches!(tokens.as_slice(), [crate::token::SpannedToken { token: crate::token::Token::KwCommand | crate::token::Token::KwExec | crate::token::Token::TypeShell, .. }, crate::token::SpannedToken { token: crate::token::Token::Eof, .. }])
+                || matches!(tokens.as_slice(), [crate::token::SpannedToken { token: crate::token::Token::KwExec | crate::token::Token::TypeShell, .. }, crate::token::SpannedToken { token: crate::token::Token::Eof, .. }])
         });
     if ordinary {
         out.push_str(name);
@@ -2704,6 +2704,17 @@ mod tests {
         assert!(formatted.contains("    ~ echo hi | cat;\n"), "{formatted}");
         assert!(!formatted.contains("shell {"), "{formatted}");
         assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn marker_statement_variants_round_trip() {
+        for stmt in ["~ a && b;", "~ cmd &;", "~ echo hi > f;", "~ a || b;"] {
+            let src = format!("function f() -> int {{\n    {stmt}\n    return 0;\n}};\n");
+            let formatted = fmt(&src);
+            assert!(formatted.contains(&format!("    {stmt}\n")), "{stmt}: {formatted}");
+            assert!(!formatted.contains("shell {"), "{stmt}: {formatted}");
+            assert_eq!(fmt(&formatted), formatted, "{stmt}");
+        }
     }
 
     #[test]

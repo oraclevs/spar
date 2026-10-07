@@ -168,7 +168,6 @@ impl Parser {
             Token::Ident(name) => Some(name.clone()),
             // Native-shell words are contextual keywords: outside their
             // construct positions they remain legal Spar names.
-            Token::KwCommand => Some("command".to_string()),
             Token::KwExec => Some("exec".to_string()),
             Token::TypeShell => Some("shell".to_string()),
             _ => None,
@@ -199,7 +198,7 @@ impl Parser {
     fn at_ident(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Ident(_) | Token::KwCommand | Token::KwExec | Token::TypeShell
+            Token::Ident(_) | Token::KwExec | Token::TypeShell
         )
     }
 
@@ -450,7 +449,7 @@ impl Parser {
                 Ok(TopLevelItem::Statement(self.parse_func_stmt()?))
             }
             Token::Ident(_)
-            | Token::KwCommand
+            | Token::ShellMarker
             | Token::KwExec
             | Token::TypeShell
             | Token::TypeStr
@@ -793,7 +792,7 @@ impl Parser {
             | Token::TypeShell => true,
             // A bare Ident is only a type-start when immediately followed by
             // `=` — otherwise it's the type-omitted value form (`name: someVar;`).
-            Token::Ident(_) | Token::KwCommand | Token::KwExec => {
+            Token::Ident(_) | Token::KwExec => {
                 if matches!(
                     self.tokens.get(self.pos + 1).map(|st| &st.token),
                     Some(Token::Eq)
@@ -838,7 +837,7 @@ impl Parser {
                     // `[Ident] =` — list of a named type, same `=`-disambiguation.
                     matches!(
                         self.tokens.get(self.pos + 1).map(|st| &st.token),
-                        Some(Token::Ident(_)) | Some(Token::KwCommand) | Some(Token::KwExec)
+                        Some(Token::Ident(_)) | Some(Token::KwExec)
                     ) && matches!(
                         self.tokens.get(self.pos + 2).map(|st| &st.token),
                         Some(Token::RBracket)
@@ -1522,7 +1521,7 @@ impl Parser {
     fn parse_scalar_type(&mut self) -> Result<SparType, SparError> {
         if matches!(
             self.peek(),
-            Token::Ident(_) | Token::KwCommand | Token::KwExec
+            Token::Ident(_) | Token::KwExec
         ) {
             // Native-shell words are contextual here too: a user-declared
             // type named `command` or `exec` remains referenceable outside
@@ -1824,7 +1823,7 @@ impl Parser {
             Token::ShellBlockStart | Token::ShellForeignBlockStart(_) => {
                 self.parse_mixed_shell_block()
             }
-            Token::KwCommand
+            Token::ShellMarker
                 if matches!(
                     self.tokens.get(self.pos + 1).map(|token| &token.token),
                     Some(Token::ShellWord(_)) | Some(Token::ShellLiteralWord(_))
@@ -1852,7 +1851,7 @@ impl Parser {
                 }
                 Ok(Expr::ExecShell(shell))
             }
-            Token::KwCommand | Token::KwExec => self.parse_namespace_ref_or_fn_call(),
+            Token::KwExec => self.parse_namespace_ref_or_fn_call(),
             Token::CommandSubStart => {
                 let (shell, consumed) = parse_command_substitution(&self.tokens[self.pos..])?;
                 self.pos += consumed;
@@ -2273,7 +2272,7 @@ impl Parser {
             (Some(first), Some(second))
                 if matches!(
                     first.token,
-                    Token::Ident(_) | Token::KwCommand | Token::KwExec | Token::TypeShell
+                    Token::Ident(_) | Token::KwExec | Token::TypeShell
                 ) && second.token == Token::Colon
         )
     }
@@ -4230,7 +4229,7 @@ function f(flag: bool) -> int {
     fn native_shell_words_are_contextual_identifiers_outside_construct_position() {
         // `type` declarations were removed (use `struct`) and struct/type
         // names must be PascalCase now, so a lowercase `command` type name
-        // is no longer expressible — this still covers "command"/"exec"/
+        // is no longer expressible — this still covers "exec"/
         // "shell" as ordinary field and function/param names.
         parse_str(
             r#"

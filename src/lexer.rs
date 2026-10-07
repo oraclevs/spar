@@ -1406,7 +1406,7 @@ impl<'a> Lexer<'a> {
             b'~' if marker_ok
                 && matches!(self.peek_at(1), Some(b' ' | b'\t' | b'\r' | b'\n')) => {
                 self.advance();
-                Token::KwCommand
+                Token::ShellMarker
             }
 
             _ => {
@@ -1833,12 +1833,12 @@ impl<'a> Lexer<'a> {
                         // the file. Map them back onto the original body.
                         let inserted: Vec<(usize, usize)> = nested
                             .iter()
-                            .filter(|token| token.token == Token::KwCommand)
+                            .filter(|token| token.token == Token::ShellMarker)
                             .map(|token| (token.span.start, token.span.end))
                             .collect();
                         let offsets = NormalizedOffsets::new(original, &normalized, &inserted);
                         for mut token in nested.into_iter().filter(|token| {
-                            token.token != Token::Eof && (function_body || token.token != Token::KwCommand)
+                            token.token != Token::Eof && (function_body || token.token != Token::ShellMarker)
                         }) {
                             let (start, end) =
                                 offsets.original_range(original, token.span.start, token.span.end);
@@ -2521,7 +2521,7 @@ impl<'a> Lexer<'a> {
                             matches!(tokens.last().map(|token| &token.token), Some(Token::Arrow));
                         let is_shell =
                             matches!(&t.token, Token::TypeShell) && !is_shell_return_type;
-                        let is_command = matches!(&t.token, Token::KwCommand);
+                        let is_command = matches!(&t.token, Token::ShellMarker);
                         let is_exec = matches!(&t.token, Token::KwExec);
                         tokens.push(t);
                         if is_run {
@@ -2616,14 +2616,14 @@ impl<'a> Lexer<'a> {
                         // Map them back onto the original body like the `shell { }` path.
                         let inserted: Vec<(usize, usize)> = nested
                             .iter()
-                            .filter(|token| token.token == Token::KwCommand)
+                            .filter(|token| token.token == Token::ShellMarker)
                             .map(|token| (token.span.start, token.span.end))
                             .collect();
                         let offsets = NormalizedOffsets::new(original, &wrapped, &inserted);
                         let mut mapped: Vec<SpannedToken> = nested
                             .into_iter()
                             .filter(|token| {
-                                token.token != Token::KwCommand && token.token != Token::Eof
+                                token.token != Token::ShellMarker && token.token != Token::Eof
                             })
                             .map(|mut token| {
                                 let (start, end) = offsets.original_range(
@@ -3315,7 +3315,7 @@ mod tests {
     #[test]
     fn command_is_an_ordinary_identifier() {
         let tokens: Vec<Token> = Lexer::new("var command: int = 1;").tokenize().unwrap().into_iter().map(|t| t.token).collect();
-        assert!(!tokens.contains(&Token::KwCommand));
+        assert!(!tokens.contains(&Token::ShellMarker));
         assert!(tokens.contains(&Token::Ident("command".into())));
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
             .into_iter()
             .map(|t| t.token)
             .collect();
-        assert!(tokens.contains(&Token::KwCommand));
+        assert!(tokens.contains(&Token::ShellMarker));
     }
 
     #[test]
@@ -3335,7 +3335,7 @@ mod tests {
         let tokens = Lexer::new("function f() -> int {\n    ~ echo hi;\n    return 0;\n};")
             .tokenize()
             .unwrap();
-        let marker = tokens.iter().find(|t| t.token == Token::KwCommand).unwrap();
+        let marker = tokens.iter().find(|t| t.token == Token::ShellMarker).unwrap();
         assert_eq!(marker.span.end - marker.span.start, 1);
     }
 
@@ -3349,7 +3349,7 @@ mod tests {
             "function f() -> int { if true { ~ echo yes; }; return 0; };",
         ] {
             let tokens = Lexer::new(src).tokenize().unwrap();
-            assert!(tokens.iter().any(|t| t.token == Token::KwCommand), "{src}");
+            assert!(tokens.iter().any(|t| t.token == Token::ShellMarker), "{src}");
         }
     }
 
@@ -3361,14 +3361,14 @@ mod tests {
             .into_iter()
             .map(|t| t.token)
             .collect();
-        assert!(!tokens.contains(&Token::KwCommand));
+        assert!(!tokens.contains(&Token::ShellMarker));
         let tokens: Vec<Token> = Lexer::new("function f() -> ShellResult<int, str> {\n    ls ~user;\n    return ok(value: 0);\n};")
             .tokenize()
             .unwrap()
             .into_iter()
             .map(|t| t.token)
             .collect();
-        assert_eq!(tokens.iter().filter(|t| **t == Token::KwCommand).count(), 1);
+        assert_eq!(tokens.iter().filter(|t| **t == Token::ShellMarker).count(), 1);
         assert!(Lexer::new("var s = \"${ ~ }\";").tokenize().is_err());
     }
 
@@ -3377,7 +3377,7 @@ mod tests {
         for src in ["cd ~;", "ls ~/projects;", "echo \"~ x\";"] {
             let wrapped = format!("function f() -> ShellResult<int, str> {{\n    {src}\n    return ok(value: 0);\n}};");
             let tokens: Vec<Token> = Lexer::new(&wrapped).tokenize().unwrap().into_iter().map(|t| t.token).collect();
-            assert_eq!(tokens.iter().filter(|t| **t == Token::KwCommand).count(), 1, "{src}: only the inserted command prefix");
+            assert_eq!(tokens.iter().filter(|t| **t == Token::ShellMarker).count(), 1, "{src}: only the inserted ~ prefix");
         }
     }
 
@@ -3386,7 +3386,7 @@ mod tests {
         assert_eq!(
             lex(r#"~ echo "hello world";"#),
             vec![
-                Token::KwCommand,
+                Token::ShellMarker,
                 Token::ShellWord("echo".into()),
                 Token::ShellWord("hello world".into()),
                 Token::Semicolon,

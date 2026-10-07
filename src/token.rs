@@ -86,7 +86,7 @@ pub enum Token {
     KwCatch,
     KwStruct,
     KwImpl,
-    KwCommand,
+    ShellMarker,
     KwExec,
 
     // Arrows
@@ -233,7 +233,7 @@ impl Token {
             Token::KwCatch => "'catch'",
             Token::KwStruct => "'struct'",
             Token::KwImpl => "'impl'",
-            Token::KwCommand => "'~'",
+            Token::ShellMarker => "'~'",
             Token::KwExec => "'exec'",
             Token::Arrow => "'->'",
             Token::FatArrow => "'=>'",

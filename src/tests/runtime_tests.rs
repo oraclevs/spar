@@ -414,23 +414,50 @@ fn tilde_pipeline_statement_runs() {
 
 #[test]
 fn shell_result_body_runs_a_program_named_command() {
-    // `command ls` is the POSIX wrapper builtin; with the keyword gone it is just a program word.
-    let source = r#"
-        function probe() -> ShellResult<int, str> {
-            command -v sh;
+    // `command` is no longer a keyword: in a ShellResult body it is just a
+    // program word, resolved on PATH like any other. Put a script of that
+    // name first on PATH and check it is the thing that ran.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("spar_command_prog_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("command");
+    std::fs::write(&program, "#!/bin/sh\necho \"ran:$1\"\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = dir.join("out.txt");
+    let source = format!(
+        r#"
+        function probe() -> ShellResult<int, str> {{
+            PATH={dir}:/usr/bin:/bin command -v > "{out}";
             return ok(value: 0);
-        };
-        function main() -> int {
+        }};
+        function main() -> int {{
             probe();
             return 0;
-        };
-    "#;
-    let r = Engine::default().execute_source(source);
-    // `command` is now an ordinary program word: the body tries to run a
-    // program of that name (and, absent one on PATH, reports exactly that).
-    let rendered = format!("{:?}", r);
-    assert!(
-        r.is_ok() || rendered.contains("could not run 'command'"),
-        "{rendered}"
+        }};
+    "#,
+        dir = dir.display(),
+        out = out.display()
     );
+    let result = Engine::default().execute_source(&source);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "ran:-v\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn marker_statement_runs_a_command_group() {
+    let out = std::env::temp_dir().join(format!("spar_marker_group_{}", std::process::id()));
+    let source = format!(
+        r#"
+        function main() -> int {{
+            ~ echo a > "{p}" && echo b >> "{p}";
+            return 0;
+        }};
+    "#,
+        p = out.display()
+    );
+    let result = Engine::default().execute_source(&source);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "a\nb\n");
+    let _ = std::fs::remove_file(&out);
 }

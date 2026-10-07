@@ -1340,7 +1340,7 @@ fn native_shell_words_are_contextual_names_outside_construct_position() {
 }
 
 #[test]
-fn command_exec_and_shell_construct_forms_remain_reserved_in_construct_position() {
+fn exec_and_shell_construct_forms_remain_reserved_in_construct_position() {
     let program = parse_ok(
         r#"
         var two: shell = shell { echo two; };
@@ -1537,4 +1537,33 @@ fn named_method_calls_preserve_argument_names() {
     assert_eq!(args.len(), 2);
     assert_eq!(args[0].param_name, "index");
     assert_eq!(args[1].param_name, "value");
+}
+
+#[test]
+fn marker_is_not_an_identifier_or_call_head() {
+    for src in [
+        "var x: int = ~ foo;",
+        "function f() -> int { ~(1); return 0; };",
+        "function f() -> int { var a: int = 1; a.~; return 0; };",
+        "function f() -> int { return ~ foo; };",
+    ] {
+        assert!(
+            crate::lexer::Lexer::new(src).tokenize().is_err()
+                || crate::parser::Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
+                    .parse()
+                    .is_err(),
+            "{src} must not parse"
+        );
+    }
+}
+
+#[test]
+fn command_is_an_ordinary_call_name_and_struct_field() {
+    parse_ok(
+        r#"
+        struct Tool { command: str = "x"; };
+        function command(name: str) -> str { return name; };
+        var out: str = command(name: "x");
+        "#,
+    );
 }

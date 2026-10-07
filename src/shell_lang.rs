@@ -54,13 +54,13 @@ pub(crate) fn parse_command_expression(
     tokens: &[SpannedToken],
 ) -> Result<(ShellExpr, usize), SparError> {
     let Some(start) = tokens.first() else {
-        return Err(parse_error("expected 'command'", Span::dummy()));
+        return Err(parse_error("expected '~'", Span::dummy()));
     };
-    if start.token != Token::KwCommand {
+    if start.token != Token::ShellMarker {
         return Err(parse_error(
             format!(
                 "expected {}, found {}",
-                Token::KwCommand.human_name(),
+                Token::ShellMarker.human_name(),
                 start.token.human_name()
             ),
             start.span.clone(),
@@ -79,9 +79,11 @@ pub(crate) fn parse_command_expression(
         })?;
     let end_span = tokens[end].span.clone();
     let steps = BodyParser::new(&tokens[1..end]).parse()?;
-    if steps.len() != 1 {
+    // `~ a && b;` is one marker statement holding a command group; only an
+    // empty body is an error.
+    if steps.is_empty() {
         return Err(parse_error(
-            "'command' must contain exactly one command or pipeline",
+            "'~' must be followed by a command or pipeline",
             start.span.clone(),
         ));
     }

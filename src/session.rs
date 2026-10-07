@@ -1008,6 +1008,16 @@ impl Session {
             .chain(self.prelude_names().map(|name| -> &'a str { name }))
     }
 
+    /// Every name a REPL statement can refer to: variables, functions and
+    /// the implicit `_`.
+    pub fn scope_names(&self) -> std::collections::HashSet<String> {
+        self.identifiers()
+            .chain(self.function_names())
+            .map(str::to_string)
+            .chain(std::iter::once("_".to_string()))
+            .collect()
+    }
+
     pub fn has_function(&self, name: &str) -> bool {
         self.functions.contains(name) || self.prelude_names().any(|prelude| prelude == name)
     }
@@ -1517,6 +1527,15 @@ mod tests {
     use crate::host::{HostFunction, HostRegistry};
     use crate::runtime::value::Shared;
     use crate::runtime::Value;
+
+    #[test]
+    fn scope_names_include_variables_functions_and_underscore() {
+        let mut session = Engine::default().session();
+        session.eval("var a: int = 1;").unwrap();
+        session.eval("function f() -> int { return 1; };").unwrap();
+        let names = session.scope_names();
+        assert!(names.contains("a") && names.contains("f") && names.contains("_"));
+    }
 
     #[test]
     fn default_unresolved_type_parameters_replaces_every_nested_occurrence() {

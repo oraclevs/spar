@@ -22,6 +22,7 @@ pub mod native_module;
 pub mod package;
 pub mod parser;
 pub mod renderer;
+pub mod repl_split;
 pub mod resolver;
 mod recursion;
 pub mod runner;

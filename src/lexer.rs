@@ -58,7 +58,7 @@ fn normalize_shell_body(body: &str) -> String {
 /// Like `normalize_shell_body`, also returning the byte ranges of the
 /// `command ` prefixes it inserted (needed to map a lex error in the
 /// normalized text back onto the original when no tokens exist to show them).
-fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
+pub(crate) fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
     let mut inserted: Vec<(usize, usize)> = Vec::new();
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PendingKind {
@@ -816,7 +816,7 @@ fn is_spar_control_header(line: &str) -> bool {
         .any(|keyword| starts_with_keyword(line, keyword))
 }
 
-fn is_spar_shell_statement_start(line: &str) -> bool {
+pub(crate) fn is_spar_shell_statement_start(line: &str) -> bool {
     const SIMPLE_KEYWORDS: &[&str] = &[
         "var", "const", "return", "break", "continue", "__shell",
     ];
@@ -839,7 +839,7 @@ fn is_spar_shell_statement_start(line: &str) -> bool {
     looks_like_spar_call(line) || looks_like_spar_assignment(line)
 }
 
-fn starts_with_keyword(source: &str, keyword: &str) -> bool {
+pub(crate) fn starts_with_keyword(source: &str, keyword: &str) -> bool {
     source.starts_with(keyword)
         && source[keyword.len()..]
             .chars()

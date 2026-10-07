@@ -52,13 +52,13 @@ pub struct Lexer<'a> {
 /// syntactic terminator is reached.
 #[allow(dead_code)] // kept for callers that only need the normalized text
 fn normalize_shell_body(body: &str) -> String {
-    normalize_shell_body_tracked(body).0
+    normalize_shell_body_tracked(body, false).0
 }
 
 /// Like `normalize_shell_body`, also returning the byte ranges of the
 /// `command ` prefixes it inserted (needed to map a lex error in the
 /// normalized text back onto the original when no tokens exist to show them).
-fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
+fn normalize_shell_body_tracked(body: &str, optional_semicolons: bool) -> (String, Vec<(usize, usize)>) {
     let mut inserted: Vec<(usize, usize)> = Vec::new();
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PendingKind {
@@ -81,17 +81,34 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
     // the finished command.
     let mut pending_comment = String::new();
 
-    for raw_line in body.split_inclusive('\n') {
+    let all_lines: Vec<&str> = body.split_inclusive('\n').collect();
+    // Indent of the first line of the statement or command in progress.
+    let mut pending_first_indent = 0_usize;
+
+    for (line_index, raw_line) in all_lines.iter().copied().enumerate() {
         let (line, had_newline) = raw_line
             .strip_suffix('\n')
             .map_or((raw_line, false), |line| (line, true));
         let trimmed = line.trim_start();
+        // With optional semicolons, a line also ends its statement when the
+        // next code line is not indented deeper than the statement's first line.
+        let next_is_continuation = |first_indent: usize| {
+            next_code_line_indent(&all_lines[line_index + 1..])
+                .is_some_and(|indent| indent > first_indent)
+        };
 
         match pending_kind {
             Some(PendingKind::SparStatement) => {
                 pending.push_str(line);
                 if had_newline {
                     pending.push('\n');
+                }
+                if optional_semicolons
+                    && !spar_statement_complete(&pending)
+                    && spar_statement_ends_at_line_end(&pending)
+                    && !next_is_continuation(pending_first_indent)
+                {
+                    insert_statement_terminator(&mut pending);
                 }
                 if spar_statement_complete(&pending) {
                     output.push_str(&pending);
@@ -114,9 +131,15 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
             }
             Some(PendingKind::NativeCommand) => {
                 let (code, comment) = split_trailing_line_comment(line);
+                let explicit_continuation = trailing_unquoted_backslash(code.trim()).is_some();
                 append_native_command_line(&mut pending, code);
                 hold_comment(&mut pending_comment, comment);
-                if native_command_complete(&pending) {
+                if native_command_complete(&pending)
+                    || (optional_semicolons
+                        && !explicit_continuation
+                        && native_command_ends_at_line_end(&pending)
+                        && !next_is_continuation(pending_first_indent))
+                {
                     output.push_str(&pending_indent);
                     let base = output.len();
                     output.push_str(&prefix_native_command_segments(
@@ -164,10 +187,19 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
             continue;
         }
 
+        pending_first_indent = line.len() - trimmed.len();
+
         if is_spar_shell_statement_start(trimmed) {
             pending.push_str(line);
             if had_newline {
                 pending.push('\n');
+            }
+            if optional_semicolons
+                && !spar_statement_complete(&pending)
+                && spar_statement_ends_at_line_end(&pending)
+                && !next_is_continuation(pending_first_indent)
+            {
+                insert_statement_terminator(&mut pending);
             }
             if spar_statement_complete(&pending) {
                 output.push_str(&pending);
@@ -181,9 +213,15 @@ fn normalize_shell_body_tracked(body: &str) -> (String, Vec<(usize, usize)>) {
         let indent_len = line.len() - trimmed.len();
         pending_indent.push_str(&line[..indent_len]);
         let (code, comment) = split_trailing_line_comment(trimmed);
+        let explicit_continuation = trailing_unquoted_backslash(code.trim()).is_some();
         append_native_command_line(&mut pending, code);
         hold_comment(&mut pending_comment, comment);
-        if native_command_complete(&pending) {
+        if native_command_complete(&pending)
+            || (optional_semicolons
+                && !explicit_continuation
+                && native_command_ends_at_line_end(&pending)
+                && !next_is_continuation(pending_first_indent))
+        {
             output.push_str(&pending_indent);
             let base = output.len();
             output.push_str(&prefix_native_command_segments(
@@ -461,6 +499,91 @@ fn prefix_native_command_segments(
         }
     }
     output
+}
+
+/// Indent width of the first line that holds code (not blank, not a comment).
+fn next_code_line_indent(lines: &[&str]) -> Option<usize> {
+    lines.iter().find_map(|line| {
+        let trimmed = line.trim_start();
+        let is_code = !(trimmed.trim_end().is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('#'));
+        is_code.then(|| line.len() - trimmed.len())
+    })
+}
+
+/// True when the text has an unclosed quote, paren, bracket or brace.
+fn has_open_nesting(source: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    let (mut paren, mut bracket, mut brace) = (0_i32, 0_i32, 0_i32);
+    for ch in source.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = if quote == Some(ch) {
+                None
+            } else if quote.is_none() {
+                Some(ch)
+            } else {
+                quote
+            };
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match ch {
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
+            '{' => brace += 1,
+            '}' => brace -= 1,
+            _ => {}
+        }
+    }
+    quote.is_some() || paren > 0 || bracket > 0 || brace > 0
+}
+
+/// A native command whose text so far could end here: nothing is left open
+/// and it does not end in a pipe or `&&`/`||` that wants a right-hand side.
+fn native_command_ends_at_line_end(source: &str) -> bool {
+    let text = source.trim_end();
+    !has_open_nesting(text)
+        && !(text.ends_with('|') || text.ends_with("&&"))
+}
+
+/// Same for a Spar statement line that lacks its `;`.
+fn spar_statement_ends_at_line_end(source: &str) -> bool {
+    let text = strip_line_comments(source);
+    let text = text.trim_end();
+    !text.is_empty()
+        && !has_open_nesting(text)
+        && !text.ends_with(['+', '-', '*', '/', '%', '=', ',', '.', '<', '&', '|', ':'])
+}
+
+/// Adds the missing `;` to the last line of `statement`, before any
+/// trailing `// comment`.
+fn insert_statement_terminator(statement: &mut String) {
+    let had_newline = statement.ends_with('\n');
+    if had_newline {
+        statement.pop();
+    }
+    let line_start = statement.rfind('\n').map_or(0, |at| at + 1);
+    let (code, _) = split_trailing_line_comment(&statement[line_start..]);
+    let at = line_start + code.len();
+    statement.insert(at, ';');
+    if had_newline {
+        statement.push('\n');
+    }
 }
 
 fn native_command_complete(source: &str) -> bool {
@@ -1809,7 +1932,7 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         let original = &self.source[body_start..body_end];
                         let (normalized, inserted_prefixes) =
-                            normalize_shell_body_tracked(original);
+                            normalize_shell_body_tracked(original, function_body);
                         let (nested, nested_comments) =
                             match Lexer::new(&normalized).tokenize_with_comments() {
                                 Ok(lexed) => lexed,
@@ -3434,5 +3557,31 @@ mod tests {
             panic!("expected a lex error");
         };
         assert_eq!(span.line, 7, "span: {span:?}");
+    }
+}
+
+#[cfg(test)]
+mod optional_semicolon_tests {
+    use super::*;
+
+    #[test]
+    fn error_on_a_line_with_an_inserted_semicolon_points_at_the_users_text() {
+        let source = "function f() -> ShellResult<int, str> {\n    var n: int = 2\n    var m: int = `\n    return ok(value: 0)\n}\n";
+        let error = Lexer::new(source).tokenize().expect_err("must fail");
+        let SparError::LexError { span, .. } = error else {
+            panic!("expected a lex error");
+        };
+        let tick = source.find('`').unwrap();
+        assert_eq!(span.start, tick, "span: {span:?}");
+        assert_eq!(span.line, 3, "span: {span:?}");
+    }
+
+    #[test]
+    fn inserted_semicolon_goes_before_a_trailing_comment() {
+        let body = "\n    return ok(value: 0) // done\n";
+        let (normalized, _) = normalize_shell_body_tracked(body, true);
+        assert_eq!(normalized, "\n    return ok(value: 0); // done\n");
+        let (strict, _) = normalize_shell_body_tracked(body, false);
+        assert_eq!(strict, "\n    return ok(value: 0) // done\n");
     }
 }

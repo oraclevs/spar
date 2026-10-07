@@ -632,3 +632,84 @@ function main() -> ShellResult<int, str> { return stored; };
     // which has no exit code, so the code falls back to 1.
     assert_eq!(exit_of(src), 1);
 }
+
+#[test]
+fn shell_result_body_commands_do_not_need_semicolons() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran.txt");
+    let source = format!(
+        r#"
+        function mark() -> ShellResult<int, str> {{
+            echo one > "{p}"
+            echo two >> "{p}"
+            return ok(value: 0)
+        }};
+        function main() -> int {{ var r: ShellResult<int, str> = mark(); return 0; }};
+    "#,
+        p = marker.display()
+    );
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "one\ntwo\n");
+}
+
+#[test]
+fn shell_result_body_mixes_blocks_and_optional_semicolons() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran.txt");
+    let source = format!(
+        r#"
+        function mark() -> ShellResult<int, str> {{
+            var n: int = 2 // trailing comment
+            if n == 2 {{
+                echo yes > "{p}"
+            }} else {{
+                echo no > "{p}";
+            }}
+            for i in [1, 2] {{
+                echo "${{i}}" >> "{p}"
+            }}
+            var items: List<int> = [
+                1,
+                2
+            ]
+            return ok(value: n)
+        }};
+        function main() -> int {{ var r: ShellResult<int, str> = mark(); return 0; }};
+    "#,
+        p = marker.display()
+    );
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "yes\n1\n2\n");
+}
+
+#[test]
+fn deeper_indented_next_line_still_continues_a_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("ran.txt");
+    let source = format!(
+        r#"
+        function f() -> ShellResult<int, str> {{
+            printf "%s\n"
+                one
+                two > "{p}";
+            return ok(value: 0);
+        }};
+        function main() -> int {{ var r: ShellResult<int, str> = f(); return 0; }};
+    "#,
+        p = marker.display()
+    );
+    assert_eq!(Engine::default().execute_source(&source).unwrap().exit_status, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "one\ntwo\n");
+}
+
+#[test]
+fn plain_function_bodies_still_require_semicolons() {
+    let source = r#"
+        function f() -> int {
+            var n: int = 2
+            return n;
+        };
+        function main() -> int { return f(); };
+    "#;
+    assert!(Engine::default().compile_source(source).is_err());
+}

@@ -29,8 +29,8 @@ fn spar_exec_with_input(source: &str, input: &str) -> std::process::Output {
 fn read_str_binds_value_visible_to_a_later_statement() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 read str name;
                 echo "hi $name";
             };
@@ -46,8 +46,8 @@ fn read_str_binds_value_visible_to_a_later_statement() {
 fn read_int_binds_value_visible_to_a_later_statement() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 read int age;
                 echo "age=$age";
             };
@@ -63,8 +63,8 @@ fn read_int_binds_value_visible_to_a_later_statement() {
 fn read_float_binds_value_visible_to_a_later_statement() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 read float ratio;
                 echo "ratio=$ratio";
             };
@@ -80,8 +80,8 @@ fn read_float_binds_value_visible_to_a_later_statement() {
 fn read_bool_binds_value_visible_to_a_later_statement() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 read bool ok;
                 echo "ok=$ok";
             };
@@ -97,8 +97,8 @@ fn read_bool_binds_value_visible_to_a_later_statement() {
 fn read_wrong_arity_is_a_runtime_error() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell { read name; };
+        function main() -> __shell {
+            return __shell { read name; };
         };
         "#,
         "",
@@ -115,8 +115,8 @@ fn read_wrong_arity_is_a_runtime_error() {
 fn read_unknown_type_token_is_a_runtime_error() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell { read frobnicate name; };
+        function main() -> __shell {
+            return __shell { read frobnicate name; };
         };
         "#,
         "",
@@ -130,8 +130,8 @@ fn read_unknown_type_token_is_a_runtime_error() {
 fn read_int_rejects_non_numeric_input() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell { read int n; };
+        function main() -> __shell {
+            return __shell { read int n; };
         };
         "#,
         "abc\n",
@@ -145,8 +145,8 @@ fn read_int_rejects_non_numeric_input() {
 fn read_float_rejects_non_numeric_input() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell { read float n; };
+        function main() -> __shell {
+            return __shell { read float n; };
         };
         "#,
         "abc\n",
@@ -160,8 +160,8 @@ fn read_float_rejects_non_numeric_input() {
 fn read_bool_rejects_non_bool_input() {
     let output = spar_exec_with_input(
         r#"
-        function main() -> shell {
-            return shell { read bool n; };
+        function main() -> __shell {
+            return __shell { read bool n; };
         };
         "#,
         "yes\n",
@@ -179,7 +179,7 @@ fn cd_inside_exec_shell_expression_still_fails_naturally() {
     let output = spar_exec_with_input(
         r#"
         function main() -> int {
-            exec shell { cd /tmp; };
+            exec __shell { cd /tmp; };
             return 0;
         };
         "#,
@@ -195,8 +195,8 @@ fn read_inside_exec_shell_expression_persists_to_a_later_separate_exec_shell() {
     let source = format!(
         r#"
         function main() -> int {{
-            exec shell {{ read int n; }};
-            exec shell {{ echo "n=$n" > "{}"; }};
+            exec __shell {{ read int n; }};
+            exec __shell {{ echo "n=$n" > "{}"; }};
             return 0;
         }};
         "#,

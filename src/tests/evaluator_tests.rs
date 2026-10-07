@@ -943,7 +943,7 @@ fn eval_original_bug_report_repro_with_dot_syntax() {
 
 #[test]
 fn eval_shell_block_lowers_to_expected_plan() {
-    let result = eval_src("var x: shell = shell { echo hi; };");
+    let result = eval_src("var x: __shell = __shell { echo hi; };");
     let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
         panic!("expected ConfigValue::Shell")
     };
@@ -956,7 +956,7 @@ fn eval_shell_block_lowers_to_expected_plan() {
 
 #[test]
 fn eval_pipeline_and_redirect_lower_correctly() {
-    let result = eval_src("var x: shell = shell { cat input | grep x > out.log; };");
+    let result = eval_src("var x: __shell = __shell { cat input | grep x > out.log; };");
     let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
         panic!("expected ConfigValue::Shell")
     };
@@ -977,9 +977,9 @@ fn eval_pipeline_and_redirect_lower_correctly() {
 fn eval_shell_plus_shell_composes_in_order() {
     let result = eval_src(
         r#"
-        function lint() -> shell { return shell { cargo clippy; }; };
-        function build() -> shell { return shell { cargo build; }; };
-        var x: shell = lint() + build();
+        function lint() -> __shell { return __shell { cargo clippy; }; };
+        function build() -> __shell { return __shell { cargo build; }; };
+        var x: __shell = lint() + build();
         "#,
     );
     let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["x"] else {
@@ -1000,7 +1000,7 @@ fn deferred_shell_interpolation_uses_module_variables() {
     let result = eval_src(
         r#"
         var name: str = "OCC";
-        var plan: shell = shell { echo "Hello ${name}"; };
+        var plan: __shell = __shell { echo "Hello ${name}"; };
         "#,
     );
     let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["plan"] else {
@@ -1017,10 +1017,10 @@ fn deferred_shell_interpolation_uses_module_variables() {
 fn shell_returning_function_interpolates_named_argument() {
     let result = eval_src(
         r#"
-        function greet(name: str) -> shell {
-            return shell { echo "Hello ${name}"; };
+        function greet(name: str) -> __shell {
+            return __shell { echo "Hello ${name}"; };
         };
-        var plan: shell = greet(name: "OCC");
+        var plan: __shell = greet(name: "OCC");
         "#,
     );
     let crate::evaluator::ConfigValue::Shell(plan) = &result.globals["plan"] else {
@@ -1034,7 +1034,7 @@ fn shell_returning_function_interpolates_named_argument() {
 
 #[test]
 fn eval_shell_construction_at_module_scope_is_deferred_data() {
-    eval_src("var x: shell = shell { this-program-does-not-exist-xyz; };");
+    eval_src("var x: __shell = __shell { this-program-does-not-exist-xyz; };");
 }
 
 #[test]

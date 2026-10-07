@@ -818,7 +818,7 @@ fn is_spar_control_header(line: &str) -> bool {
 
 fn is_spar_shell_statement_start(line: &str) -> bool {
     const SIMPLE_KEYWORDS: &[&str] = &[
-        "var", "const", "return", "break", "continue", "shell", "__shell",
+        "var", "const", "return", "break", "continue", "__shell",
     ];
     if SIMPLE_KEYWORDS
         .iter()
@@ -831,7 +831,7 @@ fn is_spar_shell_statement_start(line: &str) -> bool {
     // exec builtin.
     if starts_with_keyword(line, "exec") {
         let rest = line["exec".len()..].trim_start();
-        if rest.starts_with('{') || starts_with_keyword(rest, "shell") {
+        if rest.starts_with('{') || starts_with_keyword(rest, "__shell") {
             return true;
         }
     }
@@ -3229,7 +3229,7 @@ mod tests {
     #[test]
     fn shell_block_tokenizes_bare_words() {
         assert_eq!(
-            lex("shell { echo hello; }"),
+            lex("__shell { echo hello; }"),
             vec![
                 Token::ShellBlockStart,
                 Token::ShellWord("echo".into()),
@@ -3243,14 +3243,14 @@ mod tests {
 
     #[test]
     fn shell_block_keeps_a_quoted_argument_as_one_word() {
-        let tokens = lex(r#"shell { rm "my file.txt"; }"#);
+        let tokens = lex(r#"__shell { rm "my file.txt"; }"#);
         assert_eq!(tokens[2], Token::ShellWord("my file.txt".into()));
     }
 
     #[test]
     fn shell_block_tokenizes_pipeline_and_redirect_operators() {
         assert_eq!(
-            lex("shell { cat input | grep x > out >> log 2> err; }"),
+            lex("__shell { cat input | grep x > out >> log 2> err; }"),
             vec![
                 Token::ShellBlockStart,
                 Token::ShellWord("cat".into()),
@@ -3274,7 +3274,7 @@ mod tests {
     #[test]
     fn shell_background_command_terminates_before_following_spar_statement() {
         let tokens = Lexer::new(
-            r#"shell {
+            r#"__shell {
                 sleep 1 &
                 println(value: "done");
             }"#,
@@ -3292,7 +3292,7 @@ mod tests {
 
     #[test]
     fn shell_background_command_can_be_followed_by_another_native_command() {
-        let tokens = Lexer::new("shell { sleep 1 & echo done; }")
+        let tokens = Lexer::new("__shell { sleep 1 & echo done; }")
             .tokenize()
             .expect("background list separator should lex");
         let words = tokens
@@ -3397,7 +3397,7 @@ mod tests {
 
     #[test]
     fn shell_return_type_does_not_enter_command_mode() {
-        let tokens = lex("function main() -> shell { return shell {}; };");
+        let tokens = lex("function main() -> __shell { return __shell {}; };");
         assert_eq!(tokens[5], Token::TypeShell);
         assert_eq!(tokens[6], Token::LBrace);
         assert!(tokens.contains(&Token::ShellBlockStart));
@@ -3405,7 +3405,7 @@ mod tests {
 
     #[test]
     fn unterminated_shell_block_is_a_lex_error() {
-        let err = Lexer::new("shell { echo hi;")
+        let err = Lexer::new("__shell { echo hi;")
             .tokenize()
             .expect_err("unterminated shell block must fail");
         assert!(
@@ -3417,7 +3417,7 @@ mod tests {
 
     #[test]
     fn bare_brace_inside_shell_block_is_a_lex_error() {
-        let err = Lexer::new("shell { echo {; }")
+        let err = Lexer::new("__shell { echo {; }")
             .tokenize()
             .expect_err("bare command-word braces must fail");
         assert!(

@@ -97,9 +97,9 @@ fn as_args_expands_each_list_element_to_one_exact_argv_entry() {
     let outcome = engine()
         .execute_source(
             r#"
-            fn main() -> shell {
+            fn main() -> __shell {
                 var excludes: List<str> = ["-x", "name with spaces", "*.literal"];
-                return shell {
+                return __shell {
                     sh -c 'test "$#" -eq 3 && test "$1" = "-x" && test "$2" = "name with spaces" && test "$3" = "*.literal"' marker ${excludes.asArgs()};
                 };
             };

@@ -360,14 +360,14 @@ impl Session {
         }
 
         let function_source =
-            format!("fn {function_name}() -> shell {{ return shell {{\n{trimmed};\n}}; }};");
+            format!("fn {function_name}() -> __shell {{ return __shell {{\n{trimmed};\n}}; }};");
         let runtime_source = join_committed_source(&self.committed_source, &function_source);
         let options = CompileOptions {
             evaluate: false,
             ..self.options.clone()
         };
         let (origin, origin_line) = fragment_origin(&self.committed_source);
-        let prefix = format!("fn {function_name}() -> shell {{ return shell {{\n");
+        let prefix = format!("fn {function_name}() -> __shell {{ return __shell {{\n");
         let relocate_body = |errors: Vec<SparError>| {
             relocate_errors(
                 errors,
@@ -576,7 +576,13 @@ impl Session {
             }
         }
         let expression_type = default_unresolved_type_parameters(&expression_type);
-        let return_type = crate::typechecker::display_type(&expression_type);
+        // This text is compiled back as source, where the shell type is only
+        // spellable internally.
+        let return_type = if expression_type == crate::ast::SparType::Shell {
+            "__shell".to_string()
+        } else {
+            crate::typechecker::display_type(&expression_type)
+        };
 
         let mut function_name = "sparshInteractivePreview".to_string();
         let mut suffix = 0_u64;
@@ -810,7 +816,7 @@ impl Session {
             suffix += 1;
             name = format!("sparshInteractiveShellPlan{suffix}");
         }
-        let wrapper_prefix = format!("var {name}: shell = shell {{\n");
+        let wrapper_prefix = format!("var {name}: __shell = __shell {{\n");
         let fragment = format!("{wrapper_prefix}{terminated}\n}};");
         let inserted = 0usize;
         let mut shell_context = runtime_context(cwd, environment);
@@ -1719,7 +1725,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let mut session = Engine::default().session();
         let src = format!(
             r#"function bump() -> int {{
-                var r = exec shell {{ printf x >> {:?}; }};
+                var r = exec __shell {{ printf x >> {:?}; }};
                 return 0;
             }};
             var mut triggered: int = bump();"#,
@@ -1733,7 +1739,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "x",
-            "exec shell must only actually run once, not once per replay"
+            "exec __shell must only actually run once, not once per replay"
         );
     }
 
@@ -1989,7 +1995,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let result = mixed_preview(
             &mut session,
             &format!(
-                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+                "__shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
             ),
         )
         .expect("mixed pipeline without `to` should run");
@@ -2011,7 +2017,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.set_structured_terminal(true);
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> to json; }}"),
+            &format!("__shell {{ {CSV_SOURCE} | from csv |> to json; }}"),
         )
         .unwrap();
 
@@ -2033,8 +2039,8 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let mut terminal = Engine::default().session();
         terminal.set_structured_terminal(true);
         for source in [
-            format!("shell {{ {CSV_SOURCE} | from csv |> to json | cat > /dev/null; }}"),
-            format!("shell {{ {CSV_SOURCE} | from csv |> to json > /dev/null; }}"),
+            format!("__shell {{ {CSV_SOURCE} | from csv |> to json | cat > /dev/null; }}"),
+            format!("__shell {{ {CSV_SOURCE} | from csv |> to json > /dev/null; }}"),
         ] {
             let result = mixed_preview(&mut terminal, &source).unwrap();
             assert!(
@@ -2048,7 +2054,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let result = mixed_preview(
             &mut plain,
             &format!(
-                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+                "__shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
             ),
         );
         // No terminal and no `to`: falls back to JSON Lines bytes.
@@ -2064,7 +2070,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         session.eval(WHERE_IMPORT).unwrap();
         let result = mixed_preview(
             &mut session,
-            &format!("shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20) | cat; }}"),
+            &format!("__shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20) | cat; }}"),
         );
         assert!(result.is_err(), "{result:?}");
     }
@@ -2077,7 +2083,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let result = mixed_preview(
             &mut session,
             &format!(
-                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+                "__shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
             ),
         )
         .expect("`where` should resolve through the prelude");
@@ -2337,7 +2343,7 @@ struct Config { prompt: Prompt = Prompt(); };"#,
         let error = mixed_preview(
             &mut session,
             &format!(
-                "shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
+                "__shell {{ {CSV_SOURCE} | from csv |> where(predicate: |value| value.age > 20); }}"
             ),
         )
         .unwrap_err();

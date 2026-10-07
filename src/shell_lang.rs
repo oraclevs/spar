@@ -1309,7 +1309,7 @@ mod tests {
 
     #[test]
     fn shell_lang_parses_one_command() {
-        let expression = parse_block("shell { echo hello; }");
+        let expression = parse_block("__shell { echo hello; }");
         assert_eq!(expression.steps.len(), 1);
         let (ShellJoin::Always, ShellStep::Command(command)) = &expression.steps[0] else {
             panic!("expected one always-run command")
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn shell_lang_sequences_commands_unconditionally() {
-        let expression = parse_block("shell { a; b; c; }");
+        let expression = parse_block("__shell { a; b; c; }");
         assert_eq!(expression.steps.len(), 3);
         assert!(matches!(expression.steps[0].0, ShellJoin::Always));
         assert!(matches!(expression.steps[1].0, ShellJoin::Always));
@@ -1330,7 +1330,7 @@ mod tests {
 
     #[test]
     fn shell_lang_parses_a_pipeline_as_one_step() {
-        let expression = parse_block("shell { a | b | c; }");
+        let expression = parse_block("__shell { a | b | c; }");
         let ShellStep::Pipeline(commands) = &expression.steps[0].1 else {
             panic!("expected a pipeline")
         };
@@ -1342,9 +1342,9 @@ mod tests {
 
     #[test]
     fn shell_lang_attaches_redirects_with_their_modes() {
-        let truncate = parse_block("shell { cargo test > test.log; }");
-        let append = parse_block("shell { cargo test >> test.log; }");
-        let stderr = parse_block("shell { cargo test 2> errors.log; }");
+        let truncate = parse_block("__shell { cargo test > test.log; }");
+        let append = parse_block("__shell { cargo test >> test.log; }");
+        let stderr = parse_block("__shell { cargo test 2> errors.log; }");
 
         let ShellStep::Command(truncate) = &truncate.steps[0].1 else {
             panic!("expected command")
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn shell_lang_attaches_pipeline_redirect_to_the_last_stage() {
-        let expression = parse_block("shell { a | b > out.log; }");
+        let expression = parse_block("__shell { a | b > out.log; }");
         let ShellStep::Pipeline(commands) = &expression.steps[0].1 else {
             panic!("expected pipeline")
         };
@@ -1389,7 +1389,7 @@ mod tests {
     #[test]
     fn shell_lang_concatenates_assignment_and_quoted_interpolation_into_one_argv() {
         let expression =
-            parse_block(r#"shell { awk -v duration="${duration}" 'BEGIN { print duration }'; }"#);
+            parse_block(r#"__shell { awk -v duration="${duration}" 'BEGIN { print duration }'; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
@@ -1410,7 +1410,7 @@ mod tests {
 
     #[test]
     fn shell_lang_concatenates_mixed_quote_fragments_without_whitespace() {
-        let expression = parse_block(r#"shell { printf pre'literal'"-${name}"post; }"#);
+        let expression = parse_block(r#"__shell { printf pre'literal'"-${name}"post; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
@@ -1430,19 +1430,19 @@ mod tests {
 
     #[test]
     fn shell_lang_preserves_quoted_argument_boundaries_and_empty_plans() {
-        let expression = parse_block(r#"shell { rm "my file.txt"; }"#);
+        let expression = parse_block(r#"__shell { rm "my file.txt"; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
         assert_eq!(command.args.len(), 1);
         assert_eq!(command.args[0].text, "my file.txt");
-        assert!(parse_block("shell {}").steps.is_empty());
+        assert!(parse_block("__shell {}").steps.is_empty());
     }
 
     #[test]
     fn shell_words_decode_escaped_punctuation_space_and_dollar() {
         let expression = parse_block(
-            r#"shell { find /tmp -type f \( -iname '*.jpg' \); echo foo\ bar; echo \$HOME; }"#,
+            r#"__shell { find /tmp -type f \( -iname '*.jpg' \); echo foo\ bar; echo \$HOME; }"#,
         );
         let ShellStep::Command(find) = &expression.steps[0].1 else {
             panic!("expected find");
@@ -1469,7 +1469,7 @@ mod tests {
 
     #[test]
     fn shell_lang_rejects_a_dangling_pipeline() {
-        let tokens = Lexer::new("shell { a |; }").tokenize().expect("lex failed");
+        let tokens = Lexer::new("__shell { a |; }").tokenize().expect("lex failed");
         let err = parse_shell_block(&tokens).expect_err("dangling pipe must fail");
         assert!(err.to_string().contains("pipe"), "got: {err}");
     }
@@ -1498,7 +1498,7 @@ mod tests {
 
     #[test]
     fn shell_word_supports_embedded_command_substitution() {
-        let expression = parse_block(r#"shell { printf "%s" "prefix-$(printf value)-suffix"; }"#);
+        let expression = parse_block(r#"__shell { printf "%s" "prefix-$(printf value)-suffix"; }"#);
         let ShellStep::Command(command) = &expression.steps[0].1 else {
             panic!("expected command")
         };
@@ -1515,7 +1515,7 @@ mod tests {
     #[test]
     fn shell_lang_parses_explicit_mixed_structured_pipeline_boundaries() {
         let expression = parse_block(
-            r#"shell { printf '%s\n' '{"name":"Obi"}' | from jsonl |> take(count: 1) |> to jsonl | cat; }"#,
+            r#"__shell { printf '%s\n' '{"name":"Obi"}' | from jsonl |> take(count: 1) |> to jsonl | cat; }"#,
         );
         assert_eq!(expression.steps.len(), 1);
         let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn shell_lang_parses_scoc_decoder_namespace_and_named_args() {
         let expression =
-            parse_block(r#"shell { printf x | from scoc::ping(raw: true, streaming: false); }"#);
+            parse_block(r#"__shell { printf x | from scoc::ping(raw: true, streaming: false); }"#);
         let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
             panic!("expected mixed structured pipeline")
         };
@@ -1549,7 +1549,7 @@ mod tests {
 
     #[test]
     fn shell_lang_keeps_hyphenated_decoder_names_literal() {
-        let expression = parse_block(r#"shell { printf x | from scoc::ping-s; }"#);
+        let expression = parse_block(r#"__shell { printf x | from scoc::ping-s; }"#);
         let ShellStep::MixedPipeline(pipeline) = &expression.steps[0].1 else {
             panic!("expected mixed structured pipeline")
         };
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn shell_lang_rejects_duplicate_decoder_args() {
-        let tokens = Lexer::new(r#"shell { printf x | from df(raw: true, raw: false); }"#)
+        let tokens = Lexer::new(r#"__shell { printf x | from df(raw: true, raw: false); }"#)
             .tokenize()
             .expect("lex failed");
         let error = parse_shell_block(&tokens).expect_err("duplicate decoder args must fail");
@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn shell_lang_requires_from_before_structured_pipe() {
-        let tokens = Lexer::new("shell { printf x |> take(count: 1) |> to lines; }")
+        let tokens = Lexer::new("__shell { printf x |> take(count: 1) |> to lines; }")
             .tokenize()
             .expect("lex failed");
         let error = parse_shell_block(&tokens).expect_err("bytes must cross through from first");
@@ -1582,7 +1582,7 @@ mod tests {
 
     #[test]
     fn shell_lang_requires_to_before_returning_to_unix_pipe() {
-        let tokens = Lexer::new("shell { printf x | from lines | cat; }")
+        let tokens = Lexer::new("__shell { printf x | from lines | cat; }")
             .tokenize()
             .expect("lex failed");
         let error = parse_shell_block(&tokens).expect_err("values must cross through to first");

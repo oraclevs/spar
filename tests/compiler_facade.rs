@@ -236,7 +236,7 @@ fn selective_import_brings_helpers_from_the_modules_own_imports() {
 #[test]
 fn shell_interpolation_spans_point_at_the_real_source() {
     let source =
-        "function demo(input: str) -> shell { return shell { echo -n \"${input}\"; }; };\n";
+        "function demo(input: str) -> __shell { return __shell { echo -n \"${input}\"; }; };\n";
     let tokens = spar::Lexer::new(source).tokenize().unwrap();
     let program = spar::Parser::new(tokens).parse().unwrap();
     let spar::ast::TopLevelItem::Function(function) = &program.items[0] else {
@@ -596,16 +596,16 @@ fn mixed_structured_pipelines_are_rejected_in_byte_only_shell_surfaces() {
         .check_source(
             r#"
             function main() -> int {
-                exec shell { printf x | from lines |> to lines | cat; };
+                exec __shell { printf x | from lines |> to lines | cat; };
                 return 0;
             };
             "#,
         )
-        .expect_err("exec shell must not erase structured stages");
+        .expect_err("exec __shell must not erase structured stages");
     assert!(
         exec_shell
             .iter()
-            .any(|error| error.to_string().contains("exec shell")
+            .any(|error| error.to_string().contains("exec __shell")
                 && error.to_string().contains("structured mixed pipelines")),
         "{exec_shell:?}"
     );

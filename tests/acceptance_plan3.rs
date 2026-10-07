@@ -59,8 +59,8 @@ const DATA: &str =
 fn canonical_docker_style_pipeline_filters_projects_and_reserializes() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf '%s\n' \
                     '{{"Names":"web","Image":"nginx","Status":"Up","State":"running"}}' \
                     '{{"Names":"db","Image":"pg","Status":"Exited","State":"exited"}}' \
@@ -89,8 +89,8 @@ fn structured_output_can_be_redirected_to_a_file() {
     let path = directory.path().join("out.jsonl");
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf '%s\n' '{{"n":1}}' '{{"n":2}}' '{{"n":3}}'
                     | from jsonl
                     |> take(count: 2)
@@ -114,8 +114,8 @@ fn structured_output_can_be_redirected_to_a_file() {
 fn lines_codec_maps_text_lines() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf 'a\nb\nc\n'
                     | from lines
                     |> map(transform: |value: str| value + "!")
@@ -138,8 +138,8 @@ fn csv_and_tsv_decode_to_records_and_encode_back() {
     ] {
         let run = run_shell(&format!(
             r#"{DATA}
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     printf '{input}'
                         | from {format}
                         |> take(count: 2)
@@ -175,8 +175,8 @@ fn json_yaml_toml_documents_decode_and_encode() {
     ] {
         let run = run_shell(&format!(
             r#"{DATA}
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     printf '{document}'
                         | from {format}
                         |> to {format}
@@ -195,8 +195,8 @@ fn json_yaml_toml_documents_decode_and_encode() {
 fn malformed_input_reports_an_error_instead_of_silently_dropping_rows() {
     let source = format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf '%s\n' '{{"ok":1}}' 'this is not json'
                     | from jsonl
                     |> to jsonl
@@ -228,8 +228,8 @@ fn malformed_input_reports_an_error_instead_of_silently_dropping_rows() {
 fn take_stops_an_infinite_producer() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 yes | from lines |> take(count: 3) |> to lines | cat;
             }};
         }};
@@ -243,8 +243,8 @@ fn take_stops_an_infinite_producer() {
 fn a_downstream_that_stops_early_does_not_hang_the_producer() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 yes | from lines |> to lines | head -n 2;
             }};
         }};
@@ -257,8 +257,8 @@ fn a_downstream_that_stops_early_does_not_hang_the_producer() {
 fn transforms_are_lazy_so_map_over_infinite_input_is_fine_with_take() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 yes abc
                     | from lines
                     |> map(transform: |value: str| value + value)
@@ -278,8 +278,8 @@ fn transforms_are_lazy_so_map_over_infinite_input_is_fine_with_take() {
 fn upstream_stderr_stays_on_stderr() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 sh -c 'printf "diagnostic\n" >&2; printf "%s\n" "{{\"a\":1}}"'
                     | from jsonl
                     |> to jsonl
@@ -297,8 +297,8 @@ fn upstream_stderr_stays_on_stderr() {
 fn a_failing_upstream_command_fails_the_pipeline() {
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 sh -c 'printf "%s\n" "{{\"a\":1}}"; exit 3'
                     | from jsonl
                     |> to jsonl
@@ -323,8 +323,8 @@ fn plain_unix_pipes_stay_byte_pipes() {
     let path = directory.path().join("sorted.txt");
     let run = run_shell(&format!(
         r#"
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf 'b\na\nc\n' | sort | head -n 2 > "{}";
             }};
         }};
@@ -339,8 +339,8 @@ fn plain_unix_pipes_stay_byte_pipes() {
 fn structured_stage_directly_after_bytes_without_from_is_rejected() {
     let message = compile_error(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf 'x' |> take(count: 1) | cat;
             }};
         }};
@@ -353,8 +353,8 @@ fn structured_stage_directly_after_bytes_without_from_is_rejected() {
 fn structured_values_are_not_implicitly_serialized_into_unix_commands() {
     let message = compile_error(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf '%s\n' '{{"a":1}}' | from jsonl |> take(count: 1) | cat;
             }};
         }};
@@ -407,8 +407,8 @@ fn to_can_redirect_straight_to_a_file_for_every_format() {
         let path = directory.path().join(format!("out.{format}"));
         let run = run_shell(&format!(
             r#"{DATA}
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     printf '{input}' | from {format} |> to {format} > "{}";
                 }};
             }};
@@ -428,8 +428,8 @@ fn to_append_redirect_adds_to_an_existing_file() {
     std::fs::write(&path, "{\"first\":true}\n").unwrap();
     let run = run_shell(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf '%s\n' '{{"second":true}}' | from jsonl |> to jsonl >> "{}";
             }};
         }};
@@ -447,8 +447,8 @@ fn to_append_redirect_adds_to_an_existing_file() {
 fn to_cannot_both_redirect_and_pipe() {
     let message = compile_error(&format!(
         r#"{DATA}
-        function main() -> shell {{
-            return shell {{
+        function main() -> __shell {{
+            return __shell {{
                 printf 'a\n' | from lines |> to lines > "out.txt" | cat;
             }};
         }};
@@ -470,13 +470,13 @@ fn exec_shell_interpolates_arguments_and_redirect_targets() {
                 var dir: str = "{base}";
                 var name: str = "made";
                 var word: str = "interpolated";
-                exec shell {{ echo "value ${{word}}" > "${{dir}}/${{name}}.txt"; }};
-                exec shell {{ echo again >> ${{dir}}/${{name}}.txt; }};
+                exec __shell {{ echo "value ${{word}}" > "${{dir}}/${{name}}.txt"; }};
+                exec __shell {{ echo again >> ${{dir}}/${{name}}.txt; }};
                 return 0;
             }};
             "#
         ))
-        .expect("exec shell should run");
+        .expect("exec __shell should run");
     assert_eq!(outcome.exit_status, 0);
     assert_eq!(
         std::fs::read_to_string(directory.path().join("made.txt")).unwrap(),

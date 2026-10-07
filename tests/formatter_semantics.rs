@@ -25,7 +25,7 @@ fn canonical_function_keyword_is_fn() {
 #[test]
 fn shell_literal_dollar_does_not_turn_into_environment_interpolation() {
     let formatted = assert_reparse_and_idempotent(
-        "fn main() -> shell { return shell { printf '%s\\n' '$HOME'; }; };\n",
+        "fn main() -> __shell { return __shell { printf '%s\\n' '$HOME'; }; };\n",
     );
     assert!(
         formatted.contains("'$HOME'") || formatted.contains("'\u{24}HOME'"),
@@ -36,7 +36,7 @@ fn shell_literal_dollar_does_not_turn_into_environment_interpolation() {
 #[test]
 fn shell_word_preserves_literal_and_expression_parts() {
     let formatted = assert_reparse_and_idempotent(
-        "fn main() -> shell { var name: str = \"spar\"; return shell { printf '%s\\n' 'literal-$HOME-'${name}; }; };\n",
+        "fn main() -> __shell { var name: str = \"spar\"; return __shell { printf '%s\\n' 'literal-$HOME-'${name}; }; };\n",
     );
     assert!(formatted.contains("${name}"), "expression interpolation lost: {formatted}");
     assert!(formatted.contains("$HOME"), "literal fragment lost: {formatted}");
@@ -45,7 +45,7 @@ fn shell_word_preserves_literal_and_expression_parts() {
 #[test]
 fn shell_args_interpolation_remains_a_whole_word() {
     let formatted = assert_reparse_and_idempotent(
-        "fn main() -> shell { var args: List<str> = [\"one\", \"two\"]; return shell { printf '%s\\n' ${args.asArgs()}; }; };\n",
+        "fn main() -> __shell { var args: List<str> = [\"one\", \"two\"]; return __shell { printf '%s\\n' ${args.asArgs()}; }; };\n",
     );
     assert!(formatted.contains("${args.asArgs()}"), "Args interpolation changed: {formatted}");
 }
@@ -53,7 +53,7 @@ fn shell_args_interpolation_remains_a_whole_word() {
 #[test]
 fn shell_command_substitution_and_redirects_reparse() {
     let formatted = assert_reparse_and_idempotent(
-        "fn main() -> shell { return shell { printf '%s\\n' pre$(printf mid)post > 'out file'; }; };\n",
+        "fn main() -> __shell { return __shell { printf '%s\\n' pre$(printf mid)post > 'out file'; }; };\n",
     );
     assert!(formatted.contains("$(printf"), "command substitution lost: {formatted}");
     assert!(formatted.contains(">"), "redirect lost: {formatted}");

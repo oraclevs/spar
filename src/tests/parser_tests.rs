@@ -383,7 +383,7 @@ fn parse_unary_not() {
 
 #[test]
 fn parse_shell_block_expression() {
-    let program = parse_ok("var x: shell = shell { echo hi; };");
+    let program = parse_ok("var x: __shell = __shell { echo hi; };");
     let crate::ast::TopLevelItem::Var(declaration) = &program.items[0] else {
         panic!("expected variable declaration")
     };
@@ -396,7 +396,7 @@ fn parse_shell_block_expression() {
 #[test]
 fn parse_exec_shell_expression() {
     let program =
-        parse_ok("function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };");
+        parse_ok("function f() -> int { var r: ExecResult = exec __shell { true; }; return 0; };");
     let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
         panic!("expected function")
     };
@@ -409,7 +409,7 @@ fn parse_exec_shell_expression() {
 #[test]
 fn parse_local_var_can_infer_exec_shell_result_type() {
     let program = parse_ok(
-        "function run() -> int { var result = exec shell { true; }; return result.exitCode; };",
+        "function run() -> int { var result = exec __shell { true; }; return result.exitCode; };",
     );
     let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
         panic!("expected function");
@@ -431,7 +431,7 @@ fn parse_bare_exec_without_shell_is_an_error() {
 
 #[test]
 fn parse_main_returning_shell() {
-    let program = parse_ok("function main() -> shell { return shell { echo hi; }; };");
+    let program = parse_ok("function main() -> __shell { return __shell { echo hi; }; };");
     let crate::ast::TopLevelItem::Function(function) = &program.items[0] else {
         panic!("expected function")
     };
@@ -1343,8 +1343,8 @@ fn native_shell_words_are_contextual_names_outside_construct_position() {
 fn exec_and_shell_construct_forms_remain_reserved_in_construct_position() {
     let program = parse_ok(
         r#"
-        var two: shell = shell { echo two; };
-        function run() -> shell { return exec { echo three; }; };
+        var two: __shell = __shell { echo two; };
+        function run() -> __shell { return exec { echo three; }; };
         "#,
     );
     assert_eq!(program.items.len(), 2);
@@ -1566,4 +1566,27 @@ fn command_is_an_ordinary_call_name_and_struct_field() {
         var out: str = command(name: "x");
         "#,
     );
+}
+
+#[test]
+fn user_source_cannot_spell_the_shell_type() {
+    for src in [
+        "function main() -> shell { return 0; };",
+        "var x: shell = 1;",
+        "var p: int = shell { echo hi; };",
+    ] {
+        let err = crate::parser::Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
+            .parse()
+            .unwrap_err();
+        let text = format!("{err:?}");
+        assert!(text.contains("ShellResult"), "{src}: {text}");
+    }
+}
+
+#[test]
+fn internal_spelling_still_parses() {
+    let src = "function main() -> int { var p: __shell = __shell { echo hi; }; return 0; };";
+    assert!(crate::parser::Parser::new(crate::lexer::Lexer::new(src).tokenize().unwrap())
+        .parse()
+        .is_ok());
 }

@@ -53,7 +53,7 @@ fn async_main_preserves_void_and_shell_result_mapping() {
     assert_eq!(void_outcome.exit_status, 0);
 
     let shell_outcome = Engine::default()
-        .execute_source("async function main() -> shell { return shell { false; }; };")
+        .execute_source("async function main() -> __shell { return __shell { false; }; };")
         .expect("async shell main should execute");
     assert_ne!(shell_outcome.exit_status, 0);
 }

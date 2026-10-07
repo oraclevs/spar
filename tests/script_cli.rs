@@ -161,9 +161,9 @@ fn fmt_then_exec_preserves_native_shell_loops_and_local_mutation() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("loop.spar"),
-        r#"function main() -> shell {
+        r#"function main() -> __shell {
     var files: [str] = ["one", "two"];
-    return shell {
+    return __shell {
         var mut count: int = 0;
         for file in files {
             echo "${file}";

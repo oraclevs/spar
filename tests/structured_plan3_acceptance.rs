@@ -14,8 +14,8 @@ fn plan3_acceptance_mixes_process_bytes_structured_values_and_back_to_bytes() {
                 return rows |> take(count: 1);
             };
 
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     sh -c 'printf "diagnostic\n" >&2; printf "%s\n" "{\"name\":\"Obi\"}" "{\"name\":\"Ada\"}"'
                         | from jsonl
                         |> firstOnly()

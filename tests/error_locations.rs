@@ -224,7 +224,7 @@ fn a_returned_shell_plan_is_reported_at_its_own_line() {
     let dir = project("twoplans");
     fs::write(
         dir.join("main.spar"),
-        "fn main() -> shell {\n    var p: shell = shell { definitely_missing_zz; };\n    var q: shell = shell {\n\n\n        true;\n    };\n    return p;\n};\n",
+        "fn main() -> __shell {\n    var p: __shell = __shell { definitely_missing_zz; };\n    var q: __shell = __shell {\n\n\n        true;\n    };\n    return p;\n};\n",
     )
     .unwrap();
     let output = spar().current_dir(&dir).args(["exec", "main.spar"]).output().unwrap();

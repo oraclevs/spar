@@ -259,12 +259,12 @@ fn nested_applied_generic_fields_are_instantiated_recursively() {
 
 #[test]
 fn shell_block_has_shell_type() {
-    check_ok("var x: shell = shell { echo hi; };");
+    check_ok("var x: __shell = __shell { echo hi; };");
 }
 
 #[test]
 fn shell_type_mismatch_errors() {
-    let errors = check_err("var x: int = shell { echo hi; };");
+    let errors = check_err("var x: int = __shell { echo hi; };");
     assert!(errors.contains("type mismatch"), "got: {errors}");
 }
 
@@ -274,7 +274,7 @@ fn exec_shell_has_exec_result_type() {
         r#"
         struct ExecResult{ success: bool; exitCode: int; };
         function f() -> bool {
-            var r = exec shell { true; };
+            var r = exec __shell { true; };
             return r.success;
         };
         "#,
@@ -285,16 +285,16 @@ fn exec_shell_has_exec_result_type() {
 fn shell_plus_shell_is_legal() {
     check_ok(
         r#"
-        function a() -> shell { return shell { true; }; };
-        function b() -> shell { return shell { true; }; };
-        var x: shell = a() + b();
+        function a() -> __shell { return __shell { true; }; };
+        function b() -> __shell { return __shell { true; }; };
+        var x: __shell = a() + b();
         "#,
     );
 }
 
 #[test]
 fn shell_plus_int_is_a_clear_error() {
-    let errors = check_err("var x: shell = shell { true; } + 1;");
+    let errors = check_err("var x: __shell = __shell { true; } + 1;");
     assert!(errors.to_lowercase().contains("shell"), "got: {errors}");
 }
 
@@ -313,8 +313,8 @@ fn shell_block_statement_with_unknown_method_call_is_a_clear_type_error() {
         impl Widget {
             fn label(self) -> str { return self.name; };
         };
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 var w: Widget = Widget(name: "gauge");
                 var text: str = w.missingMethod();
             };
@@ -338,8 +338,8 @@ fn shell_block_statement_with_valid_method_call_still_checks_ok() {
         impl Widget {
             fn label(self) -> str { return self.name; };
         };
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 var w: Widget = Widget(name: "gauge");
                 var text: str = w.label();
                 echo ${text};
@@ -361,8 +361,8 @@ fn shell_block_statement_with_valid_method_call_still_checks_ok() {
 fn shell_block_bare_early_return_inside_if_does_not_false_positive() {
     check_ok(
         r#"
-        function main() -> shell {
-            return shell {
+        function main() -> __shell {
+            return __shell {
                 var x: int = 1;
                 if x == 1 {
                     return;

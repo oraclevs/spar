@@ -87,10 +87,10 @@ fn execute_never_invokes_an_imported_modules_main() {
 #[test]
 fn shell_main_maps_the_plan_status() {
     let success = Engine::default()
-        .execute_source("function main() -> shell { return shell { true; }; };")
+        .execute_source("function main() -> __shell { return __shell { true; }; };")
         .unwrap();
     let failure = Engine::default()
-        .execute_source("function main() -> shell { return shell { false; }; };")
+        .execute_source("function main() -> __shell { return __shell { false; }; };")
         .unwrap();
 
     assert_eq!(success.exit_status, 0);
@@ -165,8 +165,8 @@ fn unix_shell_pipe_keeps_existing_process_semantics() {
     let outcome = Engine::default()
         .execute_source(
             r#"
-            function main() -> shell {
-                return shell { printf spar | cat; };
+            function main() -> __shell {
+                return __shell { printf spar | cat; };
             };
             "#,
         )

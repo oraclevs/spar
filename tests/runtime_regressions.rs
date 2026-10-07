@@ -333,8 +333,8 @@ fn shell_status_signal_is_a_real_option_not_a_bare_int_or_missing_field() {
     let outcome = Engine::new(CompileOptions::default())
         .execute_source(
             r#"
-            fn main() -> shell {
-                return shell {
+            fn main() -> __shell {
+                return __shell {
                     true;
                     if status.signal.isSome() { exit 1; }
                     true | sh -c "kill -TERM $$";

@@ -15,7 +15,7 @@ pub fn parse_shell_plan(source: &str) -> Result<spar_command::ShellPlan, SparErr
 }
 
 fn parse_shell_plan_exact(source: &str) -> Result<spar_command::ShellPlan, SparError> {
-    let wrapped = format!("shell {{ {source} }}");
+    let wrapped = format!("__shell {{ {source} }}");
     let tokens = Lexer::new(&wrapped).tokenize()?;
     let (expression, consumed) = crate::shell_lang::parse_shell_block(&tokens)?;
     debug_assert!(matches!(

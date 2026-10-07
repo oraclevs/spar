@@ -841,7 +841,7 @@ fn format_type(ty: &SparType) -> String {
         SparType::Bool => "bool".to_string(),
         SparType::InlineRecord => "Record".to_string(),
         SparType::Void => "void".to_string(),
-        SparType::Shell => "shell".to_string(),
+        SparType::Shell => "__shell".to_string(),
         SparType::Error => "error".to_string(),
         SparType::List(inner) => format!("List<{}>", format_type(inner)),
         SparType::Tuple(items) => format!(
@@ -1599,7 +1599,7 @@ fn format_shell_expr(
         out.push_str("exec ");
     }
     if let Some(foreign_shell) = &shell.foreign_shell {
-        out.push_str("shell ");
+        out.push_str("__shell ");
         out.push_str(foreign_shell);
         out.push_str(" {");
         if let Some((_, ShellStep::Command(command))) = shell.steps.first() {
@@ -1618,7 +1618,7 @@ fn format_shell_expr(
         return;
     }
     if !execute {
-        out.push_str("shell ");
+        out.push_str("__shell ");
     }
     format_native_run_body(shell, depth, config, out);
 }
@@ -2531,27 +2531,27 @@ mod tests {
 
     #[test]
     fn format_shell_block() {
-        let source = "var x: shell = shell {\n    echo hi;\n};\n";
+        let source = "var x: __shell = __shell {\n    echo hi;\n};\n";
         assert_eq!(fmt(source).trim(), source.trim());
     }
 
     #[test]
     fn format_foreign_bash_block_preserves_explicit_boundary() {
-        let source = r#"function main() -> shell {
-    return shell bash {
+        let source = r#"function main() -> __shell {
+    return __shell bash {
         printf "%s" "$HOME"
     };
 };
 "#;
         let formatted = fmt(source);
-        assert!(formatted.contains("shell bash {"), "{formatted}");
+        assert!(formatted.contains("__shell bash {"), "{formatted}");
         assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]
     fn format_background_and_ordered_redirections_is_idempotent() {
-        let source = r#"function main() -> shell {
-    return shell {
+        let source = r#"function main() -> __shell {
+    return __shell {
         tool 2>&1 > out &;
         tool &>> log;
     };
@@ -2564,8 +2564,8 @@ mod tests {
 
     #[test]
     fn stderr_redirection_is_not_duplicated_by_formatting() {
-        let source = r#"function main() -> shell {
-    return shell {
+        let source = r#"function main() -> __shell {
+    return __shell {
         tool 2> errors.log;
     };
 };
@@ -2589,9 +2589,9 @@ mod tests {
 
     #[test]
     fn format_mixed_shell_loop_preserves_native_command_syntax() {
-        let source = r#"function main() -> shell {
+        let source = r#"function main() -> __shell {
     var files: [str] = ["one", "two"];
-    return shell {
+    return __shell {
         var mut count: int = 0;
         for file in files {
             for other in files {
@@ -2610,7 +2610,7 @@ mod tests {
         // special/whitespace bytes format_shell_literal_fragment quotes
         // for), so the canonical form is bare, not double-quoted.
         assert!(formatted.contains("                echo ${file}:${other};"));
-        assert!(!formatted.contains("            shell {"));
+        assert!(!formatted.contains("            __shell {"));
     }
 
     #[test]
@@ -2619,8 +2619,8 @@ mod tests {
         // no interpolation — double quotes are reserved for words that
         // actually use `${...}` (see format_shell_literal_fragment).
         let source =
-            "var x: shell = shell {\n    cat \"my file.txt\" | grep error > test.log;\n};\n";
-        let expected = "var x: shell = shell {\n    cat 'my file.txt' | grep error > test.log;\n};";
+            "var x: __shell = __shell {\n    cat \"my file.txt\" | grep error > test.log;\n};\n";
+        let expected = "var x: __shell = __shell {\n    cat 'my file.txt' | grep error > test.log;\n};";
         let formatted = fmt(source);
         assert_eq!(formatted.trim(), expected);
         assert_eq!(fmt(&formatted), formatted);
@@ -2628,7 +2628,7 @@ mod tests {
 
     #[test]
     fn format_exec_shell() {
-        let source = "function f() -> int {\n    var r: ExecResult = exec shell {\n        true;\n    };\n    return 0;\n};\n";
+        let source = "function f() -> int {\n    var r: ExecResult = exec __shell {\n        true;\n    };\n    return 0;\n};\n";
         let expected = "fn f() -> int {\n    var r: ExecResult = exec {\n        true;\n    };\n    return 0;\n};\n";
         assert_eq!(fmt(source).trim(), expected.trim());
         assert_eq!(fmt(expected), expected);
@@ -2646,7 +2646,7 @@ mod tests {
 
     #[test]
     fn format_inferred_exec_shell_local_preserves_omitted_type() {
-        let src = "function f() -> int {\n    var r = exec shell {\n        true;\n    };\n    return r.exitCode;\n};\n";
+        let src = "function f() -> int {\n    var r = exec __shell {\n        true;\n    };\n    return r.exitCode;\n};\n";
         let expected = "fn f() -> int {\n    var r = exec {\n        true;\n    };\n    return r.exitCode;\n};\n";
         assert_eq!(fmt(src).trim(), expected.trim());
     }
@@ -2702,7 +2702,7 @@ mod tests {
         let src = "function f() -> int {\n    ~ echo hi | cat;\n    return 0;\n};\n";
         let formatted = fmt(src);
         assert!(formatted.contains("    ~ echo hi | cat;\n"), "{formatted}");
-        assert!(!formatted.contains("shell {"), "{formatted}");
+        assert!(!formatted.contains("__shell {"), "{formatted}");
         assert_eq!(fmt(&formatted), formatted);
     }
 
@@ -2712,7 +2712,7 @@ mod tests {
             let src = format!("function f() -> int {{\n    {stmt}\n    return 0;\n}};\n");
             let formatted = fmt(&src);
             assert!(formatted.contains(&format!("    {stmt}\n")), "{stmt}: {formatted}");
-            assert!(!formatted.contains("shell {"), "{stmt}: {formatted}");
+            assert!(!formatted.contains("__shell {"), "{stmt}: {formatted}");
             assert_eq!(fmt(&formatted), formatted, "{stmt}");
         }
     }
@@ -2722,15 +2722,15 @@ mod tests {
         let src = "fn profile() -> ShellResult<str, str> {\n echo hello;\n return ok(value: \"OCC\");\n};\n";
         let formatted = fmt(src);
         assert!(formatted.contains("echo hello;"), "{formatted}");
-        assert!(!formatted.contains("shell {"), "{formatted}");
+        assert!(!formatted.contains("__shell {"), "{formatted}");
         assert_eq!(fmt(&formatted), formatted);
     }
 
     #[test]
     fn shell_environment_prefix_is_never_dropped() {
         let src = concat!(
-            "function main() -> shell {\n",
-            "    return shell {\n",
+            "function main() -> __shell {\n",
+            "    return __shell {\n",
             "        RUST_LOG=debug cargo run;\n",
             "    };\n",
             "};\n",
@@ -3366,8 +3366,8 @@ struct Config {
     completion: SparshCompletion = { enabled: true; };
 };
 
-function startup() -> shell {
-    return shell {
+function startup() -> __shell {
+    return __shell {
         nitch;
     };
 };
@@ -3444,8 +3444,8 @@ struct Config"#
         );
         assert!(
             formatted.contains(
-                r#"fn startup() -> shell {
-    return shell {
+                r#"fn startup() -> __shell {
+    return __shell {
         nitch;
     };
 };"#
@@ -3922,7 +3922,7 @@ struct Config"#
     #[test]
     fn comments_stay_inside_shell_values() {
         assert_comments_stay_put(
-            "fn g() -> shell {\n    return shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
+            "fn g() -> __shell {\n    return __shell {\n        // head\n        var n: str = \"a\"; // t1\n        echo hi;\n        // tail\n    };\n};\n",
         );
     }
 
@@ -3965,8 +3965,8 @@ struct Config"#
     #[test]
     fn mixed_shell_pipeline_formatting_preserves_explicit_bridges() {
         let source = concat!(
-            "function main() -> shell {\n",
-            "    return shell {\n",
+            "function main() -> __shell {\n",
+            "    return __shell {\n",
             "        printf '%s\\n' '{\"name\":\"Obi\"}' | from jsonl |> take(count: 1) |> to jsonl | cat;\n",
             "    };\n",
             "};\n",
@@ -3982,9 +3982,9 @@ struct Config"#
     #[test]
     fn mixed_shell_decoder_options_and_namespace_round_trip() {
         let source = concat!(
-            "function main() -> shell {\n",
+            "function main() -> __shell {\n",
             "    var useRaw: bool = true;\n",
-            "    return shell {\n",
+            "    return __shell {\n",
             "        printf x | from scoc::ping-s(raw: useRaw, err: choose(v: \"a,b\"));\n",
             "    };\n",
             "};\n",

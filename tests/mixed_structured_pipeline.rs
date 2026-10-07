@@ -14,8 +14,8 @@ fn mixed_pipeline_crosses_bytes_values_and_bytes_without_a_foreign_shell() {
                 return rows |> take(count: 1);
             };
 
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     printf '%s\n' '{"name":"Obi"}' '{"name":"Ada"}'
                         | from jsonl
                         |> firstOnly()
@@ -48,8 +48,8 @@ fn mixed_pipeline_keeps_stderr_out_of_structured_decoder_input() {
     let program = engine
         .compile_source(
             r#"
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     sh -c 'printf "%s\n" "{\"id\":1}"; printf "diagnostic\n" >&2'
                         | from jsonl
                         |> to jsonl
@@ -81,8 +81,8 @@ fn mixed_pipeline_scoc_env_decodes_command_output() {
     let program = engine
         .compile_source(
             r#"
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     printf '%s\n' 'USER=obi' 'SHELL=/bin/sparsh'
                         | from env
                         |> to jsonl
@@ -117,8 +117,8 @@ fn mixed_pipeline_scoc_env_raw_option_preserves_object_shape() {
     let program = engine
         .compile_source(
             r#"
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     printf '%s\n' 'USER=obi' 'SHELL=/bin/sparsh'
                         | from env(raw: true)
                         |> to json
@@ -152,8 +152,8 @@ fn mixed_pipeline_scoc_ping_auto_streams_live_output() {
             r#"
             import pkg { take } from "std/data";
 
-            function main() -> shell {
-                return shell {
+            function main() -> __shell {
+                return __shell {
                     printf '%s\n' \
                         'PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.' \
                         '64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=10.0 ms' \

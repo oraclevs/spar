@@ -449,12 +449,12 @@ mod tests {
             .execute_source(
                 r#"
                 function main() -> int {
-                    var r = exec shell { true; };
+                    var r = exec __shell { true; };
                     return r.exitCode;
                 };
                 "#,
             )
-            .expect("exec shell should succeed");
+            .expect("exec __shell should succeed");
         assert_eq!(outcome.exit_status, 0);
     }
 
@@ -464,7 +464,7 @@ mod tests {
             .execute_source(
                 r#"
                 function main() -> int {
-                    var r = exec shell { false; };
+                    var r = exec __shell { false; };
                     if r.success { return 1; }
                     return 0;
                 };
@@ -480,8 +480,8 @@ mod tests {
         let marker = temp.path().join("created-after-failure");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{ false; printf x > "{}"; }};
+            function main() -> __shell {{
+                return __shell {{ false; printf x > "{}"; }};
             }};
             "#,
             marker.display()
@@ -496,10 +496,10 @@ mod tests {
     #[test]
     fn main_returning_shell_executes_and_maps_its_status() {
         let success = Engine::default()
-            .execute_source("function main() -> shell { return shell { true; }; };")
+            .execute_source("function main() -> __shell { return __shell { true; }; };")
             .expect("shell main should execute");
         let failure = Engine::default()
-            .execute_source("function main() -> shell { return shell { false; }; };")
+            .execute_source("function main() -> __shell { return __shell { false; }; };")
             .expect("child failure should map to an outcome");
         assert_eq!(success.exit_status, 0);
         assert_ne!(failure.exit_status, 0);
@@ -511,16 +511,16 @@ mod tests {
         let marker = temp.path().join("loop-output");
         let source = format!(
             r#"
-            function writeTwice(items: [str]) -> shell {{
-                return shell {{
+            function writeTwice(items: [str]) -> __shell {{
+                return __shell {{
                     for item in items {{
                         printf x >> "{}";
                     }}
                 }};
             }};
 
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     writeTwice(items: ["a", "b"]);
                 }};
             }};
@@ -541,8 +541,8 @@ mod tests {
         let marker = temp.path().join("nested-loop-output");
         let source = format!(
             r#"
-            function writeGrid(items: [str]) -> shell {{
-                return shell {{
+            function writeGrid(items: [str]) -> __shell {{
+                return __shell {{
                     var mut count: int = 0;
                     for outer in items {{
                         for inner in items {{
@@ -554,8 +554,8 @@ mod tests {
                 }};
             }};
 
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     writeGrid(items: ["a", "b"]);
                 }};
             }};
@@ -580,9 +580,9 @@ mod tests {
         let marker = temp.path().join("captured");
         let source = format!(
             r#"
-            function main() -> shell {{
+            function main() -> __shell {{
                 var mut name: str = "Obi Charles";
-                var plan: shell = shell {{
+                var plan: __shell = __shell {{
                     printf "%s" "${{name}}" > "{}";
                 }};
                 name = "changed";
@@ -603,8 +603,8 @@ mod tests {
         let marker = temp.path().join("count");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     var mut count: int = 0;
                     for item in ["a", "b"] {{
                         count += 1;
@@ -625,8 +625,8 @@ mod tests {
         let marker = temp.path().join("branch");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     var branch: str = $(printf "main\n\n");
                     if branch == "main" {{
                         printf yes > "{}";
@@ -646,8 +646,8 @@ mod tests {
         let marker = temp.path().join("status");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     false;
                     if !status.success {{
                         printf "%s" "${{status.code}}" > "{}";
@@ -666,8 +666,8 @@ mod tests {
         let outcome = Engine::default()
             .execute_source(
                 r#"
-                function main() -> shell {
-                    return shell {
+                function main() -> __shell {
+                    return __shell {
                         true | sh -c "kill -TERM $$";
                         if status.code == 143 && !status.success && status.signal.isSome() && status.signal.unwrap() == 15 && status.pid > 0 && status.pipeline[0].success && !status.pipeline[1].success {
                             exit 0;
@@ -687,8 +687,8 @@ mod tests {
         let marker = temp.path().join("bash");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell bash {{
+            function main() -> __shell {{
+                return __shell bash {{
                     value=foreign
                     printf "%s" "$value" > "{}"
                 }};
@@ -741,8 +741,8 @@ mod tests {
         let pid_file = temp.path().join("pid");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     sh -c "sleep 0.02; printf done > '{}'" &;
                     printf "%s:%s" "$!" "${{lastJob.pid}}" > "{}";
                 }};
@@ -767,8 +767,8 @@ mod tests {
         let pid_file = temp.path().join("pid");
         let source = format!(
             r#"
-            function helper() -> shell {{
-                return shell {{
+            function helper() -> __shell {{
+                return __shell {{
                     sh -c "sleep 0.02; printf done > '{}'" &;
                     printf "%s:%s" "$!" "${{lastJob.pid}}" > "{}";
                 }};
@@ -808,8 +808,8 @@ mod tests {
         let both = temp.path().join("both");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     sh -c "printf out; printf err >&2" 3> "{}" 2>&3 > "{}";
                     sh -c "printf a; printf b >&2" &> "{}";
                     sh -c "printf c; printf d >&2" &>> "{}";
@@ -836,8 +836,8 @@ mod tests {
         let marker = temp.path().join("substitution");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     var exists: str = $(test -f "{}" && echo true || echo false);
                     var lines: str = $(printf "one\ntwo\n" | wc -l);
                     printf "%s:%s" "${{exists}}" "${{lines}}" > "{}";
@@ -855,7 +855,7 @@ mod tests {
     fn command_substitution_nonzero_is_user_eval_error_not_internal_runtime_error() {
         let errors = Engine::default()
             .execute_source(
-                "function main() -> shell {\n    return shell {\n        var value: str = $(false);\n        echo \"${value}\";\n    };\n};\n",
+                "function main() -> __shell {\n    return __shell {\n        var value: str = $(false);\n        echo \"${value}\";\n    };\n};\n",
             )
             .unwrap_err();
         let rendered = errors
@@ -875,8 +875,8 @@ mod tests {
         let marker = temp.path().join("inline-substitution");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     printf "[%s]" prefix-$(printf "a b")-suffix > "{}";
                 }};
             }};
@@ -897,14 +897,14 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         let source = format!(
             r#"
-            function enter(path: str) -> shell {{
-                return shell {{
+            function enter(path: str) -> __shell {{
+                return __shell {{
                     cd "${{path}}";
                 }};
             }};
 
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     enter(
                         path: "{}"
                     );
@@ -930,8 +930,8 @@ mod tests {
         let marker = temp.path().join("stress.txt");
         let source = format!(
             r#"
-            function writeSummary(path: str, files: List<str>) -> shell {{
-                return shell {{
+            function writeSummary(path: str, files: List<str>) -> __shell {{
+                return __shell {{
                     var mut count: int = 0;
                     for file in files {{
                         printf "%s\\n" \
@@ -943,8 +943,8 @@ mod tests {
                 }};
             }};
 
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     var files: List<str> = [
                         "Cargo.toml",
                         "Cargo.lock",
@@ -970,7 +970,7 @@ mod tests {
     fn pure_returned_shell_runtime_error_keeps_a_real_source_span() {
         let errors = Engine::default()
             .execute_source(
-                "function main() -> shell {\n    return shell { definitely-not-a-real-command-xyz; };\n};\n",
+                "function main() -> __shell {\n    return __shell { definitely-not-a-real-command-xyz; };\n};\n",
             )
             .unwrap_err();
         let Some(SparError::EvalError { span, .. }) = errors.first() else {
@@ -986,7 +986,7 @@ mod tests {
     fn native_command_runtime_error_keeps_source_line() {
         let errors = Engine::default()
             .execute_source(
-                "function main() -> shell {\n    return shell {\n        var x: int = 1;\n        definitely-not-a-real-command-xyz;\n    };\n};\n",
+                "function main() -> __shell {\n    return __shell {\n        var x: int = 1;\n        definitely-not-a-real-command-xyz;\n    };\n};\n",
             )
             .unwrap_err();
         assert!(format!("{errors:?}").contains("line: 4"), "{errors:?}");
@@ -997,9 +997,9 @@ mod tests {
         let errors = Engine::default()
             .check_source(
                 r#"
-                function main() -> shell {
+                function main() -> __shell {
                     var mut count: int = 0;
-                    return shell { count = count + 1; };
+                    return __shell { count = count + 1; };
                 };
                 "#,
             )
@@ -1016,9 +1016,9 @@ mod tests {
         let marker = temp.path().join("literal");
         let source = format!(
             r#"
-            function main() -> shell {{
+            function main() -> __shell {{
                 var name: str = "expanded";
-                return shell {{ printf "%s" '${{name}}' > "{}"; }};
+                return __shell {{ printf "%s" '${{name}}' > "{}"; }};
             }};
             "#,
             marker.display()
@@ -1033,9 +1033,9 @@ mod tests {
         let marker = temp.path().join("args");
         let source = format!(
             r#"
-            function main() -> shell {{
+            function main() -> __shell {{
                 var files: List<str> = ["one two", "three"];
-                return shell {{ printf "%s\n" ...${{files}} > "{}"; }};
+                return __shell {{ printf "%s\n" ...${{files}} > "{}"; }};
             }};
             "#,
             marker.display()
@@ -1050,8 +1050,8 @@ mod tests {
         let marker = temp.path().join("must-not-exist");
         let source = format!(
             r#"
-            function main() -> shell {{
-                return shell {{
+            function main() -> __shell {{
+                return __shell {{
                     exit 9;
                     printf bad > "{}";
                 }};

@@ -378,13 +378,13 @@ fn a_bare_shell_statement_in_a_function_is_rejected_with_a_hint() {
     let message = error(
         r#"
         function main() -> int {
-            shell { echo hi; };
+            __shell { echo hi; };
             return 0;
         };
         "#,
     );
     assert!(message.contains("never run"), "{message}");
-    assert!(message.contains("exec shell"), "{message}");
+    assert!(message.contains("exec __shell"), "{message}");
 }
 
 #[test]
@@ -392,10 +392,10 @@ fn exec_shell_return_and_assignment_are_the_ways_to_use_a_shell_value() {
     assert_eq!(
         status(
             r#"
-            function plan() -> shell { return shell { echo hi; }; };
+            function plan() -> __shell { return __shell { echo hi; }; };
             function main() -> int {
-                var kept: shell = shell { echo kept; };
-                var ran: ExecResult = exec shell { true; };
+                var kept: __shell = __shell { echo kept; };
+                var ran: ExecResult = exec __shell { true; };
                 if !ran.success { return 1; }
                 return 0;
             };

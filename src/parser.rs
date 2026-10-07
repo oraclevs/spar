@@ -169,7 +169,7 @@ impl Parser {
             // Native-shell words are contextual keywords: outside their
             // construct positions they remain legal Spar names.
             Token::KwExec => Some("exec".to_string()),
-            Token::TypeShell => Some("shell".to_string()),
+            Token::TypeShell => Some("__shell".to_string()),
             _ => None,
         };
         if let Some(name) = name {
@@ -1527,6 +1527,11 @@ impl Parser {
             // type named `command` or `exec` remains referenceable outside
             // the actual native-shell construct positions.
             let (name, _) = self.expect_ident()?;
+            if name == "shell" {
+                return Err(self.error(
+                    "the `shell` type is internal; use `ShellResult<T, E>` for functions that run commands, or prefix a single command with `~`",
+                ));
+            }
             if name == "Any" {
                 if self.at(&Token::Lt) {
                     return Err(self.error("Any does not accept type arguments"));
@@ -2235,6 +2240,12 @@ impl Parser {
     fn parse_namespace_ref_or_fn_call(&mut self) -> Result<Expr, SparError> {
         let span = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
+
+        if name == "shell" && self.at(&Token::LBrace) {
+            return Err(self.error(
+                "the `shell` type is internal; use `ShellResult<T, E>` for functions that run commands, or prefix a single command with `~`",
+            ));
+        }
 
         if let Some(type_arguments) = self.try_parse_call_type_arguments()? {
             return self.parse_user_call(name, name_span, type_arguments);
@@ -2953,7 +2964,7 @@ impl Parser {
                 let field_span = self.peek_span();
                 self.advance();
                 ("private".to_string(), field_span)
-            } else if self.at(&Token::TypeShell) {
+            } else if matches!(self.peek(), Token::Ident(n) if n == "shell") {
                 return Err(self.error(
                     "the task 'shell' field is removed; use run bash { ... } to select a shell",
                 ));
@@ -3834,8 +3845,8 @@ function f(a: int) -> int {
     #[test]
     fn shell_block_parses_spar_statements_and_native_commands_together() {
         let src = r#"
-function install(files: [str]) -> shell {
-    return shell {
+function install(files: [str]) -> __shell {
+    return __shell {
         var mut installed: int = 0;
         for file in files {
             echo "Installing ${file}";
@@ -3856,12 +3867,12 @@ function install(files: [str]) -> shell {
     #[test]
     fn shell_block_parses_multiline_lists_and_named_calls() {
         let src = r#"
-function verifyZip(archive: str) -> shell {
-    return shell { unzip -l "${archive}"; };
+function verifyZip(archive: str) -> __shell {
+    return __shell { unzip -l "${archive}"; };
 };
 
-function main() -> shell {
-    return shell {
+function main() -> __shell {
+    return __shell {
         var files: [str] = [
             "Cargo.toml",
             "Cargo.lock",
@@ -3882,8 +3893,8 @@ function main() -> shell {
     #[test]
     fn shell_block_parses_multiline_native_commands_with_and_without_backslash() {
         let src = r#"
-function main() -> shell {
-    return shell {
+function main() -> __shell {
+    return __shell {
         printf "%s\\n"
             one
             two;
@@ -3903,8 +3914,8 @@ function main() -> shell {
     #[test]
     fn shell_background_command_can_be_followed_by_spar_and_native_statements() {
         let src = r#"
-function main() -> shell {
-    return shell {
+function main() -> __shell {
+    return __shell {
         sleep 1 &
         println(value: "background started");
         echo done;

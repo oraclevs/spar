@@ -3815,7 +3815,7 @@ impl<'a> TypeChecker<'a> {
             Expr::ExecShell(shell) => {
                 if shell_contains_mixed_pipeline(shell) {
                     self.push_type_error(
-                        "`exec shell` does not support structured mixed pipelines; return/execute a normal `shell { ... }` value instead",
+                        "`exec __shell` does not support structured mixed pipelines; return/execute a normal `__shell { ... }` value instead",
                         None,
                         shell.span.clone(),
                     );
@@ -4866,7 +4866,7 @@ impl<'a> TypeChecker<'a> {
             Expr::CommandSubstitution(shell) => {
                 if shell_contains_mixed_pipeline(shell) {
                     Err(SparError::TypeError {
-                        message: "command substitution does not support structured mixed pipelines in v1; execute a normal `shell { ... }` value instead".into(),
+                        message: "command substitution does not support structured mixed pipelines in v1; execute a normal `__shell { ... }` value instead".into(),
                         hint: None,
                         span: shell.span.clone(),
                     })
@@ -4877,7 +4877,7 @@ impl<'a> TypeChecker<'a> {
             Expr::ExecShell(shell) => {
                 if shell_contains_mixed_pipeline(shell) {
                     Err(SparError::TypeError {
-                        message: "`exec shell` does not support structured mixed pipelines; return/execute a normal `shell { ... }` value instead".into(),
+                        message: "`exec __shell` does not support structured mixed pipelines; return/execute a normal `__shell { ... }` value instead".into(),
                         hint: None,
                         span: shell.span.clone(),
                     })
@@ -5192,9 +5192,9 @@ impl<'a> TypeChecker<'a> {
                     self.push_type_error(
                         "this shell value is created but never run, so it does nothing",
                         Some(
-                            "use `~ cmd` to run a command as a statement, `exec shell { ... }` \
+                            "use `~ cmd` to run a command as a statement, `exec __shell { ... }` \
                              to run it and capture its output, `return` it from a function that returns `shell`, or \
-                             assign it with `var plan: shell = ...;`"
+                             assign it with `var plan: __shell = ...;`"
                                 .into(),
                         ),
                         if shell.span.start == 0 && shell.span.end == 0 {
@@ -6778,9 +6778,9 @@ mod tests {
     fn mixed_decoder_accepts_typed_scoc_options() {
         check_ok(
             r#"
-            function main() -> shell {
+            function main() -> __shell {
                 var useRaw: bool = true;
-                return shell { printf x | from df(raw: useRaw, streaming: false); };
+                return __shell { printf x | from df(raw: useRaw, streaming: false); };
             };
             "#,
         );
@@ -6790,8 +6790,8 @@ mod tests {
     fn mixed_decoder_rejects_unknown_scoc_option() {
         let errors = check_err(
             r#"
-            function main() -> shell {
-                return shell { printf x | from df(doesNotExist: true); };
+            function main() -> __shell {
+                return __shell { printf x | from df(doesNotExist: true); };
             };
             "#,
         );
@@ -6807,8 +6807,8 @@ mod tests {
     fn mixed_decoder_rejects_wrong_option_type() {
         let errors = check_err(
             r#"
-            function main() -> shell {
-                return shell { printf x | from df(raw: "yes"); };
+            function main() -> __shell {
+                return __shell { printf x | from df(raw: "yes"); };
             };
             "#,
         );
@@ -6824,8 +6824,8 @@ mod tests {
     fn mixed_decoder_rejects_forced_streaming_for_batch_only_parser() {
         let errors = check_err(
             r#"
-            function main() -> shell {
-                return shell { printf x | from df(streaming: true); };
+            function main() -> __shell {
+                return __shell { printf x | from df(streaming: true); };
             };
             "#,
         );

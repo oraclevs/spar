@@ -134,7 +134,7 @@ fn generic_native_call_type_arguments_follow_the_registered_signature() {
 #[test]
 fn exec_shell_at_module_scope_is_rejected() {
     let errors = resolve_err(
-        "struct ExecResult{ success: bool; exitCode: int; }; var x: ExecResult = exec shell { true; };",
+        "struct ExecResult{ success: bool; exitCode: int; }; var x: ExecResult = exec __shell { true; };",
     );
     assert!(
         errors.to_lowercase().contains("exec") && errors.to_lowercase().contains("function"),
@@ -145,13 +145,13 @@ fn exec_shell_at_module_scope_is_rejected() {
 #[test]
 fn exec_shell_inside_a_function_body_is_allowed() {
     resolve_ok(
-        "struct ExecResult{ success: bool; exitCode: int; }; function f() -> int { var r: ExecResult = exec shell { true; }; return 0; };",
+        "struct ExecResult{ success: bool; exitCode: int; }; function f() -> int { var r: ExecResult = exec __shell { true; }; return 0; };",
     );
 }
 
 #[test]
 fn plain_shell_construction_at_module_scope_is_allowed() {
-    resolve_ok("var x: shell = shell { true; };");
+    resolve_ok("var x: __shell = __shell { true; };");
 }
 
 // ── SparType::Named existence validation ─────────────────────────────────────

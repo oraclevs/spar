@@ -1076,7 +1076,7 @@ fn exec_shell_can_be_used_as_a_statement_and_runs_in_order() {
     write_fixture(
         dir.path(),
         "tasks.spar",
-        "task Ordered {\n    run {\n        exec shell { echo first; };\n        exec shell { echo second; };\n        echo third;\n    };\n};\n",
+        "task Ordered {\n    run {\n        exec __shell { echo first; };\n        exec __shell { echo second; };\n        echo third;\n    };\n};\n",
     );
     let output = spar_in(&["run", "Ordered", "-f", "tasks.spar"], dir.path());
     assert!(
@@ -1256,9 +1256,9 @@ fn env_prefix_values_interpolate_in_scripts_run_by_the_compiled_runtime() {
     let file = write_fixture(
         dir.path(),
         "script.spar",
-        r#"function main() -> shell {
+        r#"function main() -> __shell {
     var secret: str = "s3";
-    return shell {
+    return __shell {
         SPAR_X="${secret}-x" printenv SPAR_X;
     };
 };
@@ -1327,8 +1327,8 @@ fn native_task_run_block_calls_a_shell_returning_helper_function() {
         "task.spar",
         &format!(
             r#"
-            function writeMarker() -> shell {{
-                return shell {{
+            function writeMarker() -> __shell {{
+                return __shell {{
                     echo "from-helper" > "{}";
                 }};
             }};
@@ -1360,8 +1360,8 @@ fn native_task_captures_pid_of_a_background_job_started_in_a_helper_function() {
         "task.spar",
         &format!(
             r#"
-            function startBackground() -> shell {{
-                return shell {{
+            function startBackground() -> __shell {{
+                return __shell {{
                     sh -c "sleep 0.02; printf done > '{}'" &;
                 }};
             }};

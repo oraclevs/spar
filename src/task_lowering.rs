@@ -419,7 +419,7 @@ fn scalar_kind(ty: &SparType) -> ScalarKind {
 fn native_block_source(expr: &Expr) -> String {
     let full = format_expr_source(expr);
     let inner = full
-        .strip_prefix("shell {")
+        .strip_prefix("__shell {")
         .and_then(|rest| rest.strip_suffix('}'))
         .unwrap_or(&full);
     inner

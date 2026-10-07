@@ -747,7 +747,7 @@ mod tests {
     fn execute_entry_accepts_zero_argument_int_void_or_shell_main() {
         assert_entry_ok("function main() -> int { return 7; };");
         assert_entry_ok("function main() -> void {};");
-        assert_entry_ok("function main() -> shell { return shell { echo ok; }; };");
+        assert_entry_ok("function main() -> __shell { return __shell { echo ok; }; };");
         assert_entry_error(
             "function main(x: int) -> int { return x; };",
             "must not declare parameters",
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn execute_entry_accepts_main_returning_shell() {
-        assert_entry_ok("function main() -> shell { return shell { true; }; };");
+        assert_entry_ok("function main() -> __shell { return __shell { true; }; };");
     }
 
     #[test]

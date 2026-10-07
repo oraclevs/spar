@@ -2673,9 +2673,12 @@ impl Parser {
                 | Expr::StructuredPipe { .. }
         ) {
             let mut message = "only function calls may be used as expression statements".to_string();
-            if let Some(command) = self.command_like_text(stmt_start) {
+            if self.looks_like_command(stmt_start) {
+                let shown = self
+                    .exact_command_text(stmt_start)
+                    .unwrap_or_else(|| "<command>".into());
                 message.push_str(&format!(
-                    "; to run a shell command here write `~ {command}`, or move shell-heavy code into a function returning `ShellResult<T, E>`"
+                    "; if you meant to run a shell command here, write `~ {shown}`, or move shell-heavy code into a function returning `ShellResult<T, E>`"
                 ));
             }
             return Err(SparError::ParseError { message, span });
@@ -2684,52 +2687,52 @@ impl Parser {
         Ok(FuncStmt::Expression(expression, span))
     }
 
-    /// When the statement starting at token `start` reads like a shell command
-    /// (`echo hi`, `ls -la`), rebuild its text from the token stream.
-    fn command_like_text(&self, start: usize) -> Option<String> {
-        let first = self.tokens.get(start)?;
-        if !matches!(first.token, Token::Ident(_)) {
-            return None;
-        }
-        let second = self.tokens.get(start + 1)?;
-        let looks_like_arg = match &second.token {
-            Token::Ident(_)
-            | Token::IntLit(_)
-            | Token::FloatLit(_)
-            | Token::StringStart
-            | Token::Slash => true,
-            // `ls -la`: a flag has a space before the dash and none after it.
-            Token::Minus => {
-                let after = self.tokens.get(start + 2)?;
-                second.span.start > first.span.end && second.span.end == after.span.start
-            }
-            _ => false,
+    /// True when the statement starting at token `start` reads like a shell
+    /// command (`echo hi`, `ls -la`, `cat /etc/hosts`).
+    fn looks_like_command(&self, start: usize) -> bool {
+        let Some(first) = self.tokens.get(start) else {
+            return false;
         };
-        if !looks_like_arg {
-            return None;
+        if !matches!(first.token, Token::Ident(_)) {
+            return false;
         }
+        let Some(second) = self.tokens.get(start + 1) else {
+            return false;
+        };
+        match &second.token {
+            Token::Ident(_) | Token::IntLit(_) | Token::FloatLit(_) | Token::StringStart => true,
+            // `ls -la`, `cat /etc`: space before the sign, none after it.
+            Token::Minus | Token::Slash => self.tokens.get(start + 2).is_some_and(|after| {
+                second.span.start > first.span.end && second.span.end == after.span.start
+            }),
+            _ => false,
+        }
+    }
+
+    /// The statement's text rebuilt from tokens, only when the rebuild is
+    /// provably the user's text: identifiers, `-`, `/`, `.` up to the `;`.
+    /// Anything else (strings, numbers, `=`, globs) yields None.
+    fn exact_command_text(&self, start: usize) -> Option<String> {
         let mut text = String::new();
         let mut prev_end: Option<usize> = None;
         for st in &self.tokens[start..] {
             let piece = match &st.token {
-                Token::Semicolon | Token::Eof => break,
-                Token::Ident(name) => name.clone(),
-                Token::IntLit(n) => n.to_string(),
-                Token::FloatLit(f) => f.to_string(),
-                Token::Minus => "-".into(),
-                Token::Slash => "/".into(),
-                Token::Dot => ".".into(),
-                _ => break,
+                Token::Semicolon => return Some(text),
+                Token::Ident(name) => name.as_str(),
+                Token::Minus => "-",
+                Token::Slash => "/",
+                Token::Dot => ".",
+                _ => return None,
             };
             if let Some(end) = prev_end {
                 if st.span.start > end {
                     text.push(' ');
                 }
             }
-            text.push_str(&piece);
+            text.push_str(piece);
             prev_end = Some(st.span.end);
         }
-        Some(text)
+        None
     }
 
     fn parse_try_stmt(&mut self) -> Result<FuncStmt, SparError> {

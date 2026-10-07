@@ -1646,3 +1646,22 @@ fn bare_command_with_flag_uses_actual_command_text_in_hint() {
     let error = parse_err("function main() -> int {\n    ls -la;\n    return 0;\n};");
     assert!(error.contains("`~ ls -la`"), "{error}");
 }
+
+#[test]
+fn bare_command_hint_never_fabricates_command_text() {
+    for src in ["echo \"hi\";", "ls --color=auto;", "grep a *.txt;", "echo 007;"] {
+        let error = parse_err(&format!("function main() -> int {{\n    {src}\n    return 0;\n}};"));
+        assert!(error.contains("ShellResult"), "{src}: {error}");
+        assert!(error.contains("`~ <command>`"), "{src}: {error}");
+    }
+}
+
+#[test]
+fn bare_command_hint_is_tentative_and_exact_when_given() {
+    let error = parse_err("function main() -> int {\n    x y;\n    return 0;\n};");
+    assert!(error.contains("if you meant to run a shell command"), "{error}");
+    let error = parse_err("function main() -> int {\n    echo hi;\n    return 0;\n};");
+    assert!(error.contains("`~ echo hi`"), "{error}");
+    let error = parse_err("function main() -> int {\n    a / b;\n    return 0;\n};");
+    assert!(!error.contains("ShellResult"), "{error}");
+}

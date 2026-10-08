@@ -66,6 +66,34 @@ pub(crate) fn exports_with_budget(
     }
 }
 
+fn import_loader(path: &str, package: bool, base_dir: &Path) -> (ImportLoader, crate::ast::ImportDecl) {
+    let mut loader = ImportLoader::new(base_dir);
+    if let Some(locator) = package_locator(base_dir) {
+        loader = loader.with_locator(locator);
+    }
+    let decl = crate::ast::ImportDecl {
+        path: path.to_string(),
+        package,
+        kind: crate::ast::ImportKind::Selective(Vec::new()),
+        span: crate::error::Span::dummy(),
+    };
+    (loader, decl)
+}
+
+/// The file `target` resolves to from `base_dir` (`"lib"` finds `lib.spar`,
+/// packages go through the lockfile), or `None` when it does not resolve. A
+/// missing local file still gives the path it would have.
+/// Cheap: no reading, parsing or compiling. Callers use it to stamp caches.
+pub fn resolve_import_path(target: &ImportTarget, base_dir: &Path) -> Option<std::path::PathBuf> {
+    let (path, package) = match target {
+        ImportTarget::File(path) => (path.as_str(), false),
+        ImportTarget::Package(path) => (path.as_str(), true),
+        ImportTarget::Missing => return None,
+    };
+    let (loader, decl) = import_loader(path, package, base_dir);
+    loader.resolve_import(&decl).ok().map(|resolved| resolved.path)
+}
+
 fn exports_worker(
     target: &ImportTarget,
     base_dir: &Path,
@@ -89,16 +117,7 @@ fn exports_worker(
         ImportTarget::Missing => return Err(IntelError::NotFound("no import target".into())),
     };
 
-    let mut loader = ImportLoader::new(base_dir);
-    if let Some(locator) = package_locator(base_dir) {
-        loader = loader.with_locator(locator);
-    }
-    let decl = crate::ast::ImportDecl {
-        path: path.to_string(),
-        package,
-        kind: crate::ast::ImportKind::Selective(Vec::new()),
-        span: crate::error::Span::dummy(),
-    };
+    let (loader, decl) = import_loader(path, package, base_dir);
     let resolved = loader
         .resolve_import(&decl)
         .map_err(|error| IntelError::NotFound(error.to_string()))?;
@@ -484,8 +503,8 @@ fn import_target(source: &str, masked: &str, from: usize, end: usize, package: b
     };
     let value = after_from.trim_start();
     let value_at = at + 4 + (after_from.len() - value.len());
-    let text = if value.starts_with('"') {
-        let Some(close_rel) = value[1..].find('"') else {
+    let text = if let Some(quoted) = value.strip_prefix('"') {
+        let Some(close_rel) = quoted.find('"') else {
             return ImportTarget::Missing;
         };
         source.get(value_at + 1..value_at + 1 + close_rel)
@@ -522,6 +541,16 @@ mod tests {
 
     fn file(name: &str) -> ImportTarget {
         ImportTarget::File(name.into())
+    }
+
+    #[test]
+    fn resolve_import_path_finds_extensionless_files_and_and_missing_files() {
+        let (dir, path) = temp_module("export var a: int = 1;\n");
+        assert_eq!(resolve_import_path(&file("lib"), dir.path()), Some(path.clone()));
+        assert_eq!(resolve_import_path(&file("lib.spar"), dir.path()), Some(path));
+        // A missing local file still resolves to where it would be (callers stat it).
+        assert_eq!(resolve_import_path(&file("nope"), dir.path()), Some(dir.path().join("nope.spar")));
+        assert_eq!(resolve_import_path(&ImportTarget::Missing, dir.path()), None);
     }
 
     #[test]

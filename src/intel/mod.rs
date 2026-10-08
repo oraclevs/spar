@@ -13,7 +13,7 @@ pub mod repair;
 pub mod scope;
 pub mod signature;
 
-pub use exports::{exports_of, exports_of_with_budget, import_context};
+pub use exports::{exports_of, exports_of_with_budget, import_context, resolve_import_path};
 pub use scope::{complete_scope, complete_scope_with};
 pub use signature::{signature_at, signature_at_with, SignatureInfo, SignatureParam};
 pub use member::{analyze_session, complete_members, complete_members_with, MemberAnalysis};

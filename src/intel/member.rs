@@ -18,7 +18,7 @@ use crate::{CompileOptions, Compiler, Lexer, Parser};
 use std::borrow::Cow;
 
 /// What the lower-level member functions need besides the source text.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub struct MemberEnv<'a> {
     pub symbols: &'a SymbolTable,
     /// The program, parsed lazily: only the type-checker fallback needs it.
@@ -170,7 +170,7 @@ fn type_field_items(symbols: &SymbolTable, ty: &SparType) -> Vec<IntelItem> {
 }
 
 /// Fields and methods of `ty`.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub(crate) fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<IntelItem> {
     let fields = type_field_items(env.symbols, ty);
     let mut methods = owner_name_for_type(ty)
@@ -210,8 +210,7 @@ pub(crate) fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<Intel
 /// cursor is in a member-access position and these are the members, possibly
 /// none: callers must not fall back to general expression completion. `None`
 /// means this is not a member access. Walks the text of the receiver chain.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
-pub fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
+pub(crate) fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
     let symbols = env.symbols;
     let receiver = receiver_before_cursor(source, offset)?;
     let scope = local_names_at(source, offset);
@@ -253,7 +252,7 @@ pub fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Op
 /// [`typed_members_indexed`], falling back to the type checker's inferred
 /// receiver type when the text-based chain walk cannot resolve it (closure
 /// parameters, call results, loop variables...).
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub fn typed_members(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
     let primary = typed_members_indexed(source, offset, env);
     if matches!(&primary, Some(items) if !items.is_empty()) {
@@ -282,7 +281,7 @@ pub fn typed_members(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec
     }
 }
 
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub fn typed_map_of(ast: &Program, symbols: &SymbolTable, len: usize) -> crate::typechecker::TypeMap {
     let (_, mut map) = crate::typechecker::TypeChecker::check_with_type_map(ast, symbols);
     map.expressions.retain(|s| s.end <= len && s.start < s.end);
@@ -291,7 +290,7 @@ pub fn typed_map_of(ast: &Program, symbols: &SymbolTable, len: usize) -> crate::
 }
 
 /// Receiver type of the member access whose `.` is at byte `dot`.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub fn receiver_type_at_dot(source: &str, map: &crate::typechecker::TypeMap, dot: usize) -> Option<SparType> {
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
@@ -304,7 +303,7 @@ pub fn receiver_type_at_dot(source: &str, map: &crate::typechecker::TypeMap, dot
 /// Wall-clock budget for the placeholder-suffix retries below.
 const INCOMPLETE_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
 
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub(crate) fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: usize) -> Option<SparType> {
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
@@ -348,7 +347,7 @@ pub fn format_type_field_shape(shape: &crate::ast::TypeFieldShape) -> String {
 }
 
 /// Function-group members, as listed after `Group.` or `Group::`.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub(crate) fn function_group_items(functions: &std::collections::HashMap<String, crate::resolver::FunctionEntry>) -> Vec<IntelItem> {
     functions
         .iter()
@@ -389,7 +388,7 @@ fn enum_member_items(variants: &[String]) -> Vec<IntelItem> {
 /// Members reached through a declaration name directly before the dot: native
 /// module functions, function-group members, type fields and enum variants.
 /// `None` when the text before `offset` does not end in `.`.
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: adapter hooks for spar-ls
 pub fn declaration_members(source: &str, offset: usize, symbols: &SymbolTable) -> Option<Vec<IntelItem>> {
     let before_cursor = source.get(..offset)?;
     let before_dot = before_cursor.strip_suffix('.')?;

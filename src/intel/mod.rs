@@ -3,6 +3,7 @@
 //! This module must stay free of LSP and async-runtime dependencies: it works
 //! on plain source text, byte offsets and paths.
 
+pub mod cursor;
 pub mod exports;
 
 pub use exports::{exports_of, exports_of_with_budget, import_context};
@@ -84,4 +85,40 @@ pub struct ImportCursor {
     pub package: bool,
     /// Byte offset of the closing `}`, when one exists.
     pub close_at: Option<usize>,
+}
+
+/// A completion or signature query against a source buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct IntelRequest<'a> {
+    pub source: &'a str,
+    /// Byte offset of the cursor in `source`.
+    pub offset: usize,
+    /// Directory relative imports resolve against.
+    pub base_dir: &'a std::path::Path,
+}
+
+/// What a completion item stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntelKind {
+    Function,
+    Method,
+    Variable,
+    Field,
+    Struct,
+    Enum,
+    EnumMember,
+    Type,
+    Keyword,
+    Parameter,
+    Module,
+}
+
+/// One completion candidate, free of any editor protocol type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntelItem {
+    pub label: String,
+    pub kind: IntelKind,
+    pub detail: Option<String>,
+    pub insert_text: String,
+    pub doc: Option<String>,
 }

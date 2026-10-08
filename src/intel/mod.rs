@@ -5,12 +5,15 @@
 
 pub mod exports;
 
-pub use exports::{exports_of, import_context};
+pub use exports::{exports_of, exports_of_with_budget, import_context};
 
 /// What kind of declaration an import candidate is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
+    /// A `function` declaration.
     Function,
+    /// An `export var` whose type is a function type.
+    Callable,
     Variable,
     Struct,
     Enum,
@@ -69,11 +72,16 @@ pub struct ImportCursor {
     pub target: ImportTarget,
     /// Names already listed (the word under the cursor excluded).
     pub already: std::collections::HashSet<String>,
+    /// First word of the comma segment holding the cursor (`b` in `b as |`),
+    /// when that segment has one. It is not part of `already`.
+    pub current: Option<String>,
     /// The partial word before the cursor.
     pub typed: String,
     /// Byte offset where `typed` starts.
     pub replace_start: usize,
     pub type_only: bool,
+    /// `import pkg { }`.
+    pub package: bool,
     /// Byte offset of the closing `}`, when one exists.
     pub close_at: Option<usize>,
 }

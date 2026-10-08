@@ -27,6 +27,18 @@ pub fn exports_of(
     exports_with_budget(target, base_dir, type_only, already, BUDGET)
 }
 
+/// Like [`exports_of`] with a caller-chosen time budget (a language server can
+/// afford more than the 500 ms used at the shell prompt).
+pub fn exports_of_with_budget(
+    target: &ImportTarget,
+    base_dir: &Path,
+    type_only: bool,
+    already: &HashSet<String>,
+    budget: Duration,
+) -> Result<Vec<ExportItem>, IntelError> {
+    exports_with_budget(target, base_dir, type_only, already, budget)
+}
+
 /// Runs the work on a worker thread and gives up after `budget`. The worker
 /// owns all its data and may finish on its own after a timeout.
 pub(crate) fn exports_with_budget(
@@ -141,11 +153,14 @@ fn exports_worker(
                     Some(GlobalEntry::Var { ty, .. }) => Some(crate::typechecker::display_type(ty)),
                     _ => None,
                 };
-                let callable = matches!(
-                    entry,
-                    Some(GlobalEntry::Var { ty: SparType::Function { .. }, .. })
-                );
-                let kind = if callable { ExportKind::Function } else { ExportKind::Variable };
+                // The declared type decides when the library does not compile
+                // and there is no symbol entry to ask.
+                let callable = matches!(decl.ty, SparType::Function { .. })
+                    || matches!(
+                        entry,
+                        Some(GlobalEntry::Var { ty: SparType::Function { .. }, .. })
+                    );
+                let kind = if callable { ExportKind::Callable } else { ExportKind::Variable };
                 push(&decl.name, kind, detail, &decl.span, decl.span.start);
             }
             TopLevelItem::Struct(decl) if decl.exported && !decl.private => {
@@ -526,16 +541,17 @@ pub fn import_context(source: &str, offset: usize) -> Option<ImportCursor> {
     // Names already listed: every comma segment except the one holding the
     // cursor. A segment's name is its first word (`a as b` lists `a`).
     let mut already = HashSet::new();
+    let mut current = None;
     let body = &masked[open + 1..body_end];
     let cursor_in_body = offset - (open + 1);
     let mut seg_start = 0usize;
     for part in body.split(',') {
         let seg_end = seg_start + part.len();
         let holds_cursor = cursor_in_body >= seg_start && cursor_in_body <= seg_end;
-        if !holds_cursor {
-            if let Some(name) = part.split_whitespace().next() {
-                already.insert(name.to_string());
-            }
+        if holds_cursor {
+            current = part.split_whitespace().next().map(str::to_string);
+        } else if let Some(name) = part.split_whitespace().next() {
+            already.insert(name.to_string());
         }
         seg_start = seg_end + 1;
     }
@@ -544,7 +560,7 @@ pub fn import_context(source: &str, offset: usize) -> Option<ImportCursor> {
         Some(close) => import_target(source, &masked, close + 1, end, package),
         None => ImportTarget::Missing,
     };
-    Some(ImportCursor { target, already, typed, replace_start, type_only, close_at: close })
+    Some(ImportCursor { target, already, current, typed, replace_start, type_only, package, close_at: close })
 }
 
 /// The `from "x"` (or bare `from x`) clause after the closing brace.
@@ -611,6 +627,65 @@ mod tests {
         let greet = items.iter().find(|i| i.name == "greet").unwrap();
         assert!(greet.detail.as_deref().unwrap().contains("name"));
         assert_eq!(greet.kind, ExportKind::Function);
+    }
+
+    #[test]
+    fn function_typed_export_var_is_callable() {
+        let (dir, _) = temp_module(
+            "export var transform: fn(value: int) -> int = |value: int| value + 1;\nexport var plain: int = 1;\nfunction f() -> int { return 1; };\n");
+        let items = exports_of(&file("lib.spar"), dir.path(), false, &Default::default()).unwrap();
+        let kind = |n: &str| items.iter().find(|i| i.name == n).map(|i| i.kind);
+        assert_eq!(kind("transform"), Some(ExportKind::Callable));
+        assert_eq!(kind("plain"), Some(ExportKind::Variable));
+        assert_eq!(kind("f"), Some(ExportKind::Function));
+    }
+
+    #[test]
+    fn library_with_type_error_still_lists_names_without_details() {
+        let (dir, _) = temp_module(
+            "export var transform: fn(value: int) -> int = |value: int| value + 1;\nfunction broken() -> int { return \"no\"; };\nexport var bad: int = \"x\";\n");
+        let items = exports_of(&file("lib.spar"), dir.path(), false, &Default::default()).unwrap();
+        let kind = |n: &str| items.iter().find(|i| i.name == n).map(|i| i.kind);
+        assert_eq!(kind("transform"), Some(ExportKind::Callable));
+        assert_eq!(kind("broken"), Some(ExportKind::Function));
+        assert_eq!(kind("bad"), Some(ExportKind::Variable));
+        let broken = items.iter().find(|i| i.name == "broken").unwrap();
+        assert!(broken.span.end > broken.span.start, "declaration span is used");
+    }
+
+    #[test]
+    fn public_budget_parameter_is_honored() {
+        let mut src = String::new();
+        for i in 0..20_000 {
+            src.push_str(&format!("export var v{i}: int = {i};\n"));
+        }
+        let (dir, _) = temp_module(&src);
+        let tiny = exports_of_with_budget(
+            &file("lib.spar"), dir.path(), false, &Default::default(),
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(tiny.unwrap_err(), IntelError::Timeout);
+        let (dir, _) = temp_module("export var a: int = 1;\n");
+        let roomy = exports_of_with_budget(
+            &file("lib.spar"), dir.path(), false, &Default::default(),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(roomy.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cursor_reports_current_segment_and_package_flag() {
+        let src = "import pkg { a, b as | } from \"std/fs\";";
+        let at = src.find('|').unwrap();
+        let cursor = import_context(&src.replace('|', ""), at).unwrap();
+        assert!(cursor.package);
+        assert_eq!(cursor.current.as_deref(), Some("b"));
+        assert!(cursor.already.contains("a") && !cursor.already.contains("b"));
+        assert_eq!(cursor.target, ImportTarget::Package("std/fs".into()));
+        let src = "import { | }";
+        let cursor = import_context(&src.replace('|', ""), 9).unwrap();
+        assert!(!cursor.package && cursor.current.is_none());
+        assert_eq!(cursor.target, ImportTarget::Missing);
     }
 
     #[test]

@@ -3,10 +3,13 @@
 //! This module must stay free of LSP and async-runtime dependencies: it works
 //! on plain source text, byte offsets and paths.
 
+pub mod chain;
 pub mod cursor;
 pub mod exports;
+pub mod member;
 
 pub use exports::{exports_of, exports_of_with_budget, import_context};
+pub use member::complete_members;
 
 /// What kind of declaration an import candidate is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +122,9 @@ pub struct IntelItem {
     pub label: String,
     pub kind: IntelKind,
     pub detail: Option<String>,
+    /// Text to insert; empty means "insert the label".
     pub insert_text: String,
     pub doc: Option<String>,
+    /// Ordering key an editor sorts by; `None` leaves the order to the caller.
+    pub sort_text: Option<String>,
 }

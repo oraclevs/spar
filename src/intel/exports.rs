@@ -209,7 +209,7 @@ fn exports_worker(
 
 /// The package locator for `base_dir`'s project, if it has a manifest and lockfile.
 /// Static only: nothing is loaded or executed.
-fn package_locator(base_dir: &Path) -> Option<crate::package::ModuleLocator> {
+pub(super) fn package_locator(base_dir: &Path) -> Option<crate::package::ModuleLocator> {
     let project_dir = base_dir
         .ancestors()
         .find(|directory| directory.join(crate::package::PACKAGE_MANIFEST_FILE).is_file())?;
@@ -250,7 +250,7 @@ fn signature_label(
 
 // ── Parsing with statement repair ───────────────────────────────────────────
 
-const REPAIR_ATTEMPTS: usize = 48;
+pub(super) const REPAIR_ATTEMPTS: usize = 48;
 
 /// Parse `source`; if it does not, blank the statement the parser complains
 /// about and retry a few times. Offsets never move.
@@ -298,7 +298,7 @@ fn blank_range(text: &str, start: usize, end: usize) -> String {
     out
 }
 
-fn blank_statement_around(text: &str, at: usize) -> String {
+pub(super) fn blank_statement_around(text: &str, at: usize) -> String {
     let bytes = text.as_bytes();
     let at = floor_boundary(text, at);
     let mut start = at;
@@ -315,7 +315,7 @@ fn blank_statement_around(text: &str, at: usize) -> String {
     blank_range(text, start, end)
 }
 
-fn blank_line_around(text: &str, at: usize) -> String {
+pub(super) fn blank_line_around(text: &str, at: usize) -> String {
     let at = floor_boundary(text, at);
     let start = text[..at].rfind('\n').map_or(0, |index| index + 1);
     let end = text[at..].find('\n').map_or(text.len(), |index| at + index);

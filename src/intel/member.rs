@@ -500,11 +500,39 @@ pub struct MemberAnalysis {
     program: Option<Program>,
     /// Length of the analysed text; a longer buffer needs its own program.
     source_len: usize,
+    /// Symbols of `import "x" as alias;` files, by alias.
+    imports: std::collections::HashMap<String, SymbolTable>,
+}
+
+/// Symbols of every aliased import the compilation loaded (best effort).
+fn import_symbols_of(
+    imports: &std::collections::HashMap<String, crate::loader::LoadedImport>,
+) -> std::collections::HashMap<String, SymbolTable> {
+    let mut out = std::collections::HashMap::new();
+    for (alias, loaded) in imports {
+        let path = &loaded.resolved_path;
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let mut options = CompileOptions { base_dir: dir.to_path_buf(), evaluate: false, ..CompileOptions::default() };
+        options.locator = loaded.locator.clone();
+        if let Some(symbols) = Compiler::new(options).compile(&text).symbols {
+            out.insert(alias.clone(), symbols);
+        }
+    }
+    out
 }
 
 impl MemberAnalysis {
     pub(super) fn symbols(&self) -> &SymbolTable {
         &self.symbols
+    }
+
+    pub(super) fn imports(&self) -> &std::collections::HashMap<String, SymbolTable> {
+        &self.imports
+    }
+
+    pub(super) fn program(&self) -> Option<&Program> {
+        self.program.as_ref()
     }
 }
 
@@ -515,7 +543,8 @@ pub fn analyze_session(source: &str, base_dir: &std::path::Path) -> Option<Membe
     options.locator = package_locator(base_dir);
     let compilation = Compiler::new(options.clone()).compile(source);
     if let Some(symbols) = compilation.symbols {
-        return Some(MemberAnalysis { symbols, program: compilation.program, source_len: source.len() });
+        let imports = import_symbols_of(&compilation.imports);
+        return Some(MemberAnalysis { symbols, program: compilation.program, source_len: source.len(), imports });
     }
     let mut text = repair_source(source)?;
     for _ in 0..6 {
@@ -525,7 +554,8 @@ pub fn analyze_session(source: &str, base_dir: &std::path::Path) -> Option<Membe
                 let tokens = Lexer::new(&text).tokenize().ok()?;
                 Parser::new(tokens).parse().ok()
             });
-            return Some(MemberAnalysis { symbols, program, source_len: source.len() });
+            let imports = import_symbols_of(&compilation.imports);
+            return Some(MemberAnalysis { symbols, program, source_len: source.len(), imports });
         }
         let start = compilation.errors.iter().find_map(|e| match e {
             SparError::ResolveError { span, .. } if span.end > span.start => Some(span.start),

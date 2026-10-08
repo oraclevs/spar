@@ -2,7 +2,7 @@ use super::*;
 use crate::ast::{SparType, TopLevelItem};
 use crate::compiler::{CompileOptions, Compiler};
 use crate::loader::ImportLoader;
-use crate::resolver::{FunctionEntry, GlobalEntry};
+use crate::resolver::GlobalEntry;
 use super::repair::floor_boundary;
 use std::collections::HashSet;
 use std::path::Path;
@@ -170,7 +170,7 @@ fn exports_worker(
             TopLevelItem::Function(decl) if !decl.is_private && !type_only => {
                 match symbols.as_ref().and_then(|s| s.functions.get(&decl.name)) {
                     Some(entry) => {
-                        let label = signature_label(&decl.name, entry, Some(decl));
+                        let label = super::signature::from_entry(&decl.name, entry, Some(decl), None).label();
                         push(&decl.name, ExportKind::Function, Some(label), &entry.span, decl.span.start);
                     }
                     None => push(&decl.name, ExportKind::Function, None, &decl.span, decl.span.start),
@@ -218,35 +218,6 @@ pub(super) fn package_locator(base_dir: &Path) -> Option<crate::package::ModuleL
         crate::package::Lockfile::read(&project_dir.join(crate::package::PACKAGE_LOCK_FILE)).ok()?;
     let store = crate::package::PackageStore::new(crate::package::StorePaths::from_env());
     Some(crate::package::ModuleLocator::for_root(lockfile, store))
-}
-
-fn signature_label(
-    name: &str,
-    entry: &FunctionEntry,
-    raw_decl: Option<&crate::ast::FunctionDecl>,
-) -> String {
-    let params = entry
-        .params
-        .iter()
-        .map(|(param_name, ty)| {
-            let mut rendered = format!("{param_name}: {}", crate::typechecker::display_type(ty));
-            if entry.default_params.contains(param_name) {
-                let default = raw_decl
-                    .and_then(|decl| decl.params.iter().find(|p| &p.name == param_name))
-                    .and_then(|p| p.default.as_ref())
-                    .map(crate::formatter::format_expression);
-                rendered.push_str(" = ");
-                rendered.push_str(default.as_deref().unwrap_or("…"));
-            }
-            rendered
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let prefix = if entry.is_async { "async " } else { "" };
-    format!(
-        "{prefix}{name}({params}) -> {}",
-        crate::typechecker::display_type(&entry.ret)
-    )
 }
 
 // ── Parsing with statement repair ───────────────────────────────────────────

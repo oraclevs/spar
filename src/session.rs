@@ -1615,7 +1615,9 @@ fn literal_source(
                 ConfigValue::Option(Some(value)) => {
                     Some(format!("some(value: {})", literal_source(inner, value, context)?))
                 }
-                ConfigValue::Option(None) => Some("none()".to_string()),
+                // `none()` cannot be typed from here once it is nested in a
+                // constructor, so an empty option keeps the initializer.
+                ConfigValue::Option(None) => None,
                 _ => None,
             },
             ("Map", [key, element]) if matches!(key, SparType::Str) => {
@@ -2258,6 +2260,27 @@ struct Config { prompt: Prompt = Prompt(); };"#,
                 ConfigValue::Int(4)
             ])]))
         );
+    }
+
+    #[test]
+    fn a_struct_with_an_empty_option_field_does_not_poison_later_submissions() {
+        let mut session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        for source in [
+            "struct S { o: Option<int> = none<int>(); c: int = 1; };",
+            "var mut s: S = S();",
+            "var a: int = 1;",
+            "s.c = 5;",
+        ] {
+            session
+                .eval_interactive_preview_with_context(source, &cwd, &environment, None, 10)
+                .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        }
+        let Some(ConfigValue::Object(fields)) = session.value("s") else {
+            panic!("s is not a struct value");
+        };
+        assert_eq!(fields.get("c"), Some(&ConfigValue::Int(5)));
     }
 
     #[test]

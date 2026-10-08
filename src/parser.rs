@@ -47,6 +47,9 @@ pub struct Parser {
     /// True while parsing an `if`/`while`/`for` head, where a following `{`
     /// opens the body and `shell` is an ordinary variable.
     in_block_head: bool,
+    /// Byte range of each top-level item, in order, for callers that need to
+    /// slice the original source per item.
+    item_ranges: Vec<(usize, usize)>,
 }
 
 fn parse_error_start(error: &SparError) -> usize {
@@ -114,6 +117,7 @@ impl Parser {
             active_type_parameters: Vec::new(),
             interactive: false,
             in_block_head: false,
+            item_ranges: Vec::new(),
         }
     }
 
@@ -221,6 +225,17 @@ impl Parser {
     }
 
     pub fn parse(mut self) -> Result<Program, SparError> {
+        self.parse_program()
+    }
+
+    /// Like `parse`, also returning the byte range of every
+    /// top-level item in the source.
+    pub fn parse_with_item_ranges(mut self) -> Result<(Program, Vec<(usize, usize)>), SparError> {
+        let program = self.parse_program()?;
+        Ok((program, self.item_ranges))
+    }
+
+    fn parse_program(&mut self) -> Result<Program, SparError> {
         let load_env = if self.at(&Token::At) {
             self.advance(); // consume '@'
             let (name, name_span) = self.expect_ident()?;
@@ -262,7 +277,14 @@ impl Parser {
             if self.at(&Token::Eof) {
                 break;
             }
+            let start = self.peek_span().start;
             items.push(self.parse_top_level_item_or_expression()?);
+            let end = self
+                .pos
+                .checked_sub(1)
+                .and_then(|index| self.tokens.get(index))
+                .map_or(start, |token| token.span.end);
+            self.item_ranges.push((start, end));
         }
 
         let is_schema_file = items

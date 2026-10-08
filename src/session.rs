@@ -160,7 +160,9 @@ pub struct Session {
 }
 
 struct EvaluatedCandidate {
-    source: String,
+    /// The normalized fragment that was evaluated, before it is reduced to
+    /// the declarations the session replays.
+    fragment: String,
     globals: HashMap<String, ConfigValue>,
     structs: HashMap<Vec<String>, indexmap::IndexMap<String, ConfigValue>>,
     identifiers: BTreeSet<String>,
@@ -692,7 +694,7 @@ impl Session {
         )
         .map_err(to_fragment)?;
 
-        self.committed_source = committed;
+        self.committed_source = commit_source(&self.committed_source, &prefix, &result.globals);
         self.globals = result.globals;
         self.structs = result.structs;
         self.identifiers = identifiers;
@@ -732,7 +734,11 @@ impl Session {
         &mut self,
         evaluated: EvaluatedCandidate,
     ) -> Result<InteractiveEvalResult, Vec<SparError>> {
-        self.committed_source = evaluated.source;
+        self.committed_source = commit_source(
+            &self.committed_source,
+            &evaluated.fragment,
+            &evaluated.globals,
+        );
         self.globals = evaluated.globals;
         self.structs = evaluated.structs;
         self.identifiers = evaluated.identifiers;
@@ -864,7 +870,7 @@ impl Session {
         // function calls, declarations, and other interactive statements.
         let normalized = normalize_interactive_fragment(fragment);
         let candidate = if self.committed_source.is_empty() {
-            normalized
+            normalized.clone()
         } else {
             format!("{}\n{}", self.committed_source, normalized)
         };
@@ -939,7 +945,7 @@ impl Session {
             .map_or(InteractiveEvalResult::Empty, InteractiveEvalResult::Value);
 
         Ok(EvaluatedCandidate {
-            source: candidate,
+            fragment: normalized,
             globals: result.globals,
             structs: result.structs,
             identifiers,
@@ -1390,6 +1396,128 @@ fn shift_into_fragment(
     errors
 }
 
+/// The source the session keeps after `fragment` succeeded. Every later
+/// evaluation replays this text, so it holds declarations only: control flow
+/// and expression statements already ran, and replaying them would repeat
+/// their side effects. What those statements changed survives because each
+/// plain-valued `var` is re-committed with its current value as initializer.
+fn commit_source(
+    committed: &str,
+    fragment: &str,
+    globals: &HashMap<String, ConfigValue>,
+) -> String {
+    let kept = declarations_only(fragment).unwrap_or_else(|| fragment.to_string());
+    let joined = join_committed_source(committed, &kept);
+    refresh_initializers(&joined, globals).unwrap_or(joined)
+}
+
+fn parse_with_ranges(source: &str) -> Option<(crate::ast::Program, Vec<(usize, usize)>)> {
+    let tokens = crate::lexer::Lexer::new(source).tokenize().ok()?;
+    let (program, ranges) = crate::parser::Parser::new(tokens)
+        .interactive()
+        .parse_with_item_ranges()
+        .ok()?;
+    (program.items.len() == ranges.len()).then_some((program, ranges))
+}
+
+/// The top-level declarations of `source`, as source text. `None` when it does
+/// not parse.
+fn declarations_only(source: &str) -> Option<String> {
+    let (program, ranges) = parse_with_ranges(source)?;
+    let mut kept = Vec::new();
+    for (item, (start, end)) in program.items.iter().zip(ranges) {
+        let is_declaration = match item {
+            crate::ast::TopLevelItem::Statement(statement) => matches!(
+                statement,
+                crate::ast::Statement::LocalVar(_) | crate::ast::Statement::TupleBinding { .. }
+            ),
+            _ => true,
+        };
+        if is_declaration {
+            kept.push(source.get(start..end)?);
+        }
+    }
+    Some(kept.join("\n"))
+}
+
+/// Replaces the initializer of each top-level `var`/`const` of a plain type
+/// with the literal for its current value, so replaying the session neither
+/// re-runs the initializer's side effects nor loses later mutations.
+fn refresh_initializers(source: &str, globals: &HashMap<String, ConfigValue>) -> Option<String> {
+    let (program, ranges) = parse_with_ranges(source)?;
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (item, (start, end)) in program.items.iter().zip(ranges) {
+        let crate::ast::TopLevelItem::Var(declaration) = item else {
+            continue;
+        };
+        if declaration.value.is_none() {
+            continue;
+        }
+        let Some(literal) = globals
+            .get(&declaration.name)
+            .and_then(|value| literal_source(&declaration.ty, value))
+        else {
+            continue;
+        };
+        let Some(text) = source.get(start..end) else {
+            continue;
+        };
+        let Some(equals) = text.find('=') else {
+            continue;
+        };
+        let body_end = if text.ends_with(';') { text.len() - 1 } else { text.len() };
+        if body_end <= equals {
+            continue;
+        }
+        out.push_str(&source[cursor..start + equals + 1]);
+        out.push(' ');
+        out.push_str(&literal);
+        cursor = start + body_end;
+    }
+    out.push_str(&source[cursor..]);
+    Some(out)
+}
+
+/// Source text that evaluates to `value`, for the plain types only: scalars
+/// and lists of them. Anything else keeps its original initializer.
+fn literal_source(ty: &crate::ast::SparType, value: &ConfigValue) -> Option<String> {
+    use crate::ast::SparType;
+    match (ty, value) {
+        (SparType::Int, ConfigValue::Int(number)) => Some(number.to_string()),
+        (SparType::Float, ConfigValue::Float(number)) if number.is_finite() => {
+            Some(format!("{number:?}"))
+        }
+        (SparType::Bool, ConfigValue::Bool(flag)) => Some(flag.to_string()),
+        (SparType::Str, ConfigValue::Str(text)) => {
+            if text.contains("${") {
+                return None;
+            }
+            let mut quoted = String::from("\"");
+            for ch in text.chars() {
+                match ch {
+                    '\\' => quoted.push_str("\\\\"),
+                    '"' => quoted.push_str("\\\""),
+                    '\n' => quoted.push_str("\\n"),
+                    '\r' => quoted.push_str("\\r"),
+                    '\t' => quoted.push_str("\\t"),
+                    other => quoted.push(other),
+                }
+            }
+            quoted.push('"');
+            Some(quoted)
+        }
+        (SparType::List(element), ConfigValue::List(items)) => {
+            let items = items
+                .iter()
+                .map(|item| literal_source(element, item))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("[{}]", items.join(", ")))
+        }
+        _ => None,
+    }
+}
+
 fn join_committed_source(committed: &str, fragment: &str) -> String {
     match (committed.trim().is_empty(), fragment.trim().is_empty()) {
         (true, true) => String::new(),
@@ -1801,6 +1929,93 @@ struct Config { prompt: Prompt = Prompt(); };"#,
             "x",
             "exec __shell must only actually run once, not once per replay"
         );
+    }
+
+    #[test]
+    fn committed_control_flow_does_not_run_again_on_later_evaluations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("effect.txt");
+        let path = path.to_string_lossy();
+        let mut session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+
+        session
+            .eval_interactive_with_context(
+                &format!("if true {{ ~ printf i >> {path:?}; }}"),
+                &cwd,
+                &environment,
+            )
+            .unwrap();
+        session
+            .eval_interactive_with_context(
+                &format!("for k in [1, 2] {{ ~ printf f >> {path:?}; }}"),
+                &cwd,
+                &environment,
+            )
+            .unwrap();
+        session
+            .eval_interactive_with_context("var mut i: int = 0", &cwd, &environment)
+            .unwrap();
+        session
+            .eval_interactive_with_context(
+                &format!("while i < 1 {{ ~ printf w >> {path:?}; i = i + 1; }}"),
+                &cwd,
+                &environment,
+            )
+            .unwrap();
+        session
+            .eval_shell_plan_with_context("echo hi", &cwd, &environment, None)
+            .unwrap();
+        session
+            .eval_transient_with_context("1 + 1", &cwd, &environment)
+            .unwrap();
+        session
+            .eval_interactive_preview_with_context("i + 1", &cwd, &environment, None, 10)
+            .unwrap();
+        session.eval("var later: int = 1;").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&*path).unwrap(), "iffw");
+        assert_eq!(session.value("i"), Some(&ConfigValue::Int(1)));
+    }
+
+    #[test]
+    fn committed_mutations_survive_without_replaying_their_statements() {
+        let mut session = Engine::default().session();
+        session.eval("var mut total: int = 0;").unwrap();
+        session.eval("for k in [1, 2, 3] { total = total + k; }").unwrap();
+        session.eval("total = total * 10;").unwrap();
+        session.eval("var other: int = total + 1;").unwrap();
+
+        assert_eq!(session.value("total"), Some(&ConfigValue::Int(60)));
+        assert_eq!(session.value("other"), Some(&ConfigValue::Int(61)));
+    }
+
+    #[test]
+    fn a_committed_declaration_initializer_is_not_run_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("effect.txt");
+        let mut session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        session
+            .eval_interactive_with_context(
+                &format!(
+                    "fn f() -> int {{ ~ printf d >> {:?}; return 1; }};\nvar r: int = f()",
+                    path.to_string_lossy()
+                ),
+                &cwd,
+                &environment,
+            )
+            .unwrap();
+        session
+            .eval_interactive_with_context("var y: int = 2", &cwd, &environment)
+            .unwrap();
+        session
+            .eval_interactive_with_context("f()", &cwd, &environment)
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "dd");
     }
 
     #[test]

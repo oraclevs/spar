@@ -210,7 +210,8 @@ pub(crate) fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<Intel
 /// cursor is in a member-access position and these are the members, possibly
 /// none: callers must not fall back to general expression completion. `None`
 /// means this is not a member access. Walks the text of the receiver chain.
-pub(crate) fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
+#[doc(hidden)] // unstable: adapter hooks for spar-ls (tests)
+pub fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
     let symbols = env.symbols;
     let receiver = receiver_before_cursor(source, offset)?;
     let scope = local_names_at(source, offset);

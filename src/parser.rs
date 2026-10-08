@@ -2696,12 +2696,23 @@ impl Parser {
         ) {
             let mut message = "only function calls may be used as expression statements".to_string();
             if self.looks_like_command(stmt_start) {
+                let removed_keyword = matches!(
+                    self.tokens.get(stmt_start).map(|t| &t.token),
+                    Some(Token::Ident(name)) if name == "command"
+                );
+                let text_start = if removed_keyword { stmt_start + 1 } else { stmt_start };
                 let shown = self
-                    .exact_command_text(stmt_start)
+                    .exact_command_text(text_start)
                     .unwrap_or_else(|| "<command>".into());
-                message.push_str(&format!(
-                    "; if you meant to run a shell command here, write `~ {shown}`, or move shell-heavy code into a function returning `ShellResult<T, E>`"
-                ));
+                if removed_keyword {
+                    message = format!(
+                        "the `command` keyword was removed; write `~ {shown}` to run a shell command, or move shell-heavy code into a function returning `ShellResult<T, E>`"
+                    );
+                } else {
+                    message.push_str(&format!(
+                        "; if you meant to run a shell command here, write `~ {shown}`, or move shell-heavy code into a function returning `ShellResult<T, E>`"
+                    ));
+                }
             }
             return Err(SparError::ParseError { message, span });
         }

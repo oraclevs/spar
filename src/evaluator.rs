@@ -1708,7 +1708,15 @@ impl Evaluator {
                 Statement::For(for_statement) => {
                     let items = match self.eval_expr(&for_statement.iterable, local_scope)? {
                         ConfigValue::List(items) => items,
-                        _ => unreachable!("typechecker ensures for-loop iterable is a list"),
+                        other => {
+                            return Err(EvalErr::Fatal {
+                                message: format!(
+                                    "a `for` loop iterates a list, found {}",
+                                    other.type_name()
+                                ),
+                                span: for_statement.span.clone(),
+                            })
+                        }
                     };
                     for (index, item) in items.into_iter().enumerate() {
                         let snapshot = local_scope.clone();
@@ -3628,7 +3636,15 @@ impl Evaluator {
                 FuncStmt::For(statement) => {
                     let items = match self.eval_expr(&statement.iterable, local_scope)? {
                         ConfigValue::List(items) => items,
-                        _ => unreachable!("typechecker ensures for-loop iterable is a list"),
+                        other => {
+                            return Err(EvalErr::Fatal {
+                                message: format!(
+                                    "a `for` loop iterates a list, found {}",
+                                    other.type_name()
+                                ),
+                                span: statement.span.clone(),
+                            })
+                        }
                     };
                     for (index, item) in items.into_iter().enumerate() {
                         let snapshot = local_scope.clone();

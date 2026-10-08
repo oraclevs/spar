@@ -1665,3 +1665,11 @@ fn bare_command_hint_is_tentative_and_exact_when_given() {
     let error = parse_err("function main() -> int {\n    a / b;\n    return 0;\n};");
     assert!(!error.contains("ShellResult"), "{error}");
 }
+
+#[test]
+fn the_removed_command_keyword_is_named_and_dropped_from_the_hint() {
+    let error = parse_err("function main() -> int {\n    command echo hi;\n    return 0;\n};");
+    assert!(error.contains("`command` keyword was removed"), "{error}");
+    assert!(error.contains("`~ echo hi`"), "{error}");
+    assert!(!error.contains("~ command"), "{error}");
+}

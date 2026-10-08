@@ -174,7 +174,7 @@ fn is_spar(text: &str, names: &HashSet<String>) -> bool {
     if let Some(after) = text.strip_prefix('~') {
         return after.starts_with(char::is_whitespace) && !after.trim().is_empty();
     }
-    if text.starts_with("#[") {
+    if text.starts_with("#[") || text.starts_with("->") {
         return true;
     }
 
@@ -205,8 +205,14 @@ fn is_spar(text: &str, names: &HashSet<String>) -> bool {
             }
         }
         "exec" => {
-            return rest.starts_with('{') || crate::lexer::starts_with_keyword(rest, "__shell");
+            return rest.starts_with('{')
+                || crate::lexer::starts_with_keyword(rest, "__shell")
+                || (crate::lexer::starts_with_keyword(rest, "shell")
+                    && rest[5..].trim_start().starts_with('{'));
         }
+        // `shell ls` is a command; `shell {` is the removed block form and
+        // goes to the parser for its migration message.
+        "shell" if rest.starts_with('{') => return true,
         "_" => {
             return rest.is_empty() || text[1..].starts_with(['.', '[', '(', ' ']);
         }
@@ -304,7 +310,16 @@ fn spar_insertions(
         return;
     }
     let mut header_start = 0;
-    for (open, close) in scan(text).blocks {
+    let blocks = scan(text).blocks;
+    for (index, &(open, close)) in blocks.iter().enumerate() {
+        // A brace pair directly followed by another one is a map or struct
+        // literal inside the header (`for k in {"a": 1} { ... }`), not the
+        // statement block: a block is never followed by a bare `{`.
+        if let Some(&(next_open, _)) = blocks.get(index + 1) {
+            if text[close + 1..next_open].trim().is_empty() {
+                continue;
+            }
+        }
         let mut inner = names.clone();
         header_binders(&text[header_start..open], &mut inner);
         header_start = close + 1;
@@ -640,6 +655,13 @@ mod tests {
     }
 
     #[test]
+    fn removed_shell_forms_reach_the_parser() {
+        assert_eq!(kinds("shell { echo hi }", &[])[0].0, ReplKind::Spar);
+        assert_eq!(kinds("-> shell", &[])[0].0, ReplKind::Spar);
+        assert_eq!(kinds("exec shell { echo hi }", &[])[0].0, ReplKind::Spar);
+    }
+
+    #[test]
     fn exec_forms() {
         assert_eq!(kinds("exec printf ok", &[])[0].0, ReplKind::Command);
         assert_eq!(kinds("exec { ls }", &[])[0].0, ReplKind::Spar);
@@ -665,6 +687,17 @@ mod tests {
     fn shadowing_name_inside_block_is_spar() {
         let out = kinds("if true { var ls = 1\n ls }", &[]);
         assert!(!out[0].1.contains("~ ls"), "{}", out[0].1);
+    }
+
+    #[test]
+    fn a_literal_in_a_block_header_is_not_the_statement_block() {
+        let st = first("for k in {\"a\": 1} { echo x }", &[]);
+        assert!(st.text.contains("{\"a\": 1}"), "{}", st.text);
+        assert!(!st.text.contains("{~ ") && !st.text.contains("{ ~ \"a"), "{}", st.text);
+        assert!(st.text.contains("~ echo x;"), "{}", st.text);
+        let st = first("for k in { a: 1; } { echo x }", &[]);
+        assert!(!st.text.contains("{ ~ a") && !st.text.contains("{~ a"), "{}", st.text);
+        assert!(st.text.contains("~ echo x;"), "{}", st.text);
     }
 
     #[test]

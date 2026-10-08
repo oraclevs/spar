@@ -2461,7 +2461,7 @@ impl Resolver {
             }
             Expr::Shell(_) | Expr::CommandSubstitution(_) => {}
             Expr::ExecShell(shell) => self.push_error(
-                "'exec shell' cannot appear at module scope — move it inside a function body",
+                "`exec` cannot appear at module scope — move it inside a function body",
                 shell.span.clone(),
             ),
         }
@@ -4122,7 +4122,7 @@ impl Resolver {
                 return;
             };
             self.push_error(
-                "'exec shell' cannot appear at module scope — move it inside a function body",
+                "`exec` cannot appear at module scope — move it inside a function body",
                 span,
             );
         }

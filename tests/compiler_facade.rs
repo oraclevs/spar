@@ -605,8 +605,39 @@ fn mixed_structured_pipelines_are_rejected_in_byte_only_shell_surfaces() {
     assert!(
         exec_shell
             .iter()
-            .any(|error| error.to_string().contains("exec __shell")
+            .any(|error| error.to_string().contains("exec")
                 && error.to_string().contains("structured mixed pipelines")),
         "{exec_shell:?}"
     );
+}
+
+#[test]
+fn shell_diagnostics_talk_about_shell_result_and_the_tilde_marker() {
+    let substitution = Engine::default()
+        .check_source(
+            r#"
+            function main() -> ShellResult<int, str> {
+                var v: str = $(echo "[1]" | from json |> to json);
+                return 0;
+            };
+            "#,
+        )
+        .expect_err("mixed command substitution is not supported");
+    let text = format!("{substitution:?}");
+    assert!(!text.contains("__shell"), "{text}");
+    assert!(text.contains("ShellResult"), "{text}");
+
+    let exec_shell = Engine::default()
+        .check_source(
+            r#"
+            function main() -> int {
+                exec __shell { printf x | from lines |> to lines | cat; };
+                return 0;
+            };
+            "#,
+        )
+        .expect_err("exec must not erase structured stages");
+    let text = format!("{exec_shell:?}");
+    assert!(!text.contains("normal `__shell"), "{text}");
+    assert!(text.contains("ShellResult"), "{text}");
 }

@@ -384,7 +384,7 @@ fn a_bare_shell_statement_in_a_function_is_rejected_with_a_hint() {
         "#,
     );
     assert!(message.contains("never run"), "{message}");
-    assert!(message.contains("exec __shell"), "{message}");
+    assert!(message.contains("ShellResult") && !message.contains("__shell"), "{message}");
 }
 
 #[test]

@@ -1997,8 +1997,12 @@ impl<'a> Lexer<'a> {
             self.advance_char();
         }
 
+        let message = match quote {
+            Some(byte) => format!("unterminated quote — expected a closing {}", byte as char),
+            None => "unterminated shell block — expected '}' (unbalanced brace)".to_string(),
+        };
         Err(SparError::LexError {
-            message: "unterminated shell block — expected '}' (unbalanced brace)".to_string(),
+            message,
             span: Span::new(body_start, self.pos, body_line, body_col),
         })
     }
@@ -3536,6 +3540,15 @@ mod tests {
                 && err.to_string().contains("unterminated shell block"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn an_open_quote_in_a_shell_block_is_reported_as_an_unterminated_quote() {
+        let err = Lexer::new("__shell { echo it\u{27}s }")
+            .tokenize()
+            .expect_err("open quote must fail");
+        assert!(err.to_string().contains("unterminated quote"), "got: {err}");
+        assert!(!err.to_string().contains("shell block"), "got: {err}");
     }
 
     #[test]

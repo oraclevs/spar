@@ -48,7 +48,7 @@ impl ScopeName {
     }
 }
 
-pub fn scope_type_text(token: &crate::token::Token) -> Option<String> {
+pub(crate) fn scope_type_text(token: &crate::token::Token) -> Option<String> {
     use crate::token::Token;
     match token {
         Token::TypeStr => Some("str".into()),
@@ -155,7 +155,7 @@ pub fn parse_chain_tokens(tokens: &[&crate::token::Token], mut index: usize) -> 
 /// half-typed string or `"${`, or a `run { ... }` body still open — and a plain
 /// lex would fail on it. Retry without the line being typed, and with
 /// closing braces added, keeping only tokens from the real prefix.
-pub fn lex_prefix_tolerantly(source: &str, end: usize) -> Option<Vec<crate::token::SpannedToken>> {
+pub(crate) fn lex_prefix_tolerantly(source: &str, end: usize) -> Option<Vec<crate::token::SpannedToken>> {
     let line_start = source[..end].rfind('\n').map_or(0, |index| index + 1);
     for cut in [end, line_start] {
         for suffix in ["", "\n}", "\n}\n}"] {
@@ -332,7 +332,7 @@ pub fn local_names_at(source: &str, offset: usize) -> Vec<ScopeName> {
     stack.into_iter().flatten().collect()
 }
 
-pub fn element_type(ty: &SparType) -> Option<SparType> {
+pub(crate) fn element_type(ty: &SparType) -> Option<SparType> {
     match ty {
         SparType::List(inner) => Some((**inner).clone()),
         SparType::Applied { name, arguments } if name == "List" => arguments.first().cloned(),
@@ -341,7 +341,7 @@ pub fn element_type(ty: &SparType) -> Option<SparType> {
     }
 }
 
-pub fn field_type_of(symbols: &SymbolTable, ty: &SparType, field: &str) -> Option<SparType> {
+pub(crate) fn field_type_of(symbols: &SymbolTable, ty: &SparType, field: &str) -> Option<SparType> {
     crate::SemanticSnapshot::new(symbols.clone()).field_type(ty, field)
 }
 

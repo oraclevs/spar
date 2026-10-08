@@ -3,14 +3,17 @@
 //! This module must stay free of LSP and async-runtime dependencies: it works
 //! on plain source text, byte offsets and paths.
 
-#[doc(hidden)] // unstable: used by spar-ls until Task 8
+#[doc(hidden)] // unstable: spar-ls still uses Chain, ScopeName, local_names_at, parse_chain_tokens,
+               // parse_type_tokens (tests) and type_of_chain until signature help moves (Task 9)
 pub mod chain;
 pub mod cursor;
 pub mod exports;
 pub mod member;
 pub mod repair;
+pub mod scope;
 
 pub use exports::{exports_of, exports_of_with_budget, import_context};
+pub use scope::{complete_scope, complete_scope_with};
 pub use member::{analyze_session, complete_members, complete_members_with, MemberAnalysis};
 
 /// What kind of declaration an import candidate is.

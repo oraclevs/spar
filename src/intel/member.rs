@@ -502,6 +502,12 @@ pub struct MemberAnalysis {
     source_len: usize,
 }
 
+impl MemberAnalysis {
+    pub(super) fn symbols(&self) -> &SymbolTable {
+        &self.symbols
+    }
+}
+
 /// Symbols of `source`; for a buffer that does not compile, of a copy with the
 /// offending statements blanked. `None` when nothing usable results.
 pub fn analyze_session(source: &str, base_dir: &std::path::Path) -> Option<MemberAnalysis> {

@@ -1420,97 +1420,285 @@ fn parse_with_ranges(source: &str) -> Option<(crate::ast::Program, Vec<(usize, u
     (program.items.len() == ranges.len()).then_some((program, ranges))
 }
 
-/// The top-level declarations of `source`, as source text. `None` when it does
-/// not parse.
+/// The top-level declarations of `source`, as source text, plus simple
+/// assignments (kept so values that cannot be printed back as source still
+/// replay their mutations). `None` when it does not parse.
 fn declarations_only(source: &str) -> Option<String> {
     let (program, ranges) = parse_with_ranges(source)?;
     let mut kept = Vec::new();
     for (item, (start, end)) in program.items.iter().zip(ranges) {
+        let text = source.get(start..end)?;
         let is_declaration = match item {
-            crate::ast::TopLevelItem::Statement(statement) => matches!(
-                statement,
-                crate::ast::Statement::LocalVar(_) | crate::ast::Statement::TupleBinding { .. }
-            ),
+            crate::ast::TopLevelItem::Statement(statement) => match statement {
+                crate::ast::Statement::LocalVar(_)
+                | crate::ast::Statement::TupleBinding { .. } => true,
+                crate::ast::Statement::Assignment { .. }
+                | crate::ast::Statement::FieldAssignment { .. } => is_call_free_assignment(text),
+                _ => false,
+            },
             _ => true,
         };
         if is_declaration {
-            kept.push(source.get(start..end)?);
+            kept.push(text);
         }
     }
     Some(kept.join("\n"))
 }
 
-/// Replaces the initializer of each top-level `var`/`const` of a plain type
-/// with the literal for its current value, so replaying the session neither
-/// re-runs the initializer's side effects nor loses later mutations.
+/// An assignment whose right-hand side runs no code of its own: replaying it
+/// cannot repeat a side effect.
+fn is_call_free_assignment(text: &str) -> bool {
+    let Some(equals) = text.find('=') else {
+        return false;
+    };
+    let rhs = &text[equals + 1..];
+    !rhs.is_empty()
+        && !rhs.starts_with('=')
+        && !rhs
+            .chars()
+            .any(|ch| matches!(ch, '(' | '{' | '~' | '$' | '|' | '`'))
+        && !rhs.contains("await")
+        && !rhs.contains("exec")
+}
+
+struct TypeContext<'a> {
+    structs: HashMap<&'a str, &'a crate::ast::StructDecl>,
+    enums: HashMap<&'a str, &'a crate::ast::EnumDecl>,
+}
+
+/// Replaces the initializer of each top-level `var`/`const` with the literal
+/// for its current value, so replaying the session neither re-runs the
+/// initializer's side effects nor loses later mutations. Assignments to a
+/// variable committed this way are already baked in and are removed. A value
+/// that cannot be printed keeps its initializer (and its replayed assignments).
 fn refresh_initializers(source: &str, globals: &HashMap<String, ConfigValue>) -> Option<String> {
     let (program, ranges) = parse_with_ranges(source)?;
-    let mut out = String::with_capacity(source.len());
-    let mut cursor = 0;
-    for (item, (start, end)) in program.items.iter().zip(ranges) {
+    let mut context = TypeContext {
+        structs: HashMap::new(),
+        enums: HashMap::new(),
+    };
+    for item in &program.items {
+        match item {
+            crate::ast::TopLevelItem::Struct(declaration) => {
+                context.structs.insert(&declaration.name, declaration);
+            }
+            crate::ast::TopLevelItem::Enum(declaration) => {
+                context.enums.insert(&declaration.name, declaration);
+            }
+            _ => {}
+        }
+    }
+    // First decide which variables can be printed.
+    let mut printed: HashMap<&str, String> = HashMap::new();
+    for item in &program.items {
         let crate::ast::TopLevelItem::Var(declaration) = item else {
             continue;
         };
         if declaration.value.is_none() {
             continue;
         }
-        let Some(literal) = globals
+        let literal = globals
             .get(&declaration.name)
-            .and_then(|value| literal_source(&declaration.ty, value))
-        else {
-            continue;
-        };
+            .and_then(|value| literal_source(&declaration.ty, value, &context));
+        match literal {
+            Some(literal) => {
+                printed.insert(&declaration.name, literal);
+            }
+            None => {
+                printed.remove(declaration.name.as_str());
+            }
+        }
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (item, (start, end)) in program.items.iter().zip(ranges) {
         let Some(text) = source.get(start..end) else {
             continue;
         };
-        let Some(equals) = text.find('=') else {
-            continue;
-        };
-        let body_end = if text.ends_with(';') { text.len() - 1 } else { text.len() };
-        if body_end <= equals {
-            continue;
+        match item {
+            crate::ast::TopLevelItem::Var(declaration) => {
+                let Some(literal) = printed.get(declaration.name.as_str()) else {
+                    continue;
+                };
+                let Some(equals) = text.find('=') else {
+                    continue;
+                };
+                let body_end = if text.ends_with(';') {
+                    text.len() - 1
+                } else {
+                    text.len()
+                };
+                if body_end <= equals {
+                    continue;
+                }
+                out.push_str(&source[cursor..start + equals + 1]);
+                out.push(' ');
+                out.push_str(literal);
+                cursor = start + body_end;
+            }
+            crate::ast::TopLevelItem::Statement(
+                crate::ast::Statement::Assignment { name, .. }
+                | crate::ast::Statement::FieldAssignment { base: name, .. },
+            ) if printed.contains_key(name.as_str()) => {
+                out.push_str(&source[cursor..start]);
+                cursor = end;
+            }
+            _ => {}
         }
-        out.push_str(&source[cursor..start + equals + 1]);
-        out.push(' ');
-        out.push_str(&literal);
-        cursor = start + body_end;
     }
     out.push_str(&source[cursor..]);
     Some(out)
 }
 
-/// Source text that evaluates to `value`, for the plain types only: scalars
-/// and lists of them. Anything else keeps its original initializer.
-fn literal_source(ty: &crate::ast::SparType, value: &ConfigValue) -> Option<String> {
+fn quote_string(text: &str) -> Option<String> {
+    let mut quoted = String::from("\"");
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '$' if chars.peek() == Some(&'{') => quoted.push_str("$\" + \""),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    Some(format!("({quoted})"))
+}
+
+/// Source text that evaluates to `value` when declared as `ty`. `None` for
+/// anything that cannot be written as a literal (shell plans, handles,
+/// results, errors, imported or generic types).
+fn literal_source(
+    ty: &crate::ast::SparType,
+    value: &ConfigValue,
+    context: &TypeContext,
+) -> Option<String> {
     use crate::ast::SparType;
     match (ty, value) {
         (SparType::Int, ConfigValue::Int(number)) => Some(number.to_string()),
         (SparType::Float, ConfigValue::Float(number)) if number.is_finite() => {
-            Some(format!("{number:?}"))
+            let text = format!("{number:?}");
+            (!text.contains('e') && !text.contains('E')).then_some(text)
         }
         (SparType::Bool, ConfigValue::Bool(flag)) => Some(flag.to_string()),
-        (SparType::Str, ConfigValue::Str(text)) => {
-            if text.contains("${") {
-                return None;
-            }
-            let mut quoted = String::from("\"");
-            for ch in text.chars() {
-                match ch {
-                    '\\' => quoted.push_str("\\\\"),
-                    '"' => quoted.push_str("\\\""),
-                    '\n' => quoted.push_str("\\n"),
-                    '\r' => quoted.push_str("\\r"),
-                    '\t' => quoted.push_str("\\t"),
-                    other => quoted.push(other),
-                }
-            }
-            quoted.push('"');
-            Some(quoted)
-        }
+        (SparType::Str, ConfigValue::Str(text)) => quote_string(text),
         (SparType::List(element), ConfigValue::List(items)) => {
             let items = items
                 .iter()
-                .map(|item| literal_source(element, item))
+                .map(|item| literal_source(element, item, context))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("[{}]", items.join(", ")))
+        }
+        (SparType::Tuple(types), ConfigValue::List(items)) if types.len() == items.len() => {
+            let items = types
+                .iter()
+                .zip(items)
+                .map(|(ty, item)| literal_source(ty, item, context))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("({})", items.join(", ")))
+        }
+        (SparType::InlineRecord, ConfigValue::Object(fields)) => {
+            let mut out = String::from("{");
+            for (name, field) in fields {
+                let field = inferred_literal(field, context)?;
+                out.push_str(&format!(" {}: {field};", quote_key(name)?));
+            }
+            out.push_str(if fields.is_empty() { "}" } else { " }" });
+            Some(out)
+        }
+        (SparType::Applied { name, arguments }, value) => match (name.as_str(), arguments.as_slice())
+        {
+            ("Option", [inner]) => match value {
+                ConfigValue::Option(Some(value)) => {
+                    Some(format!("some(value: {})", literal_source(inner, value, context)?))
+                }
+                ConfigValue::Option(None) => Some("none()".to_string()),
+                _ => None,
+            },
+            ("Map", [key, element]) if matches!(key, SparType::Str) => {
+                let pairs: Vec<(String, &ConfigValue)> = match value {
+                    ConfigValue::Object(fields) => fields
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value))
+                        .collect(),
+                    ConfigValue::Map(pairs) => pairs
+                        .iter()
+                        .map(|(key, value)| match key {
+                            ConfigValue::Str(key) => Some((key.clone(), value)),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    _ => return None,
+                };
+                let mut out = String::from("{");
+                for (key, value) in pairs {
+                    out.push_str(&format!(
+                        " {}: {};",
+                        quote_key(&key)?,
+                        literal_source(element, value, context)?
+                    ));
+                }
+                out.push_str(if out.len() == 1 { "}" } else { " }" });
+                Some(out)
+            }
+            _ => None,
+        },
+        (SparType::Named(name), ConfigValue::Str(variant)) => {
+            let declaration = context.enums.get(name.as_str())?;
+            declaration
+                .variants
+                .iter()
+                .any(|candidate| candidate == variant)
+                .then(|| format!("{name}::{variant}"))
+        }
+        (SparType::Named(name), ConfigValue::Object(fields)) => {
+            let declaration = context.structs.get(name.as_str())?;
+            if !declaration.type_parameters.is_empty() || declaration.type_binding.is_some() {
+                return None;
+            }
+            let mut arguments = Vec::new();
+            for item in &declaration.items {
+                let crate::ast::ObjectItem::Field(field) = item else {
+                    return None;
+                };
+                let field_type = field.ty.as_ref()?;
+                let field_value = fields.get(&field.name)?;
+                arguments.push(format!(
+                    "{}: {}",
+                    field.name,
+                    literal_source(field_type, field_value, context)?
+                ));
+            }
+            Some(format!("{name}({})", arguments.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+fn quote_key(name: &str) -> Option<String> {
+    if name.contains("${") || name.contains(['"', '\\', '\n']) {
+        return None;
+    }
+    Some(format!("\"{name}\""))
+}
+
+/// Literal for a value inside an untyped record, where the type is read off
+/// the value itself.
+fn inferred_literal(value: &ConfigValue, context: &TypeContext) -> Option<String> {
+    use crate::ast::SparType;
+    match value {
+        ConfigValue::Int(_) => literal_source(&SparType::Int, value, context),
+        ConfigValue::Float(_) => literal_source(&SparType::Float, value, context),
+        ConfigValue::Bool(_) => literal_source(&SparType::Bool, value, context),
+        ConfigValue::Str(_) => literal_source(&SparType::Str, value, context),
+        ConfigValue::Object(_) => literal_source(&SparType::InlineRecord, value, context),
+        ConfigValue::List(items) => {
+            let items = items
+                .iter()
+                .map(|item| inferred_literal(item, context))
                 .collect::<Option<Vec<_>>>()?;
             Some(format!("[{}]", items.join(", ")))
         }
@@ -2016,6 +2204,74 @@ struct Config { prompt: Prompt = Prompt(); };"#,
             .unwrap();
 
         assert_eq!(std::fs::read_to_string(path).unwrap(), "dd");
+    }
+
+    #[test]
+    fn mutations_of_every_value_kind_survive_later_submissions() {
+        let mut session = Engine::default().session();
+        let cwd = std::env::current_dir().unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        for source in [
+            "struct Q { n: int = 5; };",
+            "struct P { x: int = 1; y: int = 2; q: Q = Q(); tag: str = \"t\"; };",
+            "enum K { One, Two };",
+            "var mut p: P = P();",
+            "p.x = 9;",
+            "for k in [1, 2] { p.x = p.x + k; }",
+            "p.q.n = 7;",
+            "var mut m: Map<str, int> = { a: 1; };",
+            "m.insert(key: \"b\", value: 2);",
+            "var mut s: str = \"say \\\"hi\\\" $\" + \"{1}\";",
+            "s = s + \"!\";",
+            "var mut o: Option<int> = none();",
+            "o = some(value: 4);",
+            "var mut r: Record = { a: 1; b: \"x\"; };",
+            "var mut k: K = K::One;",
+            "k = K::Two;",
+            "var mut t: (int, str) = (1, \"a\");",
+            "var mut nested: List<List<int>> = [[1], [2, 3]];",
+            "nested = [[4]];",
+            "var later: int = 1;",
+        ] {
+            session
+                .eval_interactive_preview_with_context(source, &cwd, &environment, None, 10)
+                .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        }
+        session.eval("var after: int = p.x + p.q.n;").unwrap();
+        assert_eq!(session.value("after"), Some(&ConfigValue::Int(19)));
+        let ConfigValue::Object(m) = session.value("m").unwrap() else {
+            panic!("m is not a map");
+        };
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            session.value("s"),
+            Some(&ConfigValue::Str("say \"hi\" ${1}!".into()))
+        );
+        assert_eq!(
+            session.value("o"),
+            Some(&ConfigValue::Option(Some(Box::new(ConfigValue::Int(4)))))
+        );
+        assert_eq!(session.value("k"), Some(&ConfigValue::Str("Two".into())));
+        assert_eq!(
+            session.value("nested"),
+            Some(&ConfigValue::List(vec![ConfigValue::List(vec![
+                ConfigValue::Int(4)
+            ])]))
+        );
+    }
+
+    #[test]
+    fn unprintable_values_keep_replaying_simple_assignments() {
+        let mut session = Engine::default().session();
+        session.eval("var mut a: Result<int, str> = ok(value: 1);").unwrap();
+        session.eval("var b: Result<int, str> = ok(value: 2);").unwrap();
+        session.eval("a = b;").unwrap();
+        session.eval("var z: int = 1;").unwrap();
+        session.eval("var y: int = 1;").unwrap();
+        assert_eq!(
+            session.value("a"),
+            Some(&ConfigValue::Result(Ok(Box::new(ConfigValue::Int(2)))))
+        );
     }
 
     #[test]

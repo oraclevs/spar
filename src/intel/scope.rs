@@ -99,9 +99,30 @@ fn scope_items(analysis: Option<&MemberAnalysis>, source: &str, offset: usize) -
     if start > 0 && (bytes[start - 1] == b'.' || (start > 1 && &bytes[start - 2..start] == b"::")) {
         return Vec::new();
     }
+    // `var |`, `fn |`, `struct |`...: the user is naming something new.
+    let before_word = source[..start].trim_end();
+    let previous = before_word
+        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("");
+    if start > before_word.len()
+        && matches!(
+            previous,
+            "var" | "const" | "mut" | "fn" | "function" | "struct" | "enum" | "type" | "export" | "private"
+                | "schema" | "task" | "functionGroup"
+        )
+    {
+        return Vec::new();
+    }
     let typed = source[start..offset].to_ascii_lowercase();
 
-    let mut items = local_items(&local_names_at(source, offset));
+    // An unfinished `${ }` (often inside a command) is not lexable Spar; the
+    // names visible where it opens are the ones visible inside it.
+    let names_at = match source[..offset].rfind("${") {
+        Some(open) if !source[open..offset].contains('}') => open,
+        _ => offset,
+    };
+    let mut items = local_items(&local_names_at(source, names_at));
     if let Some(analysis) = analysis {
         let symbols = analysis.symbols();
         let mut push = |label: &str, kind: IntelKind, detail: Option<String>, tier: u8| {
@@ -324,6 +345,19 @@ mod tests {
         assert!(labels_at("var a: int = 1;\nvar s = \"he|llo\";").is_empty());
         assert!(labels_at("var a: int = 1;\n// note a|\n").is_empty());
         assert!(labels_at("var a: int = 1;\nvar s = a.|").is_empty());
+    }
+
+    #[test]
+    fn nothing_is_offered_where_a_new_name_is_declared() {
+        assert!(labels_at("var count: int = 1;\nvar |").is_empty());
+        assert!(labels_at("var count: int = 1;\nfunction co|").is_empty());
+        assert!(!labels_at("var count: int = 1;\nvar x = |").is_empty());
+    }
+
+    #[test]
+    fn loop_variable_is_visible_in_a_command_interpolation_on_the_same_line() {
+        let labels = labels_at("for i in [1, 2] { echo ${i|");
+        assert!(has(&labels, "i"), "{labels:?}");
     }
 
     #[test]

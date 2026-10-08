@@ -3,8 +3,8 @@
 //! This module must stay free of LSP and async-runtime dependencies: it works
 //! on plain source text, byte offsets and paths.
 
-#[doc(hidden)] // unstable: spar-ls still uses Chain, ScopeName, local_names_at, parse_chain_tokens,
-               // parse_type_tokens (tests) and type_of_chain until signature help moves (Task 9)
+#[doc(hidden)] // unstable: the spar-ls completion adapters still use Chain, ScopeName, local_names_at,
+               // parse_chain_tokens, parse_type_tokens and type_of_chain
 pub mod chain;
 pub mod cursor;
 pub mod exports;

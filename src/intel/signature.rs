@@ -175,7 +175,8 @@ pub struct SignatureEnv<'a> {
     pub hooks: &'a dyn SignatureHooks,
 }
 
-fn simple_receiver_chain(text: &str) -> Option<Chain> {
+#[doc(hidden)] // unstable: spar-ls go-to-definition
+pub fn simple_receiver_chain(text: &str) -> Option<Chain> {
     let mut parts = text.split('.');
     let root = parts.next()?.trim();
     if root.is_empty() || !root.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {

@@ -171,7 +171,7 @@ fn type_field_items(symbols: &SymbolTable, ty: &SparType) -> Vec<IntelItem> {
 
 /// Fields and methods of `ty`.
 #[doc(hidden)] // unstable: used by spar-ls until Task 8
-pub fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<IntelItem> {
+pub(crate) fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<IntelItem> {
     let fields = type_field_items(env.symbols, ty);
     let mut methods = owner_name_for_type(ty)
         .map(|owner| (env.extra_methods)(owner, false))
@@ -305,7 +305,7 @@ pub fn receiver_type_at_dot(source: &str, map: &crate::typechecker::TypeMap, dot
 const INCOMPLETE_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[doc(hidden)] // unstable: used by spar-ls until Task 8
-pub fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: usize) -> Option<SparType> {
+pub(crate) fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: usize) -> Option<SparType> {
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
     }
@@ -349,7 +349,7 @@ pub fn format_type_field_shape(shape: &crate::ast::TypeFieldShape) -> String {
 
 /// Function-group members, as listed after `Group.` or `Group::`.
 #[doc(hidden)] // unstable: used by spar-ls until Task 8
-pub fn function_group_items(functions: &std::collections::HashMap<String, crate::resolver::FunctionEntry>) -> Vec<IntelItem> {
+pub(crate) fn function_group_items(functions: &std::collections::HashMap<String, crate::resolver::FunctionEntry>) -> Vec<IntelItem> {
     functions
         .iter()
         .filter(|(name, _)| !is_internal_dependency_name(name))

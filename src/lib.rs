@@ -13,6 +13,7 @@ pub mod error;
 pub mod evaluator;
 pub mod formatter;
 pub mod host;
+pub mod intel;
 pub mod lexer;
 pub mod loader;
 pub(crate) mod lowerer;

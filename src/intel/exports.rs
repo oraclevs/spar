@@ -532,6 +532,17 @@ fn import_target(source: &str, masked: &str, from: usize, end: usize, package: b
 mod tests {
     use super::*;
 
+    /// Tests use a generous budget so a loaded parallel test run cannot trip the
+    /// 500 ms prompt budget; the budget itself is tested with explicit values.
+    fn exports_of(
+        target: &ImportTarget,
+        base_dir: &Path,
+        type_only: bool,
+        already: &HashSet<String>,
+    ) -> Result<Vec<ExportItem>, IntelError> {
+        exports_with_budget(target, base_dir, type_only, already, Duration::from_secs(30))
+    }
+
     fn temp_module(src: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lib.spar");

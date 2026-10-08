@@ -3,13 +3,15 @@
 //! This module must stay free of LSP and async-runtime dependencies: it works
 //! on plain source text, byte offsets and paths.
 
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub mod chain;
 pub mod cursor;
 pub mod exports;
 pub mod member;
+pub mod repair;
 
 pub use exports::{exports_of, exports_of_with_budget, import_context};
-pub use member::complete_members;
+pub use member::{analyze_session, complete_members, complete_members_with, MemberAnalysis};
 
 /// What kind of declaration an import candidate is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

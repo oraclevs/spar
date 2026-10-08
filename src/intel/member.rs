@@ -7,7 +7,8 @@
 
 use super::chain::{local_names_at, type_of_chain, Chain, ChainStep};
 use super::cursor::{inside_string_interpolation, lexical_state_at, CursorLexicalState};
-use super::exports::{blank_line_around, blank_statement_around, package_locator, REPAIR_ATTEMPTS};
+use super::exports::package_locator;
+use super::repair::{blank_statement_around, repair_source};
 use super::{IntelItem, IntelKind, IntelRequest};
 use crate::ast::{Program, SparType};
 use crate::error::SparError;
@@ -17,6 +18,7 @@ use crate::{CompileOptions, Compiler, Lexer, Parser};
 use std::borrow::Cow;
 
 /// What the lower-level member functions need besides the source text.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub struct MemberEnv<'a> {
     pub symbols: &'a SymbolTable,
     /// The program, parsed lazily: only the type-checker fallback needs it.
@@ -168,6 +170,7 @@ fn type_field_items(symbols: &SymbolTable, ty: &SparType) -> Vec<IntelItem> {
 }
 
 /// Fields and methods of `ty`.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<IntelItem> {
     let fields = type_field_items(env.symbols, ty);
     let mut methods = owner_name_for_type(ty)
@@ -207,6 +210,7 @@ pub fn member_items_for_type(env: &MemberEnv, ty: &SparType) -> Vec<IntelItem> {
 /// cursor is in a member-access position and these are the members, possibly
 /// none: callers must not fall back to general expression completion. `None`
 /// means this is not a member access. Walks the text of the receiver chain.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
     let symbols = env.symbols;
     let receiver = receiver_before_cursor(source, offset)?;
@@ -249,6 +253,7 @@ pub fn typed_members_indexed(source: &str, offset: usize, env: &MemberEnv) -> Op
 /// [`typed_members_indexed`], falling back to the type checker's inferred
 /// receiver type when the text-based chain walk cannot resolve it (closure
 /// parameters, call results, loop variables...).
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn typed_members(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec<IntelItem>> {
     let primary = typed_members_indexed(source, offset, env);
     if matches!(&primary, Some(items) if !items.is_empty()) {
@@ -277,6 +282,7 @@ pub fn typed_members(source: &str, offset: usize, env: &MemberEnv) -> Option<Vec
     }
 }
 
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn typed_map_of(ast: &Program, symbols: &SymbolTable, len: usize) -> crate::typechecker::TypeMap {
     let (_, mut map) = crate::typechecker::TypeChecker::check_with_type_map(ast, symbols);
     map.expressions.retain(|s| s.end <= len && s.start < s.end);
@@ -285,6 +291,7 @@ pub fn typed_map_of(ast: &Program, symbols: &SymbolTable, len: usize) -> crate::
 }
 
 /// Receiver type of the member access whose `.` is at byte `dot`.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn receiver_type_at_dot(source: &str, map: &crate::typechecker::TypeMap, dot: usize) -> Option<SparType> {
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
@@ -294,6 +301,10 @@ pub fn receiver_type_at_dot(source: &str, map: &crate::typechecker::TypeMap, dot
 
 /// While the user is typing `recv.` the file usually does not parse. Insert a placeholder member
 /// (and the closers the surrounding text needs) so the checker can type the receiver anyway.
+/// Wall-clock budget for the placeholder-suffix retries below.
+const INCOMPLETE_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
+
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: usize) -> Option<SparType> {
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
@@ -305,7 +316,11 @@ pub fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: us
     while member_end < bytes.len() && (bytes[member_end].is_ascii_alphanumeric() || bytes[member_end] == b'_') {
         member_end += 1;
     }
+    let started = std::time::Instant::now();
     for suffix in ["", ";", ")", ");", "]", "];", "}", "};"] {
+        if started.elapsed() > INCOMPLETE_BUDGET {
+            return None;
+        }
         let candidate = format!("{}.__member{}{}", &source[..dot], suffix, &source[member_end..]);
         let Ok(tokens) = Lexer::new(&candidate).tokenize() else { continue };
         let Ok(program) = Parser::new(tokens).parse() else { continue };
@@ -317,7 +332,7 @@ pub fn receiver_type_for_incomplete(source: &str, symbols: &SymbolTable, dot: us
     None
 }
 
-fn format_type_field_shape(shape: &crate::ast::TypeFieldShape) -> String {
+pub fn format_type_field_shape(shape: &crate::ast::TypeFieldShape) -> String {
     use crate::ast::TypeFieldShape;
     match shape {
         TypeFieldShape::Primitive(ty) => display(ty),
@@ -333,6 +348,7 @@ fn format_type_field_shape(shape: &crate::ast::TypeFieldShape) -> String {
 }
 
 /// Function-group members, as listed after `Group.` or `Group::`.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn function_group_items(functions: &std::collections::HashMap<String, crate::resolver::FunctionEntry>) -> Vec<IntelItem> {
     functions
         .iter()
@@ -373,6 +389,7 @@ fn enum_member_items(variants: &[String]) -> Vec<IntelItem> {
 /// Members reached through a declaration name directly before the dot: native
 /// module functions, function-group members, type fields and enum variants.
 /// `None` when the text before `offset` does not end in `.`.
+#[doc(hidden)] // unstable: used by spar-ls until Task 8
 pub fn declaration_members(source: &str, offset: usize, symbols: &SymbolTable) -> Option<Vec<IntelItem>> {
     let before_cursor = source.get(..offset)?;
     let before_dot = before_cursor.strip_suffix('.')?;
@@ -476,50 +493,25 @@ fn path_members(source: &str, offset: usize, symbols: &SymbolTable) -> Option<Ve
 
 // ── Source analysis for the stateless entry point ────────────────────────────
 
-/// The text of `source` after blanking, in place, each statement the lexer or
-/// parser rejects, until the rest lexes and parses. Offsets never move.
-fn repair_source(source: &str) -> Option<String> {
-    let mut text = source.to_string();
-    for _ in 0..REPAIR_ATTEMPTS {
-        let failure = match Lexer::new(&text).tokenize() {
-            Ok(tokens) => match Parser::new(tokens).parse() {
-                Ok(_) => return Some(text),
-                Err(SparError::ParseError { span, .. }) => (false, span.start),
-                Err(SparError::LexError { span, .. }) => (true, span.start),
-                Err(_) => return None,
-            },
-            Err(SparError::LexError { span, .. }) => (true, span.start),
-            Err(SparError::ParseError { span, .. }) => (false, span.start),
-            Err(_) => return None,
-        };
-        let repaired = if failure.0 {
-            blank_line_around(&text, failure.1)
-        } else {
-            blank_statement_around(&text, failure.1)
-        };
-        if repaired == text {
-            return None;
-        }
-        text = repaired;
-    }
-    None
-}
-
-struct Analysis {
+/// The symbols of a source buffer, computed once and reusable for many
+/// completions of lines typed after it (the sparsh session source).
+pub struct MemberAnalysis {
     symbols: SymbolTable,
     program: Option<Program>,
+    /// Length of the analysed text; a longer buffer needs its own program.
+    source_len: usize,
 }
 
-/// Symbols of `req.source`; for a buffer that does not compile (the line being
-/// typed ends in `.`), of a copy with the offending statements blanked.
-fn analyze(req: &IntelRequest) -> Option<Analysis> {
-    let mut options = CompileOptions { base_dir: req.base_dir.to_path_buf(), evaluate: false, ..CompileOptions::default() };
-    options.locator = package_locator(req.base_dir);
-    let compilation = Compiler::new(options.clone()).compile(req.source);
+/// Symbols of `source`; for a buffer that does not compile, of a copy with the
+/// offending statements blanked. `None` when nothing usable results.
+pub fn analyze_session(source: &str, base_dir: &std::path::Path) -> Option<MemberAnalysis> {
+    let mut options = CompileOptions { base_dir: base_dir.to_path_buf(), evaluate: false, ..CompileOptions::default() };
+    options.locator = package_locator(base_dir);
+    let compilation = Compiler::new(options.clone()).compile(source);
     if let Some(symbols) = compilation.symbols {
-        return Some(Analysis { symbols, program: compilation.program });
+        return Some(MemberAnalysis { symbols, program: compilation.program, source_len: source.len() });
     }
-    let mut text = repair_source(req.source)?;
+    let mut text = repair_source(source)?;
     for _ in 0..6 {
         let compilation = Compiler::new(options.clone()).compile(&text);
         if let Some(symbols) = compilation.symbols {
@@ -527,7 +519,7 @@ fn analyze(req: &IntelRequest) -> Option<Analysis> {
                 let tokens = Lexer::new(&text).tokenize().ok()?;
                 Parser::new(tokens).parse().ok()
             });
-            return Some(Analysis { symbols, program });
+            return Some(MemberAnalysis { symbols, program, source_len: source.len() });
         }
         let start = compilation.errors.iter().find_map(|e| match e {
             SparError::ResolveError { span, .. } if span.end > span.start => Some(span.start),
@@ -545,21 +537,47 @@ fn analyze(req: &IntelRequest) -> Option<Analysis> {
 /// Members of the receiver in front of the cursor: struct fields, methods and
 /// built-in methods of its type, `Enum.`/`Enum::` variants, module and
 /// function-group members. The partial member name before the cursor filters
-/// the list by prefix. Empty when the cursor is not after `receiver.`, is in
-/// a string or comment, or the receiver's type is unknown.
+/// the list by prefix, ignoring case. Empty when the cursor is not after
+/// `receiver.`, is in a string or comment, or the receiver's type is unknown.
+///
+/// Stateless: it compiles `req.source` with default options, so embedder
+/// natives and the data prelude are not visible. Callers completing many lines
+/// against one unchanged source should use [`analyze_session`] and
+/// [`complete_members_with`].
 pub fn complete_members(req: &IntelRequest) -> Vec<IntelItem> {
-    let mut offset = req.offset.min(req.source.len());
-    while !req.source.is_char_boundary(offset) {
+    // Offsets past the end or inside a character are clamped by the callee.
+    let Some(analysis) = analyze_session(req.source, req.base_dir) else { return Vec::new() };
+    complete_members_with(&analysis, req.source, req.offset)
+}
+
+/// [`complete_members`] against symbols computed earlier. `analysis` comes from
+/// a prefix of `source` (the committed session); `source` is that prefix plus
+/// the line being typed, whose own declarations are found by the token scan.
+pub fn complete_members_with(analysis: &MemberAnalysis, source: &str, offset: usize) -> Vec<IntelItem> {
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
         offset -= 1;
     }
-    match lexical_state_at(req.source, offset) {
+    match lexical_state_at(source, offset) {
         CursorLexicalState::Code => {}
-        CursorLexicalState::String if inside_string_interpolation(req.source, offset) => {}
+        CursorLexicalState::String if inside_string_interpolation(source, offset) => {}
         _ => return Vec::new(),
     }
-    let Some(analysis) = analyze(req) else { return Vec::new() };
-    let source = req.source;
-    let ast = || analysis.program.as_ref().map(Cow::Borrowed);
+    // Only the type-checker fallback needs a program that contains the line.
+    let repaired: std::cell::OnceCell<Option<Program>> = std::cell::OnceCell::new();
+    let ast = || {
+        if analysis.program.is_some() && source.len() == analysis.source_len {
+            return analysis.program.as_ref().map(Cow::Borrowed);
+        }
+        repaired
+            .get_or_init(|| {
+                let text = repair_source(source)?;
+                let tokens = Lexer::new(&text).tokenize().ok()?;
+                Parser::new(tokens).parse().ok()
+            })
+            .as_ref()
+            .map(Cow::Borrowed)
+    };
     let no_extra = |_: &str, _: bool| Vec::new();
     let env = MemberEnv { symbols: &analysis.symbols, ast: &ast, extra_methods: &no_extra };
     let items = typed_members(source, offset, &env)
@@ -567,10 +585,14 @@ pub fn complete_members(req: &IntelRequest) -> Vec<IntelItem> {
         .or_else(|| path_members(source, offset, &analysis.symbols))
         .unwrap_or_default();
     let typed = source[..offset]
-        .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
         .next()
-        .unwrap_or("");
-    items.into_iter().filter(|item| item.label.starts_with(typed)).collect()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    items
+        .into_iter()
+        .filter(|item| item.label.to_ascii_lowercase().starts_with(&typed))
+        .collect()
 }
 
 #[cfg(test)]
@@ -677,5 +699,68 @@ mod tests {
     fn multi_line_sources_with_functions_and_comments() {
         let source = format!("// header \u{e9}\nfn helper() -> int {{\n    return 1;\n}};\n\n{P}var q: int = 2;\np.po|");
         assert_eq!(labels(&source), vec!["port"]);
+    }
+
+    #[test]
+    fn prefix_filter_ignores_case() {
+        assert_eq!(labels(&format!("{P}p.NA|")), vec!["name"]);
+    }
+
+    #[test]
+    fn non_ascii_partial_is_not_a_member_position() {
+        assert!(labels(&format!("{P}p.n\u{e9}|")).is_empty());
+    }
+
+    #[test]
+    fn call_result_receiver_uses_the_checker() {
+        let source = format!("{P}fn make() -> P {{ return P(); }};\nfn main() -> int {{\n    var s = make().|;\n    return 0;\n}};\n");
+        let names = labels(&source);
+        assert!(names.contains(&"name".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn bare_underscore_receiver_is_empty() {
+        assert!(labels(&format!("{P}_.|")).is_empty());
+    }
+
+    #[test]
+    fn option_and_result_receivers_list_their_methods() {
+        let option = labels("var o: Option<int> = some(value: 1);\no.|");
+        assert!(!option.is_empty(), "{option:?}");
+        assert!(option.iter().all(|n| !n.is_empty()));
+        let result = labels("var r: Result<int, str> = ok(value: 1);\nr.|");
+        assert!(!result.is_empty(), "{result:?}");
+    }
+
+    #[test]
+    fn function_group_members_follow_the_group_name() {
+        let group = "functionGroup Convert {\n    function toText(value: int) -> str { return str(value: value); }\n    function toBool(value: str) -> bool { return bool(value: value); }\n};\n";
+        let mut names = labels(&format!("{group}Convert.|"));
+        names.sort();
+        assert_eq!(names, vec!["toBool", "toText"]);
+        assert_eq!(labels(&format!("{group}Convert::toT|")), vec!["toText"]);
+        assert!(members(&format!("{group}Convert.|")).iter().all(|i| i.kind == IntelKind::Function));
+    }
+
+    #[test]
+    fn syntax_error_elsewhere_uses_the_repair_path() {
+        let source = format!("{P}var oops = (;\nvar later: int = 1;\np.|");
+        let names = labels(&source);
+        assert!(names.contains(&"name".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn session_analysis_is_reusable_for_later_lines() {
+        let session = P.to_string();
+        let analysis = analyze_session(&session, Path::new(".")).unwrap();
+        let line = "p.na";
+        let source = format!("{session}\n{line}");
+        let cached = complete_members_with(&analysis, &source, source.len());
+        let direct = complete_members(&IntelRequest { source: &source, offset: source.len(), base_dir: Path::new(".") });
+        assert_eq!(cached, direct);
+        assert_eq!(cached.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["name"]);
+        // The call-result fallback needs the line's own program.
+        let source = format!("{session}\np.name.");
+        assert!(!complete_members_with(&analysis, &source, source.len()).is_empty());
     }
 }

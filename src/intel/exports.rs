@@ -16,7 +16,8 @@ const BUDGET: Duration = Duration::from_millis(500);
 /// `exported` vars, structs, enums and types, plus non-private functions and
 /// function groups. The compiler's symbol table also holds prelude and
 /// transitively spliced symbols, so it is used for metadata only.
-/// `type_only` keeps structs, enums and types.
+/// `type_only` keeps structs, enums and types. (`type_only` and
+/// `ExportKind::Type` mirror old spar-ls branches; the grammar no longer has `type`.)
 pub fn exports_of(
     target: &ImportTarget,
     base_dir: &Path,
@@ -26,7 +27,33 @@ pub fn exports_of(
     exports_with_budget(target, base_dir, type_only, already, BUDGET)
 }
 
+/// Runs the work on a worker thread and gives up after `budget`. The worker
+/// owns all its data and may finish on its own after a timeout.
 pub(crate) fn exports_with_budget(
+    target: &ImportTarget,
+    base_dir: &Path,
+    type_only: bool,
+    already: &HashSet<String>,
+    budget: Duration,
+) -> Result<Vec<ExportItem>, IntelError> {
+    let (target, base_dir, already) = (target.clone(), base_dir.to_path_buf(), already.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("spar-intel-exports".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let _ = tx.send(exports_worker(&target, &base_dir, type_only, &already, budget));
+        });
+    if spawned.is_err() {
+        return Err(IntelError::Timeout);
+    }
+    match rx.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(_) => Err(IntelError::Timeout),
+    }
+}
+
+fn exports_worker(
     target: &ImportTarget,
     base_dir: &Path,
     type_only: bool,
@@ -70,6 +97,10 @@ pub(crate) fn exports_with_budget(
         .map_err(|_| IntelError::Parse(format!("{} is not valid UTF-8", resolved.path.display())))?;
     check()?;
 
+    let comments = crate::lexer::Lexer::new(&source)
+        .tokenize_with_comments()
+        .map(|(_, comments)| comments)
+        .unwrap_or_default();
     let raw = parse_with_statement_repair(&source)
         .ok_or_else(|| IntelError::Parse(format!("{} does not parse", resolved.path.display())))?;
     check()?;
@@ -95,7 +126,7 @@ pub(crate) fn exports_with_budget(
             name: name.to_string(),
             kind,
             detail,
-            doc: leading_documentation(&source, decl_start),
+            doc: leading_documentation_with(&comments, &source, decl_start),
             span: span.clone(),
             file: resolved.path.clone(),
         });
@@ -319,11 +350,16 @@ fn documentation_cursor(source: &str, declaration_start: usize) -> usize {
     }
 }
 
-fn leading_documentation(source: &str, declaration_start: usize) -> Option<String> {
-    let (_, comments) = crate::lexer::Lexer::new(source).tokenize_with_comments().ok()?;
+fn leading_documentation_with(
+    comments: &[crate::lexer::CommentTrivia],
+    source: &str,
+    declaration_start: usize,
+) -> Option<String> {
     let mut cursor = documentation_cursor(source, declaration_start);
     let mut parts = Vec::new();
-    for comment in comments.iter().filter(|comment| !comment.is_trailing).rev() {
+    // Comments are in source order: skip those at or after the declaration.
+    let upto = comments.partition_point(|comment| comment.start < cursor);
+    for comment in comments[..upto].iter().filter(|comment| !comment.is_trailing).rev() {
         if comment.start >= cursor {
             continue;
         }
@@ -519,7 +555,7 @@ fn import_target(source: &str, masked: &str, from: usize, end: usize, package: b
     };
     let trimmed = tail.trim_start();
     let at = from + (tail.len() - trimmed.len());
-    let Some(after_from) = trimmed.strip_prefix("from") else {
+    let Some(after_from) = trimmed.strip_prefix("from").filter(|r| !r.bytes().next().is_some_and(is_word_byte)) else {
         return ImportTarget::Missing;
     };
     let value = after_from.trim_start();
@@ -624,7 +660,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub.spar")).unwrap();
         let r = exports_of(&file("sub.spar"), dir.path(), false, &Default::default());
-        assert!(r.is_err());
+        assert!(matches!(r, Err(IntelError::NotFound(_))), "{r:?}");
     }
 
     #[test]
@@ -632,7 +668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.spar"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
         let r = exports_of(&file("lib.spar"), dir.path(), false, &Default::default());
-        assert!(r.is_err());
+        assert!(matches!(r, Err(IntelError::Parse(_))), "{r:?}");
     }
 
     #[test]
@@ -648,17 +684,78 @@ mod tests {
             "import { a } from \"a.spar\";\nexport var b: int = 2;\n",
         )
         .unwrap();
-        let _ = exports_of(&file("a.spar"), dir.path(), false, &Default::default());
+        let items = exports_of(&file("a.spar"), dir.path(), false, &Default::default()).unwrap();
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["a"]);
     }
 
     #[test]
-    fn parse_error_still_returns_recovered_names_or_an_error() {
+    fn parse_error_recovers_names_from_the_good_statements() {
         let (dir, _) = temp_module("export var ok: int = 1;\nexport var broken: int = ;\n");
-        let r = exports_of(&file("lib.spar"), dir.path(), false, &Default::default());
-        assert!(r.is_ok() || matches!(r, Err(IntelError::Parse(_))));
-        if let Ok(items) = r {
-            assert!(items.iter().any(|i| i.name == "ok"));
+        let items = exports_of(&file("lib.spar"), dir.path(), false, &Default::default()).unwrap();
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"]);
+    }
+
+    #[test]
+    fn private_and_unexported_structs_and_enums_are_not_listed() {
+        let (dir, _) = temp_module(
+            "struct Plain { a: int = 1; };\nprivate struct Priv { a: int = 1; };\nenum Hidden { A, B };\nexport struct Shown { a: int = 1; };\n");
+        let items = exports_of(&file("lib.spar"), dir.path(), false, &Default::default()).unwrap();
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["Shown"]);
+    }
+
+    #[test]
+    fn many_documented_exports_are_fast_and_complete() {
+        let mut src = String::new();
+        for i in 0..10_000 {
+            src.push_str(&format!("/// doc {i}\nexport var v{i}: int = {i};\n"));
         }
+        let (dir, _) = temp_module(&src);
+        let started = std::time::Instant::now();
+        let items = exports_with_budget(
+            &file("lib.spar"), dir.path(), false, &Default::default(),
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 10_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        let v7 = items.iter().find(|i| i.name == "v7").unwrap();
+        assert_eq!(v7.doc.as_deref(), Some("doc 7"));
+    }
+
+    #[test]
+    fn tiny_budget_times_out_promptly_mid_work() {
+        let mut src = String::new();
+        for i in 0..20_000 {
+            src.push_str(&format!("export var v{i}: int = {i};\n"));
+        }
+        let (dir, _) = temp_module(&src);
+        let started = std::time::Instant::now();
+        let r = exports_with_budget(
+            &file("lib.spar"), dir.path(), false, &Default::default(),
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(r.unwrap_err(), IntelError::Timeout);
+        assert!(started.elapsed() < std::time::Duration::from_millis(400), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn blocking_fifo_target_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.spar");
+        let ok = std::process::Command::new("mkfifo").arg(&fifo).status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let r = exports_with_budget(
+            &file("pipe.spar"), dir.path(), false, &Default::default(),
+            std::time::Duration::from_millis(100),
+        );
+        assert_eq!(r.unwrap_err(), IntelError::Timeout);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
@@ -743,5 +840,54 @@ mod tests {
         }
         let _ = import_context("", 0);
         let _ = import_context("\"unterminated import { ", 5);
+    }
+
+    #[test]
+    fn import_context_cursor_segment_exclusion() {
+        let src = "import { a, b, c }";
+        let c = import_context(src, src.find('c').unwrap() + 1).unwrap();
+        assert_eq!(c.typed, "c");
+        assert_eq!(c.already, ["a", "b"].iter().map(|s| s.to_string()).collect());
+        let mid = import_context(src, src.find('b').unwrap() + 1).unwrap();
+        assert_eq!(mid.typed, "b");
+        assert_eq!(mid.already, ["a", "c"].iter().map(|s| s.to_string()).collect());
+    }
+
+    #[test]
+    fn import_context_multiline_from_after_comment() {
+        let src = "import { a, }\n  // where from\n  from /* x */ \"lib.spar\";";
+        let c = import_context(src, src.find("a,").unwrap() + 3).unwrap();
+        assert_eq!(c.target, ImportTarget::File("lib.spar".into()));
+    }
+
+    #[test]
+    fn import_context_braces_and_semicolons_in_strings() {
+        let src = "var s: str = \"import { x; }\";\nimport { a, } from \"we};ird.spar\";";
+        let off = src.rfind("a,").unwrap() + 3;
+        let c = import_context(src, off).unwrap();
+        assert_eq!(c.target, ImportTarget::File("we};ird.spar".into()));
+        // inside the string literal itself there is no import context
+        assert!(import_context(src, src.find("x;").unwrap()).is_none());
+    }
+
+    #[test]
+    fn import_context_alias_lists_original_name() {
+        let src = "import { a as z, b";
+        let c = import_context(src, src.len()).unwrap();
+        assert_eq!(c.typed, "b");
+        assert!(c.already.contains("a") && !c.already.contains("z"));
+    }
+
+    #[test]
+    fn import_context_nested_braces_do_not_confuse() {
+        let src = "import { a } from \"x\";\nvar r = { k: 1 };";
+        assert!(import_context(src, src.find("k:").unwrap()).is_none());
+    }
+
+    #[test]
+    fn import_target_requires_word_boundary_after_from() {
+        let src = "import { a,  } fromx \"lib.spar\";";
+        let c = import_context(src, "import { a, ".len()).unwrap();
+        assert_eq!(c.target, ImportTarget::Missing);
     }
 }

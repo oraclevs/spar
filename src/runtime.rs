@@ -23,7 +23,7 @@ pub use resource::ResourceId;
 pub use schema::{Schema, SchemaField, SchemaInferenceError, SchemaType};
 pub use stream::{StreamResource, StreamState};
 pub use table::TableValue;
-pub use value::{ErrBox, ErrorValue, Shared, Value};
+pub use value::{ErrBox, OkBox, ErrorValue, Shared, Value};
 
 use crate::ast::SparType;
 use crate::async_runtime::{RuntimeFault, TaskInvocation, TaskStatus};
@@ -849,6 +849,12 @@ pub(crate) fn call_function_with_context(
 
 pub(crate) enum InteractiveRuntimeExecution {
     Value(crate::session::InteractiveRuntimeValue),
+    /// A call whose body ended a mixed pipeline in a structured result a
+    /// terminal should render, next to the value the call returned.
+    Captured {
+        returned: Value,
+        capture: crate::session::InteractiveRuntimeValue,
+    },
     Process(crate::evaluator::ShellPlanOutcome),
 }
 
@@ -927,11 +933,28 @@ pub(crate) fn execute_interactive_preview_with_context(
                 .execute_shell_program(&program)
                 .map_err(|fault| vec![fault.into_error()])?,
         ),
-        value => InteractiveRuntimeExecution::Value(
-            runtime
-                .materialize_interactive_preview(value, preview_limit)
-                .map_err(|fault| vec![fault.into_error()])?,
-        ),
+        value => {
+            let capture = runtime.context.take_mixed_capture();
+            match capture {
+                Some(capture) => InteractiveRuntimeExecution::Captured {
+                    returned: value,
+                    capture: crate::session::InteractiveRuntimeValue {
+                        value: capture.value,
+                        stream_preview: false,
+                        truncated: false,
+                        presentation: capture.format.map_or(
+                            crate::session::InteractivePresentation::Pipeline,
+                            crate::session::InteractivePresentation::Encoded,
+                        ),
+                    },
+                },
+                None => InteractiveRuntimeExecution::Value(
+                    runtime
+                        .materialize_interactive_preview(value, preview_limit)
+                        .map_err(|fault| vec![fault.into_error()])?,
+                ),
+            }
+        }
     };
     let result = runtime
         .state
@@ -3191,7 +3214,7 @@ impl Runtime<'_> {
                             vec![value.as_ref().clone()],
                             span,
                         )?;
-                        Ok(Value::Result(Ok(Box::new(mapped))))
+                        Ok(Value::Result(Ok(crate::runtime::value::OkBox::new(mapped))))
                     }
                     Err(error) => Ok(Value::Result(Err(error.clone()))),
                 }
@@ -3201,7 +3224,7 @@ impl Runtime<'_> {
                     return Err(type_error("Result", receiver, span).into());
                 };
                 match value {
-                    Ok(value) => Ok(Value::Result(Ok(Box::new(value.as_ref().clone())))),
+                    Ok(value) => Ok(Value::Result(Ok(value.clone()))),
                     Err(error) => {
                         let transform = args.get(1).ok_or_else(|| {
                             runtime_error("Result.mapErr requires a transform callable", span)
@@ -3243,7 +3266,7 @@ impl Runtime<'_> {
                     return Err(type_error("Result", receiver, span).into());
                 };
                 match value {
-                    Ok(value) => Ok(Value::Result(Ok(Box::new(value.as_ref().clone())))),
+                    Ok(value) => Ok(Value::Result(Ok(value.clone()))),
                     Err(error) => {
                         let fallback = args.get(1).ok_or_else(|| {
                             runtime_error("Result.orElse requires a fallback callable", span)
@@ -4634,6 +4657,7 @@ impl Runtime<'_> {
     ) -> Result<spar_command::CommandPlan, RuntimeFault> {
         let mut args = Vec::with_capacity(command.args.len());
         let mut glob_args = Vec::new();
+        let is_echo = matches!(command.program.parts.as_slice(), [CompiledShellWordPart::Literal(name)] if name == "echo");
         for argument in &command.args {
             // Args is intentionally expanded only when it occupies the entire
             // shell word. Each stored string is already one argv entry and is
@@ -4643,6 +4667,15 @@ impl Runtime<'_> {
                 match value {
                     Value::Args(values) => {
                         args.extend(values);
+                        continue;
+                    }
+                    value if is_echo => {
+                        args.push(match value {
+                            Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+                                shell_primitive_to_string(value, &argument.span)?
+                            }
+                            other => other.render_display(),
+                        });
                         continue;
                     }
                     value => {
@@ -4673,7 +4706,7 @@ impl Runtime<'_> {
                 if argument.glob {
                     glob_args.push(args.len());
                 }
-                args.push(self.eval_shell_word(argument, frame, module)?);
+                args.push(self.eval_shell_word_display(argument, frame, module, is_echo)?);
             }
         }
         let program = self.eval_shell_word(&command.program, frame, module)?;
@@ -4742,6 +4775,18 @@ impl Runtime<'_> {
         frame: &mut Frame,
         module: crate::compiled::ModuleId,
     ) -> Result<String, RuntimeFault> {
+        self.eval_shell_word_display(word, frame, module, false)
+    }
+
+    /// `display`: non-primitive `${...}` values are written the way `print`
+    /// shows them rather than raising a type error (used for `echo`).
+    fn eval_shell_word_display(
+        &mut self,
+        word: &CompiledShellWord,
+        frame: &mut Frame,
+        module: crate::compiled::ModuleId,
+        display: bool,
+    ) -> Result<String, RuntimeFault> {
         let mut output = String::new();
         for part in &word.parts {
             match part {
@@ -4789,6 +4834,7 @@ impl Runtime<'_> {
                             )
                             .into())
                         }
+                        other if display => output.push_str(&other.render_display()),
                         other => return Err(type_error("primitive", &other, &word.span).into()),
                     }
                 }
@@ -5409,7 +5455,7 @@ fn value_from_config_typed(
             if matches!(name.as_str(), "Result" | "ShellResult") && arguments.len() == 2 =>
         {
             Value::Result(match value {
-                Ok(value) => Ok(Box::new(value_from_config_typed(
+                Ok(value) => Ok(crate::runtime::value::OkBox::new(value_from_config_typed(
                     *value,
                     &arguments[0],
                     symbols,

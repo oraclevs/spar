@@ -8,6 +8,45 @@ use crate::evaluator::{ConfigValue, PromiseHandle};
 use super::resource::ResourceId;
 use super::{ClosureValue, MixedShellValue, Schema, ShellProgramValue, TableValue};
 
+/// Ok side of a `Result`/`ShellResult`. `quiet` tells a shell not to print the
+/// value (`ok(value:, quiet: true)`); default false. Equality ignores it.
+#[derive(Clone)]
+pub struct OkBox {
+    pub value: Box<Value>,
+    pub quiet: bool,
+    /// Show the value as a structured table at a terminal (`ok(pretty: true)`).
+    pub pretty: bool,
+}
+
+impl OkBox {
+    pub fn new(value: Value) -> Self {
+        Self { value: Box::new(value), quiet: false, pretty: false }
+    }
+
+    pub fn with_flags(value: Value, quiet: bool, pretty: bool) -> Self {
+        Self { value: Box::new(value), quiet, pretty }
+    }
+}
+
+impl std::fmt::Debug for OkBox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.value, formatter)
+    }
+}
+
+impl PartialEq for OkBox {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl std::ops::Deref for OkBox {
+    type Target = Box<Value>;
+    fn deref(&self) -> &Box<Value> {
+        &self.value
+    }
+}
+
 /// Error side of a `Result`/`ShellResult`. Carries the process exit code that
 /// `err(error:, exitCode:)` was given (default 1) next to the error value.
 /// Equality compares only the wrapped value, so the code never changes `==`.
@@ -188,7 +227,7 @@ pub enum Value {
     Object(ObjectMap),
     Map(MapValue),
     Option(std::option::Option<Box<Value>>),
-    Result(std::result::Result<Box<Value>, ErrBox>),
+    Result(std::result::Result<OkBox, ErrBox>),
     Table(Shared<TableValue>),
     Schema(Shared<Schema>),
     Error(Box<ErrorValue>),
@@ -521,7 +560,7 @@ impl Value {
                 Value::Option(value.map(|value| Box::new(Value::from_config(*value))))
             }
             ConfigValue::Result(value) => Value::Result(match value {
-                Ok(value) => Ok(Box::new(Value::from_config(*value))),
+                Ok(value) => Ok(OkBox::new(Value::from_config(*value))),
                 Err(value) => Err(ErrBox::new(Value::from_config(*value))),
             }),
             ConfigValue::Shell(plan) => Value::Shell(Shared::from(plan)),
@@ -634,7 +673,7 @@ impl Value {
                 None => None,
             })),
             Value::Result(value) => Ok(ConfigValue::Result(match value {
-                Ok(value) => Ok(Box::new(value.try_into_config(span)?)),
+                Ok(value) => Ok(Box::new((*value.value).try_into_config(span)?)),
                 Err(value) => Err(Box::new(value.value.try_into_config(span)?)),
             })),
             Value::Table(_) => Err(SparError::EvalError {
@@ -713,7 +752,7 @@ mod tests {
             Value::Map(vec![(Value::String("k".into()), Value::Int(1))].into()),
             Value::Option(None),
             Value::Option(Some(Box::new(Value::Int(1)))),
-            Value::Result(Ok(Box::new(Value::Int(1)))),
+            Value::Result(Ok(OkBox::new(Value::Int(1)))),
             Value::Result(Err(ErrBox::new(Value::String("bad".into())))),
             Value::Error(Box::new(ErrorValue {
                 message: "broken".into(),

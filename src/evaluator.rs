@@ -1838,6 +1838,7 @@ impl Evaluator {
     ) -> Result<spar_command::CommandPlan, EvalErr> {
         let mut args = Vec::with_capacity(command.args.len());
         let mut glob_args = Vec::new();
+        let is_echo = matches!(command.program.parts.as_slice(), [ShellWordPart::Literal(name)] if name == "echo");
         for argument in &command.args {
             let spread = match argument.parts.as_slice() {
                 [ShellWordPart::Literal(prefix), ShellWordPart::Expr(expression)]
@@ -1865,7 +1866,7 @@ impl Evaluator {
                 if argument.glob {
                     glob_args.push(args.len());
                 }
-                args.push(self.eval_deferred_shell_word(argument, local_scope)?);
+                args.push(self.eval_deferred_shell_word_display(argument, local_scope, is_echo)?);
             }
         }
 
@@ -1927,14 +1928,28 @@ impl Evaluator {
         word: &ShellWord,
         local_scope: &HashMap<String, ConfigValue>,
     ) -> Result<String, EvalErr> {
+        self.eval_deferred_shell_word_display(word, local_scope, false)
+    }
+
+    /// `display`: a `${...}` holding a list, record or other non-primitive is
+    /// written the way `print` shows it instead of being a type error (`echo`).
+    fn eval_deferred_shell_word_display(
+        &mut self,
+        word: &ShellWord,
+        local_scope: &HashMap<String, ConfigValue>,
+        display: bool,
+    ) -> Result<String, EvalErr> {
         let mut output = String::new();
         for part in &word.parts {
             match part {
                 ShellWordPart::Literal(value) => output.push_str(value),
                 ShellWordPart::Expr(expression) => {
-                    output.push_str(&shell_scalar_to_string(
-                        self.eval_expr(expression, local_scope)?,
-                    )?);
+                    let value = self.eval_expr(expression, local_scope)?;
+                    if display && !matches!(value, ConfigValue::Str(_) | ConfigValue::Int(_) | ConfigValue::Float(_) | ConfigValue::Bool(_)) {
+                        output.push_str(&crate::runtime::Value::from_config(value).render_display());
+                    } else {
+                        output.push_str(&shell_scalar_to_string(value)?);
+                    }
                 }
                 ShellWordPart::Environment(name) => {
                     if name == "?" {

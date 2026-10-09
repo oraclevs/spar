@@ -43,8 +43,8 @@ fn none<T>() -> Option<T> {
     return nativeCore::none();
 };
 
-fn ok<T, E>(value: T) -> Result<T, E> {
-    return nativeCore::ok(value: value);
+fn ok<T, E>(value: T, quiet: bool = false, pretty: bool = false) -> Result<T, E> {
+    return nativeCore::ok(value: value, quiet: quiet, pretty: pretty);
 };
 
 fn err<T, E>(error: E, exitCode: int = 1) -> Result<T, E> {

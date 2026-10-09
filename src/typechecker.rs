@@ -2349,7 +2349,13 @@ impl<'a> TypeChecker<'a> {
                         "structured pipe stage has no unsupplied parameter compatible with {}",
                         display_type(&input_ty)
                     ),
-                    hint: None,
+                    hint: match &input_ty {
+                        SparType::Applied { name, .. } if name == "Result" || name == "ShellResult" => Some(
+                            "the input is a Result: take its value first, e.g. `(await f()).unwrap() |> stage(...)`"
+                                .into(),
+                        ),
+                        _ => None,
+                    },
                     span: span.clone(),
                 })?;
 

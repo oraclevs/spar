@@ -153,6 +153,7 @@ pub struct Session {
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
     function_return_types: BTreeMap<String, crate::ast::SparType>,
+    function_async: BTreeSet<String>,
     structured_terminal: bool,
     /// Parameter names of the prelude's `std/data` functions, so interactive
     /// clients can label arguments before anything has been compiled.
@@ -169,6 +170,7 @@ struct EvaluatedCandidate {
     functions: BTreeSet<String>,
     function_params: BTreeMap<String, Vec<String>>,
     function_return_types: BTreeMap<String, crate::ast::SparType>,
+    function_async: BTreeSet<String>,
     interactive: InteractiveEvalResult,
 }
 
@@ -183,6 +185,7 @@ impl Session {
             identifiers: BTreeSet::new(),
             functions: BTreeSet::new(),
             function_params: BTreeMap::new(),
+            function_async: BTreeSet::new(),
             function_return_types: BTreeMap::new(),
             structured_terminal: false,
             prelude_params: BTreeMap::new(),
@@ -405,6 +408,10 @@ impl Session {
         Ok(match execution {
             crate::runtime::InteractiveRuntimeExecution::Value(value) => {
                 InteractivePreviewResult::RuntimeValue(value)
+            }
+            // Only calls that opt into `set_capture_mixed` produce a capture.
+            crate::runtime::InteractiveRuntimeExecution::Captured { capture, .. } => {
+                InteractivePreviewResult::RuntimeValue(capture)
             }
             crate::runtime::InteractiveRuntimeExecution::Process(outcome) => {
                 InteractivePreviewResult::Process(outcome)
@@ -660,8 +667,12 @@ impl Session {
         identifiers.remove("_");
         let mut function_params = BTreeMap::new();
         let mut function_return_types = BTreeMap::new();
+        let mut function_async = BTreeSet::new();
         for (name, entry) in &symbols.imported_functions {
             function_return_types.insert(name.clone(), entry.ret.clone());
+            if entry.is_async {
+                function_async.insert(name.clone());
+            }
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -672,6 +683,9 @@ impl Session {
                 continue;
             }
             function_return_types.insert(name.clone(), entry.ret.clone());
+            if entry.is_async {
+                function_async.insert(name.clone());
+            }
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -700,11 +714,15 @@ impl Session {
         self.identifiers = identifiers;
         self.functions = functions;
         self.function_params = function_params;
+        self.function_async = function_async;
         self.function_return_types = function_return_types;
 
         match execution {
             crate::runtime::InteractiveRuntimeExecution::Process(outcome) => {
                 Ok(InteractivePreviewResult::Process(outcome))
+            }
+            crate::runtime::InteractiveRuntimeExecution::Captured { capture, .. } => {
+                Ok(InteractivePreviewResult::RuntimeValue(capture))
             }
             crate::runtime::InteractiveRuntimeExecution::Value(mut preview) => {
                 if matches!(
@@ -744,6 +762,7 @@ impl Session {
         self.identifiers = evaluated.identifiers;
         self.functions = evaluated.functions;
         self.function_params = evaluated.function_params;
+        self.function_async = evaluated.function_async;
         self.function_return_types = evaluated.function_return_types;
         Ok(evaluated.interactive)
     }
@@ -765,6 +784,80 @@ impl Session {
     ) -> Result<InteractiveEvalResult, Vec<SparError>> {
         self.evaluate_candidate(fragment, Some(runtime_context(cwd, environment)))
             .map(|evaluated| evaluated.interactive)
+    }
+
+    /// Calls a `ShellResult` function through the compiled runtime without
+    /// committing anything. The tree evaluator cannot run structured mixed
+    /// pipelines (`cmd | from fmt`); the runtime can, and keeps the `err`
+    /// exit code that a `ConfigValue` conversion would drop.
+    pub fn eval_call_runtime_with_context(
+        &self,
+        call: &str,
+        cwd: &Path,
+        environment: &[(OsString, OsString)],
+    ) -> Result<(crate::runtime::Value, Option<InteractiveRuntimeValue>), Vec<SparError>> {
+        let call = call.trim().trim_end_matches(';').trim_end();
+        // `await f(...)` on an async function: run it in an async wrapper.
+        let (awaited, call) = match call.strip_prefix("await ") {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, call),
+        };
+        let name = call.split_once('(').map_or(call, |(name, _)| name).trim();
+        let return_type = self
+            .function_return_types
+            .get(name)
+            .map(type_source_text)
+            .ok_or_else(|| {
+                vec![SparError::EvalError {
+                    message: format!("unknown function '{name}'"),
+                    span: crate::Span::dummy(),
+                }]
+            })?;
+        let mut function_name = "sparshInteractiveCall".to_string();
+        let mut suffix = 0_u64;
+        while self.identifiers.contains(&function_name) {
+            suffix += 1;
+            function_name = format!("sparshInteractiveCall{suffix}");
+        }
+        let function_source = if awaited {
+            format!("async fn {function_name}() -> {return_type} {{ return await {call}; }};")
+        } else {
+            format!("fn {function_name}() -> {return_type} {{ return {call}; }};")
+        };
+        let runtime_source = join_committed_source(&self.committed_source, &function_source);
+        let options = CompileOptions {
+            evaluate: false,
+            ..self.options.clone()
+        };
+        let compilation = Compiler::new(options.clone())
+            .with_interactive_expressions()
+            .compile(&runtime_source)
+            .into_result()?;
+        let program = std::sync::Arc::new(
+            crate::compiled::CompiledProgram::from_compilation(compilation, options)?,
+        );
+        let mut context = runtime_context(cwd, environment);
+        context.set_structured_terminal(self.structured_terminal);
+        // On a structured terminal, a pipeline ending the body (`cmd | from fmt`)
+        // renders as a table instead of serialized rows.
+        context.set_capture_mixed(self.structured_terminal);
+        let (execution, _) = crate::runtime::execute_interactive_preview_with_context(
+            &program,
+            &function_name,
+            context,
+            usize::MAX,
+            awaited,
+        )?;
+        match execution {
+            crate::runtime::InteractiveRuntimeExecution::Value(preview) => Ok((preview.value, None)),
+            crate::runtime::InteractiveRuntimeExecution::Captured { returned, capture } => {
+                Ok((returned, Some(capture)))
+            }
+            crate::runtime::InteractiveRuntimeExecution::Process(_) => Err(vec![SparError::EvalError {
+                message: format!("'{name}' did not return a value"),
+                span: crate::Span::dummy(),
+            }]),
+        }
     }
 
     /// Evaluates a transient fragment while capturing its direct stdout writes.
@@ -903,8 +996,12 @@ impl Session {
         identifiers.extend(symbols.tasks.keys().cloned());
         let mut function_params = BTreeMap::new();
         let mut function_return_types = BTreeMap::new();
+        let mut function_async = BTreeSet::new();
         for (name, entry) in &symbols.imported_functions {
             function_return_types.insert(name.clone(), entry.ret.clone());
+            if entry.is_async {
+                function_async.insert(name.clone());
+            }
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -912,6 +1009,9 @@ impl Session {
         }
         for (name, entry) in &symbols.functions {
             function_return_types.insert(name.clone(), entry.ret.clone());
+            if entry.is_async {
+                function_async.insert(name.clone());
+            }
             function_params.insert(
                 name.clone(),
                 entry.params.iter().map(|(name, _)| name.clone()).collect(),
@@ -951,6 +1051,7 @@ impl Session {
             identifiers,
             functions,
             function_params,
+            function_async,
             function_return_types,
             interactive,
         })
@@ -1042,6 +1143,11 @@ impl Session {
     /// Declared return type of a callable visible to the interactive session.
     pub fn function_return_type(&self, name: &str) -> Option<&crate::ast::SparType> {
         self.function_return_types.get(name)
+    }
+
+    /// Whether `name` is an `async` function (call it with `await`).
+    pub fn function_is_async(&self, name: &str) -> bool {
+        self.function_async.contains(name)
     }
 
     /// Named parameter labels for an interactive function call.

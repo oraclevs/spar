@@ -137,7 +137,7 @@ fn register_sum_type_constructors(registry: &mut NativeRegistry) {
         .register(NativeFunction::sync(
             "nativeCore",
             "ok",
-            vec![("value", t)],
+            vec![("value", t), ("quiet", SparType::Bool), ("pretty", SparType::Bool)],
             result_te.clone(),
             true,
             |_context, args| {
@@ -145,7 +145,15 @@ fn register_sum_type_constructors(registry: &mut NativeRegistry) {
                     .first()
                     .cloned()
                     .ok_or_else(|| error("missing native argument 'value'"))?;
-                Ok(Value::Result(Ok(Box::new(value))))
+                let quiet = match args.get(1) {
+                    Some(Value::Bool(quiet)) => *quiet,
+                    _ => return Err(error("ok quiet must be a bool")),
+                };
+                let pretty = match args.get(2) {
+                    Some(Value::Bool(pretty)) => *pretty,
+                    _ => return Err(error("ok pretty must be a bool")),
+                };
+                Ok(Value::Result(Ok(crate::runtime::value::OkBox::with_flags(value, quiet, pretty))))
             },
         ))
         .expect("nativeCore::ok registration must be unique");
@@ -647,7 +655,7 @@ fn register_collection_methods(registry: &mut NativeRegistry) {
                     return Err(error("Bytes.toUtf8 receiver is not Bytes"));
                 };
                 match String::from_utf8(values.clone()) {
-                    Ok(value) => Ok(Value::Result(Ok(Box::new(Value::String(value))))),
+                    Ok(value) => Ok(Value::Result(Ok(crate::runtime::value::OkBox::new(Value::String(value))))),
                     Err(err) => Ok(Value::Result(Err(crate::runtime::value::ErrBox::new(Value::Error(Box::new(crate::runtime::value::ErrorValue {
                         message: err.to_string(),
                         kind: "Utf8Error".into(),
@@ -1019,7 +1027,7 @@ fn register_option_methods(registry: &mut NativeRegistry) {
             "Option", "okOr", option_t.clone(), vec![("error", e.clone())], result_te, false,
             |_context, args| {
                 match option_receiver(args)? {
-                    Some(value) => Ok(Value::Result(Ok(Box::new(value.as_ref().clone())))),
+                    Some(value) => Ok(Value::Result(Ok(crate::runtime::value::OkBox::new(value.as_ref().clone())))),
                     None => Ok(Value::Result(Err(crate::runtime::value::ErrBox::new(args.get(1).cloned().ok_or_else(|| error("missing Option.okOr error"))?)))),
                 }
             },
@@ -1358,7 +1366,7 @@ fn option_receiver(args: &[Value]) -> Result<&std::option::Option<Box<Value>>, c
 
 fn result_receiver(
     args: &[Value],
-) -> Result<&std::result::Result<Box<Value>, crate::runtime::value::ErrBox>, crate::SparError> {
+) -> Result<&std::result::Result<crate::runtime::value::OkBox, crate::runtime::value::ErrBox>, crate::SparError> {
     match args.first() {
         Some(Value::Result(value)) => Ok(value),
         Some(other) => Err(error(format!(
